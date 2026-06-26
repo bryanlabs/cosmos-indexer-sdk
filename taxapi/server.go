@@ -3,6 +3,7 @@ package taxapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
@@ -146,9 +147,14 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 }
 
 func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time, hash, category, dir, denom, amountBase, from, to string) Row {
-	m, ok := meta[denom]
+	// IBC voucher denoms arrive as trace paths (e.g. "transfer/channel-0/uatom").
+	// Resolve to the underlying base asset so symbol, decimals and price match the
+	// native token (uatom that round-trips is still ATOM); keep the raw path.
+	base, isIBC := ibcBaseDenom(denom)
+
+	m, ok := meta[base]
 	decimals := 6
-	symbol := denom
+	symbol := base
 	if ok {
 		decimals = m.Decimals
 		if m.Symbol != "" {
@@ -162,15 +168,31 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	amt = amt.Shift(int32(-decimals))
 
 	price := decimal.Zero
-	if usdF, found := s.oracle.PriceAt(chain, denom, ts.UTC().Format("2006-01-02")); found {
+	if usdF, found := s.oracle.PriceAt(chain, base, ts.UTC().Format("2006-01-02")); found {
 		price = decimal.NewFromFloat(usdF)
 	}
 	return Row{
 		Time: ts, Category: category, Direction: dir,
 		Symbol: symbol, Denom: denom, Amount: amt,
 		PriceUSD: price, ValueUSD: amt.Mul(price),
-		From: from, To: to, TxHash: hash,
+		From: from, To: to, TxHash: hash, IsIBC: isIBC,
 	}
+}
+
+// ibcBaseDenom strips leading IBC trace prefixes ("transfer/channel-N/" and
+// "<wasm-port>/channel/" pairs) from a voucher denom, returning the underlying
+// base denom and whether a prefix was stripped. "transfer/channel-0/uatom" ->
+// ("uatom", true); "ibc/HASH" and "uatom" pass through unchanged (false).
+func ibcBaseDenom(denom string) (string, bool) {
+	parts := strings.Split(denom, "/")
+	i := 0
+	for i+1 < len(parts) && (parts[i] == "transfer" || strings.HasPrefix(parts[i], "08-wasm-")) {
+		i += 2
+	}
+	if i == 0 {
+		return denom, false
+	}
+	return strings.Join(parts[i:], "/"), true
 }
 
 func def(v, d string) string {

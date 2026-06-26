@@ -23,12 +23,17 @@ type Row struct {
 	To        string
 	TxHash    string
 	Asset     string // non-fungible asset id "<collection>/<token_id>" for nft_sale
+	IsIBC     bool   // true when Denom is an IBC trace path (Symbol is the resolved base)
 }
 
-// description is the human/tax note; for NFT sales it names the asset sold.
+// description is the human/tax note; NFT sales name the asset, IBC rows carry the
+// raw trace path so the UI can show an "IBC" badge with full detail on hover.
 func (r Row) description() string {
 	if r.Category == "nft_sale" && r.Asset != "" {
 		return "nft_sale " + r.Asset
+	}
+	if r.IsIBC {
+		return "ibc " + r.Denom
 	}
 	return r.Category
 }
