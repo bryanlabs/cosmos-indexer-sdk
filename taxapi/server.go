@@ -26,6 +26,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /8949", s.handle8949)
 	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
 	mux.HandleFunc("GET /income", s.handleIncome)
+	mux.HandleFunc("GET /990t", s.handle990T)
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	return withCORS(mux)
 }
@@ -117,6 +118,32 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	_ = cw.Write([]string{"", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
+}
+
+// handle990T computes the Form 990-T / UBIT estimate from an address's staking
+// income (for retirement-account wallets): gross UBTI, the $1,000 specific
+// deduction, taxable UBTI, and estimated tax at trust rates.
+func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	addr := q.Get("address")
+	if addr == "" {
+		http.Error(w, "address required", http.StatusBadRequest)
+		return
+	}
+	chain := def(q.Get("chain"), "mainnet")
+	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	ubti := decimal.Zero
+	for _, row := range rows {
+		if row.Category == "reward" || row.Category == "commission" {
+			ubti = ubti.Add(row.ValueUSD)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(compute990T(ubti))
 }
 
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
