@@ -1,0 +1,23 @@
+# Builds the tax stack on top of the cosmos-indexer SDK:
+#   taxindexer - generic indexer + tax classification layer (writes taxable_events)
+#   taxapid    - export API (Koinly/Summ/CoinLedger CSV + 8949) backed by the oracle
+#
+# Both are pure-Go static binaries (CGO off): wasmvm is only an indirect dep and is
+# never invoked, so no muslc/wasmvm static-lib dance is needed.
+FROM golang:1.22-alpine3.18 AS build
+WORKDIR /src
+RUN apk add --no-cache git
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxindexer ./taxindexer && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxapid ./taxapid
+
+FROM alpine:3.18
+RUN apk add --no-cache ca-certificates && adduser -D -u 1137 tax
+COPY --from=build /out/taxindexer /usr/local/bin/taxindexer
+COPY --from=build /out/taxapid /usr/local/bin/taxapid
+USER tax
+# Default entrypoint is the API; the indexer Deployment overrides command.
+ENTRYPOINT ["/usr/local/bin/taxapid"]
