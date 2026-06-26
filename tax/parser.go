@@ -169,12 +169,21 @@ func rewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEve
 	return out
 }
 
-// coinsReceivedBy sums the coins credited to target across this message's
-// transfer (recipient/amount) and coin_received (receiver/amount) events.
+// coinsReceivedBy sums the coins credited to target. coin_received and transfer
+// describe the SAME movement (SDK emits both), so we count ONLY coin_received,
+// falling back to transfer only when no coin_received event is present — summing
+// both would double the amount.
 func coinsReceivedBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
+	primary := "transfer"
+	for _, ev := range log.Events {
+		if ev.Type == "coin_received" {
+			primary = "coin_received"
+			break
+		}
+	}
 	total := sdk.NewCoins()
 	for _, ev := range log.Events {
-		if ev.Type != "transfer" && ev.Type != "coin_received" {
+		if ev.Type != primary {
 			continue
 		}
 		cur := ""

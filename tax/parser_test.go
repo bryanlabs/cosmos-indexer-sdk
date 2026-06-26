@@ -67,3 +67,16 @@ func TestClassifyAuthzExecRestake(t *testing.T) {
 		t.Fatalf("authz exec restake classification wrong: %+v", out)
 	}
 }
+
+// Both coin_received and transfer to the delegator (same movement) must count once.
+func TestClassifyRewardNoDoubleCount(t *testing.T) {
+	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "7240259uatom"}),
+		ev("transfer", [2]string{"recipient", del}, [2]string{"sender", val}, [2]string{"amount", "7240259uatom"}),
+	}}
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Amount != "7240259" {
+		t.Fatalf("double-count not prevented: %+v", out)
+	}
+}

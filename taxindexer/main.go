@@ -20,10 +20,10 @@ func main() {
 	// Custom table for classified taxable events (auto-migrated on startup).
 	indexer.RegisterCustomModels([]any{&tax.TaxableEvent{}})
 
-	// One parser instance handles every taxable message type.
-	parser := &tax.Parser{ID: "tax-parser"}
+	// The SDK requires each registered parser to have a globally-unique
+	// identifier, so register a distinct instance (same logic) per type URL.
 	for _, url := range tax.MessageTypeURLs {
-		indexer.RegisterCustomMessageParser(url, parser)
+		indexer.RegisterCustomMessageParser(url, &tax.Parser{ID: "tax:" + url})
 	}
 
 	// No message-type filter: the SDK still indexes ALL messages/events
