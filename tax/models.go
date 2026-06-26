@@ -23,6 +23,8 @@ const (
 	CategoryIBCOut     Category = "ibc_out"    // outbound IBC transfer
 	CategoryIBCIn      Category = "ibc_in"     // inbound IBC receive
 	CategoryNFTSale    Category = "nft_sale"   // CosmWasm NFT marketplace sale (disposal for seller, acquisition for buyer)
+	CategoryNFTMint    Category = "nft_mint"   // CosmWasm NFT mint (acquisition; basis = mint cost)
+	CategorySwap       Category = "swap"       // CosmWasm DEX swap leg (offer = disposal, return = acquisition)
 )
 
 // TaxableEvent is one classified coin movement, denormalized for fast

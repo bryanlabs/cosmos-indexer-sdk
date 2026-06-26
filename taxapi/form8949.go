@@ -47,6 +47,12 @@ func Build8949(rows []Row) []Form8949Row {
 	var out []Form8949Row
 
 	for _, r := range sorted {
+		// NFT acquisition via mint: establishes the NFT's cost basis.
+		if r.Category == "nft_mint" {
+			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
+			continue
+		}
+
 		// NFT marketplace sale: dispose/acquire the NFT, valued in USD.
 		if r.Category == "nft_sale" {
 			key := r.Asset

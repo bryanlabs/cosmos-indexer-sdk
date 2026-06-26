@@ -105,3 +105,43 @@ func TestClassifyRewardNoDoubleCount(t *testing.T) {
 		t.Fatalf("double-count not prevented: %+v", out)
 	}
 }
+
+// DEX swap (wasm action=swap) → two legs: dispose offer, acquire return.
+func TestClassifySwap(t *testing.T) {
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("wasm",
+			[2]string{"action", "swap"},
+			[2]string{"receiver", del},
+			[2]string{"offer_asset", "uatom"}, [2]string{"offer_amount", "330000"},
+			[2]string{"ask_asset", "factory/x/art"}, [2]string{"return_amount", "15362"},
+		),
+	}}
+	out := swapEvents(log)
+	if len(out) != 2 {
+		t.Fatalf("want 2 swap legs, got %d: %+v", len(out), out)
+	}
+	if out[0].FromAddr != del || out[0].Denom != "uatom" || out[0].Amount != "330000" {
+		t.Fatalf("offer leg wrong: %+v", out[0])
+	}
+	if out[1].ToAddr != del || out[1].Denom != "factory/x/art" || out[1].Amount != "15362" {
+		t.Fatalf("return leg wrong: %+v", out[1])
+	}
+}
+
+// NFT mint (wasm action=mint) → acquisition for owner with the spent cost.
+func TestClassifyNFTMint(t *testing.T) {
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_spent", [2]string{"spender", del}, [2]string{"amount", "5000000uatom"}),
+		ev("wasm",
+			[2]string{"_contract_address", "coll1"},
+			[2]string{"action", "mint"},
+			[2]string{"owner", del},
+			[2]string{"token_id", "1047"},
+		),
+	}}
+	out := nftMintEvents(log)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].ToAddr != del ||
+		out[0].Asset != "coll1/1047" || out[0].Amount != "5000000" || out[0].Denom != "uatom" {
+		t.Fatalf("nft mint classification wrong: %+v", out)
+	}
+}

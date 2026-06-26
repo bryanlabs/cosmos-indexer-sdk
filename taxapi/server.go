@@ -148,8 +148,8 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	for _, e := range events {
 		dir := "in"
 		switch e.Category {
-		case string(tax.CategoryTransfer), string(tax.CategoryIBCOut), string(tax.CategoryNFTSale):
-			// Seller (FromAddr) disposes; everyone else (ToAddr) acquires.
+		case string(tax.CategoryTransfer), string(tax.CategoryIBCOut), string(tax.CategoryNFTSale), string(tax.CategorySwap):
+			// Disposer (FromAddr) sends; everyone else (ToAddr) acquires.
 			if e.FromAddr == addr {
 				dir = "out"
 			}

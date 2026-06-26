@@ -30,8 +30,8 @@ type Row struct {
 // description is the human/tax note; NFT sales name the asset, IBC rows carry the
 // raw trace path so the UI can show an "IBC" badge with full detail on hover.
 func (r Row) description() string {
-	if r.Category == "nft_sale" && r.Asset != "" {
-		return "nft_sale " + r.Asset
+	if (r.Category == "nft_sale" || r.Category == "nft_mint") && r.Asset != "" {
+		return r.Category + " " + r.Asset
 	}
 	if r.IsIBC {
 		return "ibc " + r.Denom
@@ -46,8 +46,10 @@ func (r Row) label() string {
 		return "staking"
 	case "fee":
 		return "fee"
-	case "nft_sale":
+	case "nft_sale", "nft_mint":
 		return "nft"
+	case "swap":
+		return "swap"
 	default:
 		if r.Direction == "in" {
 			return "receive"
@@ -189,12 +191,14 @@ func ctcType(r Row) string {
 		return "staking"
 	case "fee":
 		return "fee"
-	case "nft_sale":
-		// Seller disposes the NFT (sell), buyer acquires it (buy).
+	case "nft_sale", "swap":
+		// Disposal leg = sell, acquisition leg = buy.
 		if r.Direction == "out" {
 			return "sell"
 		}
 		return "buy"
+	case "nft_mint":
+		return "buy" // acquisition
 	default:
 		if r.Direction == "in" {
 			return "receive"

@@ -127,6 +127,8 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 	// wasm-finalize-sale event carrying the asset, price, seller and buyer.
 	case *wasmtypes.MsgExecuteContract:
 		events = append(events, nftSaleEvents(log)...)
+		events = append(events, swapEvents(log)...)
+		events = append(events, nftMintEvents(log)...)
 
 	case *chantypes.MsgRecvPacket:
 		var data transfertypes.FungibleTokenPacketData
@@ -201,6 +203,106 @@ func nftSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 		})
 	}
 	return out
+}
+
+// swapEvents turns each CosmWasm DEX swap (wasm event, action=swap) into two
+// taxable legs for the receiver: a disposal of the offered asset and an
+// acquisition of the returned asset (a crypto-to-crypto trade).
+func swapEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
+	var out []TaxableEvent
+	for _, ev := range log.Events {
+		if ev.Type != "wasm" {
+			continue
+		}
+		a := attrMap(ev)
+		if a["action"] != "swap" {
+			continue
+		}
+		recv := a["receiver"]
+		if recv == "" || a["offer_asset"] == "" || a["ask_asset"] == "" {
+			continue
+		}
+		// Disposal: the offered asset leaves the receiver.
+		out = append(out, TaxableEvent{
+			Category: string(CategorySwap),
+			FromAddr: recv,
+			Amount:   a["offer_amount"], Denom: a["offer_asset"],
+		})
+		// Acquisition: the returned asset arrives.
+		out = append(out, TaxableEvent{
+			Category: string(CategorySwap),
+			ToAddr:   recv,
+			Amount:   a["return_amount"], Denom: a["ask_asset"],
+		})
+	}
+	return out
+}
+
+// nftMintEvents turns each CosmWasm NFT mint (wasm event, action=mint) into an
+// acquisition for the owner, with the mint cost (coins the owner spent in this
+// message) as the basis.
+func nftMintEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
+	var out []TaxableEvent
+	for _, ev := range log.Events {
+		if ev.Type != "wasm" {
+			continue
+		}
+		a := attrMap(ev)
+		if a["action"] != "mint" || a["token_id"] == "" {
+			continue
+		}
+		owner := a["owner"]
+		if owner == "" {
+			owner = a["minter"]
+		}
+		collection := a["_contract_address"]
+		// Mint cost = what the owner spent in this message (the mint price).
+		cost := coinsSpentBy(log, owner)
+		amount, denom := "", ""
+		if len(cost) > 0 {
+			amount, denom = cost[0].Amount.String(), cost[0].Denom
+		}
+		out = append(out, TaxableEvent{
+			Category: string(CategoryNFTMint),
+			ToAddr:   owner,
+			Amount:   amount, Denom: denom,
+			Asset: collection + "/" + a["token_id"],
+		})
+	}
+	return out
+}
+
+// attrMap flattens an event's attributes into a map.
+func attrMap(ev indexerTxTypes.LogMessageEvent) map[string]string {
+	m := make(map[string]string, len(ev.Attributes))
+	for _, a := range ev.Attributes {
+		m[a.Key] = a.Value
+	}
+	return m
+}
+
+// coinsSpentBy sums the coins debited from target via coin_spent events.
+func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
+	total := sdk.NewCoins()
+	for _, ev := range log.Events {
+		if ev.Type != "coin_spent" {
+			continue
+		}
+		cur := ""
+		for _, a := range ev.Attributes {
+			switch a.Key {
+			case "spender":
+				cur = a.Value
+			case "amount":
+				if cur == target {
+					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
+						total = total.Add(coins...)
+					}
+				}
+			}
+		}
+	}
+	return total
 }
 
 // rewardEvents emits CategoryReward events for the coins credited to delegator
