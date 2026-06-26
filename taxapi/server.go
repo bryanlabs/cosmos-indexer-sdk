@@ -131,15 +131,25 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chain := def(q.Get("chain"), "mainnet")
-	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	start := dateParam(q.Get("start"), time.Time{})
+	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
+	// An entity may hold several wallets; the $1,000 deduction is per return, so
+	// sum staking income across all of them, then compute one 990-T.
 	ubti := decimal.Zero
-	for _, row := range rows {
-		if row.Category == "reward" || row.Category == "commission" {
-			ubti = ubti.Add(row.ValueUSD)
+	for _, a := range strings.Split(addr, ",") {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		rows, err := s.rowsFor(chain, a, start, end)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, row := range rows {
+			if row.Category == "reward" || row.Category == "commission" {
+				ubti = ubti.Add(row.ValueUSD)
+			}
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
