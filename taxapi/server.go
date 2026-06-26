@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -21,6 +22,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /8949", s.handle8949)
+	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	return withCORS(mux)
 }
 
@@ -59,6 +61,17 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=form-8949.csv")
 	_ = Write8949CSV(w, Build8949(rows))
+}
+
+func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	rep, err := s.coverage(dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rep)
 }
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),
