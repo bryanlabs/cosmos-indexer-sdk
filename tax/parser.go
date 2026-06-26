@@ -3,14 +3,17 @@ package tax
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
 	"github.com/DefiantLabs/cosmos-indexer/parsers"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"gorm.io/gorm"
@@ -22,21 +25,34 @@ import (
 var MessageTypeURLs = []string{
 	"/cosmos.bank.v1beta1.MsgSend",
 	"/cosmos.bank.v1beta1.MsgMultiSend",
+	"/cosmos.staking.v1beta1.MsgDelegate",
+	"/cosmos.staking.v1beta1.MsgUndelegate",
+	"/cosmos.staking.v1beta1.MsgBeginRedelegate",
 	"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
 	"/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission",
+	"/cosmos.authz.v1beta1.MsgExec",
 	"/ibc.applications.transfer.v1.MsgTransfer",
 	"/ibc.core.channel.v1.MsgRecvPacket",
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
-// types above; ParseMessage type-switches and returns the taxable events for
-// that message (height/time/hash are filled in IndexMessage where the Message
-// model is available).
+// types above.
 type Parser struct{ ID string }
 
 func (p *Parser) Identifier() string { return p.ID }
 
 func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, cfg config.IndexConfig) (*any, error) {
+	events := classify(cosmosMsg, log)
+	if len(events) == 0 {
+		return nil, nil
+	}
+	v := any(events)
+	return &v, nil
+}
+
+// classify turns a single message + its event log into taxable events. It's a
+// standalone function so MsgExec can recurse into its inner messages.
+func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var events []TaxableEvent
 
 	switch m := cosmosMsg.(type) {
@@ -50,7 +66,6 @@ func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage,
 		}
 
 	case *banktypes.MsgMultiSend:
-		// SDK 0.47 restricts MultiSend to a single input; fall back to "" if not.
 		from := ""
 		if len(m.Inputs) == 1 {
 			from = m.Inputs[0].Address
@@ -65,19 +80,19 @@ func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage,
 			}
 		}
 
+	// Staking delegate/undelegate/redelegate are NOT taxable themselves, but the
+	// SDK auto-withdraws pending rewards on each — that reward is income.
+	case *stakingtypes.MsgDelegate:
+		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+	case *stakingtypes.MsgUndelegate:
+		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+	case *stakingtypes.MsgBeginRedelegate:
+		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+
 	case *disttypes.MsgWithdrawDelegatorReward:
-		// Reward amount lives in the transfer/coin_received events to the delegator.
-		for _, c := range coinsReceivedBy(log, m.DelegatorAddress) {
-			events = append(events, TaxableEvent{
-				Category: string(CategoryReward),
-				ToAddr:   m.DelegatorAddress,
-				Amount:   c.Amount.String(), Denom: c.Denom,
-			})
-		}
+		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
 
 	case *disttypes.MsgWithdrawValidatorCommission:
-		// The recipient (validator's withdraw addr) isn't in the msg; take it from
-		// the coin_received events.
 		for recv, coins := range receivedCoinsByReceiver(log) {
 			for _, c := range coins {
 				events = append(events, TaxableEvent{
@@ -86,6 +101,16 @@ func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage,
 					Amount:   c.Amount.String(), Denom: c.Denom,
 				})
 			}
+		}
+
+	case *authz.MsgExec:
+		inners, err := m.GetMessages()
+		if err != nil {
+			return nil
+		}
+		for i, inner := range inners {
+			sub := eventsForAuthzIndex(log, i)
+			events = append(events, classify(inner, sub)...)
 		}
 
 	case *transfertypes.MsgTransfer:
@@ -104,16 +129,9 @@ func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage,
 				Amount: data.Amount, Denom: data.Denom,
 			})
 		}
-
-	default:
-		return nil, nil
 	}
 
-	if len(events) == 0 {
-		return nil, nil
-	}
-	v := any(events)
-	return &v, nil
+	return events
 }
 
 func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message, _ []parsers.MessageEventWithAttributes, cfg config.IndexConfig) error {
@@ -135,6 +153,20 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 		}
 	}
 	return nil
+}
+
+// rewardEvents emits CategoryReward events for the coins credited to delegator
+// in this message's transfer/coin_received events (the auto-withdrawn reward).
+func rewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
+	var out []TaxableEvent
+	for _, c := range coinsReceivedBy(log, delegator) {
+		out = append(out, TaxableEvent{
+			Category: string(CategoryReward),
+			ToAddr:   delegator,
+			Amount:   c.Amount.String(), Denom: c.Denom,
+		})
+	}
+	return out
 }
 
 // coinsReceivedBy sums the coins credited to target across this message's
@@ -185,4 +217,21 @@ func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coin
 		}
 	}
 	return out
+}
+
+// eventsForAuthzIndex returns a sub-log containing only the events tagged with
+// the given authz_msg_index, so an inner MsgExec message classifies against its
+// own events.
+func eventsForAuthzIndex(log *indexerTxTypes.LogMessage, idx int) *indexerTxTypes.LogMessage {
+	target := strconv.Itoa(idx)
+	sub := &indexerTxTypes.LogMessage{}
+	for _, ev := range log.Events {
+		for _, a := range ev.Attributes {
+			if a.Key == "authz_msg_index" && a.Value == target {
+				sub.Events = append(sub.Events, ev)
+				break
+			}
+		}
+	}
+	return sub
 }
