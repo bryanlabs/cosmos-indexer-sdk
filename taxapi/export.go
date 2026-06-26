@@ -16,12 +16,21 @@ type Row struct {
 	Direction string // in | out
 	Symbol    string
 	Denom     string
-	Amount    decimal.Decimal // display units
+	Amount    decimal.Decimal // display units (for nft_sale: the sale price in Denom)
 	PriceUSD  decimal.Decimal // per unit at the event date (0 if unknown)
 	ValueUSD  decimal.Decimal // Amount * PriceUSD
 	From      string
 	To        string
 	TxHash    string
+	Asset     string // non-fungible asset id "<collection>/<token_id>" for nft_sale
+}
+
+// description is the human/tax note; for NFT sales it names the asset sold.
+func (r Row) description() string {
+	if r.Category == "nft_sale" && r.Asset != "" {
+		return "nft_sale " + r.Asset
+	}
+	return r.Category
 }
 
 // label maps our category to a human/tax label.
@@ -31,6 +40,8 @@ func (r Row) label() string {
 		return "staking"
 	case "fee":
 		return "fee"
+	case "nft_sale":
+		return "nft"
 	default:
 		if r.Direction == "in" {
 			return "receive"
@@ -52,7 +63,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 			_ = w.Write([]string{
 				r.Time.UTC().Format("2006-01-02 15:04:05 UTC"),
 				sentAmt, sentCur, recvAmt, recvCur,
-				"", "", usd(r.ValueUSD), "USD", r.label(), r.Category, r.TxHash,
+				"", "", usd(r.ValueUSD), "USD", r.label(), r.description(), r.TxHash,
 			})
 		}
 
@@ -83,7 +94,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 			}
 			_ = w.Write([]string{
 				r.Time.UTC().Format("2006-01-02 15:04:05"),
-				"Cosmos", sentCur, sentAmt, recvCur, recvAmt, "", "", typ, r.Category, r.TxHash,
+				"Cosmos", sentCur, sentAmt, recvCur, recvAmt, "", "", typ, r.description(), r.TxHash,
 			})
 		}
 
@@ -95,7 +106,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 			_ = w.Write([]string{
 				r.Time.UTC().Format("2006-01-02 15:04:05"),
 				typ, r.Symbol, r.Amount.String(), "", "", "", "",
-				r.From, r.To, "cosmos", r.TxHash, r.Category, refPrice(r.PriceUSD), "USD",
+				r.From, r.To, "cosmos", r.TxHash, r.description(), refPrice(r.PriceUSD), "USD",
 			})
 		}
 
@@ -118,6 +129,12 @@ func ctcType(r Row) string {
 		return "staking"
 	case "fee":
 		return "fee"
+	case "nft_sale":
+		// Seller disposes the NFT (sell), buyer acquires it (buy).
+		if r.Direction == "out" {
+			return "sell"
+		}
+		return "buy"
 	default:
 		if r.Direction == "in" {
 			return "receive"

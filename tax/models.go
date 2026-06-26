@@ -22,6 +22,7 @@ const (
 	CategoryCommission Category = "commission" // validator commission (income)
 	CategoryIBCOut     Category = "ibc_out"    // outbound IBC transfer
 	CategoryIBCIn      Category = "ibc_in"     // inbound IBC receive
+	CategoryNFTSale    Category = "nft_sale"   // CosmWasm NFT marketplace sale (disposal for seller, acquisition for buyer)
 )
 
 // TaxableEvent is one classified coin movement, denormalized for fast
@@ -37,7 +38,12 @@ type TaxableEvent struct {
 	// Base-denom integer amount as a string (e.g. "1234567" uatom).
 	Amount string
 	// On-chain base denom (e.g. "uatom", "ibc/<hash>"); resolved to a symbol at export.
+	// For nft_sale, this is the denom the NFT was priced/paid in; Amount is the price.
 	Denom string
+
+	// Asset identifies a non-fungible asset for nft_sale events as
+	// "<collection>/<token_id>"; empty for fungible coin movements.
+	Asset string `gorm:"index:idx_tax_asset"`
 
 	FromAddr string `gorm:"index:idx_tax_from"`
 	ToAddr   string `gorm:"index:idx_tax_to"`

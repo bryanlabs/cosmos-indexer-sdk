@@ -68,6 +68,31 @@ func TestClassifyAuthzExecRestake(t *testing.T) {
 	}
 }
 
+// A Stargaze-style NFT marketplace sale emits wasm-finalize-sale; classify it as
+// one nft_sale with the asset, price, seller and buyer. (Real event shape from
+// cosmoshub-4 height 31761365.)
+func TestClassifyNFTSale(t *testing.T) {
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("wasm-finalize-sale",
+			[2]string{"collection", "cosmos1coll"},
+			[2]string{"token_id", "468"},
+			[2]string{"denom", "uatom"},
+			[2]string{"price", "30000000"},
+			[2]string{"seller_recipient", del},
+			[2]string{"nft_recipient", other},
+		),
+	}}
+	out := nftSaleEvents(log)
+	if len(out) != 1 {
+		t.Fatalf("want 1 nft sale, got %d: %+v", len(out), out)
+	}
+	e := out[0]
+	if e.Category != string(CategoryNFTSale) || e.Amount != "30000000" || e.Denom != "uatom" ||
+		e.FromAddr != del || e.ToAddr != other || e.Asset != "cosmos1coll/468" {
+		t.Fatalf("nft sale classification wrong: %+v", e)
+	}
+}
+
 // Both coin_received and transfer to the delegator (same movement) must count once.
 func TestClassifyRewardNoDoubleCount(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}

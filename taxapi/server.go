@@ -110,12 +110,15 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	for _, e := range events {
 		dir := "in"
 		switch e.Category {
-		case string(tax.CategoryTransfer), string(tax.CategoryIBCOut):
+		case string(tax.CategoryTransfer), string(tax.CategoryIBCOut), string(tax.CategoryNFTSale):
+			// Seller (FromAddr) disposes; everyone else (ToAddr) acquires.
 			if e.FromAddr == addr {
 				dir = "out"
 			}
 		}
-		out = append(out, s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr))
+		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
+		row.Asset = e.Asset
+		out = append(out, row)
 	}
 
 	// Fees (generic SDK Fee table): a spend by the payer.

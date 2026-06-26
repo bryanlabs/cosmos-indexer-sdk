@@ -14,6 +14,7 @@ import (
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"gorm.io/gorm"
@@ -33,6 +34,7 @@ var MessageTypeURLs = []string{
 	"/cosmos.authz.v1beta1.MsgExec",
 	"/ibc.applications.transfer.v1.MsgTransfer",
 	"/ibc.core.channel.v1.MsgRecvPacket",
+	"/cosmwasm.wasm.v1.MsgExecuteContract",
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -120,6 +122,12 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 			Amount: m.Token.Amount.String(), Denom: m.Token.Denom,
 		})
 
+	// CosmWasm contract calls. The dominant taxable case on Cosmos Hub is NFT
+	// marketplace sales (Stargaze Marketplace v2), which emit an authoritative
+	// wasm-finalize-sale event carrying the asset, price, seller and buyer.
+	case *wasmtypes.MsgExecuteContract:
+		events = append(events, nftSaleEvents(log)...)
+
 	case *chantypes.MsgRecvPacket:
 		var data transfertypes.FungibleTokenPacketData
 		if err := json.Unmarshal(m.Packet.GetData(), &data); err == nil && data.Amount != "" {
@@ -147,12 +155,52 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 		events[i].TxHash = message.Tx.Hash
 		if err := db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "message_id"}, {Name: "sub_index"}},
-			DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash"}),
+			DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash"}),
 		}).Create(&events[i]).Error; err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// nftSaleEvents turns each wasm-finalize-sale event (CosmWasm NFT marketplace,
+// e.g. Stargaze Marketplace v2) into a taxable NFT sale: the seller disposes the
+// NFT for `price` of `denom`, the buyer (nft_recipient) acquires it. One event
+// holds both parties; direction is derived per-address at export time.
+func nftSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
+	var out []TaxableEvent
+	for _, ev := range log.Events {
+		if ev.Type != "wasm-finalize-sale" {
+			continue
+		}
+		var collection, tokenID, denom, price, seller, buyer string
+		for _, a := range ev.Attributes {
+			switch a.Key {
+			case "collection":
+				collection = a.Value
+			case "token_id":
+				tokenID = a.Value
+			case "denom":
+				denom = a.Value
+			case "price":
+				price = a.Value
+			case "seller_recipient":
+				seller = a.Value
+			case "nft_recipient":
+				buyer = a.Value
+			}
+		}
+		if price == "" || collection == "" {
+			continue
+		}
+		out = append(out, TaxableEvent{
+			Category: string(CategoryNFTSale),
+			FromAddr: seller, ToAddr: buyer,
+			Amount: price, Denom: denom,
+			Asset: collection + "/" + tokenID,
+		})
+	}
+	return out
 }
 
 // rewardEvents emits CategoryReward events for the coins credited to delegator

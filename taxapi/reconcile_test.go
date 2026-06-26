@@ -7,7 +7,7 @@ import (
 
 func TestSummarizeCoverage(t *testing.T) {
 	rows := []typeCount{
-		{MessageType: "/cosmwasm.wasm.v1.MsgExecuteContract", Total: 128, Classified: 0},
+		{MessageType: "/ibc.core.client.v1.MsgUpdateClient", Total: 128, Classified: 0}, // relayer noise, unsupported
 		{MessageType: "/cosmos.bank.v1beta1.MsgSend", Total: 38, Classified: 38},
 		{MessageType: "/cosmos.staking.v1beta1.MsgDelegate", Total: 8, Classified: 5},
 	}
@@ -23,8 +23,8 @@ func TestSummarizeCoverage(t *testing.T) {
 	if rep.SupportedTypes != 2 || rep.UnsupportedTypes != 1 {
 		t.Fatalf("type split wrong: supported=%d unsupported=%d", rep.SupportedTypes, rep.UnsupportedTypes)
 	}
-	// The single gap must be the WASM contract type, with its full count surfaced.
-	if len(rep.Gaps) != 1 || rep.Gaps[0].MessageType != "/cosmwasm.wasm.v1.MsgExecuteContract" || rep.Gaps[0].Unclassified != 128 {
+	// The single gap must be the unsupported relayer type, full count surfaced.
+	if len(rep.Gaps) != 1 || rep.Gaps[0].MessageType != "/ibc.core.client.v1.MsgUpdateClient" || rep.Gaps[0].Unclassified != 128 {
 		t.Fatalf("gap detection wrong: %+v", rep.Gaps)
 	}
 	// A partially-classified supported type reports the remainder as unclassified.
