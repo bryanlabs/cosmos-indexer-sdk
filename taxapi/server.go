@@ -22,6 +22,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /8949", s.handle8949)
+	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	return withCORS(mux)
 }
@@ -61,6 +62,23 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=form-8949.csv")
 	_ = Write8949CSV(w, Build8949(rows))
+}
+
+func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	addr := q.Get("address")
+	if addr == "" {
+		http.Error(w, "address required", http.StatusBadRequest)
+		return
+	}
+	chain := def(q.Get("chain"), "mainnet")
+	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(BuildScheduleD(Build8949(rows)))
 }
 
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {

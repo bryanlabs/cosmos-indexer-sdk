@@ -94,6 +94,37 @@ func Build8949(rows []Row) []Form8949Row {
 	return out
 }
 
+// ScheduleD is the capital-gains summary that the 8949 totals flow into on IRS
+// Schedule D (Form 1040). Short-term and long-term are taxed differently, so they
+// stay separate; Net is line 16 (overall capital gain or loss).
+type ScheduleD struct {
+	ShortTermProceeds  decimal.Decimal `json:"short_term_proceeds"`
+	ShortTermCostBasis decimal.Decimal `json:"short_term_cost_basis"`
+	ShortTermGainLoss  decimal.Decimal `json:"short_term_gain_loss"` // Schedule D line 7
+	LongTermProceeds   decimal.Decimal `json:"long_term_proceeds"`
+	LongTermCostBasis  decimal.Decimal `json:"long_term_cost_basis"`
+	LongTermGainLoss   decimal.Decimal `json:"long_term_gain_loss"` // Schedule D line 15
+	NetGainLoss        decimal.Decimal `json:"net_gain_loss"`        // Schedule D line 16
+}
+
+// BuildScheduleD rolls up 8949 lines into the Schedule D short/long-term totals.
+func BuildScheduleD(rows []Form8949Row) ScheduleD {
+	var d ScheduleD
+	for _, r := range rows {
+		if r.LongTerm {
+			d.LongTermProceeds = d.LongTermProceeds.Add(r.Proceeds)
+			d.LongTermCostBasis = d.LongTermCostBasis.Add(r.CostBasis)
+			d.LongTermGainLoss = d.LongTermGainLoss.Add(r.GainLoss)
+		} else {
+			d.ShortTermProceeds = d.ShortTermProceeds.Add(r.Proceeds)
+			d.ShortTermCostBasis = d.ShortTermCostBasis.Add(r.CostBasis)
+			d.ShortTermGainLoss = d.ShortTermGainLoss.Add(r.GainLoss)
+		}
+	}
+	d.NetGainLoss = d.ShortTermGainLoss.Add(d.LongTermGainLoss)
+	return d
+}
+
 // Write8949CSV writes the 8949 rows, short-term first then long-term, matching
 // the Part I / Part II split.
 func Write8949CSV(out io.Writer, rows []Form8949Row) error {
