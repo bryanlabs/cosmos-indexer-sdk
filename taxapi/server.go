@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -24,6 +25,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /8949", s.handle8949)
 	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
+	mux.HandleFunc("GET /income", s.handleIncome)
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	return withCORS(mux)
 }
@@ -80,6 +82,41 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(BuildScheduleD(Build8949(rows)))
+}
+
+// handleIncome returns an ordinary-income report (staking rewards + validator
+// commission, valued in USD at receipt) for Schedule 1 / Form 990-T. These are
+// income at the time received, distinct from the 8949's capital dispositions.
+func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	addr := q.Get("address")
+	if addr == "" {
+		http.Error(w, "address required", http.StatusBadRequest)
+		return
+	}
+	chain := def(q.Get("chain"), "mainnet")
+	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", "attachment; filename=income-schedule1-990t.csv")
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+	_ = cw.Write([]string{"date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
+	total := decimal.Zero
+	for _, row := range rows {
+		if row.Category != "reward" && row.Category != "commission" {
+			continue
+		}
+		total = total.Add(row.ValueUSD)
+		_ = cw.Write([]string{
+			row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
+			row.Amount.String(), row.PriceUSD.String(), row.ValueUSD.StringFixed(2), row.TxHash,
+		})
+	}
+	_ = cw.Write([]string{"", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
 }
 
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {

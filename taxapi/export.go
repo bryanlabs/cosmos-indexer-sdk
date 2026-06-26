@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"encoding/csv"
+	"fmt"
 	"io"
 	"time"
 
@@ -115,10 +116,64 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 			})
 		}
 
+	case "cryptio":
+		// Cryptio custom-CSV template (enterprise sub-ledger). Strict schema.
+		_ = w.Write([]string{"transactionDate", "orderType", "txhash", "incomingAsset", "incomingVolume", "incomingUnitRate", "incomingTransactionValue", "outgoingAsset", "outgoingVolume", "outgoingUnitRate", "outgoingTransactionValue", "feeAsset", "feeVolume", "feeUnitRate", "feeTransactionValue", "otherParties", "note"}) //nolint:lll
+		for _, r := range rows {
+			date := r.Time.UTC().Format("2006-01-02 15:04:05")
+			amt, rate, val := r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD)
+			if r.Direction == "in" && r.Category != "fee" {
+				_ = w.Write([]string{date, "deposit", r.TxHash, r.Symbol, amt, rate, val, "", "", "", "", "", "", "", "", party(r), r.description()})
+			} else {
+				ot := "withdraw"
+				if r.Category == "fee" {
+					ot = "fee"
+				}
+				_ = w.Write([]string{date, ot, r.TxHash, "", "", "", "", r.Symbol, amt, rate, val, "", "", "", "", party(r), r.description()})
+			}
+		}
+
+	case "bitwave":
+		// Bitwave enterprise accounting; core columns + a unique id per line.
+		_ = w.Write([]string{"id", "date", "type", "amount", "amountTicker", "txHash", "contactAddress", "category"})
+		for i, r := range rows {
+			typ := "Deposit"
+			if r.Direction == "out" {
+				typ = "Withdrawal"
+			}
+			if r.Category == "fee" {
+				typ = "Fee"
+			}
+			_ = w.Write([]string{
+				fmt.Sprintf("%s-%d", r.TxHash, i), r.Time.UTC().Format(time.RFC3339),
+				typ, r.Amount.String(), r.Symbol, r.TxHash, party(r), r.description(),
+			})
+		}
+
+	case "generic":
+		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
+		// or accountant can map it; also the recommended import for Trace Finance.
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain"}) //nolint:lll
+		for _, r := range rows {
+			_ = w.Write([]string{
+				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
+				r.Symbol, r.Denom, r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD),
+				r.From, r.To, r.Asset, "cosmoshub-4",
+			})
+		}
+
 	default: // fall through to koinly for unknown formats
 		return WriteCSV(out, "koinly", rows)
 	}
 	return w.Error()
+}
+
+// party returns the counterparty address for a row (the non-fee side).
+func party(r Row) string {
+	if r.Direction == "in" {
+		return r.From
+	}
+	return r.To
 }
 
 func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
