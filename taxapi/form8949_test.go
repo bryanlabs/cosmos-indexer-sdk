@@ -26,6 +26,35 @@ func TestBuild8949FIFOGain(t *testing.T) {
 	}
 }
 
+func TestBuild8949NFTSale(t *testing.T) {
+	buy := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	sell := buy.AddDate(0, 0, 10)
+	rows := []Row{
+		// Bought NFT for ~$2, sold for ~$3 → short-term gain $1 on the NFT itself.
+		{Time: buy, Direction: "in", Category: "nft_sale", Asset: "coll/42", ValueUSD: d(2)},
+		{Time: sell, Direction: "out", Category: "nft_sale", Asset: "coll/42", ValueUSD: d(3)},
+	}
+	got := Build8949(rows)
+	if len(got) != 1 {
+		t.Fatalf("want 1 disposal, got %d: %+v", len(got), got)
+	}
+	r := got[0]
+	if r.Description != "NFT coll/42" || !r.Proceeds.Equal(d(3)) || !r.CostBasis.Equal(d(2)) ||
+		!r.GainLoss.Equal(d(1)) || r.LongTerm {
+		t.Fatalf("nft 8949 calc wrong: %+v", r)
+	}
+}
+
+// An NFT sold without a recorded prior buy has unknown ("Various") basis.
+func TestBuild8949NFTUnknownBasis(t *testing.T) {
+	sell := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
+	rows := []Row{{Time: sell, Direction: "out", Category: "nft_sale", Asset: "coll/7", ValueUSD: d(5)}}
+	got := Build8949(rows)
+	if len(got) != 1 || got[0].DateAcquired != "Various" || !got[0].CostBasis.IsZero() || !got[0].Proceeds.Equal(d(5)) {
+		t.Fatalf("nft unknown-basis wrong: %+v", got)
+	}
+}
+
 func TestBuild8949LongTermAndUnknownBasis(t *testing.T) {
 	buy := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	sell := buy.AddDate(1, 0, 1) // >365d → long term

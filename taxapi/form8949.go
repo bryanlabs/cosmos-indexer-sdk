@@ -31,15 +31,59 @@ type lot struct {
 // per disposal lot consumed. NOTE: this is a basic engine — cost basis for
 // units acquired before the queried window is unknown (treated as 0 / "Various");
 // accurate basis needs full acquisition history (archive-node indexing).
+//
+// NFT marketplace sales (Category "nft_sale") are treated as dispositions of the
+// non-fungible asset itself, NOT of the ATOM that changed hands: a buy (in)
+// establishes the NFT's USD cost basis, a sell (out) is a capital disposal with
+// proceeds = the sale's USD value. (The ATOM leg of an NFT trade is a separate,
+// second-order disposal not yet modeled; the headline NFT gain/loss is.)
 func Build8949(rows []Row) []Form8949Row {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
 
-	lots := map[string][]lot{} // asset -> FIFO lots
+	lots := map[string][]lot{}    // asset -> FIFO lots (fungible)
+	nftLots := map[string][]lot{} // "<collection>/<token>" -> FIFO lots (qty always 1, cost in total USD)
 	var out []Form8949Row
 
 	for _, r := range sorted {
+		// NFT marketplace sale: dispose/acquire the NFT, valued in USD.
+		if r.Category == "nft_sale" {
+			key := r.Asset
+			desc := "NFT " + r.Asset
+			switch r.Direction {
+			case "in": // buyer acquires the NFT; basis = USD paid
+				nftLots[key] = append(nftLots[key], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
+			case "out": // seller disposes the NFT; proceeds = USD received
+				proceeds := r.ValueUSD
+				q := nftLots[key]
+				if len(q) == 0 {
+					out = append(out, Form8949Row{
+						Description:  desc,
+						DateAcquired: "Various",
+						DateSold:     r.Time.UTC().Format("01/02/2006"),
+						Proceeds:     proceeds,
+						CostBasis:    decimal.Zero,
+						GainLoss:     proceeds,
+						LongTerm:     false,
+					})
+				} else {
+					l := q[0]
+					out = append(out, Form8949Row{
+						Description:  desc,
+						DateAcquired: l.date.UTC().Format("01/02/2006"),
+						DateSold:     r.Time.UTC().Format("01/02/2006"),
+						Proceeds:     proceeds,
+						CostBasis:    l.cost,
+						GainLoss:     proceeds.Sub(l.cost),
+						LongTerm:     r.Time.Sub(l.date) > 365*24*time.Hour,
+					})
+					nftLots[key] = q[1:]
+				}
+			}
+			continue
+		}
+
 		asset := r.Symbol
 		if asset == "" {
 			asset = r.Denom
