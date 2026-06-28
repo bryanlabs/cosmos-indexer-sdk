@@ -28,6 +28,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /income", s.handleIncome)
 	mux.HandleFunc("GET /990t", s.handle990T)
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
+	mux.HandleFunc("GET /balance", s.handleBalance)
 	return withCORS(mux)
 }
 

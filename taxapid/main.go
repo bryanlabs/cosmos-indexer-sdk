@@ -34,6 +34,12 @@ func main() {
 		log.Fatalf("db connect: %v", err)
 	}
 
+	// Own the balance-snapshot table (the SDK now serves /balance, replacing the
+	// legacy cosmos-tax-cli). Live reads come from NODE_REST_API.
+	if err := db.AutoMigrate(&taxapi.BalanceSnapshot{}); err != nil {
+		log.Printf("balance table migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"))
 	srv := taxapi.NewServer(db, oracle)
 
