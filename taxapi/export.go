@@ -30,7 +30,7 @@ type Row struct {
 // description is the human/tax note; NFT sales name the asset, IBC rows carry the
 // raw trace path so the UI can show an "IBC" badge with full detail on hover.
 func (r Row) description() string {
-	if (r.Category == "nft_sale" || r.Category == "nft_mint") && r.Asset != "" {
+	if (r.Category == categoryNFTSale || r.Category == categoryNFTMint) && r.Asset != "" {
 		return r.Category + " " + r.Asset
 	}
 	if r.IsIBC {
@@ -42,16 +42,16 @@ func (r Row) description() string {
 // label maps our category to a human/tax label.
 func (r Row) label() string {
 	switch r.Category {
-	case "reward", "commission":
+	case categoryReward, categoryCommission:
 		return "staking"
-	case "fee":
-		return "fee"
-	case "nft_sale", "nft_mint":
+	case categoryFee:
+		return categoryFee
+	case categoryNFTSale, categoryNFTMint:
 		return "nft"
-	case "swap":
-		return "swap"
+	case categorySwap:
+		return categorySwap
 	default:
-		if r.Direction == "in" {
+		if r.Direction == directionIn {
 			return "receive"
 		}
 		return "send"
@@ -80,7 +80,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
 			tag := ""
-			if r.Category == "reward" || r.Category == "commission" {
+			if r.Category == categoryReward || r.Category == categoryCommission {
 				tag = "staked"
 			}
 			_ = w.Write([]string{
@@ -94,10 +94,10 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
 			typ := "Deposit"
-			if r.Direction == "out" {
+			if r.Direction == directionOut {
 				typ = "Withdrawal"
 			}
-			if r.Category == "reward" || r.Category == "commission" {
+			if r.Category == categoryReward || r.Category == categoryCommission {
 				typ = "Staking Reward"
 			}
 			_ = w.Write([]string{
@@ -124,12 +124,12 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		for _, r := range rows {
 			date := r.Time.UTC().Format("2006-01-02 15:04:05")
 			amt, rate, val := r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD)
-			if r.Direction == "in" && r.Category != "fee" {
+			if r.Direction == directionIn && r.Category != categoryFee {
 				_ = w.Write([]string{date, "deposit", r.TxHash, r.Symbol, amt, rate, val, "", "", "", "", "", "", "", "", party(r), r.description()})
 			} else {
 				ot := "withdraw"
-				if r.Category == "fee" {
-					ot = "fee"
+				if r.Category == categoryFee {
+					ot = categoryFee
 				}
 				_ = w.Write([]string{date, ot, r.TxHash, "", "", "", "", r.Symbol, amt, rate, val, "", "", "", "", party(r), r.description()})
 			}
@@ -140,10 +140,10 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		_ = w.Write([]string{"id", "date", "type", "amount", "amountTicker", "txHash", "contactAddress", "category"})
 		for i, r := range rows {
 			typ := "Deposit"
-			if r.Direction == "out" {
+			if r.Direction == directionOut {
 				typ = "Withdrawal"
 			}
-			if r.Category == "fee" {
+			if r.Category == categoryFee {
 				typ = "Fee"
 			}
 			_ = w.Write([]string{
@@ -172,14 +172,14 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 
 // party returns the counterparty address for a row (the non-fee side).
 func party(r Row) string {
-	if r.Direction == "in" {
+	if r.Direction == directionIn {
 		return r.From
 	}
 	return r.To
 }
 
 func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
-	if r.Direction == "out" {
+	if r.Direction == directionOut {
 		return r.Amount.String(), r.Symbol, "", ""
 	}
 	return "", "", r.Amount.String(), r.Symbol
@@ -187,20 +187,20 @@ func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
 
 func ctcType(r Row) string {
 	switch r.Category {
-	case "reward", "commission":
+	case categoryReward, categoryCommission:
 		return "staking"
-	case "fee":
-		return "fee"
-	case "nft_sale", "swap":
+	case categoryFee:
+		return categoryFee
+	case categoryNFTSale, categorySwap:
 		// Disposal leg = sell, acquisition leg = buy.
-		if r.Direction == "out" {
+		if r.Direction == directionOut {
 			return "sell"
 		}
 		return "buy"
-	case "nft_mint":
+	case categoryNFTMint:
 		return "buy" // acquisition
 	default:
-		if r.Direction == "in" {
+		if r.Direction == directionIn {
 			return "receive"
 		}
 		return "send"

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
@@ -14,7 +15,6 @@ import (
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"gorm.io/gorm"
@@ -281,6 +281,12 @@ func attrMap(ev indexerTxTypes.LogMessageEvent) map[string]string {
 	return m
 }
 
+// SDK event/attribute names matched while summing coin movements.
+const (
+	evCoinReceived = "coin_received"
+	attrAmount     = "amount"
+)
+
 // coinsSpentBy sums the coins debited from target via coin_spent events.
 func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 	total := sdk.NewCoins()
@@ -293,7 +299,7 @@ func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 			switch a.Key {
 			case "spender":
 				cur = a.Value
-			case "amount":
+			case attrAmount:
 				if cur == target {
 					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
 						total = total.Add(coins...)
@@ -326,8 +332,8 @@ func rewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEve
 func coinsReceivedBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 	primary := "transfer"
 	for _, ev := range log.Events {
-		if ev.Type == "coin_received" {
-			primary = "coin_received"
+		if ev.Type == evCoinReceived {
+			primary = evCoinReceived
 			break
 		}
 	}
@@ -341,7 +347,7 @@ func coinsReceivedBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 			switch a.Key {
 			case "recipient", "receiver":
 				cur = a.Value
-			case "amount":
+			case attrAmount:
 				if cur == target {
 					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
 						total = total.Add(coins...)
@@ -358,7 +364,7 @@ func coinsReceivedBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coins {
 	out := map[string]sdk.Coins{}
 	for _, ev := range log.Events {
-		if ev.Type != "coin_received" {
+		if ev.Type != evCoinReceived {
 			continue
 		}
 		cur := ""
@@ -366,7 +372,7 @@ func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coin
 			switch a.Key {
 			case "receiver":
 				cur = a.Value
-			case "amount":
+			case attrAmount:
 				if cur != "" {
 					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
 						out[cur] = out[cur].Add(coins...)

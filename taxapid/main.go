@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
@@ -45,7 +46,12 @@ func main() {
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)
-	if err := http.ListenAndServe(listen, srv.Handler()); err != nil {
+	server := &http.Server{
+		Addr:              listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }

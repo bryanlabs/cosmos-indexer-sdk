@@ -48,19 +48,19 @@ func Build8949(rows []Row) []Form8949Row {
 
 	for _, r := range sorted {
 		// NFT acquisition via mint: establishes the NFT's cost basis.
-		if r.Category == "nft_mint" {
+		if r.Category == categoryNFTMint {
 			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
 			continue
 		}
 
 		// NFT marketplace sale: dispose/acquire the NFT, valued in USD.
-		if r.Category == "nft_sale" {
+		if r.Category == categoryNFTSale {
 			key := r.Asset
 			desc := "NFT " + r.Asset
 			switch r.Direction {
-			case "in": // buyer acquires the NFT; basis = USD paid
+			case directionIn: // buyer acquires the NFT; basis = USD paid
 				nftLots[key] = append(nftLots[key], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
-			case "out": // seller disposes the NFT; proceeds = USD received
+			case directionOut: // seller disposes the NFT; proceeds = USD received
 				proceeds := r.ValueUSD
 				q := nftLots[key]
 				if len(q) == 0 {
@@ -95,11 +95,11 @@ func Build8949(rows []Row) []Form8949Row {
 			asset = r.Denom
 		}
 		switch {
-		case r.Direction == "in" && r.Category != "fee":
+		case r.Direction == directionIn && r.Category != categoryFee:
 			// acquisition
 			lots[asset] = append(lots[asset], lot{qty: r.Amount, cost: r.PriceUSD, date: r.Time})
 
-		case r.Direction == "out":
+		case r.Direction == directionOut:
 			// disposal (incl. fee spends): consume FIFO
 			remaining := r.Amount
 			disposalPrice := r.PriceUSD

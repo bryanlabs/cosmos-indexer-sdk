@@ -14,6 +14,8 @@ const (
 	del   = "cosmos1delegatoraddrxxxxxxxxxxxxxxxxxxxxxx"
 	val   = "cosmosvaloper1validatorxxxxxxxxxxxxxxxxxxxx"
 	other = "cosmos1otheraddrxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+	uatomDenom = "uatom"
 )
 
 func ev(t string, attrs ...[2]string) indexerTxTypes.LogMessageEvent {
@@ -25,9 +27,9 @@ func ev(t string, attrs ...[2]string) indexerTxTypes.LogMessageEvent {
 }
 
 func TestClassifyBankSend(t *testing.T) {
-	msg := &banktypes.MsgSend{FromAddress: del, ToAddress: other, Amount: sdk.NewCoins(sdk.NewInt64Coin("uatom", 100))}
+	msg := &banktypes.MsgSend{FromAddress: del, ToAddress: other, Amount: sdk.NewCoins(sdk.NewInt64Coin(uatomDenom, 100))}
 	out := classify(msg, &indexerTxTypes.LogMessage{})
-	if len(out) != 1 || out[0].Category != string(CategoryTransfer) || out[0].Amount != "100" || out[0].Denom != "uatom" || out[0].FromAddr != del || out[0].ToAddr != other {
+	if len(out) != 1 || out[0].Category != string(CategoryTransfer) || out[0].Amount != "100" || out[0].Denom != uatomDenom || out[0].FromAddr != del || out[0].ToAddr != other {
 		t.Fatalf("bank send classification wrong: %+v", out)
 	}
 }
@@ -76,7 +78,7 @@ func TestClassifyNFTSale(t *testing.T) {
 		ev("wasm-finalize-sale",
 			[2]string{"collection", "cosmos1coll"},
 			[2]string{"token_id", "468"},
-			[2]string{"denom", "uatom"},
+			[2]string{"denom", uatomDenom},
 			[2]string{"price", "30000000"},
 			[2]string{"seller_recipient", del},
 			[2]string{"nft_recipient", other},
@@ -87,7 +89,7 @@ func TestClassifyNFTSale(t *testing.T) {
 		t.Fatalf("want 1 nft sale, got %d: %+v", len(out), out)
 	}
 	e := out[0]
-	if e.Category != string(CategoryNFTSale) || e.Amount != "30000000" || e.Denom != "uatom" ||
+	if e.Category != string(CategoryNFTSale) || e.Amount != "30000000" || e.Denom != uatomDenom ||
 		e.FromAddr != del || e.ToAddr != other || e.Asset != "cosmos1coll/468" {
 		t.Fatalf("nft sale classification wrong: %+v", e)
 	}
@@ -112,7 +114,7 @@ func TestClassifySwap(t *testing.T) {
 		ev("wasm",
 			[2]string{"action", "swap"},
 			[2]string{"receiver", del},
-			[2]string{"offer_asset", "uatom"}, [2]string{"offer_amount", "330000"},
+			[2]string{"offer_asset", uatomDenom}, [2]string{"offer_amount", "330000"},
 			[2]string{"ask_asset", "factory/x/art"}, [2]string{"return_amount", "15362"},
 		),
 	}}
@@ -120,7 +122,7 @@ func TestClassifySwap(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("want 2 swap legs, got %d: %+v", len(out), out)
 	}
-	if out[0].FromAddr != del || out[0].Denom != "uatom" || out[0].Amount != "330000" {
+	if out[0].FromAddr != del || out[0].Denom != uatomDenom || out[0].Amount != "330000" {
 		t.Fatalf("offer leg wrong: %+v", out[0])
 	}
 	if out[1].ToAddr != del || out[1].Denom != "factory/x/art" || out[1].Amount != "15362" {
@@ -141,7 +143,7 @@ func TestClassifyNFTMint(t *testing.T) {
 	}}
 	out := nftMintEvents(log)
 	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].ToAddr != del ||
-		out[0].Asset != "coll1/1047" || out[0].Amount != "5000000" || out[0].Denom != "uatom" {
+		out[0].Asset != "coll1/1047" || out[0].Amount != "5000000" || out[0].Denom != uatomDenom {
 		t.Fatalf("nft mint classification wrong: %+v", out)
 	}
 }

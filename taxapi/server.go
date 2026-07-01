@@ -110,7 +110,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 	_ = cw.Write([]string{"date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
 	total := decimal.Zero
 	for _, row := range rows {
-		if row.Category != "reward" && row.Category != "commission" {
+		if row.Category != categoryReward && row.Category != categoryCommission {
 			continue
 		}
 		total = total.Add(row.ValueUSD)
@@ -149,7 +149,7 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, row := range rows {
-			if row.Category == "reward" || row.Category == "commission" {
+			if row.Category == categoryReward || row.Category == categoryCommission {
 				ubti = ubti.Add(row.ValueUSD)
 			}
 		}
@@ -185,12 +185,12 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 
 	out := make([]Row, 0, len(events)+8)
 	for _, e := range events {
-		dir := "in"
+		dir := directionIn
 		switch e.Category {
 		case string(tax.CategoryTransfer), string(tax.CategoryIBCOut), string(tax.CategoryNFTSale), string(tax.CategorySwap):
 			// Disposer (FromAddr) sends; everyone else (ToAddr) acquires.
 			if e.FromAddr == addr {
-				dir = "out"
+				dir = directionOut
 			}
 		}
 		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
@@ -215,7 +215,7 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
 		Scan(&fees).Error; err == nil {
 		for _, f := range fees {
-			out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, "fee", "out", f.Denom, f.Amount, addr, ""))
+			out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, categoryFee, directionOut, f.Denom, f.Amount, addr, ""))
 		}
 	}
 

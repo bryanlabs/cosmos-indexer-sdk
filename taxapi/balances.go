@@ -57,7 +57,10 @@ func GetBalanceSnapshotHistory(db *gorm.DB, address string) []BalanceSnapshot {
 
 // --- live node read (ported from cosmos-tax-cli/rest/balances.go) ---
 
-const uatomToAtom = 1_000_000.0
+const (
+	uatomToAtom = 1_000_000.0
+	denomUatom  = "uatom"
+)
 
 type atomHoldings struct{ Liquid, Staked, Reward float64 }
 
@@ -66,8 +69,12 @@ type balCoin struct {
 	Amount string `json:"amount"`
 }
 
+// balHTTP bounds live node reads; the default client has no timeout and would
+// hang a request indefinitely on a stuck node.
+var balHTTP = &http.Client{Timeout: 15 * time.Second}
+
 func balGetJSON(url string, out interface{}) error {
-	resp, err := http.Get(url)
+	resp, err := balHTTP.Get(url)
 	if err != nil {
 		return err
 	}
@@ -94,7 +101,7 @@ func getAtomHoldings(host, address string) (atomHoldings, error) {
 		return h, err
 	}
 	for _, c := range bal.Balances {
-		if c.Denom == "uatom" {
+		if c.Denom == denomUatom {
 			if v, err := strconv.ParseFloat(c.Amount, 64); err == nil {
 				h.Liquid = v / uatomToAtom
 			}
@@ -111,7 +118,7 @@ func getAtomHoldings(host, address string) (atomHoldings, error) {
 	}
 	var staked float64
 	for _, d := range del.DelegationResponses {
-		if d.Balance.Denom == "uatom" {
+		if d.Balance.Denom == denomUatom {
 			if v, err := strconv.ParseFloat(d.Balance.Amount, 64); err == nil {
 				staked += v
 			}
@@ -126,7 +133,7 @@ func getAtomHoldings(host, address string) (atomHoldings, error) {
 		return h, err
 	}
 	for _, c := range rew.Total {
-		if c.Denom == "uatom" {
+		if c.Denom == denomUatom {
 			if v, err := strconv.ParseFloat(c.Amount, 64); err == nil {
 				h.Reward = v / uatomToAtom
 			}
