@@ -22,6 +22,7 @@ func NewServer(db *gorm.DB, oracle *Oracle) *Server { return &Server{db: db, ora
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /8949", s.handle8949)
 	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
