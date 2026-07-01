@@ -154,7 +154,7 @@ type ScheduleD struct {
 	LongTermProceeds   decimal.Decimal `json:"long_term_proceeds"`
 	LongTermCostBasis  decimal.Decimal `json:"long_term_cost_basis"`
 	LongTermGainLoss   decimal.Decimal `json:"long_term_gain_loss"` // Schedule D line 15
-	NetGainLoss        decimal.Decimal `json:"net_gain_loss"`        // Schedule D line 16
+	NetGainLoss        decimal.Decimal `json:"net_gain_loss"`       // Schedule D line 16
 }
 
 // BuildScheduleD rolls up 8949 lines into the Schedule D short/long-term totals.

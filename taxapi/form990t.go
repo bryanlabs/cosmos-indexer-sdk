@@ -32,12 +32,12 @@ func trustBrackets() []trustBracket {
 
 // Form990T is the UBIT summary for an entity's staking income.
 type Form990T struct {
-	StakingIncomeUSD string `json:"staking_income_usd"` // gross UBTI
+	StakingIncomeUSD  string `json:"staking_income_usd"` // gross UBTI
 	SpecificDeduction string `json:"specific_deduction"`
-	TaxableUBTI      string `json:"taxable_ubti_usd"`
-	EstimatedTaxUSD  string `json:"estimated_tax_usd"`
-	FilingRequired   bool   `json:"filing_required"` // gross UBTI >= $1,000
-	Note             string `json:"note"`
+	TaxableUBTI       string `json:"taxable_ubti_usd"`
+	EstimatedTaxUSD   string `json:"estimated_tax_usd"`
+	FilingRequired    bool   `json:"filing_required"` // gross UBTI >= $1,000
+	Note              string `json:"note"`
 }
 
 // compute990T runs the UBIT calc over a gross UBTI (USD).
