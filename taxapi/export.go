@@ -108,6 +108,9 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		}
 
 	case "coinledger":
+		// Universal Manual Import Template: dates must read Month-Day-Year, and
+		// "Type" comes from CoinLedger's fixed vocabulary (Deposit/Withdrawal/
+		// Staking/...), not a free-text label.
 		_ = w.Write([]string{"Date (UTC)", "Platform", "Asset Sent", "Amount Sent", "Asset Received", "Amount Received", "Fee Currency", "Fee Amount", "Type", "Description", "TxHash"})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
@@ -116,10 +119,10 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 				typ = "Withdrawal"
 			}
 			if r.Category == "reward" || r.Category == "commission" {
-				typ = "Staking Reward"
+				typ = "Staking"
 			}
 			_ = w.Write([]string{
-				r.Time.UTC().Format("2006-01-02 15:04:05"),
+				r.Time.UTC().Format("01/02/2006 15:04:05"),
 				"Cosmos", sentCur, sentAmt, recvCur, recvAmt, "", "", typ, r.description(), r.TxHash,
 			})
 		}
