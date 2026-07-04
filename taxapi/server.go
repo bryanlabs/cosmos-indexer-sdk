@@ -57,6 +57,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /wasm/submissions", s.handleListWasmSubmissions)
 	mux.HandleFunc("GET /wasm/submissions/status", s.handleWasmSubmissionStatus)
 	mux.HandleFunc("PATCH /wasm/submissions/{id}", s.handleUpdateWasmSubmission)
+	mux.HandleFunc("GET /delegator-report", s.handleDelegatorReport)
+	mux.HandleFunc("POST /admin/validator-keys", s.handleCreateValidatorKey)
+	mux.HandleFunc("GET /admin/validator-keys", s.handleListValidatorKeys)
 	return withCORS(mux)
 }
 

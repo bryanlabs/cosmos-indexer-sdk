@@ -66,6 +66,10 @@ func main() {
 	if err := db.AutoMigrate(&taxapi.WasmSubmission{}); err != nil {
 		log.Printf("wasm submission table migrate: %v", err)
 	}
+	// Delegator-report widget for validators (INF-210): API keys + usage log.
+	if err := db.AutoMigrate(&taxapi.ValidatorKey{}, &taxapi.ValidatorReportUsage{}); err != nil {
+		log.Printf("validator key table migrate: %v", err)
+	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())

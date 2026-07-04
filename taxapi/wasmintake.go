@@ -46,32 +46,41 @@ var validWasmStatus = map[string]bool{
 	WasmSubmissionDeclined:    true,
 }
 
-// --- naive in-memory rate limiting: N submissions per (client, contract) per
-// window. This deployment runs a single replica (see the k8s manifest), so an
-// in-memory limiter is real spam resistance here, not a distributed one.
+// --- naive in-memory rate limiting: N hits per key per window, independently
+// configurable per limiter instance (wasm submissions vs. delegator-report
+// calls have very different legitimate volumes). This deployment runs a
+// single replica (see the k8s manifest), so an in-memory limiter is real
+// spam resistance here, not a distributed one.
 type submissionLimiter struct {
+	limit  int
+	window time.Duration
+
 	mu   sync.Mutex
 	hits map[string][]time.Time
 }
 
-var wasmLimiter = &submissionLimiter{hits: map[string][]time.Time{}}
+func newLimiter(limit int, window time.Duration) *submissionLimiter {
+	return &submissionLimiter{limit: limit, window: window, hits: map[string][]time.Time{}}
+}
 
 const (
 	submissionRateLimit  = 5
 	submissionRateWindow = time.Hour
 )
 
+var wasmLimiter = newLimiter(submissionRateLimit, submissionRateWindow)
+
 func (l *submissionLimiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	cutoff := time.Now().Add(-submissionRateWindow)
+	cutoff := time.Now().Add(-l.window)
 	kept := l.hits[key][:0]
 	for _, t := range l.hits[key] {
 		if t.After(cutoff) {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= submissionRateLimit {
+	if len(kept) >= l.limit {
 		l.hits[key] = kept
 		return false
 	}
