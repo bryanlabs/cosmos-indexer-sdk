@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -14,10 +15,12 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// BalanceSnapshot is a point-in-time (daily) record of an address's ATOM
-// holdings, captured live from the node so historical lookups don't need a node.
-// Amounts are in ATOM (already divided by 1e6). One row per (address, date).
-// (Ported from the legacy cosmos-tax-cli so the SDK can fully replace it.)
+// BalanceSnapshot is a point-in-time (daily) record of an address's native-
+// asset holdings, captured live from the node so historical lookups don't
+// need a node. Amounts are display units (already divided by 10^decimals for
+// this deployment's NativeAsset, see server.go — NOT hardcoded to ATOM,
+// INF-208). One row per (address, date). (Ported from the legacy
+// cosmos-tax-cli so the SDK can fully replace it.)
 type BalanceSnapshot struct {
 	ID      uint
 	Address string    `gorm:"index:idx_bal_addr_date,priority:1,unique"`
@@ -57,9 +60,7 @@ func GetBalanceSnapshotHistory(db *gorm.DB, address string) []BalanceSnapshot {
 
 // --- live node read (ported from cosmos-tax-cli/rest/balances.go) ---
 
-const uatomToAtom = 1_000_000.0
-
-type atomHoldings struct{ Liquid, Staked, Reward float64 }
+type nativeHoldings struct{ Liquid, Staked, Reward float64 }
 
 type balCoin struct {
 	Denom  string `json:"denom"`
@@ -82,10 +83,15 @@ func balGetJSON(url string, out interface{}) error {
 	return json.Unmarshal(body, out)
 }
 
-// getAtomHoldings reads liquid bank balance, bonded delegations, and unclaimed
-// rewards for an address from a node REST endpoint (host).
-func getAtomHoldings(host, address string) (atomHoldings, error) {
-	var h atomHoldings
+// getNativeHoldings reads liquid bank balance, bonded delegations, and
+// unclaimed rewards for an address from a node REST endpoint (host), for
+// this deployment's native denom (e.g. uatom, uusdc — see NativeAsset,
+// INF-208). Chains with no meaningful staking module for typical holders
+// (e.g. Noble) simply report Staked/Reward as 0; the delegation/rewards
+// queries 404 gracefully rather than failing the whole lookup.
+func getNativeHoldings(host, address string, native NativeAsset) (nativeHoldings, error) {
+	var h nativeHoldings
+	unitsPerDisplay := math.Pow10(native.Decimals)
 
 	var bal struct {
 		Balances []balCoin `json:"balances"`
@@ -94,9 +100,9 @@ func getAtomHoldings(host, address string) (atomHoldings, error) {
 		return h, err
 	}
 	for _, c := range bal.Balances {
-		if c.Denom == "uatom" {
+		if c.Denom == native.Denom {
 			if v, err := strconv.ParseFloat(c.Amount, 64); err == nil {
-				h.Liquid = v / uatomToAtom
+				h.Liquid = v / unitsPerDisplay
 			}
 		}
 	}
@@ -106,38 +112,36 @@ func getAtomHoldings(host, address string) (atomHoldings, error) {
 			Balance balCoin `json:"balance"`
 		} `json:"delegation_responses"`
 	}
-	if err := balGetJSON(fmt.Sprintf("%s/cosmos/staking/v1beta1/delegations/%s?pagination.limit=1000", host, address), &del); err != nil {
-		return h, err
-	}
-	var staked float64
-	for _, d := range del.DelegationResponses {
-		if d.Balance.Denom == "uatom" {
-			if v, err := strconv.ParseFloat(d.Balance.Amount, 64); err == nil {
-				staked += v
+	if err := balGetJSON(fmt.Sprintf("%s/cosmos/staking/v1beta1/delegations/%s?pagination.limit=1000", host, address), &del); err == nil {
+		var staked float64
+		for _, d := range del.DelegationResponses {
+			if d.Balance.Denom == native.Denom {
+				if v, err := strconv.ParseFloat(d.Balance.Amount, 64); err == nil {
+					staked += v
+				}
 			}
 		}
+		h.Staked = staked / unitsPerDisplay
 	}
-	h.Staked = staked / uatomToAtom
 
 	var rew struct {
 		Total []balCoin `json:"total"`
 	}
-	if err := balGetJSON(fmt.Sprintf("%s/cosmos/distribution/v1beta1/delegators/%s/rewards", host, address), &rew); err != nil {
-		return h, err
-	}
-	for _, c := range rew.Total {
-		if c.Denom == "uatom" {
-			if v, err := strconv.ParseFloat(c.Amount, 64); err == nil {
-				h.Reward = v / uatomToAtom
+	if err := balGetJSON(fmt.Sprintf("%s/cosmos/distribution/v1beta1/delegators/%s/rewards", host, address), &rew); err == nil {
+		for _, c := range rew.Total {
+			if c.Denom == native.Denom {
+				if v, err := strconv.ParseFloat(c.Amount, 64); err == nil {
+					h.Reward = v / unitsPerDisplay
+				}
 			}
 		}
 	}
 	return h, nil
 }
 
-// handleBalance serves pre-indexed (and live-fetched) ATOM holdings for an
-// address. Matches the legacy cosmos-tax-cli /balance contract so the mono-app's
-// TAX_API_URL can point here instead of the cli.
+// handleBalance serves pre-indexed (and live-fetched) native-asset holdings
+// for an address. Matches the legacy cosmos-tax-cli /balance contract so the
+// mono-app's TAX_API_URL can point here instead of the cli.
 //
 //	GET /balance?address=cosmos1...            -> latest (live from node, persisted)
 //	GET /balance?address=...&date=YYYY-MM-DD   -> holdings as of a date (from snapshots)
@@ -162,7 +166,7 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 				"staked": b.Staked, "reward": b.Reward, "total": b.Liquid + b.Staked + b.Reward,
 			})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"address": address, "symbol": "ATOM", "history": series})
+		_ = json.NewEncoder(w).Encode(map[string]any{"address": address, "symbol": s.native.Symbol, "history": series})
 		return
 	}
 
@@ -175,7 +179,7 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	if !asOf.IsZero() {
 		if b, ok := GetBalanceSnapshotAsOf(s.db, address, asOf); ok {
-			writeBalance(w, address, b, false)
+			s.writeBalance(w, address, b, false)
 			return
 		}
 		http.Error(w, "no balance snapshot for this address on or before that date", http.StatusNotFound)
@@ -186,24 +190,24 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	// the history series accrues. Fall back to the newest cached snapshot if the
 	// node is unreachable.
 	if node := os.Getenv("NODE_REST_API"); node != "" {
-		if h, err := getAtomHoldings(node, address); err == nil {
+		if h, err := getNativeHoldings(node, address, s.native); err == nil {
 			today := nowUTC().Truncate(24 * time.Hour)
 			b := BalanceSnapshot{Address: address, Date: today, Liquid: h.Liquid, Staked: h.Staked, Reward: h.Reward}
 			_ = UpsertBalanceSnapshot(s.db, &b)
-			writeBalance(w, address, b, true)
+			s.writeBalance(w, address, b, true)
 			return
 		}
 	}
 	if b, ok := GetBalanceSnapshotAsOf(s.db, address, time.Time{}); ok {
-		writeBalance(w, address, b, false)
+		s.writeBalance(w, address, b, false)
 		return
 	}
 	http.Error(w, "no balance available (node unreachable and no snapshot yet)", http.StatusNotFound)
 }
 
-func writeBalance(w http.ResponseWriter, address string, b BalanceSnapshot, live bool) {
+func (s *Server) writeBalance(w http.ResponseWriter, address string, b BalanceSnapshot, live bool) {
 	out := map[string]any{
-		"address": address, "symbol": "ATOM", "date": b.Date.UTC().Format("2006-01-02"),
+		"address": address, "symbol": s.native.Symbol, "date": b.Date.UTC().Format("2006-01-02"),
 		"liquid": b.Liquid, "staked": b.Staked, "reward": b.Reward,
 		"total": b.Liquid + b.Staked + b.Reward,
 	}

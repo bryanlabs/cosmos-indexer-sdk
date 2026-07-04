@@ -137,7 +137,7 @@ func TestHandlePriceSeriesCSV(t *testing.T) {
 	}))
 	defer oracleSrv.Close()
 
-	s := &Server{oracle: NewOracle(oracleSrv.URL, "")}
+	s := &Server{oracle: NewOracle(oracleSrv.URL, ""), native: DefaultNativeAsset}
 	req := httptest.NewRequest(http.MethodGet, "/price-series?start=2026-01-01&end=2026-01-01&format=csv", nil)
 	rec := httptest.NewRecorder()
 	s.handlePriceSeries(rec, req)

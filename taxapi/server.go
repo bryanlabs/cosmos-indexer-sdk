@@ -15,12 +15,29 @@ import (
 	"gorm.io/gorm"
 )
 
+// NativeAsset is this deployment's chain-native token. The indexer/API is
+// generic, but each process (mainnet, testnet, or an added chain like Noble)
+// serves exactly one chain, so its native asset is fixed at startup via env
+// (see taxapid/main.go) rather than hardcoded to ATOM (INF-208).
+type NativeAsset struct {
+	Denom    string // base denom, e.g. "uatom", "uusdc"
+	Decimals int
+	Symbol   string // e.g. "ATOM", "USDC"
+}
+
+// DefaultNativeAsset is ATOM/uatom/6 — cosmoshub's asset, the default so
+// existing mainnet/testnet deployments need no new env vars.
+var DefaultNativeAsset = NativeAsset{Denom: "uatom", Decimals: 6, Symbol: "ATOM"}
+
 type Server struct {
 	db     *gorm.DB
 	oracle *Oracle
+	native NativeAsset
 }
 
-func NewServer(db *gorm.DB, oracle *Oracle) *Server { return &Server{db: db, oracle: oracle} }
+func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
+	return &Server{db: db, oracle: oracle, native: native}
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -310,6 +327,17 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	// Resolve to the underlying base asset so symbol, decimals and price match the
 	// native token (uatom that round-trips is still ATOM); keep the raw path.
 	base, isIBC := ibcBaseDenom(denom)
+	// A voucher can also arrive already hashed ("ibc/<HASH>") when the oracle
+	// hasn't scraped this trace yet — e.g. an asset from a chain we've only
+	// just started indexing. Resolve it via the chain's own IBC transfer
+	// module before giving up (cross-chain IBC, INF-208).
+	if !isIBC && strings.HasPrefix(base, "ibc/") {
+		if path, ok := s.oracle.DenomTrace(strings.TrimPrefix(base, "ibc/")); ok {
+			if resolved, resolvedIsIBC := ibcBaseDenom(path); resolvedIsIBC {
+				base, isIBC = resolved, true
+			}
+		}
+	}
 
 	// Decimals resolution: the oracle first, then the chain's own bank module,
 	// and only if both miss do we assume 6 (and flag it) rather than silently

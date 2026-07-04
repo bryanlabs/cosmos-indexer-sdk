@@ -84,6 +84,44 @@ func TestPriceAtCachesMissBriefly(t *testing.T) {
 	}
 }
 
+func TestDenomTraceResolvesAndCaches(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"denom_trace":{"path":"transfer/channel-141","base_denom":"uosmo"}}`))
+	}))
+	defer srv.Close()
+
+	o := NewOracle("http://unused-in-this-test", srv.URL)
+	path, ok := o.DenomTrace("ABCDEF1234")
+	if !ok || path != "transfer/channel-141/uosmo" {
+		t.Fatalf("want transfer/channel-141/uosmo, got %q ok=%v", path, ok)
+	}
+	if _, ok := o.DenomTrace("ABCDEF1234"); !ok || hits != 1 {
+		t.Fatalf("second lookup should be cached (1 http call), got hits=%d", hits)
+	}
+}
+
+func TestDenomTraceUnknownHash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	o := NewOracle("http://unused-in-this-test", srv.URL)
+	if _, ok := o.DenomTrace("DEADBEEF"); ok {
+		t.Fatal("want ok=false for a hash the chain doesn't recognize")
+	}
+}
+
+func TestDenomTraceDisabledWithoutNodeREST(t *testing.T) {
+	o := NewOracle("http://unused-in-this-test", "")
+	if _, ok := o.DenomTrace("ABCDEF1234"); ok {
+		t.Fatal("want ok=false when nodeREST is empty (fallback disabled)")
+	}
+}
+
 func TestPriceAtUnreachableOracleIsNotFoundNotFabricated(t *testing.T) {
 	// Nothing listening on this port: PriceAt must return found=false, not panic
 	// or fabricate a price.

@@ -29,7 +29,7 @@ type pricePoint struct {
 func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	chain := def(q.Get("chain"), "mainnet")
-	denom := def(q.Get("denom"), "uatom")
+	denom := def(q.Get("denom"), s.native.Denom)
 	end := dateParam(q.Get("end"), nowUTC())
 	start := dateParam(q.Get("start"), end.AddDate(0, 0, -90))
 

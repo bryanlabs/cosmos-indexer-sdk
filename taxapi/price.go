@@ -25,11 +25,12 @@ type Oracle struct {
 	nodeREST string // chain REST API host for the denoms_metadata fallback; "" disables it
 	http     *http.Client
 
-	mu     sync.Mutex
-	denoms map[string]map[string]DenomMeta // chain -> denom -> meta (cached)
-	at     map[string]time.Time
-	bank   map[string]DenomMeta       // denom -> meta from the chain's bank module (cached, no TTL)
-	prices map[string]priceCacheEntry // "chain|denom|date" -> price (cached; see PriceAt)
+	mu          sync.Mutex
+	denoms      map[string]map[string]DenomMeta // chain -> denom -> meta (cached)
+	at          map[string]time.Time
+	bank        map[string]DenomMeta       // denom -> meta from the chain's bank module (cached, no TTL)
+	prices      map[string]priceCacheEntry // "chain|denom|date" -> price (cached; see PriceAt)
+	denomTraces map[string]string          // ibc hash -> full trace path (cached, no TTL; see DenomTrace)
 }
 
 // priceMissTTL bounds how long a "no price found" result is trusted before
@@ -50,13 +51,14 @@ type priceCacheEntry struct {
 // pass "" to disable the fallback (decimals then go straight to "unknown").
 func NewOracle(base, nodeREST string) *Oracle {
 	return &Oracle{
-		base:     base,
-		nodeREST: nodeREST,
-		http:     &http.Client{Timeout: 8 * time.Second},
-		denoms:   map[string]map[string]DenomMeta{},
-		at:       map[string]time.Time{},
-		bank:     map[string]DenomMeta{},
-		prices:   map[string]priceCacheEntry{},
+		base:        base,
+		nodeREST:    nodeREST,
+		http:        &http.Client{Timeout: 8 * time.Second},
+		denoms:      map[string]map[string]DenomMeta{},
+		at:          map[string]time.Time{},
+		bank:        map[string]DenomMeta{},
+		prices:      map[string]priceCacheEntry{},
+		denomTraces: map[string]string{},
 	}
 }
 
@@ -172,6 +174,47 @@ func (o *Oracle) BankMetaFallback(denom string) (DenomMeta, bool) {
 	o.bank[denom] = m
 	o.mu.Unlock()
 	return m, true
+}
+
+// DenomTrace resolves an "ibc/<HASH>" voucher denom to its full trace path
+// (e.g. "transfer/channel-141/uosmo") via the chain's own IBC transfer
+// module, for vouchers the oracle hasn't already resolved — most useful for
+// an asset that arrived from a chain we've only recently started indexing
+// (cross-chain IBC, INF-208). hash is the bare hash without the "ibc/"
+// prefix. Cached indefinitely: once a denom trace is registered on chain it
+// never changes. ok=false when the fallback is disabled, unreachable, or the
+// hash is genuinely unknown to this chain.
+func (o *Oracle) DenomTrace(hash string) (string, bool) {
+	if o.nodeREST == "" {
+		return "", false
+	}
+
+	o.mu.Lock()
+	if p, ok := o.denomTraces[hash]; ok {
+		o.mu.Unlock()
+		return p, true
+	}
+	o.mu.Unlock()
+
+	var body struct {
+		DenomTrace struct {
+			Path      string `json:"path"`
+			BaseDenom string `json:"base_denom"`
+		} `json:"denom_trace"`
+	}
+	url := fmt.Sprintf("%s/ibc/apps/transfer/v1/denom_traces/%s", o.nodeREST, hash)
+	if err := o.get(url, &body); err != nil {
+		return "", false
+	}
+	if body.DenomTrace.Path == "" || body.DenomTrace.BaseDenom == "" {
+		return "", false
+	}
+	full := body.DenomTrace.Path + "/" + body.DenomTrace.BaseDenom
+
+	o.mu.Lock()
+	o.denomTraces[hash] = full
+	o.mu.Unlock()
+	return full, true
 }
 
 func (o *Oracle) get(url string, out any) error {

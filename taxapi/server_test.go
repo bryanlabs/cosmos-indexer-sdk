@@ -70,6 +70,50 @@ func TestBuildRowBothMissesAssumesAndFlags(t *testing.T) {
 	}
 }
 
+// An "ibc/<HASH>" voucher (the common on-chain form, as opposed to the full
+// "transfer/channel-N/denom" trace path) should resolve via the chain's own
+// denom-trace lookup when the oracle hasn't already scraped it, rather than
+// being treated as an opaque unknown base denom (cross-chain IBC, INF-208).
+func TestBuildRowResolvesHashedIBCDenomViaTrace(t *testing.T) {
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "denom_traces"):
+			_, _ = w.Write([]byte(`{"denom_trace":{"path":"transfer/channel-141","base_denom":"uosmo"}}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer stub.Close()
+
+	s := &Server{oracle: NewOracle(stub.URL, stub.URL)}
+	meta := map[string]DenomMeta{"uosmo": {Symbol: "OSMO", Decimals: 6}}
+
+	row := s.buildRow("mainnet", meta, time.Now(), "h1", "transfer", "in", "ibc/AAAABBBBCCCC", "5000000", "a", "b")
+	if !row.IsIBC {
+		t.Fatalf("want IsIBC=true once resolved via denom trace: %+v", row)
+	}
+	if row.DecimalsAssumed || row.Symbol != "OSMO" || !row.Amount.Equal(d(5)) {
+		t.Fatalf("want OSMO/5 resolved via the trace, got %+v", row)
+	}
+}
+
+// If the denom-trace lookup itself can't resolve the hash (fallback disabled
+// or the chain doesn't recognize it), the row still degrades honestly to
+// DecimalsAssumed rather than crashing or guessing silently.
+func TestBuildRowUnresolvableHashedIBCDenomStillFlags(t *testing.T) {
+	stub := stubChainServer(t)
+	s := &Server{oracle: NewOracle(stub.URL, "")} // no nodeREST: trace + bank fallback both disabled
+
+	row := s.buildRow("mainnet", map[string]DenomMeta{}, time.Now(), "h2", "transfer", "in", "ibc/UNRESOLVABLE", "5000000", "a", "b")
+	if row.IsIBC {
+		t.Fatalf("should not claim IsIBC when the hash never resolved: %+v", row)
+	}
+	if !row.DecimalsAssumed {
+		t.Fatalf("should honestly flag DecimalsAssumed rather than guess: %+v", row)
+	}
+}
+
 func TestBuildRowPriceFoundVsMissing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

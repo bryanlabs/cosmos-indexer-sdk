@@ -4,13 +4,16 @@
 // Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, ORACLE_URL (wasm-indexer base,
 // e.g. http://wasm-indexer:8080), NODE_REST_API (chain REST host, also used by
 // /balance; fallback for denom metadata the oracle doesn't have), LISTEN
-// (default :8082).
+// (default :8082). NATIVE_DENOM/NATIVE_DECIMALS/NATIVE_SYMBOL configure this
+// deployment's chain-native asset (default uatom/6/ATOM for cosmoshub;
+// override per chain when deploying an additional chain, see INF-208).
 package main
 
 import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
@@ -21,6 +24,24 @@ func env(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func nativeAssetFromEnv() taxapi.NativeAsset {
+	native := taxapi.DefaultNativeAsset
+	if d := os.Getenv("NATIVE_DENOM"); d != "" {
+		native.Denom = d
+	}
+	if s := os.Getenv("NATIVE_SYMBOL"); s != "" {
+		native.Symbol = s
+	}
+	if dec := os.Getenv("NATIVE_DECIMALS"); dec != "" {
+		if n, err := strconv.Atoi(dec); err == nil {
+			native.Decimals = n
+		} else {
+			log.Printf("NATIVE_DECIMALS=%q is not an integer, keeping default %d", dec, native.Decimals)
+		}
+	}
+	return native
 }
 
 func main() {
@@ -43,7 +64,7 @@ func main() {
 	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
-	srv := taxapi.NewServer(db, oracle)
+	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)
