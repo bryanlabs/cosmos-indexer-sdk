@@ -70,6 +70,11 @@ func main() {
 	if err := db.AutoMigrate(&taxapi.ValidatorKey{}, &taxapi.ValidatorReportUsage{}); err != nil {
 		log.Printf("validator key table migrate: %v", err)
 	}
+	// Durable async report cache: computed once, served instantly until newer
+	// on-chain activity, a max age, or a resync request invalidates it.
+	if err := db.AutoMigrate(&taxapi.ReportJob{}); err != nil {
+		log.Printf("report job table migrate: %v", err)
+	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())

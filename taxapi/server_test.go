@@ -4,9 +4,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/shopspring/decimal"
 )
 
@@ -219,5 +221,44 @@ func TestIBCRowWithUnknownDecimalsFlagsBoth(t *testing.T) {
 	want := "ibc transfer/channel-0/mystery (decimals unknown, amount may be wrong) (price missing)"
 	if got := row.description(); got != want {
 		t.Fatalf("description = %q, want %q", got, want)
+	}
+}
+
+// prewarmPrices must dedupe: 5 events across only 2 distinct (denom, date)
+// pairs should hit the oracle exactly twice, not 5 times, and the sequential
+// buildRow loop that follows must see cache hits (no further oracle calls).
+func TestPrewarmPricesDedupesAndWarmsCache(t *testing.T) {
+	var calls int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usd":9.5,"found":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	s := &Server{oracle: NewOracle(srv.URL, "")}
+
+	day1 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
+	events := []tax.TaxableEvent{
+		{Denom: "uatom", Timestamp: day1},
+		{Denom: "uatom", Timestamp: day1},
+		{Denom: "uatom", Timestamp: day1},
+		{Denom: "uatom", Timestamp: day2},
+		{Denom: "uusdc", Timestamp: day1},
+	}
+
+	s.prewarmPrices("mainnet", events, nil)
+	if got := atomic.LoadInt64(&calls); got != 3 {
+		t.Fatalf("want exactly 3 oracle calls for 3 distinct (denom,date) pairs, got %d", got)
+	}
+
+	// The sequential path (buildRow, via PriceAt) must now be pure cache hits.
+	for _, e := range events {
+		if _, found := s.oracle.PriceAt("mainnet", e.Denom, e.Timestamp.UTC().Format("2006-01-02")); !found {
+			t.Fatalf("expected a warm cache hit for %s/%s", e.Denom, e.Timestamp)
+		}
+	}
+	if got := atomic.LoadInt64(&calls); got != 3 {
+		t.Fatalf("post-warm PriceAt calls must not hit the oracle again, call count grew to %d", got)
 	}
 }

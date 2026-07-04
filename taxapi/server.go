@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
@@ -43,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /events", s.handleEvents)
+	mux.HandleFunc("GET /report-job", s.handleReportJob)
 	mux.HandleFunc("GET /8949", s.handle8949)
 	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
 	mux.HandleFunc("GET /income", s.handleIncome)
@@ -277,6 +279,16 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(rep)
 }
 
+// feeRec is one payer-side fee row from the generic SDK Fee table, joined
+// against its address/denom/tx/block. Named at package scope (not local to
+// rowsFor) so prewarmPrices can share the type.
+type feeRec struct {
+	Amount string
+	Denom  string
+	Ts     time.Time
+	Hash   string
+}
+
 // rowsFor loads classified taxable events + fees for an address in [start,end),
 // resolves denoms + USD prices, and returns normalized Rows.
 func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error) {
@@ -291,7 +303,26 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		return nil, err
 	}
 
-	out := make([]Row, 0, len(events)+8)
+	// Fees (generic SDK Fee table): a spend by the payer.
+	var fees []feeRec
+	_ = s.db.Table("fees").
+		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
+		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
+		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
+		Joins("JOIN txes ON txes.id = fees.tx_id").
+		Joins("JOIN blocks ON blocks.id = txes.block_id").
+		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
+		Scan(&fees).Error
+
+	// A busy wallet can have thousands of rows, almost all on distinct dates, and
+	// buildRow's price lookup is a network call to the oracle on a cache miss —
+	// done one row at a time this made a large report take tens of seconds.
+	// Resolve every row's base denom up front and warm the oracle's price cache
+	// for all of them CONCURRENTLY first, so the sequential build below is pure
+	// in-memory cache hits.
+	s.prewarmPrices(chain, events, fees)
+
+	out := make([]Row, 0, len(events)+len(fees))
 	for _, e := range events {
 		dir := "in"
 		switch e.Category {
@@ -305,40 +336,67 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		row.Asset = e.Asset
 		out = append(out, row)
 	}
-
-	// Fees (generic SDK Fee table): a spend by the payer.
-	type feeRec struct {
-		Amount string
-		Denom  string
-		Ts     time.Time
-		Hash   string
-	}
-	var fees []feeRec
-	if err := s.db.Table("fees").
-		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
-		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
-		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
-		Joins("JOIN txes ON txes.id = fees.tx_id").
-		Joins("JOIN blocks ON blocks.id = txes.block_id").
-		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
-		Scan(&fees).Error; err == nil {
-		for _, f := range fees {
-			out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, "fee", "out", f.Denom, f.Amount, addr, ""))
-		}
+	for _, f := range fees {
+		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, "fee", "out", f.Denom, f.Amount, addr, ""))
 	}
 
 	return out, nil
 }
 
-func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time, hash, category, dir, denom, amountBase, from, to string) Row {
-	// IBC voucher denoms arrive as trace paths (e.g. "transfer/channel-0/uatom").
-	// Resolve to the underlying base asset so symbol, decimals and price match the
-	// native token (uatom that round-trips is still ATOM); keep the raw path.
-	base, isIBC := ibcBaseDenom(denom)
-	// A voucher can also arrive already hashed ("ibc/<HASH>") when the oracle
-	// hasn't scraped this trace yet — e.g. an asset from a chain we've only
-	// just started indexing. Resolve it via the chain's own IBC transfer
-	// module before giving up (cross-chain IBC, INF-208).
+const priceWarmConcurrency = 16
+
+// prewarmPrices resolves the base denom for every event/fee and fetches their
+// USD prices concurrently, populating Oracle.PriceAt's cache before the
+// sequential row-building loop reads it. Denom resolution itself (DenomTrace)
+// is left sequential: it's a rare path (only unresolved "ibc/<hash>" vouchers
+// hit it) with its own cache, so it isn't the bottleneck a busy wallet has.
+func (s *Server) prewarmPrices(chain string, events []tax.TaxableEvent, fees []feeRec) {
+	type dateKey struct{ denom, date string }
+	seen := make(map[dateKey]struct{})
+	add := func(denom string, ts time.Time) {
+		base, _ := s.resolveBaseDenom(denom)
+		seen[dateKey{base, ts.UTC().Format("2006-01-02")}] = struct{}{}
+	}
+	for _, e := range events {
+		add(e.Denom, e.Timestamp)
+	}
+	for _, f := range fees {
+		add(f.Denom, f.Ts)
+	}
+	if len(seen) == 0 {
+		return
+	}
+
+	keys := make(chan dateKey, len(seen))
+	for k := range seen {
+		keys <- k
+	}
+	close(keys)
+
+	workers := priceWarmConcurrency
+	if len(seen) < workers {
+		workers = len(seen)
+	}
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for k := range keys {
+				s.oracle.PriceAt(chain, k.denom, k.date)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// resolveBaseDenom strips IBC trace prefixes and, for an already-hashed
+// voucher the oracle hasn't scraped yet, resolves it via the chain's own IBC
+// transfer module (cross-chain IBC, INF-208). Split out of buildRow so a
+// pre-pass can resolve every row's base denom once, up front, before
+// concurrently pre-warming the price cache (see rowsFor).
+func (s *Server) resolveBaseDenom(denom string) (base string, isIBC bool) {
+	base, isIBC = ibcBaseDenom(denom)
 	if !isIBC && strings.HasPrefix(base, "ibc/") {
 		if path, ok := s.oracle.DenomTrace(strings.TrimPrefix(base, "ibc/")); ok {
 			if resolved, resolvedIsIBC := ibcBaseDenom(path); resolvedIsIBC {
@@ -346,6 +404,14 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 			}
 		}
 	}
+	return base, isIBC
+}
+
+func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time, hash, category, dir, denom, amountBase, from, to string) Row {
+	// IBC voucher denoms arrive as trace paths (e.g. "transfer/channel-0/uatom").
+	// Resolve to the underlying base asset so symbol, decimals and price match the
+	// native token (uatom that round-trips is still ATOM); keep the raw path.
+	base, isIBC := s.resolveBaseDenom(denom)
 
 	// Decimals resolution: the oracle first, then the chain's own bank module,
 	// and only if both miss do we assume 6 (and flag it) rather than silently
