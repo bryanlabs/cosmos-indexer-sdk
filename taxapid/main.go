@@ -62,6 +62,10 @@ func main() {
 	if err := db.AutoMigrate(&taxapi.BalanceSnapshot{}); err != nil {
 		log.Printf("balance table migrate: %v", err)
 	}
+	// WASM contract indexing intake (INF-209): user submissions + admin triage.
+	if err := db.AutoMigrate(&taxapi.WasmSubmission{}); err != nil {
+		log.Printf("wasm submission table migrate: %v", err)
+	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())

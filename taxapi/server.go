@@ -52,6 +52,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
+	mux.HandleFunc("GET /wasm/coverage", s.handleWasmCoverage)
+	mux.HandleFunc("POST /wasm/submissions", s.handleCreateWasmSubmission)
+	mux.HandleFunc("GET /wasm/submissions", s.handleListWasmSubmissions)
+	mux.HandleFunc("GET /wasm/submissions/status", s.handleWasmSubmissionStatus)
+	mux.HandleFunc("PATCH /wasm/submissions/{id}", s.handleUpdateWasmSubmission)
 	return withCORS(mux)
 }
 
