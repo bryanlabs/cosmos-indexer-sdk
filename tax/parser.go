@@ -83,16 +83,18 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 		}
 
 	// Staking delegate/undelegate/redelegate are NOT taxable themselves, but the
-	// SDK auto-withdraws pending rewards on each — that reward is income.
+	// SDK auto-withdraws pending rewards on each — that reward is income. This
+	// auto-withdrawal uses the same withdraw-address routing as an explicit
+	// MsgWithdrawDelegatorReward, so it needs the same redirect-safe attribution.
 	case *stakingtypes.MsgDelegate:
-		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
 	case *stakingtypes.MsgUndelegate:
-		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
 	case *stakingtypes.MsgBeginRedelegate:
-		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
 
 	case *disttypes.MsgWithdrawDelegatorReward:
-		events = append(events, rewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
 
 	case *disttypes.MsgWithdrawValidatorCommission:
 		for recv, coins := range receivedCoinsByReceiver(log) {
@@ -305,11 +307,23 @@ func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 	return total
 }
 
-// rewardEvents emits CategoryReward events for the coins credited to delegator
-// in this message's transfer/coin_received events (the auto-withdrawn reward).
-func rewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
+// delegatorRewardEvents attributes a withdrawn reward to the delegator even
+// when they've redirected withdrawals to a different address via
+// MsgSetWithdrawAddress (INF-213): income is recognized by whoever has
+// dominion and control over it (Rev. Rul. 2023-14), the delegator who directed
+// the withdrawal, not wherever they asked the tokens to land. Grouping by
+// whichever receiver actually shows up in the log (like
+// MsgWithdrawValidatorCommission already does below) rather than filtering to
+// an exact address match is what finds the reward when the real on-chain
+// receiver is the withdraw address, not the delegator -- an exact-match lookup
+// finds nothing there and silently drops the income entirely.
+func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
+	total := sdk.NewCoins()
+	for _, coins := range receivedCoinsByReceiver(log) {
+		total = total.Add(coins...)
+	}
 	var out []TaxableEvent
-	for _, c := range coinsReceivedBy(log, delegator) {
+	for _, c := range total {
 		out = append(out, TaxableEvent{
 			Category: string(CategoryReward),
 			ToAddr:   delegator,
@@ -317,40 +331,6 @@ func rewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEve
 		})
 	}
 	return out
-}
-
-// coinsReceivedBy sums the coins credited to target. coin_received and transfer
-// describe the SAME movement (SDK emits both), so we count ONLY coin_received,
-// falling back to transfer only when no coin_received event is present — summing
-// both would double the amount.
-func coinsReceivedBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
-	primary := "transfer"
-	for _, ev := range log.Events {
-		if ev.Type == "coin_received" {
-			primary = "coin_received"
-			break
-		}
-	}
-	total := sdk.NewCoins()
-	for _, ev := range log.Events {
-		if ev.Type != primary {
-			continue
-		}
-		cur := ""
-		for _, a := range ev.Attributes {
-			switch a.Key {
-			case "recipient", "receiver":
-				cur = a.Value
-			case "amount":
-				if cur == target {
-					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
-						total = total.Add(coins...)
-					}
-				}
-			}
-		}
-	}
-	return total
 }
 
 // receivedCoinsByReceiver groups coin_received amounts by receiver (used for

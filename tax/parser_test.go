@@ -8,6 +8,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
 const (
@@ -43,14 +44,62 @@ func TestClassifyDelegatorRewardFromEvents(t *testing.T) {
 	}
 }
 
-// A reward to a different address in the same log must NOT be attributed to del.
-func TestClassifyRewardIgnoresOtherReceiver(t *testing.T) {
+// A reward redirected to a different address (MsgSetWithdrawAddress) must
+// still attribute to the delegator, not vanish (INF-213): the delegator has
+// dominion and control over the income regardless of where they told it to
+// land, so this must not depend on any exact-address match against the event.
+func TestClassifyRewardRedirectedToWithdrawAddressStillAttributesToDelegator(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "500uatom"}),
 	}}
-	if out := classify(msg, log); len(out) != 0 {
-		t.Fatalf("expected no events for non-matching receiver, got %+v", out)
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "500" || out[0].ToAddr != del {
+		t.Fatalf("redirected reward should attribute to the delegator, got %+v", out)
+	}
+}
+
+// Real mainnet fixture: cosmoshub-4 height 31821176, tx
+// 020F25D22B68506A3953943D441DFDDE2D46A967AE7286C61E3B3BE8977BBB3A. Delegator
+// cosmos140kq2fts8ed9m73a6dch7sgdap6hnp2pqqasx9 had set their withdraw address
+// to cosmos1tdlzn4kreyrjqg9etg2fvqvxt9vpwhtzp3af80 (confirmed via a separate
+// MsgSetWithdrawAddress from the same delegator); withdrawing rewards paid
+// 627uatom to that withdraw address, not the delegator. Message events are
+// already scoped per msg_index by the chain's own ABCI logs before this
+// message's LogMessage is built (core/tx.go), so this is exactly the shape
+// classify() sees for message 0 of that tx (the paired MsgWithdrawValidatorCommission
+// at msg_index 1, paying 18231286uatom to the same withdraw address, is a
+// separate LogMessage classify() never sees here).
+func TestClassifyRewardRedirectedToWithdrawAddressMainnetFixture(t *testing.T) {
+	delegator := "cosmos140kq2fts8ed9m73a6dch7sgdap6hnp2pqqasx9"
+	withdrawAddr := "cosmos1tdlzn4kreyrjqg9etg2fvqvxt9vpwhtzp3af80"
+	msg := &disttypes.MsgWithdrawDelegatorReward{
+		DelegatorAddress: delegator,
+		ValidatorAddress: "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k",
+	}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_received", [2]string{"receiver", withdrawAddr}, [2]string{"amount", "627uatom"}),
+		ev("transfer", [2]string{"recipient", withdrawAddr}, [2]string{"sender", "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"}, [2]string{"amount", "627uatom"}),
+		ev("withdraw_rewards", [2]string{"amount", "627uatom"}, [2]string{"validator", "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k"}, [2]string{"delegator", delegator}),
+	}}
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "627" || out[0].ToAddr != delegator {
+		t.Fatalf("mainnet redirected-reward fixture misclassified: %+v", out)
+	}
+}
+
+// The same auto-withdraw-on-delegate path uses the same withdraw-address
+// routing as an explicit MsgWithdrawDelegatorReward, so a redelegate that
+// triggers an auto-withdrawn reward to a redirected address must attribute the
+// same way.
+func TestClassifyRedelegateRewardRedirectedToWithdrawAddressStillAttributesToDelegator(t *testing.T) {
+	msg := &stakingtypes.MsgBeginRedelegate{DelegatorAddress: del, ValidatorSrcAddress: val}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "250uatom"}),
+	}}
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "250" || out[0].ToAddr != del {
+		t.Fatalf("redirected redelegate reward should attribute to the delegator, got %+v", out)
 	}
 }
 
