@@ -115,6 +115,31 @@ func TestDenomTraceUnknownHash(t *testing.T) {
 	}
 }
 
+// A gateway that can never resolve traces (e.g. a REST node returning 501
+// Not Implemented for the whole denom_traces endpoint) must not be re-hit on
+// every row of a report using that hash: a real cosmoshub wallet with ~2300
+// rows across ~20 distinct never-resolving hashes turned a report from
+// milliseconds into tens of seconds before misses were cached.
+func TestDenomTraceUnresolvedHashIsCachedNotRetriedPerRow(t *testing.T) {
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"code":12,"message":"Not Implemented","details":[]}`))
+	}))
+	defer srv.Close()
+
+	o := NewOracle("http://unused-in-this-test", srv.URL)
+	for i := 0; i < 50; i++ {
+		if _, ok := o.DenomTrace("SAME_UNRESOLVABLE_HASH"); ok {
+			t.Fatal("want ok=false for a hash the gateway can't resolve")
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("want exactly 1 http call for 50 lookups of the same unresolvable hash, got %d", hits)
+	}
+}
+
 func TestDenomTraceDisabledWithoutNodeREST(t *testing.T) {
 	o := NewOracle("http://unused-in-this-test", "")
 	if _, ok := o.DenomTrace("ABCDEF1234"); ok {

@@ -28,9 +28,9 @@ type Oracle struct {
 	mu          sync.Mutex
 	denoms      map[string]map[string]DenomMeta // chain -> denom -> meta (cached)
 	at          map[string]time.Time
-	bank        map[string]DenomMeta       // denom -> meta from the chain's bank module (cached, no TTL)
-	prices      map[string]priceCacheEntry // "chain|denom|date" -> price (cached; see PriceAt)
-	denomTraces map[string]string          // ibc hash -> full trace path (cached, no TTL; see DenomTrace)
+	bank        map[string]DenomMeta            // denom -> meta from the chain's bank module (cached, no TTL)
+	prices      map[string]priceCacheEntry      // "chain|denom|date" -> price (cached; see PriceAt)
+	denomTraces map[string]denomTraceCacheEntry // ibc hash -> trace (cached; see DenomTrace)
 }
 
 // priceMissTTL bounds how long a "no price found" result is trusted before
@@ -41,6 +41,21 @@ const priceMissTTL = 5 * time.Minute
 
 type priceCacheEntry struct {
 	usd    float64
+	found  bool
+	cached time.Time
+}
+
+// denomTraceMissTTL bounds how long an unresolved trace is trusted before
+// retrying. A resolved trace is permanent and cached indefinitely; some node
+// REST gateways don't implement /ibc/apps/transfer/v1/denom_traces at all
+// (501 Not Implemented) -- without caching that, every row for that denom
+// repeats the same failing call, and a wallet with many distinct IBC assets
+// can spend most of a report's time on calls that were never going to
+// succeed.
+const denomTraceMissTTL = 5 * time.Minute
+
+type denomTraceCacheEntry struct {
+	path   string
 	found  bool
 	cached time.Time
 }
@@ -58,7 +73,7 @@ func NewOracle(base, nodeREST string) *Oracle {
 		at:          map[string]time.Time{},
 		bank:        map[string]DenomMeta{},
 		prices:      map[string]priceCacheEntry{},
-		denomTraces: map[string]string{},
+		denomTraces: map[string]denomTraceCacheEntry{},
 	}
 }
 
@@ -181,18 +196,21 @@ func (o *Oracle) BankMetaFallback(denom string) (DenomMeta, bool) {
 // module, for vouchers the oracle hasn't already resolved — most useful for
 // an asset that arrived from a chain we've only recently started indexing
 // (cross-chain IBC, INF-208). hash is the bare hash without the "ibc/"
-// prefix. Cached indefinitely: once a denom trace is registered on chain it
-// never changes. ok=false when the fallback is disabled, unreachable, or the
-// hash is genuinely unknown to this chain.
+// prefix. A resolved trace is cached indefinitely (once registered on chain
+// it never changes); an unresolved one is cached for denomTraceMissTTL so a
+// wallet with many rows of the same never-going-to-resolve hash (e.g. this
+// node's REST gateway not implementing the endpoint at all) doesn't repeat
+// the same failing call per row. ok=false when the fallback is disabled,
+// unreachable, or the hash is genuinely unknown to this chain.
 func (o *Oracle) DenomTrace(hash string) (string, bool) {
 	if o.nodeREST == "" {
 		return "", false
 	}
 
 	o.mu.Lock()
-	if p, ok := o.denomTraces[hash]; ok {
+	if e, ok := o.denomTraces[hash]; ok && (e.found || time.Since(e.cached) < denomTraceMissTTL) {
 		o.mu.Unlock()
-		return p, true
+		return e.path, e.found
 	}
 	o.mu.Unlock()
 
@@ -202,19 +220,16 @@ func (o *Oracle) DenomTrace(hash string) (string, bool) {
 			BaseDenom string `json:"base_denom"`
 		} `json:"denom_trace"`
 	}
+	path, found := "", false
 	url := fmt.Sprintf("%s/ibc/apps/transfer/v1/denom_traces/%s", o.nodeREST, hash)
-	if err := o.get(url, &body); err != nil {
-		return "", false
+	if err := o.get(url, &body); err == nil && body.DenomTrace.Path != "" && body.DenomTrace.BaseDenom != "" {
+		path, found = body.DenomTrace.Path+"/"+body.DenomTrace.BaseDenom, true
 	}
-	if body.DenomTrace.Path == "" || body.DenomTrace.BaseDenom == "" {
-		return "", false
-	}
-	full := body.DenomTrace.Path + "/" + body.DenomTrace.BaseDenom
 
 	o.mu.Lock()
-	o.denomTraces[hash] = full
+	o.denomTraces[hash] = denomTraceCacheEntry{path: path, found: found, cached: nowUTC()}
 	o.mu.Unlock()
-	return full, true
+	return path, found
 }
 
 func (o *Oracle) get(url string, out any) error {
