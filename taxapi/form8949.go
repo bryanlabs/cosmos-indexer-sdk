@@ -20,12 +20,32 @@ type Form8949Row struct {
 	CostBasis    decimal.Decimal
 	GainLoss     decimal.Decimal
 	LongTerm     bool
+	// BasisUnknown is true when the asset disposed of arrived from outside our
+	// indexed view (a plain transfer-in or IBC-in, or a disposal with no
+	// matching acquisition at all) rather than a known on-chain acquisition
+	// (reward, commission, swap, NFT mint/buy). CostBasis is then 0, not a
+	// fabricated basis — the true cost is whatever the user actually paid
+	// wherever they acquired it, which we cannot see (see INF-205).
+	BasisUnknown bool
 }
 
+const basisUnknownNote = " (basis unknown, complete in your aggregator)"
+
 type lot struct {
-	qty  decimal.Decimal // display units
-	cost decimal.Decimal // USD per unit
-	date time.Time
+	qty          decimal.Decimal // display units
+	cost         decimal.Decimal // USD per unit
+	date         time.Time
+	basisUnknown bool // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
+}
+
+// basisUnknownFor reports whether an "in" event establishes a lot whose cost
+// basis we can actually stand behind. Rewards/commission are dominion-and-
+// control income at receipt (the FMV then IS the basis); swaps and NFT mints/
+// buys are on-chain trades we priced ourselves. A plain transfer-in or IBC-in
+// could be an exchange withdrawal or a wallet we don't track — the FMV at
+// receipt is not necessarily what the user actually paid for it.
+func basisUnknownFor(category string) bool {
+	return category == "transfer" || category == "ibc_in"
 }
 
 // Build8949 runs a per-asset FIFO over the priced rows and emits one 8949 line
@@ -65,14 +85,17 @@ func Build8949(rows []Row) []Form8949Row {
 				proceeds := r.ValueUSD
 				q := nftLots[key]
 				if len(q) == 0 {
+					// No recorded mint/buy: this NFT's acquisition is outside our
+					// view (bought elsewhere, or minted before the indexed window).
 					out = append(out, Form8949Row{
-						Description:  desc,
+						Description:  desc + basisUnknownNote,
 						DateAcquired: "Various",
 						DateSold:     r.Time.UTC().Format("01/02/2006"),
 						Proceeds:     proceeds,
 						CostBasis:    decimal.Zero,
 						GainLoss:     proceeds,
 						LongTerm:     false,
+						BasisUnknown: true,
 					})
 				} else {
 					l := q[0]
@@ -98,7 +121,10 @@ func Build8949(rows []Row) []Form8949Row {
 		switch {
 		case r.Direction == "in" && r.Category != "fee":
 			// acquisition
-			lots[asset] = append(lots[asset], lot{qty: r.Amount, cost: r.PriceUSD, date: r.Time})
+			lots[asset] = append(lots[asset], lot{
+				qty: r.Amount, cost: r.PriceUSD, date: r.Time,
+				basisUnknown: basisUnknownFor(r.Category),
+			})
 
 		case r.Direction == "out":
 			// disposal (incl. fee spends): consume FIFO
@@ -107,31 +133,45 @@ func Build8949(rows []Row) []Form8949Row {
 			for remaining.IsPositive() {
 				q := lots[asset]
 				if len(q) == 0 {
-					// no known lot: basis unknown
+					// no known lot at all: basis unknown
 					proceeds := remaining.Mul(disposalPrice)
 					out = append(out, Form8949Row{
-						Description:  remaining.String() + " " + asset,
+						Description:  remaining.String() + " " + asset + basisUnknownNote,
 						DateAcquired: "Various",
 						DateSold:     r.Time.UTC().Format("01/02/2006"),
 						Proceeds:     proceeds,
 						CostBasis:    decimal.Zero,
 						GainLoss:     proceeds,
 						LongTerm:     false,
+						BasisUnknown: true,
 					})
 					break
 				}
 				l := q[0]
 				take := decimal.Min(remaining, l.qty)
 				proceeds := take.Mul(disposalPrice)
-				cost := take.Mul(l.cost)
+				desc := take.String() + " " + asset
+				var cost, gain decimal.Decimal
+				if l.basisUnknown {
+					// We saw this lot arrive (transfer/IBC-in) but not its true
+					// origin, so its receipt-time FMV is not a defensible basis —
+					// mark it rather than silently treat it as known (INF-205).
+					cost = decimal.Zero
+					gain = proceeds
+					desc += basisUnknownNote
+				} else {
+					cost = take.Mul(l.cost)
+					gain = proceeds.Sub(cost)
+				}
 				out = append(out, Form8949Row{
-					Description:  take.String() + " " + asset,
+					Description:  desc,
 					DateAcquired: l.date.UTC().Format("01/02/2006"),
 					DateSold:     r.Time.UTC().Format("01/02/2006"),
 					Proceeds:     proceeds,
 					CostBasis:    cost,
-					GainLoss:     proceeds.Sub(cost),
+					GainLoss:     gain,
 					LongTerm:     r.Time.Sub(l.date) > 365*24*time.Hour,
+					BasisUnknown: l.basisUnknown,
 				})
 				remaining = remaining.Sub(take)
 				if l.qty.Equal(take) {
@@ -145,6 +185,22 @@ func Build8949(rows []Row) []Form8949Row {
 	return out
 }
 
+// CountUnknownBasis returns how many 8949 lines have an unresolved cost basis.
+// Zero means this is a "pure on-chain wallet" (INF-205): every disposal traces
+// to a known acquisition (reward, commission, swap, NFT mint/buy), so the 8949
+// is fully correct on its own. Nonzero means the wallet received assets from
+// outside our view (an exchange withdrawal, IBC-in, or an untracked sender) —
+// steer those users to a full-history aggregator instead.
+func CountUnknownBasis(rows []Form8949Row) int {
+	n := 0
+	for _, r := range rows {
+		if r.BasisUnknown {
+			n++
+		}
+	}
+	return n
+}
+
 // ScheduleD is the capital-gains summary that the 8949 totals flow into on IRS
 // Schedule D (Form 1040). Short-term and long-term are taxed differently, so they
 // stay separate; Net is line 16 (overall capital gain or loss).
@@ -154,8 +210,12 @@ type ScheduleD struct {
 	// addresses (Rev. Proc. 2024-28, see INF-204). Callers combining several
 	// wallets' responses should keep them as per-wallet subtotals, not sum them
 	// into one number, to stay labeled wallet-by-wallet.
-	Address            string          `json:"address,omitempty"`
-	WalletByWallet     bool            `json:"wallet_by_wallet"`
+	Address        string `json:"address,omitempty"`
+	WalletByWallet bool   `json:"wallet_by_wallet"`
+	// UnknownBasisLines > 0 means this wallet is not "pure on-chain" (INF-205):
+	// some disposed lots arrived from outside our view, so these totals are a
+	// floor, not the full picture — steer to a full-history aggregator.
+	UnknownBasisLines  int             `json:"unknown_basis_lines"`
 	ShortTermProceeds  decimal.Decimal `json:"short_term_proceeds"`
 	ShortTermCostBasis decimal.Decimal `json:"short_term_cost_basis"`
 	ShortTermGainLoss  decimal.Decimal `json:"short_term_gain_loss"` // Schedule D line 7
@@ -191,13 +251,13 @@ func BuildScheduleD(rows []Form8949Row) ScheduleD {
 func Write8949CSV(out io.Writer, rows []Form8949Row) error {
 	w := csv.NewWriter(out)
 	defer w.Flush()
-	_ = w.Write([]string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)"})
+	_ = w.Write([]string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown"})
 	write := func(part string, longTerm bool) {
 		for _, r := range rows {
 			if r.LongTerm != longTerm {
 				continue
 			}
-			_ = w.Write([]string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2)})
+			_ = w.Write([]string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown)})
 		}
 	}
 	write("I (short-term)", false)

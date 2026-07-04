@@ -26,6 +26,24 @@ func TestHandleMethodology(t *testing.T) {
 	}
 }
 
+func TestHandleRecognitionPolicy(t *testing.T) {
+	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	req := httptest.NewRequest(http.MethodGet, "/recognition-policy", nil)
+	rec := httptest.NewRecorder()
+	s.handleRecognitionPolicy(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	var p RecognitionPolicy
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if p.Policy != RecognitionPolicyDefault || p.Explanation == "" || p.EffectiveDate == "" {
+		t.Fatalf("recognition policy should be fully populated: %+v", p)
+	}
+}
+
 func TestHandlePriceSeriesJSON(t *testing.T) {
 	oracleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

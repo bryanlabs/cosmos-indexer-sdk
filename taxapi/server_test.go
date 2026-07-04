@@ -107,7 +107,7 @@ func TestBuildIncomeCSVWarnsOnMissingPrice(t *testing.T) {
 		{Time: now, Category: "commission", Symbol: "MYST", ValueUSD: decimal.Zero, PriceMissing: true},
 		{Time: now, Category: "transfer", Symbol: "ATOM", ValueUSD: d(999)}, // not income, must be excluded
 	}
-	csvOut := buildIncomeCSV(rows, "cosmos1wallet")
+	csvOut := buildIncomeCSV(rows, "cosmos1wallet", RecognitionPolicyDefault)
 	if !strings.Contains(csvOut, "TOTAL") || strings.Contains(csvOut, "999") {
 		t.Fatalf("csv should total only reward/commission rows: %s", csvOut)
 	}
@@ -117,13 +117,38 @@ func TestBuildIncomeCSVWarnsOnMissingPrice(t *testing.T) {
 	if !strings.Contains(csvOut, "cosmos1wallet") {
 		t.Fatalf("csv should stamp the address on every line (INF-204): %s", csvOut)
 	}
+	if !strings.Contains(csvOut, "RECOGNITION POLICY") || !strings.Contains(csvOut, RecognitionPolicyDefault) {
+		t.Fatalf("csv should print the recognition policy (INF-206): %s", csvOut)
+	}
 }
 
 func TestBuildIncomeCSVNoWarningWhenAllPriced(t *testing.T) {
 	rows := []Row{{Time: time.Now(), Category: "reward", Symbol: "ATOM", ValueUSD: d(5)}}
-	csvOut := buildIncomeCSV(rows, "cosmos1wallet")
+	csvOut := buildIncomeCSV(rows, "cosmos1wallet", RecognitionPolicyDefault)
 	if strings.Contains(csvOut, "WARNING") {
 		t.Fatalf("no warning expected when every row has a price: %s", csvOut)
+	}
+}
+
+func TestHandleIncomeRejectsUnimplementedRecognitionPolicy(t *testing.T) {
+	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	req := httptest.NewRequest(http.MethodGet, "/income?address=cosmos1abc&recognition=at-sale", nil)
+	rec := httptest.NewRecorder()
+	s.handleIncome(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("want 501 for an unimplemented recognition policy, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandle990TRejectsUnimplementedRecognitionPolicy(t *testing.T) {
+	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	req := httptest.NewRequest(http.MethodGet, "/990t?address=cosmos1abc&recognition=at-sale", nil)
+	rec := httptest.NewRecorder()
+	s.handle990T(rec, req)
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("want 501 for an unimplemented recognition policy, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

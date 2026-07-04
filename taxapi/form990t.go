@@ -44,14 +44,17 @@ type Form990T struct {
 	// PriceMissingRows counts staking-income rows with no known price; their
 	// value is excluded from StakingIncomeUSD above (0, not a real zero), so the
 	// true UBTI is at least this much higher (INF-201).
-	PriceMissingRows int    `json:"price_missing_rows"`
-	Note             string `json:"note"`
+	PriceMissingRows int `json:"price_missing_rows"`
+	// RecognitionPolicy is the policy that timed this income (INF-206); printed
+	// on the report so it's never an implicit assumption.
+	RecognitionPolicy string `json:"recognition_policy"`
+	Note              string `json:"note"`
 }
 
 // compute990T runs the UBIT calc over a gross UBTI (USD) already summed by the
 // caller; priceMissingRows is the count of income rows that had no known price
 // and so contributed 0 to that sum, so the note can say the total is a floor.
-func compute990T(ubti decimal.Decimal, priceMissingRows int) Form990T {
+func compute990T(ubti decimal.Decimal, priceMissingRows int, recognitionPolicy string) Form990T {
 	taxable := ubti.Sub(specificDeduction)
 	if taxable.IsNegative() {
 		taxable = decimal.Zero
@@ -68,6 +71,7 @@ func compute990T(ubti decimal.Decimal, priceMissingRows int) Form990T {
 		EstimatedTaxUSD:   tax.StringFixed(2),
 		FilingRequired:    ubti.GreaterThanOrEqual(specificDeduction),
 		PriceMissingRows:  priceMissingRows,
+		RecognitionPolicy: recognitionPolicy,
 		Note:              note,
 	}
 }

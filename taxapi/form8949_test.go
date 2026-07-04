@@ -14,7 +14,9 @@ func TestBuild8949FIFOGain(t *testing.T) {
 	day1 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	day10 := day1.AddDate(0, 0, 10)
 	rows := []Row{
-		{Time: day1, Direction: "in", Category: "transfer", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
+		// Acquired via reward: a known on-chain acquisition, so basis is trusted
+		// (see TestBuild8949TransferInHasUnknownBasis for the opposite case).
+		{Time: day1, Direction: "in", Category: "reward", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
 		{Time: day10, Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(4), PriceUSD: d(3)},
 	}
 	got := Build8949(rows)
@@ -22,7 +24,7 @@ func TestBuild8949FIFOGain(t *testing.T) {
 		t.Fatalf("want 1 disposal, got %d: %+v", len(got), got)
 	}
 	r := got[0]
-	if !r.Proceeds.Equal(d(12)) || !r.CostBasis.Equal(d(8)) || !r.GainLoss.Equal(d(4)) || r.LongTerm {
+	if !r.Proceeds.Equal(d(12)) || !r.CostBasis.Equal(d(8)) || !r.GainLoss.Equal(d(4)) || r.LongTerm || r.BasisUnknown {
 		t.Fatalf("wrong 8949 calc: %+v", r)
 	}
 }
@@ -73,6 +75,83 @@ func TestBuild8949LongTermAndUnknownBasis(t *testing.T) {
 	}
 	if got[1].DateAcquired != "Various" || !got[1].CostBasis.IsZero() || !got[1].Proceeds.Equal(d(12)) {
 		t.Fatalf("unknown-basis line wrong: %+v", got[1])
+	}
+	if got[0].BasisUnknown {
+		t.Fatalf("the reward-sourced lot IS a known acquisition, should not be flagged: %+v", got[0])
+	}
+	if !got[1].BasisUnknown {
+		t.Fatalf("a disposal with no matching lot at all must be flagged BasisUnknown: %+v", got[1])
+	}
+	if CountUnknownBasis(got) != 1 {
+		t.Fatalf("want 1 unknown-basis line, got %d", CountUnknownBasis(got))
+	}
+}
+
+// A plain transfer-in (could be an exchange withdrawal, or IBC-in from an
+// untracked wallet) establishes a lot we can't stand behind — its receipt-time
+// price is not necessarily what the user actually paid (INF-205).
+func TestBuild8949TransferInHasUnknownBasis(t *testing.T) {
+	in := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	out := in.AddDate(0, 0, 5)
+	rows := []Row{
+		{Time: in, Direction: "in", Category: "transfer", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
+		{Time: out, Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(10), PriceUSD: d(3)},
+	}
+	got := Build8949(rows)
+	if len(got) != 1 || !got[0].BasisUnknown {
+		t.Fatalf("transfer-in lot should be flagged BasisUnknown: %+v", got)
+	}
+	if !got[0].CostBasis.IsZero() || !got[0].GainLoss.Equal(got[0].Proceeds) {
+		t.Fatalf("unknown-basis disposal should not fabricate a cost basis: %+v", got[0])
+	}
+	if got[0].DateAcquired != "01/01/2026" {
+		t.Fatalf("the acquisition date IS known (we saw the transfer), should not be blanked to Various: %+v", got[0])
+	}
+	if !strings.Contains(got[0].Description, "basis unknown") {
+		t.Fatalf("description should carry the warning: %q", got[0].Description)
+	}
+}
+
+// IBC-in is the other explicit "arrived from elsewhere" case named in INF-205.
+// Swaps and NFT mints/buys are on-chain trades we priced ourselves, so those
+// stay known-basis.
+func TestBuild8949KnownVsUnknownBasisCategories(t *testing.T) {
+	base := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	cases := []struct {
+		category string
+		unknown  bool
+	}{
+		{"reward", false},
+		{"commission", false},
+		{"swap", false},
+		{"transfer", true},
+		{"ibc_in", true},
+	}
+	for _, c := range cases {
+		rows := []Row{
+			{Time: base, Direction: "in", Category: c.category, Symbol: "XYZ", Amount: d(1), PriceUSD: d(5)},
+			{Time: base.AddDate(0, 0, 1), Direction: "out", Category: "transfer", Symbol: "XYZ", Amount: d(1), PriceUSD: d(6)},
+		}
+		got := Build8949(rows)
+		if len(got) != 1 || got[0].BasisUnknown != c.unknown {
+			t.Fatalf("category %q: want BasisUnknown=%v, got %+v", c.category, c.unknown, got)
+		}
+	}
+}
+
+// A wallet whose only acquisitions are known on-chain events (rewards, swaps,
+// NFT mints/buys) is "pure on-chain" (INF-205): CountUnknownBasis is 0 and the
+// native 8949 is fully correct on its own, no aggregator needed.
+func TestPureOnChainWalletHasNoUnknownBasis(t *testing.T) {
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	rows := []Row{
+		{Time: base, Direction: "in", Category: "reward", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
+		{Time: base.AddDate(0, 0, 5), Direction: "in", Category: "commission", Symbol: "ATOM", Amount: d(5), PriceUSD: d(2)},
+		{Time: base.AddDate(0, 0, 10), Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(3), PriceUSD: d(4)},
+	}
+	got := Build8949(rows)
+	if CountUnknownBasis(got) != 0 {
+		t.Fatalf("pure on-chain wallet should have zero unknown-basis lines, got %d: %+v", CountUnknownBasis(got), got)
 	}
 }
 

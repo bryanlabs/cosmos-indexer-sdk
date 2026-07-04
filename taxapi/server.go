@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /balance", s.handleBalance)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
+	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	return withCORS(mux)
 }
 
@@ -68,8 +70,6 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=form-8949.csv")
 	// One address per call (rowsFor above is single-address), so every lot here
 	// is computed strictly per-wallet — stamp which one for multi-address
 	// reports, which concatenate several of these responses (INF-204).
@@ -77,6 +77,13 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	for i := range form {
 		form[i].Address = addr
 	}
+	// A nonzero count means this wallet isn't "pure on-chain" (INF-205): some
+	// lots arrived from outside our view, so the 8949 alone understates true
+	// completeness. Exposed as a header (the body is a CSV) so the web UI can
+	// gate the confident-download path without re-parsing the CSV.
+	w.Header().Set("X-Basis-Unknown-Count", strconv.Itoa(CountUnknownBasis(form)))
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", "attachment; filename=form-8949.csv")
 	_ = Write8949CSV(w, form)
 }
 
@@ -93,9 +100,11 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sched := BuildScheduleD(Build8949(rows))
+	form := Build8949(rows)
+	sched := BuildScheduleD(form)
 	sched.Address = addr
 	sched.WalletByWallet = true
+	sched.UnknownBasisLines = CountUnknownBasis(form)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sched)
 }
@@ -110,6 +119,16 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address required", http.StatusBadRequest)
 		return
 	}
+	// Recognition policy is a documented, explicit parameter (INF-206), not a
+	// hardcode: "at-claim" is the only implemented policy today. A future
+	// "at-sale" needs no reindex (every reward's claim date/amount is already
+	// stored), but isn't built yet, so it's rejected rather than silently
+	// falling back.
+	recognition := def(q.Get("recognition"), RecognitionPolicyDefault)
+	if recognition != RecognitionPolicyDefault {
+		http.Error(w, fmt.Sprintf("recognition policy %q is not implemented yet; only %q is available today", recognition, RecognitionPolicyDefault), http.StatusNotImplemented)
+		return
+	}
 	chain := def(q.Get("chain"), "mainnet")
 	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
@@ -118,7 +137,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=income-schedule1-990t.csv")
-	_, _ = w.Write([]byte(buildIncomeCSV(rows, addr)))
+	_, _ = w.Write([]byte(buildIncomeCSV(rows, addr, recognition)))
 }
 
 // buildIncomeCSV renders the reward/commission rows as the income-report CSV:
@@ -127,8 +146,9 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 // row's value (0, not a real zero) rather than fabricating one. address is
 // stamped on every row and the TOTAL/WARNING lines so a multi-address report
 // (several of these concatenated) reads as per-wallet subtotals, never a
-// pooled figure (Rev. Proc. 2024-28, see INF-204).
-func buildIncomeCSV(rows []Row, address string) string {
+// pooled figure (Rev. Proc. 2024-28, see INF-204). recognition is printed on
+// the report so the policy behind these numbers is never implicit (INF-206).
+func buildIncomeCSV(rows []Row, address, recognition string) string {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
 	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
@@ -148,6 +168,7 @@ func buildIncomeCSV(rows []Row, address string) string {
 		})
 	}
 	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
+	_ = cw.Write([]string{address, "", "RECOGNITION POLICY", "", "", "", "", recognition, ""})
 	if len(missingDenoms) > 0 {
 		denoms := make([]string, 0, len(missingDenoms))
 		for sym := range missingDenoms {
@@ -173,6 +194,11 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address required", http.StatusBadRequest)
 		return
 	}
+	recognition := def(q.Get("recognition"), RecognitionPolicyDefault)
+	if recognition != RecognitionPolicyDefault {
+		http.Error(w, fmt.Sprintf("recognition policy %q is not implemented yet; only %q is available today", recognition, RecognitionPolicyDefault), http.StatusNotImplemented)
+		return
+	}
 	chain := def(q.Get("chain"), "mainnet")
 	start := dateParam(q.Get("start"), time.Time{})
 	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
@@ -195,7 +221,7 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 		priceMissingRows += addrMissing
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(compute990T(ubti, priceMissingRows))
+	_ = json.NewEncoder(w).Encode(compute990T(ubti, priceMissingRows, recognition))
 }
 
 // sumUBTI totals reward/commission ValueUSD across one address's rows for the

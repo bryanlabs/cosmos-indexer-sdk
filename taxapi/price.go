@@ -28,7 +28,7 @@ type Oracle struct {
 	mu     sync.Mutex
 	denoms map[string]map[string]DenomMeta // chain -> denom -> meta (cached)
 	at     map[string]time.Time
-	bank   map[string]DenomMeta        // denom -> meta from the chain's bank module (cached, no TTL)
+	bank   map[string]DenomMeta       // denom -> meta from the chain's bank module (cached, no TTL)
 	prices map[string]priceCacheEntry // "chain|denom|date" -> price (cached; see PriceAt)
 }
 
