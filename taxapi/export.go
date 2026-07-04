@@ -30,6 +30,11 @@ type Row struct {
 	// PriceUSD and ValueUSD for this row may be wrong and should not be trusted
 	// silently (see INF-200/201).
 	DecimalsAssumed bool
+	// PriceMissing is true when the oracle had no USD price for this denom/date.
+	// PriceUSD and ValueUSD are then 0, but that 0 is NOT a confirmed value, it
+	// means "unknown" (INF-201); consumers must not sum it as a real zero without
+	// surfacing the gap.
+	PriceMissing bool
 }
 
 // description is the human/tax note; NFT sales name the asset, IBC rows carry the
@@ -45,6 +50,9 @@ func (r Row) description() string {
 	}
 	if r.DecimalsAssumed {
 		d += " (decimals unknown, amount may be wrong)"
+	}
+	if r.PriceMissing {
+		d += " (price missing)"
 	}
 	return d
 }
@@ -165,12 +173,12 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	case "generic":
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed"}) //nolint:lll
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				r.Symbol, r.Denom, r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD),
-				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed),
+				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
 			})
 		}
 

@@ -3,7 +3,9 @@ package taxapi
 import (
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +31,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /990t", s.handle990T)
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	mux.HandleFunc("GET /balance", s.handleBalance)
+	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
+	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	return withCORS(mux)
 }
 
@@ -104,21 +108,46 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=income-schedule1-990t.csv")
-	cw := csv.NewWriter(w)
-	defer cw.Flush()
+	_, _ = w.Write([]byte(buildIncomeCSV(rows)))
+}
+
+// buildIncomeCSV renders the reward/commission rows as the income-report CSV:
+// header, one line per row, a TOTAL, and (INF-201) an explicit WARNING line
+// when any included row had no known price, since TOTAL then excludes that
+// row's value (0, not a real zero) rather than fabricating one.
+func buildIncomeCSV(rows []Row) string {
+	var buf strings.Builder
+	cw := csv.NewWriter(&buf)
 	_ = cw.Write([]string{"date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
 	total := decimal.Zero
+	missingDenoms := map[string]bool{}
 	for _, row := range rows {
 		if row.Category != "reward" && row.Category != "commission" {
 			continue
 		}
 		total = total.Add(row.ValueUSD)
+		if row.PriceMissing {
+			missingDenoms[row.Symbol] = true
+		}
 		_ = cw.Write([]string{
 			row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
 			row.Amount.String(), row.PriceUSD.String(), row.ValueUSD.StringFixed(2), row.TxHash,
 		})
 	}
 	_ = cw.Write([]string{"", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
+	if len(missingDenoms) > 0 {
+		denoms := make([]string, 0, len(missingDenoms))
+		for sym := range missingDenoms {
+			denoms = append(denoms, sym)
+		}
+		sort.Strings(denoms)
+		_ = cw.Write([]string{"", "WARNING", "", "", "", "",
+			fmt.Sprintf("no price found for: %s -- TOTAL above excludes their value, actual income is higher", strings.Join(denoms, ", ")),
+			"",
+		})
+	}
+	cw.Flush()
+	return buf.String()
 }
 
 // handle990T computes the Form 990-T / UBIT estimate from an address's staking
@@ -137,6 +166,7 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 	// An entity may hold several wallets; the $1,000 deduction is per return, so
 	// sum staking income across all of them, then compute one 990-T.
 	ubti := decimal.Zero
+	priceMissingRows := 0
 	for _, a := range strings.Split(addr, ",") {
 		a = strings.TrimSpace(a)
 		if a == "" {
@@ -147,14 +177,29 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		for _, row := range rows {
-			if row.Category == "reward" || row.Category == "commission" {
-				ubti = ubti.Add(row.ValueUSD)
-			}
-		}
+		addrUBTI, addrMissing := sumUBTI(rows)
+		ubti = ubti.Add(addrUBTI)
+		priceMissingRows += addrMissing
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(compute990T(ubti))
+	_ = json.NewEncoder(w).Encode(compute990T(ubti, priceMissingRows))
+}
+
+// sumUBTI totals reward/commission ValueUSD across one address's rows for the
+// 990-T, and counts how many of those rows had no known price (INF-201) — that
+// count feeds compute990T's note, since the total below excludes their value.
+func sumUBTI(rows []Row) (ubti decimal.Decimal, priceMissingRows int) {
+	ubti = decimal.Zero
+	for _, row := range rows {
+		if row.Category != "reward" && row.Category != "commission" {
+			continue
+		}
+		ubti = ubti.Add(row.ValueUSD)
+		if row.PriceMissing {
+			priceMissingRows++
+		}
+	}
+	return ubti, priceMissingRows
 }
 
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
@@ -250,8 +295,11 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	amt = amt.Shift(int32(-decimals))
 
 	price := decimal.Zero
+	priceMissing := false
 	if usdF, found := s.oracle.PriceAt(chain, base, ts.UTC().Format("2006-01-02")); found {
 		price = decimal.NewFromFloat(usdF)
+	} else {
+		priceMissing = true
 	}
 	return Row{
 		Time: ts, Category: category, Direction: dir,
@@ -259,6 +307,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 		PriceUSD: price, ValueUSD: amt.Mul(price),
 		From: from, To: to, TxHash: hash, IsIBC: isIBC,
 		DecimalsAssumed: assumed,
+		PriceMissing:    priceMissing,
 	}
 }
 

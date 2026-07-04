@@ -1,6 +1,10 @@
 package taxapi
 
-import "github.com/shopspring/decimal"
+import (
+	"fmt"
+
+	"github.com/shopspring/decimal"
+)
 
 // Form 990-T / UBIT computation for staking income earned inside a tax-advantaged
 // account (IRA/HSA/Solo-401k). Staking rewards are treated here as unrelated
@@ -32,28 +36,39 @@ func trustBrackets() []trustBracket {
 
 // Form990T is the UBIT summary for an entity's staking income.
 type Form990T struct {
-	StakingIncomeUSD string `json:"staking_income_usd"` // gross UBTI
+	StakingIncomeUSD  string `json:"staking_income_usd"` // gross UBTI
 	SpecificDeduction string `json:"specific_deduction"`
-	TaxableUBTI      string `json:"taxable_ubti_usd"`
-	EstimatedTaxUSD  string `json:"estimated_tax_usd"`
-	FilingRequired   bool   `json:"filing_required"` // gross UBTI >= $1,000
+	TaxableUBTI       string `json:"taxable_ubti_usd"`
+	EstimatedTaxUSD   string `json:"estimated_tax_usd"`
+	FilingRequired    bool   `json:"filing_required"` // gross UBTI >= $1,000
+	// PriceMissingRows counts staking-income rows with no known price; their
+	// value is excluded from StakingIncomeUSD above (0, not a real zero), so the
+	// true UBTI is at least this much higher (INF-201).
+	PriceMissingRows int    `json:"price_missing_rows"`
 	Note             string `json:"note"`
 }
 
-// compute990T runs the UBIT calc over a gross UBTI (USD).
-func compute990T(ubti decimal.Decimal) Form990T {
+// compute990T runs the UBIT calc over a gross UBTI (USD) already summed by the
+// caller; priceMissingRows is the count of income rows that had no known price
+// and so contributed 0 to that sum, so the note can say the total is a floor.
+func compute990T(ubti decimal.Decimal, priceMissingRows int) Form990T {
 	taxable := ubti.Sub(specificDeduction)
 	if taxable.IsNegative() {
 		taxable = decimal.Zero
 	}
 	tax := trustTax(taxable)
+	note := "Estimate only. Staking as UBTI is unsettled; tax computed at 2024 trust rates after the $1,000 deduction."
+	if priceMissingRows > 0 {
+		note += fmt.Sprintf(" %d income row(s) had no known price and are excluded from the total above, actual UBTI is higher.", priceMissingRows)
+	}
 	return Form990T{
 		StakingIncomeUSD:  ubti.StringFixed(2),
 		SpecificDeduction: specificDeduction.StringFixed(2),
 		TaxableUBTI:       taxable.StringFixed(2),
 		EstimatedTaxUSD:   tax.StringFixed(2),
 		FilingRequired:    ubti.GreaterThanOrEqual(specificDeduction),
-		Note:              "Estimate only. Staking as UBTI is unsettled; tax computed at 2024 trust rates after the $1,000 deduction.",
+		PriceMissingRows:  priceMissingRows,
+		Note:              note,
 	}
 }
 

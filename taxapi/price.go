@@ -28,7 +28,20 @@ type Oracle struct {
 	mu     sync.Mutex
 	denoms map[string]map[string]DenomMeta // chain -> denom -> meta (cached)
 	at     map[string]time.Time
-	bank   map[string]DenomMeta // denom -> meta from the chain's bank module (cached, no TTL)
+	bank   map[string]DenomMeta        // denom -> meta from the chain's bank module (cached, no TTL)
+	prices map[string]priceCacheEntry // "chain|denom|date" -> price (cached; see PriceAt)
+}
+
+// priceMissTTL bounds how long a "no price found" result is trusted before
+// PriceAt retries the oracle. A found price for a historical date never
+// changes and is cached indefinitely; a miss might just mean the oracle
+// hadn't caught up yet, so it's worth a retry rather than a permanent no.
+const priceMissTTL = 5 * time.Minute
+
+type priceCacheEntry struct {
+	usd    float64
+	found  bool
+	cached time.Time
 }
 
 // NewOracle constructs a client for the wasm-indexer oracle at base. nodeREST is
@@ -43,6 +56,7 @@ func NewOracle(base, nodeREST string) *Oracle {
 		denoms:   map[string]map[string]DenomMeta{},
 		at:       map[string]time.Time{},
 		bank:     map[string]DenomMeta{},
+		prices:   map[string]priceCacheEntry{},
 	}
 }
 
@@ -76,17 +90,35 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 }
 
 // PriceAt returns the USD price for a denom on (or most recently before) a date
-// (YYYY-MM-DD). found=false when the oracle has no price.
+// (YYYY-MM-DD). found=false when the oracle has no price — callers must not
+// treat that as a confirmed $0 (INF-201). A found price is cached indefinitely
+// (a historical day's price is immutable); a miss is cached for priceMissTTL so
+// one report's many rows for the same denom+date don't hammer the oracle, but a
+// transient gap still gets retried.
 func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
+	key := chain + "|" + denom + "|" + date
+
+	o.mu.Lock()
+	if e, ok := o.prices[key]; ok && (e.found || time.Since(e.cached) < priceMissTTL) {
+		o.mu.Unlock()
+		return e.usd, e.found
+	}
+	o.mu.Unlock()
+
 	var body struct {
 		USD   float64 `json:"usd"`
 		Found bool    `json:"found"`
 	}
 	url := fmt.Sprintf("%s/price?chain=%s&denom=%s&date=%s", o.base, chain, denom, date)
-	if err := o.get(url, &body); err != nil {
-		return 0, false
+	usd, found := 0.0, false
+	if err := o.get(url, &body); err == nil {
+		usd, found = body.USD, body.Found
 	}
-	return body.USD, body.Found
+
+	o.mu.Lock()
+	o.prices[key] = priceCacheEntry{usd: usd, found: found, cached: nowUTC()}
+	o.mu.Unlock()
+	return usd, found
 }
 
 // BankMetaFallback resolves a denom's symbol+decimals directly from the chain's
