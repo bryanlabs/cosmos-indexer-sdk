@@ -2,7 +2,9 @@
 // writes, using the wasm-indexer oracle for USD pricing + denom resolution.
 //
 // Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, ORACLE_URL (wasm-indexer base,
-// e.g. http://wasm-indexer:8080), LISTEN (default :8082).
+// e.g. http://wasm-indexer:8080), NODE_REST_API (chain REST host, also used by
+// /balance; fallback for denom metadata the oracle doesn't have), LISTEN
+// (default :8082).
 package main
 
 import (
@@ -40,7 +42,7 @@ func main() {
 		log.Printf("balance table migrate: %v", err)
 	}
 
-	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"))
+	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle)
 
 	listen := env("LISTEN", ":8082")

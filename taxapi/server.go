@@ -227,14 +227,21 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	// native token (uatom that round-trips is still ATOM); keep the raw path.
 	base, isIBC := ibcBaseDenom(denom)
 
-	m, ok := meta[base]
-	decimals := 6
-	symbol := base
-	if ok {
-		decimals = m.Decimals
-		if m.Symbol != "" {
-			symbol = m.Symbol
-		}
+	// Decimals resolution: the oracle first, then the chain's own bank module,
+	// and only if both miss do we assume 6 (and flag it) rather than silently
+	// corrupting the amount (INF-200).
+	var decimals int
+	var symbol string
+	assumed := false
+	if m, ok := meta[base]; ok {
+		decimals, symbol = m.Decimals, m.Symbol
+	} else if m, ok := s.oracle.BankMetaFallback(base); ok {
+		decimals, symbol = m.Decimals, m.Symbol
+	} else {
+		decimals, symbol, assumed = 6, base, true
+	}
+	if symbol == "" {
+		symbol = base
 	}
 	amt, err := decimal.NewFromString(amountBase)
 	if err != nil {
@@ -251,6 +258,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 		Symbol: symbol, Denom: denom, Amount: amt,
 		PriceUSD: price, ValueUSD: amt.Mul(price),
 		From: from, To: to, TxHash: hash, IsIBC: isIBC,
+		DecimalsAssumed: assumed,
 	}
 }
 

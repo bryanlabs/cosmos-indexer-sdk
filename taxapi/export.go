@@ -25,18 +25,28 @@ type Row struct {
 	TxHash    string
 	Asset     string // non-fungible asset id "<collection>/<token_id>" for nft_sale
 	IsIBC     bool   // true when Denom is an IBC trace path (Symbol is the resolved base)
+	// DecimalsAssumed is true when neither the oracle nor the chain's bank module
+	// could resolve this denom, so decimals fell back to a bare guess (6). Amount,
+	// PriceUSD and ValueUSD for this row may be wrong and should not be trusted
+	// silently (see INF-200/201).
+	DecimalsAssumed bool
 }
 
 // description is the human/tax note; NFT sales name the asset, IBC rows carry the
 // raw trace path so the UI can show an "IBC" badge with full detail on hover.
+// Rows with an unresolved denom get an explicit warning suffix rather than
+// silently reporting a possibly-wrong amount.
 func (r Row) description() string {
+	d := r.Category
 	if (r.Category == "nft_sale" || r.Category == "nft_mint") && r.Asset != "" {
-		return r.Category + " " + r.Asset
+		d = r.Category + " " + r.Asset
+	} else if r.IsIBC {
+		d = "ibc " + r.Denom
 	}
-	if r.IsIBC {
-		return "ibc " + r.Denom
+	if r.DecimalsAssumed {
+		d += " (decimals unknown, amount may be wrong)"
 	}
-	return r.Category
+	return d
 }
 
 // label maps our category to a human/tax label.
@@ -155,12 +165,12 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	case "generic":
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain"}) //nolint:lll
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				r.Symbol, r.Denom, r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD),
-				r.From, r.To, r.Asset, "cosmoshub-4",
+				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed),
 			})
 		}
 
@@ -219,4 +229,11 @@ func refPrice(d decimal.Decimal) string {
 		return ""
 	}
 	return d.String()
+}
+
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
