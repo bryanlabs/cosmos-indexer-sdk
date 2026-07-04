@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -72,5 +73,25 @@ func TestBuild8949LongTermAndUnknownBasis(t *testing.T) {
 	}
 	if got[1].DateAcquired != "Various" || !got[1].CostBasis.IsZero() || !got[1].Proceeds.Equal(d(12)) {
 		t.Fatalf("unknown-basis line wrong: %+v", got[1])
+	}
+}
+
+// Write8949CSV must carry the Address column so a multi-address report (several
+// single-wallet responses concatenated) reads as per-wallet lots, never a
+// pooled basis (Rev. Proc. 2024-28, see INF-204).
+func TestWrite8949CSVIncludesAddress(t *testing.T) {
+	rows := []Form8949Row{
+		{Address: "cosmos1abc", Description: "1 ATOM", DateAcquired: "01/01/2026", DateSold: "02/01/2026", Proceeds: d(3), CostBasis: d(2), GainLoss: d(1)},
+	}
+	var buf strings.Builder
+	if err := Write8949CSV(&buf, rows); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	out := buf.String()
+	if !strings.HasPrefix(out, "Address,Part,") {
+		t.Fatalf("header should lead with Address: %q", out)
+	}
+	if !strings.Contains(out, "cosmos1abc,I (short-term)") {
+		t.Fatalf("row should carry the address: %q", out)
 	}
 }

@@ -107,18 +107,21 @@ func TestBuildIncomeCSVWarnsOnMissingPrice(t *testing.T) {
 		{Time: now, Category: "commission", Symbol: "MYST", ValueUSD: decimal.Zero, PriceMissing: true},
 		{Time: now, Category: "transfer", Symbol: "ATOM", ValueUSD: d(999)}, // not income, must be excluded
 	}
-	csvOut := buildIncomeCSV(rows)
+	csvOut := buildIncomeCSV(rows, "cosmos1wallet")
 	if !strings.Contains(csvOut, "TOTAL") || strings.Contains(csvOut, "999") {
 		t.Fatalf("csv should total only reward/commission rows: %s", csvOut)
 	}
 	if !strings.Contains(csvOut, "WARNING") || !strings.Contains(csvOut, "MYST") {
 		t.Fatalf("csv should warn about the MYST row with no price: %s", csvOut)
 	}
+	if !strings.Contains(csvOut, "cosmos1wallet") {
+		t.Fatalf("csv should stamp the address on every line (INF-204): %s", csvOut)
+	}
 }
 
 func TestBuildIncomeCSVNoWarningWhenAllPriced(t *testing.T) {
 	rows := []Row{{Time: time.Now(), Category: "reward", Symbol: "ATOM", ValueUSD: d(5)}}
-	csvOut := buildIncomeCSV(rows)
+	csvOut := buildIncomeCSV(rows, "cosmos1wallet")
 	if strings.Contains(csvOut, "WARNING") {
 		t.Fatalf("no warning expected when every row has a price: %s", csvOut)
 	}

@@ -70,7 +70,14 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=form-8949.csv")
-	_ = Write8949CSV(w, Build8949(rows))
+	// One address per call (rowsFor above is single-address), so every lot here
+	// is computed strictly per-wallet — stamp which one for multi-address
+	// reports, which concatenate several of these responses (INF-204).
+	form := Build8949(rows)
+	for i := range form {
+		form[i].Address = addr
+	}
+	_ = Write8949CSV(w, form)
 }
 
 func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
@@ -86,8 +93,11 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	sched := BuildScheduleD(Build8949(rows))
+	sched.Address = addr
+	sched.WalletByWallet = true
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(BuildScheduleD(Build8949(rows)))
+	_ = json.NewEncoder(w).Encode(sched)
 }
 
 // handleIncome returns an ordinary-income report (staking rewards + validator
@@ -108,17 +118,20 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=income-schedule1-990t.csv")
-	_, _ = w.Write([]byte(buildIncomeCSV(rows)))
+	_, _ = w.Write([]byte(buildIncomeCSV(rows, addr)))
 }
 
 // buildIncomeCSV renders the reward/commission rows as the income-report CSV:
 // header, one line per row, a TOTAL, and (INF-201) an explicit WARNING line
 // when any included row had no known price, since TOTAL then excludes that
-// row's value (0, not a real zero) rather than fabricating one.
-func buildIncomeCSV(rows []Row) string {
+// row's value (0, not a real zero) rather than fabricating one. address is
+// stamped on every row and the TOTAL/WARNING lines so a multi-address report
+// (several of these concatenated) reads as per-wallet subtotals, never a
+// pooled figure (Rev. Proc. 2024-28, see INF-204).
+func buildIncomeCSV(rows []Row, address string) string {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
+	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
 	total := decimal.Zero
 	missingDenoms := map[string]bool{}
 	for _, row := range rows {
@@ -130,18 +143,18 @@ func buildIncomeCSV(rows []Row) string {
 			missingDenoms[row.Symbol] = true
 		}
 		_ = cw.Write([]string{
-			row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
+			address, row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
 			row.Amount.String(), row.PriceUSD.String(), row.ValueUSD.StringFixed(2), row.TxHash,
 		})
 	}
-	_ = cw.Write([]string{"", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
+	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
 	if len(missingDenoms) > 0 {
 		denoms := make([]string, 0, len(missingDenoms))
 		for sym := range missingDenoms {
 			denoms = append(denoms, sym)
 		}
 		sort.Strings(denoms)
-		_ = cw.Write([]string{"", "WARNING", "", "", "", "",
+		_ = cw.Write([]string{address, "", "WARNING", "", "", "", "",
 			fmt.Sprintf("no price found for: %s -- TOTAL above excludes their value, actual income is higher", strings.Join(denoms, ", ")),
 			"",
 		})
