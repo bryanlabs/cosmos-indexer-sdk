@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
@@ -14,7 +15,6 @@ import (
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 	"gorm.io/gorm"
@@ -35,6 +35,8 @@ var MessageTypeURLs = []string{
 	"/ibc.applications.transfer.v1.MsgTransfer",
 	"/ibc.core.channel.v1.MsgRecvPacket",
 	"/cosmwasm.wasm.v1.MsgExecuteContract",
+	TypeURLWithdrawTokenizeShareReward,
+	TypeURLWithdrawAllTokenizeShareReward,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -107,12 +109,30 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 			}
 		}
 
+	// Liquid Staking Module reward withdrawals. The amount is not on the
+	// message, and delegatorRewardEvents cannot be reused here: LSM pays the
+	// record's module account first and then forwards to the owner, so summing
+	// coin_received counts the same reward twice and picks up the tip payee. The
+	// module emits withdraw_tokenize_share_reward with the settled amount per
+	// record, which is the authoritative figure.
+	case *MsgWithdrawTokenizeShareRecordReward:
+		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress)...)
+
+	case *MsgWithdrawAllTokenizeShareRecordReward:
+		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress)...)
+
 	case *authz.MsgExec:
-		inners, err := m.GetMessages()
-		if err != nil {
-			return nil
-		}
-		for i, inner := range inners {
+		// GetMessages is all-or-nothing: one inner message the codec cannot
+		// decode makes it error, which used to discard the entire MsgExec.
+		// Restake bots wrap reward withdrawals and delegations in here, so that
+		// silently dropped real income. Unpack them one at a time instead and
+		// keep the index alignment the event lookup depends on.
+		for i, anyMsg := range m.Msgs {
+			inner, ok := anyMsg.GetCachedValue().(sdk.Msg)
+			if !ok || inner == nil {
+				config.Log.Debugf("tax: skipping undecodable authz inner message %d of type %s", i, anyMsg.TypeUrl)
+				continue
+			}
 			sub := eventsForAuthzIndex(log, i)
 			events = append(events, classify(inner, sub)...)
 		}
@@ -327,6 +347,40 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator string) []T
 		out = append(out, TaxableEvent{
 			Category: string(CategoryReward),
 			ToAddr:   delegator,
+			Amount:   c.Amount.String(), Denom: c.Denom,
+		})
+	}
+	return out
+}
+
+// tokenizeShareRewardEvents reads the withdraw_tokenize_share_reward events the
+// x/liquid module emits, one per tokenize-share record settled, and attributes
+// the income to the record owner. WithdrawAll settles several records in one
+// message and so emits several events.
+//
+// Income is attributed to the owner even when the event's withdraw_address
+// differs, matching how redirected staking rewards are attributed to the
+// delegator rather than the withdraw address (INF-213).
+func tokenizeShareRewardEvents(log *indexerTxTypes.LogMessage, owner string) []TaxableEvent {
+	total := sdk.NewCoins()
+	for _, ev := range log.Events {
+		if ev.Type != "withdraw_tokenize_share_reward" {
+			continue
+		}
+		for _, a := range ev.Attributes {
+			if a.Key != "amount" {
+				continue
+			}
+			if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
+				total = total.Add(coins...)
+			}
+		}
+	}
+	var out []TaxableEvent
+	for _, c := range total {
+		out = append(out, TaxableEvent{
+			Category: string(CategoryReward),
+			ToAddr:   owner,
 			Amount:   c.Amount.String(), Denom: c.Denom,
 		})
 	}

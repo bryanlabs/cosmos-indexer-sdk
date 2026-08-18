@@ -20,6 +20,12 @@ func main() {
 	// Custom table for classified taxable events (auto-migrated on startup).
 	indexer.RegisterCustomModels([]any{&tax.TaxableEvent{}})
 
+	// Gaia's x/liquid (LSM) messages are not in the SDK v0.47 codec this build
+	// links, so without these the decoder cannot read them. See tax/gaialiquid.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.GaiaLiquidMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering x/liquid message types: %v", err)
+	}
+
 	// The SDK requires each registered parser to have a globally-unique
 	// identifier, so register a distinct instance (same logic) per type URL.
 	for _, url := range tax.MessageTypeURLs {
