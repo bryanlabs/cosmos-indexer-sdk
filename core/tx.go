@@ -149,7 +149,18 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 				currMessages = append(currMessages, msg)
 				currLogMsgs = append(currLogMsgs, currTxLog)
 			} else {
-				return nil, blockTime, fmt.Errorf("tx message could not be processed")
+				// The message type is absent from this build's codec, which
+				// happens when the chain adds a module newer than the indexer's
+				// SDK version. Skip the single message rather than failing the
+				// block, which would drop every other transaction in it.
+				config.Log.Warnf("[Block: %v] [TX: %v] Skipping undecodable msg of type '%v' at index %d; the rest of the block is still indexed.",
+					blockResults.Block.Height, tendermintHashToHex(txHash), txFull.Body.Messages[msgIdx].TypeUrl, msgIdx)
+				currMessages = append(currMessages, nil)
+				currLogMsgs = append(currLogMsgs, txtypes.LogMessage{
+					MessageIndex: msgIdx,
+				})
+				messagesRaw = append(messagesRaw, nil)
+				continue
 			}
 		}
 
@@ -286,12 +297,24 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 				var currMsgUnpack types.Msg
 				err := cl.Codec.InterfaceRegistry.UnpackAny(currTx.Body.Messages[msgIdx], &currMsgUnpack)
 				if err != nil || currMsgUnpack == nil {
-					return nil, blockTime, fmt.Errorf("tx message could not be processed. Unpacking protos failed and CachedValue is not present. TX Hash: %s, Msg type: %s, Msg index: %d, Code: %d",
+					// The message type is absent from this build's codec, which
+					// happens when the chain adds a module newer than the
+					// indexer's SDK version. Skip the single message rather than
+					// failing the block, which would drop every other
+					// transaction in it.
+					config.Log.Warnf("[Block: %v] [TX: %v] Skipping undecodable msg of type '%v' at index %d (code %d); the rest of the block is still indexed.",
+						currTxResp.Height,
 						currTxResp.TxHash,
 						currTx.Body.Messages[msgIdx].TypeUrl,
 						msgIdx,
 						currTxResp.Code,
 					)
+					currMessages = append(currMessages, nil)
+					currLogMsgs = append(currLogMsgs, txtypes.LogMessage{
+						MessageIndex: msgIdx,
+					})
+					messagesRaw[len(messagesRaw)-1] = nil
+					continue
 				}
 				currMsg = currMsgUnpack
 			}
