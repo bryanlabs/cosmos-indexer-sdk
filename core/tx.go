@@ -203,7 +203,7 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 		}
 
 		processedTx.Tx.Fees = fees
-		processedTx.Tx.Memo = txFull.Body.Memo
+		processedTx.Tx.Memo = sanitizeMemo(txFull.Body.Memo)
 
 		currTxDbWrappers = append(currTxDbWrappers, processedTx)
 	}
@@ -213,6 +213,19 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 
 func tendermintHashToHex(hash []byte) string {
 	return strings.ToUpper(hex.EncodeToString(hash))
+}
+
+// sanitizeMemo strips null bytes and invalid UTF-8 sequences that PostgreSQL
+// text columns reject. Cosmos SDK memos are arbitrary bytes, so they can
+// contain 0x00 which is valid in Go strings but invalid in a UTF8 text column.
+func sanitizeMemo(memo string) string {
+	memo = strings.ToValidUTF8(memo, "")
+	return strings.Map(func(r rune) rune {
+		if r == 0 {
+			return -1
+		}
+		return r
+	}, memo)
 }
 
 // ProcessRPCTXs - Given an RPC response, build out the more specific data used by the parser.
@@ -372,7 +385,7 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 		}
 
 		processedTx.Tx.Fees = fees
-		processedTx.Tx.Memo = currTx.Body.Memo
+		processedTx.Tx.Memo = sanitizeMemo(currTx.Body.Memo)
 
 		currTxDbWrappers = append(currTxDbWrappers, processedTx)
 	}
