@@ -26,6 +26,18 @@ func main() {
 		log.Fatalf("tax-indexer: registering x/liquid message types: %v", err)
 	}
 
+	// IBC channel v2 (ibc-go v10) likewise post-dates this build's ibc-go v7.
+	// A v2 receive is an inbound transfer, so it has to decode. See tax/ibcv2.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.IBCChannelV2MsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering IBC channel v2 message types: %v", err)
+	}
+
+	// Cosmos Hub's tokenfactory, which reuses the osmosis proto package name.
+	// MsgMint credits real balances, so it has to decode. See tax/tokenfactory.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.TokenFactoryMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering tokenfactory message types: %v", err)
+	}
+
 	// The SDK requires each registered parser to have a globally-unique
 	// identifier, so register a distinct instance (same logic) per type URL.
 	for _, url := range tax.MessageTypeURLs {

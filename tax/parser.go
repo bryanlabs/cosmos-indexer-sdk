@@ -37,6 +37,8 @@ var MessageTypeURLs = []string{
 	"/cosmwasm.wasm.v1.MsgExecuteContract",
 	TypeURLWithdrawTokenizeShareReward,
 	TypeURLWithdrawAllTokenizeShareReward,
+	TypeURLV2RecvPacket,
+	TypeURLTFMint,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -151,6 +153,25 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 		events = append(events, nftSaleEvents(log)...)
 		events = append(events, swapEvents(log)...)
 		events = append(events, nftMintEvents(log)...)
+
+	// A tokenfactory mint credits the recipient with newly created coins, which
+	// is an acquisition for them. Cosmos Hub's observed traffic is STARS
+	// distributed this way. Amount and recipient are both on the message.
+	case *MsgTFMint:
+		if m.Amount != "" && m.Denom != "" {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryTransfer),
+				FromAddr: m.Sender, ToAddr: m.Recipient(),
+				Amount: m.Amount, Denom: m.Denom,
+			})
+		}
+
+	// IBC channel v2 receive: an inbound transfer, same as the v1 case below.
+	// The amount comes from the fungible_token_packet event rather than the
+	// packet payload, because v2 payloads on Cosmos Hub arrive solidity-ABI
+	// encoded from the Ethereum bridge. See tax/ibcv2.go.
+	case *MsgRecvPacketV2:
+		events = append(events, ibcV2ReceiveEvents(log)...)
 
 	case *chantypes.MsgRecvPacket:
 		var data transfertypes.FungibleTokenPacketData
@@ -348,6 +369,49 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator string) []T
 			Category: string(CategoryReward),
 			ToAddr:   delegator,
 			Amount:   c.Amount.String(), Denom: c.Denom,
+		})
+	}
+	return out
+}
+
+// ibcV2ReceiveEvents turns the fungible_token_packet events of a channel v2
+// receive into inbound transfers. The module emits one per payload with the
+// sender, receiver, denom and amount already extracted, which is exactly what
+// the v1 path digs out of the packet's JSON data.
+//
+// Unlike v1, the event carries a success flag, so a receive that wrote an error
+// acknowledgement and moved no funds is not recorded as an acquisition.
+func ibcV2ReceiveEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
+	var out []TaxableEvent
+	for _, ev := range log.Events {
+		if ev.Type != "fungible_token_packet" {
+			continue
+		}
+		var sender, receiver, denom, amount, success string
+		for _, a := range ev.Attributes {
+			switch a.Key {
+			case "sender":
+				sender = a.Value
+			case "receiver":
+				receiver = a.Value
+			case "denom":
+				denom = a.Value
+			case "amount":
+				amount = a.Value
+			case "success":
+				success = a.Value
+			}
+		}
+		if success != "" && success != "true" {
+			continue
+		}
+		if amount == "" || receiver == "" {
+			continue
+		}
+		out = append(out, TaxableEvent{
+			Category: string(CategoryIBCIn),
+			FromAddr: sender, ToAddr: receiver,
+			Amount: amount, Denom: denom,
 		})
 	}
 	return out

@@ -49,6 +49,19 @@ func GaiaLiquidMsgTypes() map[string]sdk.Msg {
 	}
 }
 
+// rawMsg preserves the exact bytes a message was decoded from.
+//
+// The interface registry re-marshals every message it unpacks, to cache it back
+// into the Any. Left to gogoproto's reflection marshaller that panics on
+// hand-written types, so each of these messages marshals by handing back the
+// bytes it came from. That is also strictly more faithful than re-encoding:
+// fields we chose not to model still survive a round trip.
+type rawMsg struct{ raw []byte }
+
+func (r *rawMsg) Marshal() ([]byte, error) { return r.raw, nil }
+func (r *rawMsg) Size() int                { return len(r.raw) }
+func (r *rawMsg) keep(b []byte)            { r.raw = append([]byte(nil), b...) }
+
 // --- minimal protobuf wire reader -------------------------------------------
 //
 // gogoproto calls Unmarshal when a type provides it, exactly as it does for
@@ -122,6 +135,7 @@ func signerOf(addr string) []sdk.AccAddress {
 // --- MsgTokenizeShares -------------------------------------------------------
 
 type MsgTokenizeShares struct {
+	rawMsg
 	DelegatorAddress    string `protobuf:"bytes,1,opt,name=delegator_address,json=delegatorAddress,proto3" json:"delegator_address,omitempty"`
 	ValidatorAddress    string `protobuf:"bytes,2,opt,name=validator_address,json=validatorAddress,proto3" json:"validator_address,omitempty"`
 	AmountRaw           []byte `protobuf:"bytes,3,opt,name=amount,proto3" json:"amount,omitempty"`
@@ -137,6 +151,7 @@ func (m *MsgTokenizeShares) ValidateBasic() error         { return nil }
 func (m *MsgTokenizeShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
 func (m *MsgTokenizeShares) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		switch f.num {
 		case 1:
@@ -155,6 +170,7 @@ func (m *MsgTokenizeShares) Unmarshal(b []byte) error {
 // --- MsgRedeemTokensForShares ------------------------------------------------
 
 type MsgRedeemTokensForShares struct {
+	rawMsg
 	DelegatorAddress string `protobuf:"bytes,1,opt,name=delegator_address,json=delegatorAddress,proto3" json:"delegator_address,omitempty"`
 	AmountRaw        []byte `protobuf:"bytes,2,opt,name=amount,proto3" json:"amount,omitempty"`
 }
@@ -168,6 +184,7 @@ func (m *MsgRedeemTokensForShares) ValidateBasic() error         { return nil }
 func (m *MsgRedeemTokensForShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
 func (m *MsgRedeemTokensForShares) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		switch f.num {
 		case 1:
@@ -182,6 +199,7 @@ func (m *MsgRedeemTokensForShares) Unmarshal(b []byte) error {
 // --- MsgTransferTokenizeShareRecord ------------------------------------------
 
 type MsgTransferTokenizeShareRecord struct {
+	rawMsg
 	TokenizeShareRecordId uint64 `protobuf:"varint,1,opt,name=tokenize_share_record_id,json=tokenizeShareRecordId,proto3" json:"tokenize_share_record_id,omitempty"`
 	Sender                string `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
 	NewOwner              string `protobuf:"bytes,3,opt,name=new_owner,json=newOwner,proto3" json:"new_owner,omitempty"`
@@ -196,6 +214,7 @@ func (m *MsgTransferTokenizeShareRecord) ValidateBasic() error         { return 
 func (m *MsgTransferTokenizeShareRecord) GetSigners() []sdk.AccAddress { return signerOf(m.Sender) }
 func (m *MsgTransferTokenizeShareRecord) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		switch f.num {
 		case 1:
@@ -212,6 +231,7 @@ func (m *MsgTransferTokenizeShareRecord) Unmarshal(b []byte) error {
 // --- MsgDisableTokenizeShares / MsgEnableTokenizeShares ----------------------
 
 type MsgDisableTokenizeShares struct {
+	rawMsg
 	DelegatorAddress string `protobuf:"bytes,1,opt,name=delegator_address,json=delegatorAddress,proto3" json:"delegator_address,omitempty"`
 }
 
@@ -224,6 +244,7 @@ func (m *MsgDisableTokenizeShares) ValidateBasic() error         { return nil }
 func (m *MsgDisableTokenizeShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
 func (m *MsgDisableTokenizeShares) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		if f.num == 1 {
 			m.DelegatorAddress = string(f.bytes)
@@ -233,6 +254,7 @@ func (m *MsgDisableTokenizeShares) Unmarshal(b []byte) error {
 }
 
 type MsgEnableTokenizeShares struct {
+	rawMsg
 	DelegatorAddress string `protobuf:"bytes,1,opt,name=delegator_address,json=delegatorAddress,proto3" json:"delegator_address,omitempty"`
 }
 
@@ -245,6 +267,7 @@ func (m *MsgEnableTokenizeShares) ValidateBasic() error         { return nil }
 func (m *MsgEnableTokenizeShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
 func (m *MsgEnableTokenizeShares) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		if f.num == 1 {
 			m.DelegatorAddress = string(f.bytes)
@@ -256,6 +279,7 @@ func (m *MsgEnableTokenizeShares) Unmarshal(b []byte) error {
 // --- the two reward messages (income) ----------------------------------------
 
 type MsgWithdrawTokenizeShareRecordReward struct {
+	rawMsg
 	OwnerAddress string `protobuf:"bytes,1,opt,name=owner_address,json=ownerAddress,proto3" json:"owner_address,omitempty"`
 	RecordId     uint64 `protobuf:"varint,2,opt,name=record_id,json=recordId,proto3" json:"record_id,omitempty"`
 }
@@ -271,6 +295,7 @@ func (m *MsgWithdrawTokenizeShareRecordReward) GetSigners() []sdk.AccAddress {
 }
 func (m *MsgWithdrawTokenizeShareRecordReward) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		switch f.num {
 		case 1:
@@ -283,6 +308,7 @@ func (m *MsgWithdrawTokenizeShareRecordReward) Unmarshal(b []byte) error {
 }
 
 type MsgWithdrawAllTokenizeShareRecordReward struct {
+	rawMsg
 	OwnerAddress string `protobuf:"bytes,1,opt,name=owner_address,json=ownerAddress,proto3" json:"owner_address,omitempty"`
 }
 
@@ -299,6 +325,7 @@ func (m *MsgWithdrawAllTokenizeShareRecordReward) GetSigners() []sdk.AccAddress 
 }
 func (m *MsgWithdrawAllTokenizeShareRecordReward) Unmarshal(b []byte) error {
 	m.Reset()
+	m.keep(b)
 	return scanFields(b, func(f wireField) error {
 		if f.num == 1 {
 			m.OwnerAddress = string(f.bytes)

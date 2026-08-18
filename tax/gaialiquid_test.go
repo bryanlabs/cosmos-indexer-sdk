@@ -169,3 +169,60 @@ func TestTokenizeAndRedeemProduceNoTaxableEvent(t *testing.T) {
 		}
 	}
 }
+
+// The interface registry re-marshals every message it unpacks, to cache it back
+// into the Any. gogoproto's reflection marshaller panics on hand-written types,
+// which took down the indexer, so every custom type must marshal itself and
+// return exactly the bytes it decoded from.
+func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
+	all := map[string]interface {
+		Unmarshal([]byte) error
+		Marshal() ([]byte, error)
+		Size() int
+	}{}
+	for url, m := range GaiaLiquidMsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	for url, m := range IBCChannelV2MsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	for url, m := range TokenFactoryMsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	if len(all) != 15 {
+		t.Fatalf("expected 15 registered custom types, got %d", len(all))
+	}
+
+	// Field 1 is a string on some of these and a nested message on others, so an
+	// empty length-delimited field 1 is the one shape valid for all of them.
+	// Field 11 is modelled by none of them: it proves unknown fields survive the
+	// round trip rather than being dropped by a re-encode.
+	payload := append(nested(1, nil), fieldVarint(11, 99)...)
+	for url, m := range all {
+		if err := m.Unmarshal(payload); err != nil {
+			t.Fatalf("%s: unmarshal: %v", url, err)
+		}
+		out, err := m.Marshal()
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", url, err)
+		}
+		if string(out) != string(payload) {
+			t.Fatalf("%s: round trip changed the bytes", url)
+		}
+		if m.Size() != len(payload) {
+			t.Fatalf("%s: Size() = %d, want %d", url, m.Size(), len(payload))
+		}
+	}
+}
