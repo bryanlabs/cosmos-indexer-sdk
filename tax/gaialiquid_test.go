@@ -201,8 +201,8 @@ func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
 			Size() int
 		})
 	}
-	if len(all) != 15 {
-		t.Fatalf("expected 15 registered custom types, got %d", len(all))
+	if len(all) != 17 {
+		t.Fatalf("expected 17 registered custom types, got %d", len(all))
 	}
 
 	// Field 1 is a string on some of these and a nested message on others, so an

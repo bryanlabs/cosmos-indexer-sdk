@@ -25,15 +25,21 @@ const (
 	TypeURLTFBurn        = "/osmosis.tokenfactory.v1beta1.MsgBurn"
 	TypeURLTFCreateDenom = "/osmosis.tokenfactory.v1beta1.MsgCreateDenom"
 	TypeURLTFChangeAdmin = "/osmosis.tokenfactory.v1beta1.MsgChangeAdmin"
+	// Display metadata only; carries no value.
+	TypeURLTFSetMetadata = "/osmosis.tokenfactory.v1beta1.MsgSetDenomMetadata"
+	// Moves coins between two addresses on the admin's say-so.
+	TypeURLTFForceTransfer = "/osmosis.tokenfactory.v1beta1.MsgForceTransfer"
 )
 
 // TokenFactoryMsgTypes maps the tokenfactory type URLs to registrable instances.
 func TokenFactoryMsgTypes() map[string]sdk.Msg {
 	return map[string]sdk.Msg{
-		TypeURLTFMint:        &MsgTFMint{},
-		TypeURLTFBurn:        &MsgTFBurn{},
-		TypeURLTFCreateDenom: &MsgTFCreateDenom{},
-		TypeURLTFChangeAdmin: &MsgTFChangeAdmin{},
+		TypeURLTFMint:          &MsgTFMint{},
+		TypeURLTFBurn:          &MsgTFBurn{},
+		TypeURLTFCreateDenom:   &MsgTFCreateDenom{},
+		TypeURLTFChangeAdmin:   &MsgTFChangeAdmin{},
+		TypeURLTFSetMetadata:   &MsgTFSetDenomMetadata{},
+		TypeURLTFForceTransfer: &MsgTFForceTransfer{},
 	}
 }
 
@@ -188,6 +194,86 @@ func (m *MsgTFChangeAdmin) Unmarshal(b []byte) error {
 			m.Denom = string(f.bytes)
 		case 3:
 			m.NewAdmin = string(f.bytes)
+		}
+		return nil
+	})
+}
+
+// --- MsgSetDenomMetadata -----------------------------------------------------
+//
+// Display metadata only: name, symbol, decimals. No amount, no recipient, so it
+// cannot move value and produces no taxable event. Registered so the generic
+// message tables stay complete.
+
+type MsgTFSetDenomMetadata struct {
+	rawMsg
+	Sender      string `protobuf:"bytes,1,opt,name=sender,proto3" json:"sender,omitempty"`
+	MetadataRaw []byte `protobuf:"bytes,2,opt,name=metadata,proto3" json:"metadata,omitempty"`
+}
+
+func (m *MsgTFSetDenomMetadata) Reset()        { *m = MsgTFSetDenomMetadata{} }
+func (m *MsgTFSetDenomMetadata) ProtoMessage() {}
+func (m *MsgTFSetDenomMetadata) String() string {
+	return fmt.Sprintf("tokenfactory MsgSetDenomMetadata{%s}", m.Sender)
+}
+func (m *MsgTFSetDenomMetadata) ValidateBasic() error         { return nil }
+func (m *MsgTFSetDenomMetadata) GetSigners() []sdk.AccAddress { return signerOf(m.Sender) }
+func (m *MsgTFSetDenomMetadata) Unmarshal(b []byte) error {
+	m.Reset()
+	m.keep(b)
+	return scanFields(b, func(f wireField) error {
+		switch f.num {
+		case 1:
+			m.Sender = string(f.bytes)
+		case 2:
+			m.MetadataRaw = append([]byte(nil), f.bytes...)
+		}
+		return nil
+	})
+}
+
+// --- MsgForceTransfer --------------------------------------------------------
+//
+// A denom admin moving coins between two addresses without their involvement.
+// That is a real movement for both parties, so it is classified like a send.
+// It has never appeared on Cosmos Hub (zero occurrences from 2025-12-31 to
+// 2026-08-18), but it is registered and classified so that if the module is
+// ever used that way the value is not silently skipped.
+
+type MsgTFForceTransfer struct {
+	rawMsg
+	Sender              string `protobuf:"bytes,1,opt,name=sender,proto3" json:"sender,omitempty"`
+	Denom               string `json:"denom,omitempty"`
+	Amount              string `json:"amount,omitempty"`
+	TransferFromAddress string `protobuf:"bytes,3,opt,name=transferFromAddress,proto3" json:"transferFromAddress,omitempty"`
+	TransferToAddress   string `protobuf:"bytes,4,opt,name=transferToAddress,proto3" json:"transferToAddress,omitempty"`
+}
+
+func (m *MsgTFForceTransfer) Reset()        { *m = MsgTFForceTransfer{} }
+func (m *MsgTFForceTransfer) ProtoMessage() {}
+func (m *MsgTFForceTransfer) String() string {
+	return fmt.Sprintf("tokenfactory MsgForceTransfer{%s%s %s -> %s}",
+		m.Amount, m.Denom, m.TransferFromAddress, m.TransferToAddress)
+}
+func (m *MsgTFForceTransfer) ValidateBasic() error         { return nil }
+func (m *MsgTFForceTransfer) GetSigners() []sdk.AccAddress { return signerOf(m.Sender) }
+func (m *MsgTFForceTransfer) Unmarshal(b []byte) error {
+	m.Reset()
+	m.keep(b)
+	return scanFields(b, func(f wireField) error {
+		switch f.num {
+		case 1:
+			m.Sender = string(f.bytes)
+		case 2:
+			denom, amount, err := coinFields(f.bytes)
+			if err != nil {
+				return err
+			}
+			m.Denom, m.Amount = denom, amount
+		case 3:
+			m.TransferFromAddress = string(f.bytes)
+		case 4:
+			m.TransferToAddress = string(f.bytes)
 		}
 		return nil
 	})

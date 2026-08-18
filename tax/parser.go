@@ -40,6 +40,7 @@ var MessageTypeURLs = []string{
 	TypeURLWithdrawAllTokenizeShareReward,
 	TypeURLV2RecvPacket,
 	TypeURLTFMint,
+	TypeURLTFForceTransfer,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -163,6 +164,16 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 			events = append(events, TaxableEvent{
 				Category: string(CategoryTransfer),
 				FromAddr: m.Sender, ToAddr: m.Recipient(),
+				Amount: m.Amount, Denom: m.Denom,
+			})
+		}
+
+	// An admin moving someone else's coins is still a movement for both sides.
+	case *MsgTFForceTransfer:
+		if m.Amount != "" && m.Denom != "" {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryTransfer),
+				FromAddr: m.TransferFromAddress, ToAddr: m.TransferToAddress,
 				Amount: m.Amount, Denom: m.Denom,
 			})
 		}

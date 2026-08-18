@@ -76,8 +76,8 @@ func TestTokenFactoryNonValueMessagesProduceNoEvent(t *testing.T) {
 
 func TestTokenFactoryTypesAreRegistrable(t *testing.T) {
 	types := TokenFactoryMsgTypes()
-	if len(types) != 4 {
-		t.Fatalf("expected 4 tokenfactory types, got %d", len(types))
+	if len(types) != 6 {
+		t.Fatalf("expected 6 tokenfactory types, got %d", len(types))
 	}
 	for url, msg := range types {
 		u, ok := msg.(interface{ Unmarshal([]byte) error })
@@ -87,5 +87,48 @@ func TestTokenFactoryTypesAreRegistrable(t *testing.T) {
 		if err := u.Unmarshal(nil); err != nil {
 			t.Fatalf("%s: empty unmarshal: %v", url, err)
 		}
+	}
+}
+
+// SetDenomMetadata is display information only, so it must decode but never
+// produce a taxable event.
+func TestSetDenomMetadataDecodesWithoutValue(t *testing.T) {
+	sender := "cosmos1z3dvpke5pq3752pum6x4zd2fyfjz69p0rusqzt"
+	meta := append(fieldBytes(1, "Pepe is fren"), fieldBytes(3, "factory/x/pepe")...)
+	var m MsgTFSetDenomMetadata
+	if err := m.Unmarshal(append(fieldBytes(1, sender), nested(2, meta)...)); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.Sender != sender || len(m.MetadataRaw) == 0 {
+		t.Fatalf("decoded = %+v", m)
+	}
+	if out := classify(&m, &indexerTxTypes.LogMessage{}); len(out) != 0 {
+		t.Fatalf("metadata produced %d taxable events", len(out))
+	}
+}
+
+// ForceTransfer has never appeared on Cosmos Hub, but if it ever does it moves
+// real coins between two parties and must be recorded for both.
+func TestForceTransferIsClassifiedAsAMovement(t *testing.T) {
+	from := "cosmos1dycvuk8xxqr9mt4vatev3ygdmt7csazum3zu4z"
+	to := "cosmos1z8hye2cqvxusvvpcwk5l6uxw3zxv73pew5rdgs"
+	coin := append(fieldBytes(1, "factory/x/pepe"), fieldBytes(2, "4200")...)
+	b := append(fieldBytes(1, "cosmos1admin"), nested(2, coin)...)
+	b = append(b, fieldBytes(3, from)...)
+	b = append(b, fieldBytes(4, to)...)
+
+	var m MsgTFForceTransfer
+	if err := m.Unmarshal(b); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.Amount != "4200" || m.Denom != "factory/x/pepe" {
+		t.Fatalf("coin = %s / %s", m.Amount, m.Denom)
+	}
+	out := classify(&m, &indexerTxTypes.LogMessage{})
+	if len(out) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(out))
+	}
+	if out[0].FromAddr != from || out[0].ToAddr != to || out[0].Amount != "4200" {
+		t.Fatalf("event = %+v", out[0])
 	}
 }
