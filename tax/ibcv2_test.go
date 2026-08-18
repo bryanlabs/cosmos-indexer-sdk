@@ -150,3 +150,54 @@ func TestIBCV2TypesAreRegistrable(t *testing.T) {
 		}
 	}
 }
+
+// Real mainnet receive at height 29349107. The destination callback failed, so
+// ibc-go's callbacks middleware reverted the callback and re-emitted the whole
+// execution with an ibccallbackerror- prefix on the event type AND on every
+// attribute key. success is still true: the transfer happened and the recipient
+// holds the coins, so it is still an acquisition. Matching only the bare event
+// type silently dropped 54994958330602429076480 aseda.
+func TestClassifyIBCV2ReceiveSurvivesFailedCallback(t *testing.T) {
+	receiver := "cosmos1lqu9662kd4my6dww4gzp3730vew0gkwe0nl9ztjh0n5da0a8zc4swsvd22"
+	sender := "0xca6d9fd15df411de3c1324ac01f2205e583b5c21"
+	denom := "transfer/cosmoshub-0/transfer/channel-1337/aseda"
+
+	msg := &MsgRecvPacketV2{}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("ibccallbackerror-fungible_token_packet",
+			[2]string{"ibccallbackerror-sender", sender},
+			[2]string{"ibccallbackerror-receiver", receiver},
+			[2]string{"ibccallbackerror-denom", denom},
+			[2]string{"ibccallbackerror-amount", "54994958330602429076480"},
+			[2]string{"ibccallbackerror-success", "true"}),
+	}}
+
+	out := classify(msg, log)
+	if len(out) != 1 {
+		t.Fatalf("a failed callback must not discard the transfer: got %d events", len(out))
+	}
+	if out[0].Amount != "54994958330602429076480" || out[0].Denom != denom {
+		t.Fatalf("event = %+v", out[0])
+	}
+	if out[0].ToAddr != receiver || out[0].FromAddr != sender {
+		t.Fatalf("addresses = %s -> %s", out[0].FromAddr, out[0].ToAddr)
+	}
+	if out[0].Category != string(CategoryIBCIn) {
+		t.Fatalf("category = %q", out[0].Category)
+	}
+}
+
+// The prefix must not smuggle in a genuinely failed transfer.
+func TestClassifyIBCV2PrefixedFailedTransferStillExcluded(t *testing.T) {
+	msg := &MsgRecvPacketV2{}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("ibccallbackerror-fungible_token_packet",
+			[2]string{"ibccallbackerror-receiver", "cosmos1abc"},
+			[2]string{"ibccallbackerror-denom", "uatom"},
+			[2]string{"ibccallbackerror-amount", "1000"},
+			[2]string{"ibccallbackerror-success", "false"}),
+	}}
+	if out := classify(msg, log); len(out) != 0 {
+		t.Fatalf("a failed transfer produced %d events", len(out))
+	}
+}

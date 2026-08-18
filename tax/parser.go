@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -374,6 +375,10 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator string) []T
 	return out
 }
 
+// ibcCallbackErrorPrefix is what ibc-go's callbacks middleware prepends to the
+// type and attribute keys of events emitted during a callback it had to revert.
+const ibcCallbackErrorPrefix = "ibccallbackerror-"
+
 // ibcV2ReceiveEvents turns the fungible_token_packet events of a channel v2
 // receive into inbound transfers. The module emits one per payload with the
 // sender, receiver, denom and amount already extracted, which is exactly what
@@ -384,12 +389,18 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator string) []T
 func ibcV2ReceiveEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var out []TaxableEvent
 	for _, ev := range log.Events {
-		if ev.Type != "fungible_token_packet" {
+		// When a destination callback fails, ibc-go's callbacks middleware
+		// reverts the callback and re-emits that execution's events with an
+		// ibccallbackerror- prefix on the type AND on every attribute key. The
+		// transfer itself is not reverted, so the recipient still received the
+		// coins and it is still an acquisition. Matching the bare type only
+		// silently dropped those.
+		if strings.TrimPrefix(ev.Type, ibcCallbackErrorPrefix) != "fungible_token_packet" {
 			continue
 		}
 		var sender, receiver, denom, amount, success string
 		for _, a := range ev.Attributes {
-			switch a.Key {
+			switch strings.TrimPrefix(a.Key, ibcCallbackErrorPrefix) {
 			case "sender":
 				sender = a.Value
 			case "receiver":
