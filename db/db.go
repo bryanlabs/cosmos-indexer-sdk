@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
@@ -256,6 +257,8 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 		for _, address := range uniqueAddress {
 			addressesSlice = append(addressesSlice, address)
 		}
+		// Lock rows in a stable order so concurrent indexers cannot deadlock.
+		sort.Slice(addressesSlice, func(i, j int) bool { return addressesSlice[i].Address < addressesSlice[j].Address })
 
 		if len(addressesSlice) != 0 {
 			if err := dbTransaction.Clauses(clause.OnConflict{
@@ -433,6 +436,8 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 	for _, messageType := range fullUniqueBlockMessageTypes {
 		messageTypesSlice = append(messageTypesSlice, messageType)
 	}
+	// Lock rows in a stable order so concurrent indexers cannot deadlock.
+	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].MessageType < messageTypesSlice[j].MessageType })
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -464,6 +469,8 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 	for _, messageType := range fullUniqueBlockMessageEventTypes {
 		messageTypesSlice = append(messageTypesSlice, messageType)
 	}
+	// Lock rows in a stable order so concurrent indexers cannot deadlock.
+	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].Type < messageTypesSlice[j].Type })
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -495,6 +502,10 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 	for _, messageEventAttributeKey := range fullUniqueMessageEventAttributeKeys {
 		messageEventAttributeKeysSlice = append(messageEventAttributeKeysSlice, messageEventAttributeKey)
 	}
+	// Lock rows in a stable order so concurrent indexers cannot deadlock.
+	sort.Slice(messageEventAttributeKeysSlice, func(i, j int) bool {
+		return messageEventAttributeKeysSlice[i].Key < messageEventAttributeKeysSlice[j].Key
+	})
 
 	if len(messageEventAttributeKeysSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
