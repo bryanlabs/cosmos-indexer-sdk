@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
@@ -424,6 +425,45 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 	return block, txs, err
 }
 
+// The lookup tables (message types, event types, attribute keys) hold a small
+// set of values that recur in nearly every block. Re-upserting them per block
+// meant every indexer process took an exclusive row lock on the same handful of
+// rows, so processes serialised on Lock/transactionid rather than running in
+// parallel, and three indexers were no faster than one.
+//
+// A row's id never changes once assigned, so remember it per process and send
+// only genuinely new values to the database. A miss falls through to the
+// original upsert, which is what makes this safe when another process inserts a
+// value first.
+type idCache struct {
+	mu sync.RWMutex
+	m  map[string]uint
+}
+
+func newIDCache() *idCache { return &idCache{m: make(map[string]uint)} }
+
+func (c *idCache) get(key string) (uint, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	id, ok := c.m[key]
+	return id, ok
+}
+
+func (c *idCache) put(key string, id uint) {
+	if id == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[key] = id
+}
+
+var (
+	messageTypeIDs      = newIDCache()
+	messageEventTypeIDs = newIDCache()
+	attributeKeyIDs     = newIDCache()
+)
+
 func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageType, error) {
 	fullUniqueBlockMessageTypes := make(map[string]models.MessageType)
 	for _, tx := range txs {
@@ -433,7 +473,12 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 	}
 
 	var messageTypesSlice []models.MessageType
-	for _, messageType := range fullUniqueBlockMessageTypes {
+	for key, messageType := range fullUniqueBlockMessageTypes {
+		if id, ok := messageTypeIDs.get(messageType.MessageType); ok {
+			messageType.ID = id
+			fullUniqueBlockMessageTypes[key] = messageType
+			continue
+		}
 		messageTypesSlice = append(messageTypesSlice, messageType)
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
@@ -451,6 +496,7 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 
 	for _, messageType := range messageTypesSlice {
 		fullUniqueBlockMessageTypes[messageType.MessageType] = messageType
+		messageTypeIDs.put(messageType.MessageType, messageType.ID)
 	}
 
 	return fullUniqueBlockMessageTypes, nil
@@ -466,7 +512,12 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 	}
 
 	var messageTypesSlice []models.MessageEventType
-	for _, messageType := range fullUniqueBlockMessageEventTypes {
+	for key, messageType := range fullUniqueBlockMessageEventTypes {
+		if id, ok := messageEventTypeIDs.get(messageType.Type); ok {
+			messageType.ID = id
+			fullUniqueBlockMessageEventTypes[key] = messageType
+			continue
+		}
 		messageTypesSlice = append(messageTypesSlice, messageType)
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
@@ -484,6 +535,7 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 
 	for _, messageType := range messageTypesSlice {
 		fullUniqueBlockMessageEventTypes[messageType.Type] = messageType
+		messageEventTypeIDs.put(messageType.Type, messageType.ID)
 	}
 
 	return fullUniqueBlockMessageEventTypes, nil
@@ -499,7 +551,12 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 	}
 
 	var messageEventAttributeKeysSlice []models.MessageEventAttributeKey
-	for _, messageEventAttributeKey := range fullUniqueMessageEventAttributeKeys {
+	for key, messageEventAttributeKey := range fullUniqueMessageEventAttributeKeys {
+		if id, ok := attributeKeyIDs.get(messageEventAttributeKey.Key); ok {
+			messageEventAttributeKey.ID = id
+			fullUniqueMessageEventAttributeKeys[key] = messageEventAttributeKey
+			continue
+		}
 		messageEventAttributeKeysSlice = append(messageEventAttributeKeysSlice, messageEventAttributeKey)
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
@@ -519,6 +576,7 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 
 	for _, messageEventAttributeKey := range messageEventAttributeKeysSlice {
 		fullUniqueMessageEventAttributeKeys[messageEventAttributeKey.Key] = messageEventAttributeKey
+		attributeKeyIDs.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
 	}
 
 	return fullUniqueMessageEventAttributeKeys, nil
