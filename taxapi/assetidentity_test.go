@@ -27,8 +27,11 @@ func TestJunoFactoryUatomCannotBePricedOrLabelledAsNativeAtom(t *testing.T) {
 	s := NewServer(nil, o, DefaultNativeAsset)
 	meta := map[string]DenomMeta{junoFactoryUatomVoucher: {Symbol: "ATOM", Decimals: 6}, "uatom": {Symbol: "ATOM", Decimals: 6}}
 	row := s.buildRow("mainnet", meta, time.Now(), "factory-tx", "transfer", "in", junoFactoryUatomVoucher, "10000000000", "a", "b")
-	if row.Symbol == "ATOM" || row.Symbol != junoFactoryUatomSymbol || !row.PriceMissing || !row.PriceUSD.IsZero() || !row.ValueUSD.IsZero() || !row.DecimalsAssumed || !row.IsIBC || row.Denom != junoFactoryUatomVoucher {
+	if row.Symbol == "ATOM" || row.Symbol != junoFactoryUatomSymbol || !row.PriceMissing || !row.PriceUSD.IsZero() || !row.ValueUSD.IsZero() || row.DecimalsAssumed || !row.IsIBC || row.Denom != junoFactoryUatomVoucher {
 		t.Fatalf("factory token misidentified: %+v", row)
+	}
+	if row.AssetIdentity == nil || row.AssetIdentity.SourceChain != "juno-1" || row.AssetIdentity.TokenName != "ATOMREWARDS" || row.AssetIdentity.RawAmount != "10000000000" || row.AssetIdentity.OfficialAtomMatch {
+		t.Fatalf("trace evidence missing: %+v", row.AssetIdentity)
 	}
 	if calls != 0 {
 		t.Fatal("unverified factory asset should not request a price")
@@ -43,6 +46,21 @@ func TestJunoFactoryUatomCannotBePricedOrLabelledAsNativeAtom(t *testing.T) {
 		t.Fatalf("native pricing broken: %+v", native)
 	}
 }
+func TestNonCanonicalAtomLabelRequiresReview(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usd":2,"found":true}`))
+	}))
+	defer srv.Close()
+	s := NewServer(nil, NewOracle(srv.URL, ""), DefaultNativeAsset)
+	for _, denom := range []string{"ibc/OTHER_ATOM_LABEL", "transfer/channel-141/transfer/channel-9/uatom"} {
+		row := s.buildRow("mainnet", map[string]DenomMeta{denom: {Symbol: "ATOM", Decimals: 6}, "uatom": {Symbol: "ATOM", Decimals: 6}}, time.Now(), "tx", "transfer", "in", denom, "1000000", "a", "b")
+		if row.Symbol == "ATOM" || !row.PriceMissing || row.AssetIdentity == nil || row.AssetIdentity.OfficialAtomMatch {
+			t.Fatalf("non-native ATOM priced by name: %+v", row)
+		}
+	}
+}
+
 func TestJunoFactoryTransferCannotCreateNativeAtomFifoLot(t *testing.T) {
 	s := NewServer(nil, NewOracle("http://127.0.0.1:1", ""), DefaultNativeAsset)
 	at := time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC)

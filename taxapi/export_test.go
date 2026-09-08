@@ -91,8 +91,8 @@ func TestWriteCSVImportContractsAndEscaping(t *testing.T) {
 			width:  8, desc: 7,
 		},
 		"generic": {
-			header: []string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger"},
-			width:  18, desc: -1,
+			header: []string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity"},
+			width:  19, desc: -1,
 		},
 	}
 

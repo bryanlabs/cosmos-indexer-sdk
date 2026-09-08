@@ -463,9 +463,20 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 		symbol = base
 	}
 	unverifiedFactory := isUnverifiedJunoFactoryUatom(chain, denom, base)
+	atomMismatch := chain == "mainnet" && denom != "uatom" && (unverifiedFactory || strings.EqualFold(symbol, "ATOM") || base == "uatom")
+	var identity *AssetIdentity
+	if atomMismatch {
+		identity = &AssetIdentity{ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
+			BaseToken: base, Treatment: "unreviewed", Note: "Did not match the official Cosmos Hub ATOM denom. Native ATOM pricing is disabled; user treatment has not been selected."}
+		symbol = "ATOM-UNVERIFIED"
+	}
 	if unverifiedFactory {
-		// Keep a separate identity so this cannot enter native ATOM totals/FIFO.
-		symbol, decimals, assumed, isIBC = junoFactoryUatomSymbol, 6, true, true
+		// Source-chain metadata verifies ATOMREWARDS and its display exponent.
+		symbol, decimals, assumed, isIBC = junoFactoryUatomSymbol, 6, false, true
+		identity.TokenName = "ATOMREWARDS"
+		identity.SourceChain = "juno-1"
+		identity.ChannelPath = "transfer/channel-141/transfer/channel-42"
+		identity.BaseToken = junoFactoryUatomBase
 	}
 	amt, err := decimal.NewFromString(amountBase)
 	if err != nil {
@@ -483,7 +494,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	if !found && base != denom {
 		usdF, found = s.oracle.PriceAt(chain, denom, date)
 	}
-	if found && !unverifiedFactory {
+	if found && !atomMismatch {
 		price = decimal.NewFromFloat(usdF)
 	} else {
 		priceMissing = true
@@ -495,6 +506,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 		From: from, To: to, TxHash: hash, IsIBC: isIBC,
 		DecimalsAssumed: assumed,
 		PriceMissing:    priceMissing,
+		AssetIdentity:   identity,
 	}
 }
 

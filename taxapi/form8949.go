@@ -118,6 +118,9 @@ func Build8949(rows []Row) []Form8949Row {
 		if asset == "" {
 			asset = r.Denom
 		}
+		if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch {
+			asset = r.AssetIdentity.RawDenom
+		}
 		switch {
 		case r.Direction == "in" && r.Category != "fee":
 			// acquisition

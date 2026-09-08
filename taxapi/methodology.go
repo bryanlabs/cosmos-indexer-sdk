@@ -25,7 +25,7 @@ const (
 
 func currentMethodology() Methodology {
 	return Methodology{
-		AssetIdentity:        "Known Juno tokenfactory voucher ibc/3622BC03E5098BF3EC0A2DB13E5031668290B98020C5FADB7901207F44C4D717 is displayed as JUNO-TF-uatom, not ATOM. Its verified source denom is factory/juno1tm748xtl4wmxfn5hqn6r66tzv0csc3qsey04st/uatom, routed from Juno through Osmosis. No native ATOM price or FIFO identity is used. Display decimals remain an explicit assumption until source metadata is verified.",
+		AssetIdentity:        "Known Juno tokenfactory voucher ibc/3622BC03E5098BF3EC0A2DB13E5031668290B98020C5FADB7901207F44C4D717 is displayed as ATOMREWARDS, not ATOM. Its verified source denom is factory/juno1tm748xtl4wmxfn5hqn6r66tzv0csc3qsey04st/uatom, routed from Juno through Osmosis. No native ATOM price or FIFO identity is used. The Juno bank module verifies the token name and six decimals. Token names, display aliases and issuer descriptions do not prove native ATOM equivalence or market value.",
 		RewardClassification: "Delegator reward income includes only executed withdraw_rewards events, split by validator and denomination. Delegated, undelegated and redelegated principal is not income. Auto-withdrawals during staking operations, including both redelegation validators, are included. Fees are separate.",
 		ValidatorMetadata:    "The operator address comes from the withdrawal event. Monikers are current chain REST labels at report generation, not historical names or evidence of validator jurisdiction. CoinTracker's fixed import schema has no metadata field; use the Generic or Income CSV for validator attribution.",
 		Version:              MethodologyVersion,

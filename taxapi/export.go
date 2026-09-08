@@ -31,6 +31,7 @@ type Row struct {
 	ValidatorAddress string
 	ValidatorMoniker string
 	RewardTrigger    string
+	AssetIdentity    *AssetIdentity
 	// DecimalsAssumed is true when neither the oracle nor the chain's bank module
 	// could resolve this denom, so decimals fell back to a bare guess (6). Amount,
 	// PriceUSD and ValueUSD for this row may be wrong and should not be trusted
@@ -61,6 +62,10 @@ func (r Row) description() string {
 			RewardTrigger    string `json:"reward_trigger"`
 		}{r.ValidatorAddress, r.ValidatorMoniker, r.RewardTrigger})
 		d += " | staking_metadata=" + string(metadata)
+	}
+	if r.AssetIdentity != nil {
+		metadata, _ := json.Marshal(r.AssetIdentity)
+		d += " | asset_identity=" + string(metadata)
 	}
 	if r.DecimalsAssumed {
 		d += " (decimals unknown, amount may be wrong)"
@@ -193,13 +198,13 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	case "generic":
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger"}) //nolint:lll
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				r.Symbol, r.Denom, r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD),
 				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
-				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger,
+				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.AssetIdentity),
 			})
 		}
 
@@ -207,6 +212,14 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		return WriteCSV(out, "koinly", rows)
 	}
 	return w.Error()
+}
+
+func assetIdentityJSON(identity *AssetIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	data, _ := json.Marshal(identity)
+	return string(data)
 }
 
 // party returns the counterparty address for a row (the non-fee side).
