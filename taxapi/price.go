@@ -106,12 +106,25 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 	return m
 }
 
+const cosmosHubNobleUSDCDenom = "ibc/27BCBC098A3AE31C80E18A3EA7A516F2530B7362F83D7992A4D7888DBB586D33"
+
+// fixedUSDStablecoinPrice is deliberately an exact chain+denom allowlist, not a
+// symbol check. Anyone can create a token called USDC, while this voucher's IBC
+// trace is pinned to transfer/channel-1266/transfer/channel-2/uusdc. The oracle
+// currently knows its symbol and decimals but has no CoinGecko mapping for it.
+func fixedUSDStablecoinPrice(chain, denom string) (float64, bool) {
+	if chain == "mainnet" && denom == cosmosHubNobleUSDCDenom {
+		return 1, true
+	}
+	return 0, false
+}
+
 // PriceAt returns the USD price for a denom on (or most recently before) a date
-// (YYYY-MM-DD). found=false when the oracle has no price — callers must not
-// treat that as a confirmed $0 (INF-201). A found price is cached indefinitely
-// (a historical day's price is immutable); a miss is cached for priceMissTTL so
-// one report's many rows for the same denom+date don't hammer the oracle, but a
-// transient gap still gets retried.
+// (YYYY-MM-DD). The oracle is authoritative when it has a value. If it does not,
+// an exact allowlist supplies the documented $1 peg for verified USD stablecoin
+// vouchers. found=false for every other miss, which callers must not treat as a
+// confirmed $0 (INF-201). A found price is cached indefinitely; other misses are
+// cached for priceMissTTL so a transient gap still gets retried.
 func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
 	key := chain + "|" + denom + "|" + date
 
@@ -130,6 +143,9 @@ func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
 	usd, found := 0.0, false
 	if err := o.get(url, &body); err == nil {
 		usd, found = body.USD, body.Found
+	}
+	if !found {
+		usd, found = fixedUSDStablecoinPrice(chain, denom)
 	}
 
 	o.mu.Lock()

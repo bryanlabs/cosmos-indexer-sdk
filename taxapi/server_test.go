@@ -146,6 +146,24 @@ func TestBuildRowPriceFoundVsMissing(t *testing.T) {
 	}
 }
 
+func TestBuildRowPinnedUSDCFallbackProducesPricedReward(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usd":0,"found":false}`))
+	}))
+	defer srv.Close()
+
+	s := &Server{oracle: NewOracle(srv.URL, "")}
+	meta := map[string]DenomMeta{cosmosHubNobleUSDCDenom: {Symbol: "USDC", Decimals: 6}}
+	row := s.buildRow("mainnet", meta, time.Now(), "h-usdc", "reward", "in", cosmosHubNobleUSDCDenom, "243", "", "wallet")
+	if row.PriceMissing || !row.PriceUSD.Equal(d(1)) || !row.ValueUSD.Equal(decimal.RequireFromString("0.000243")) {
+		t.Fatalf("pinned USDC reward should be valued at $1 per unit: %+v", row)
+	}
+	if strings.Contains(row.description(), "price missing") {
+		t.Fatalf("priced USDC row must not carry a warning: %q", row.description())
+	}
+}
+
 func TestBuildIncomeCSVWarnsOnMissingPrice(t *testing.T) {
 	now := time.Now()
 	rows := []Row{

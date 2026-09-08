@@ -66,6 +66,52 @@ func TestPriceAtCachesFoundIndefinitely(t *testing.T) {
 	}
 }
 
+func TestPriceAtUsesPinnedUSDCPriceWhenOracleMisses(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usd":0,"found":false}`))
+	}))
+	defer srv.Close()
+
+	o := NewOracle(srv.URL, "")
+	usd, found := o.PriceAt("mainnet", cosmosHubNobleUSDCDenom, "2026-05-04")
+	if !found || usd != 1 {
+		t.Fatalf("want pinned USDC price 1/true, got %v/%v", usd, found)
+	}
+	if _, _ = o.PriceAt("mainnet", cosmosHubNobleUSDCDenom, "2026-05-04"); hits != 1 {
+		t.Fatalf("want pinned price cached after one oracle attempt, got %d calls", hits)
+	}
+}
+
+func TestPriceAtDoesNotTrustUSDCNameForUnknownDenom(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usd":0,"found":false}`))
+	}))
+	defer srv.Close()
+
+	o := NewOracle(srv.URL, "")
+	if _, found := o.PriceAt("mainnet", "factory/cosmos1issuer/usdc", "2026-05-04"); found {
+		t.Fatal("an unknown token named USDC must remain unpriced")
+	}
+}
+
+func TestPriceAtPrefersOraclePriceOverPinnedUSDCPrice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usd":0.9975,"found":true}`))
+	}))
+	defer srv.Close()
+
+	o := NewOracle(srv.URL, "")
+	usd, found := o.PriceAt("mainnet", cosmosHubNobleUSDCDenom, "2026-05-04")
+	if !found || usd != 0.9975 {
+		t.Fatalf("want oracle price 0.9975/true, got %v/%v", usd, found)
+	}
+}
+
 func TestPriceAtCachesMissBriefly(t *testing.T) {
 	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

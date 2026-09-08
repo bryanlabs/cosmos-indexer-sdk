@@ -58,9 +58,10 @@ const reportMaxAge = 24 * time.Hour
 // beyond this.
 var inFlight sync.Map // key: string -> struct{}{}
 
-// canonicalReportKey normalizes chain/addresses/date-range/format into a
-// stable cache key: same address set in any order, case, or whitespace maps
-// to the same key.
+// canonicalReportKey normalizes methodology/chain/addresses/date-range/format
+// into a stable cache key. Including the methodology version invalidates every
+// cached report when pricing policy changes, while the same address set in any
+// order, case, or whitespace still maps to the same key.
 func canonicalReportKey(chain string, addresses []string, start, end, format string) string {
 	norm := make([]string, 0, len(addresses))
 	for _, a := range addresses {
@@ -70,7 +71,7 @@ func canonicalReportKey(chain string, addresses []string, start, end, format str
 		}
 	}
 	sort.Strings(norm)
-	return strings.Join([]string{chain, strings.Join(norm, ","), start, end, format}, "|")
+	return strings.Join([]string{MethodologyVersion, chain, strings.Join(norm, ","), start, end, format}, "|")
 }
 
 // reportIsStale reports whether a cached job's computation is out of date:

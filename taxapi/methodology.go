@@ -16,8 +16,8 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v1"
-	MethodologyDate    = "2026-07-04"
+	MethodologyVersion = "v2"
+	MethodologyDate    = "2026-09-08"
 )
 
 func currentMethodology() Methodology {
@@ -31,7 +31,8 @@ func currentMethodology() Methodology {
 		AggregationRule:      "one reference USD price per (denom, UTC day), read once from the oracle and cached; every row for that denom/day reuses the same value",
 		FallbackOrder: []string{
 			"wasm-indexer oracle price for the exact denom and day",
-			"no synthetic fallback beyond that: if the oracle has no price for a denom/day, the row is flagged price_missing rather than valued at $0",
+			"documented $1 USD peg for exact allowlisted USDC denominations when the oracle has no price",
+			"no synthetic fallback for any other asset: the row is flagged price_missing rather than valued at $0",
 		},
 		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated (see INF-201)",
 	}

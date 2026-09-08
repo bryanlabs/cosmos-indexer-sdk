@@ -437,7 +437,15 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 
 	price := decimal.Zero
 	priceMissing := false
-	if usdF, found := s.oracle.PriceAt(chain, base, ts.UTC().Format("2006-01-02")); found {
+	date := ts.UTC().Format("2006-01-02")
+	usdF, found := s.oracle.PriceAt(chain, base, date)
+	// If denom-trace resolution changed the lookup key, retry the exact voucher.
+	// The oracle may know a price or pinned stablecoin policy for that on-chain
+	// denom even when it has no entry for the trace's base denom.
+	if !found && base != denom {
+		usdF, found = s.oracle.PriceAt(chain, denom, date)
+	}
+	if found {
 		price = decimal.NewFromFloat(usdF)
 	} else {
 		priceMissing = true
