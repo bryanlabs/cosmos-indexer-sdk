@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -28,10 +29,14 @@ type Row struct {
 	IsIBC     bool   // true when Denom is an IBC trace path (Symbol is the resolved base)
 	// Validator attribution is populated for staking rewards and auto-withdrawals.
 	// It is carried in descriptions for import formats that support a note field.
-	ValidatorAddress string
-	ValidatorMoniker string
-	RewardTrigger    string
-	AssetIdentity    *AssetIdentity
+	ValidatorAddress   string
+	ValidatorMoniker   string
+	RewardTrigger      string
+	AssetIdentity      *AssetIdentity
+	AssetDecision      *AssetDecision
+	Excluded           bool
+	ManualBasisUSD     *decimal.Decimal
+	ManualAcquiredDate *time.Time
 	// DecimalsAssumed is true when neither the oracle nor the chain's bank module
 	// could resolve this denom, so decimals fell back to a bare guess (6). Amount,
 	// PriceUSD and ValueUSD for this row may be wrong and should not be trusted
@@ -56,15 +61,10 @@ func (r Row) description() string {
 		d = "ibc " + r.Denom
 	}
 	if r.ValidatorAddress != "" {
-		metadata, _ := json.Marshal(struct {
-			ValidatorAddress string `json:"validator_address"`
-			ValidatorMoniker string `json:"validator_moniker"`
-			RewardTrigger    string `json:"reward_trigger"`
-		}{r.ValidatorAddress, r.ValidatorMoniker, r.RewardTrigger})
-		d += " | staking_metadata=" + string(metadata)
+		d += " | staking_metadata=" + stakingMetadataJSON(r)
 	}
 	if r.AssetIdentity != nil {
-		metadata, _ := json.Marshal(r.AssetIdentity)
+		metadata, _ := json.Marshal(r.reviewIdentity())
 		d += " | asset_identity=" + string(metadata)
 	}
 	if r.DecimalsAssumed {
@@ -97,8 +97,41 @@ func (r Row) label() string {
 
 // WriteCSV writes rows in the requested platform format.
 func WriteCSV(out io.Writer, format string, rows []Row) error {
+	if pending := PendingAssetReviews(rows); pending > 0 {
+		return assetReviewRequired{pending}
+	}
+	kept := make([]Row, 0, len(rows))
+	for _, row := range rows {
+		if !row.Excluded {
+			kept = append(kept, row)
+		}
+	}
+	return writeCSV(out, format, kept)
+}
+
+// Internal preview transport retains pending and user-excluded receipts. It is
+// not a tax-software download; the tax export entrypoint always gates reviews.
+func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
+	if format != "cryptotaxcalculator" && format != "summ" {
+		return fmt.Errorf("preview format must be cryptotaxcalculator or summ")
+	}
+	var buf bytes.Buffer
+	if err := writeCSV(&buf, format, rows); err != nil {
+		return err
+	}
+	records, err := csv.NewReader(&buf).ReadAll()
+	if err != nil {
+		return err
+	}
+	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata")
+	for i, row := range rows {
+		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row))
+	}
+	return csv.NewWriter(out).WriteAll(records)
+}
+
+func writeCSV(out io.Writer, format string, rows []Row) error {
 	w := csv.NewWriter(out)
-	defer w.Flush()
 
 	switch format {
 	case "koinly":
@@ -108,7 +141,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 			_ = w.Write([]string{
 				r.Time.UTC().Format("2006-01-02 15:04:05 UTC"),
 				sentAmt, sentCur, recvAmt, recvCur,
-				"", "", usd(r.ValueUSD), "USD", r.label(), r.description(), r.TxHash,
+				"", "", rowValueText(r), "USD", r.label(), r.description(), r.TxHash,
 			})
 		}
 
@@ -157,7 +190,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 			_ = w.Write([]string{
 				r.Time.UTC().Format("2006-01-02 15:04:05"),
 				typ, r.Symbol, r.Amount.String(), "", "", "", "",
-				r.From, r.To, "cosmos", r.TxHash, r.description(), refPrice(r.PriceUSD), "USD",
+				r.From, r.To, "cosmos", r.TxHash, r.description(), rowPriceText(r), "USD",
 			})
 		}
 
@@ -166,7 +199,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		_ = w.Write([]string{"transactionDate", "orderType", "txhash", "incomingAsset", "incomingVolume", "incomingUnitRate", "incomingTransactionValue", "outgoingAsset", "outgoingVolume", "outgoingUnitRate", "outgoingTransactionValue", "feeAsset", "feeVolume", "feeUnitRate", "feeTransactionValue", "otherParties", "note"}) //nolint:lll
 		for _, r := range rows {
 			date := r.Time.UTC().Format("2006-01-02 15:04:05")
-			amt, rate, val := r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD)
+			amt, rate, val := r.Amount.String(), rowPriceText(r), rowValueText(r)
 			if r.Direction == "in" && r.Category != "fee" {
 				_ = w.Write([]string{date, "deposit", r.TxHash, r.Symbol, amt, rate, val, "", "", "", "", "", "", "", "", party(r), r.description()})
 			} else {
@@ -198,20 +231,72 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	case "generic":
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity"}) //nolint:lll
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
-				r.Symbol, r.Denom, r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD),
+				r.Symbol, r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
 				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
-				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.AssetIdentity),
+				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, "value"), manualField(r, "basis"), manualField(r, "date"),
 			})
 		}
 
 	default: // fall through to koinly for unknown formats
 		return WriteCSV(out, "koinly", rows)
 	}
+	w.Flush()
 	return w.Error()
+}
+
+func stakingMetadataJSON(r Row) string {
+	if r.ValidatorAddress == "" {
+		return ""
+	}
+	data, _ := json.Marshal(struct {
+		ValidatorAddress string `json:"validator_address"`
+		ValidatorMoniker string `json:"validator_moniker"`
+		RewardTrigger    string `json:"reward_trigger"`
+	}{r.ValidatorAddress, r.ValidatorMoniker, r.RewardTrigger})
+	return string(data)
+}
+
+func (r Row) reviewIdentity() *AssetIdentity {
+	if r.AssetIdentity == nil {
+		return nil
+	}
+	identity := *r.AssetIdentity
+	identity.Decision = r.AssetDecision
+	identity.Excluded = r.Excluded
+	identity.Treatment = "unreviewed"
+	if r.AssetDecision != nil {
+		identity.Treatment = r.AssetDecision.Mode
+		if r.AssetDecision.Mode == AssetDecisionExclude {
+			identity.Note = "Explicitly treated as valueless/excluded by the user. The source receipt remains in preview and audit records."
+		} else {
+			identity.Note = "Explicit user override of token, quantity, value, basis and acquisition date. These are user-supplied inputs, not verified on-chain identity or oracle prices."
+		}
+	}
+	return &identity
+}
+func reviewMode(r Row) string {
+	if r.AssetDecision == nil {
+		return ""
+	}
+	return r.AssetDecision.Mode
+}
+func manualField(r Row, field string) string {
+	if r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride {
+		return ""
+	}
+	switch field {
+	case "value":
+		return r.AssetDecision.ValueUSD
+	case "basis":
+		return r.AssetDecision.CostBasisUSD
+	case "date":
+		return r.AssetDecision.AcquiredDate
+	}
+	return ""
 }
 
 func assetIdentityJSON(identity *AssetIdentity) string {
@@ -257,6 +342,19 @@ func ctcType(r Row) string {
 		}
 		return "send"
 	}
+}
+
+func rowPriceText(r Row) string {
+	if r.AssetDecision != nil && r.AssetDecision.Mode == AssetDecisionOverride {
+		return r.PriceUSD.String()
+	}
+	return refPrice(r.PriceUSD)
+}
+func rowValueText(r Row) string {
+	if r.AssetDecision != nil && r.AssetDecision.Mode == AssetDecisionOverride {
+		return r.ValueUSD.String()
+	}
+	return usd(r.ValueUSD)
 }
 
 func usd(d decimal.Decimal) string {

@@ -19,13 +19,13 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v4"
+	MethodologyVersion = "v5"
 	MethodologyDate    = "2026-09-08"
 )
 
 func currentMethodology() Methodology {
 	return Methodology{
-		AssetIdentity:        "Known Juno tokenfactory voucher ibc/3622BC03E5098BF3EC0A2DB13E5031668290B98020C5FADB7901207F44C4D717 is displayed as ATOMREWARDS, not ATOM. Its verified source denom is factory/juno1tm748xtl4wmxfn5hqn6r66tzv0csc3qsey04st/uatom, routed from Juno through Osmosis. No native ATOM price or FIFO identity is used. The Juno bank module verifies the token name and six decimals. Token names, display aliases and issuer descriptions do not prove native ATOM equivalence or market value.",
+		AssetIdentity:        "Suspected-spam and token-identity mismatches retain their reported labels, raw denominations, source traces and transaction memos. Their preview is provisional and tax downloads are blocked until explicit per-record decisions. Users may exclude a receipt as valueless or enter any token ticker, quantity, total USD value, total USD cost basis and acquisition date. Overrides are user-supplied, not oracle-verified, and apply only to that report. Original on-chain records are never changed. Excluded receipts remain in preview and review audit JSON.",
 		RewardClassification: "Delegator reward income includes only executed withdraw_rewards events, split by validator and denomination. Delegated, undelegated and redelegated principal is not income. Auto-withdrawals during staking operations, including both redelegation validators, are included. Fees are separate.",
 		ValidatorMetadata:    "The operator address comes from the withdrawal event. Monikers are current chain REST labels at report generation, not historical names or evidence of validator jurisdiction. CoinTracker's fixed import schema has no metadata field; use the Generic or Income CSV for validator attribution.",
 		Version:              MethodologyVersion,
@@ -36,7 +36,8 @@ func currentMethodology() Methodology {
 		TimestampGranularity: "daily (UTC calendar day); every event on a given day for a given denom uses that day's single reference price, not an intraday price",
 		AggregationRule:      "one reference USD price per (denom, UTC day), read once from the oracle and cached; every row for that denom/day reuses the same value",
 		FallbackOrder: []string{
-			"asset identity check first: the reviewed Juno tokenfactory uatom voucher is not native ATOM; keep it separately labelled and unpriced pending verified metadata",
+			"asset review first: suspected-spam receipts remain unreviewed until the user explicitly excludes them or supplies token identity, quantity, value and basis; no default exclusion or override",
+			"for an explicit override, use the user's exact total USD value and basis with their chosen token and acquisition date, not a guessed native ATOM price",
 			"wasm-indexer oracle price for the exact denom and day",
 			"documented $1 USD peg for exact allowlisted USDC denominations when the oracle has no price",
 			"no synthetic fallback for any other asset: the row is flagged price_missing rather than valued at $0",

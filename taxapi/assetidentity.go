@@ -3,16 +3,23 @@ package taxapi
 // AssetIdentity preserves evidence separately from an optional user treatment.
 // An unresolved mismatch is never silently merged into the native ATOM asset.
 type AssetIdentity struct {
-	ReportedLabel     string `json:"reported_label"`
-	TokenName         string `json:"token_name"`
-	RawDenom          string `json:"raw_denom"`
-	RawAmount         string `json:"raw_amount"`
-	SourceChain       string `json:"source_chain"`
-	ChannelPath       string `json:"channel_path"`
-	BaseToken         string `json:"base_token"`
-	OfficialAtomMatch bool   `json:"official_atom_match"`
-	Treatment         string `json:"treatment"`
-	Note              string `json:"note"`
+	RecordID          string         `json:"record_id"`
+	Wallet            string         `json:"wallet"`
+	Memo              string         `json:"memo"`
+	SuspectedSpam     bool           `json:"suspected_spam"`
+	Reasons           []string       `json:"reasons"`
+	Decision          *AssetDecision `json:"decision,omitempty"`
+	Excluded          bool           `json:"excluded"`
+	ReportedLabel     string         `json:"reported_label"`
+	TokenName         string         `json:"token_name"`
+	RawDenom          string         `json:"raw_denom"`
+	RawAmount         string         `json:"raw_amount"`
+	SourceChain       string         `json:"source_chain"`
+	ChannelPath       string         `json:"channel_path"`
+	BaseToken         string         `json:"base_token"`
+	OfficialAtomMatch bool           `json:"official_atom_match"`
+	Treatment         string         `json:"treatment"`
+	Note              string         `json:"note"`
 }
 
 const (

@@ -35,6 +35,7 @@ type lot struct {
 	qty          decimal.Decimal // display units
 	cost         decimal.Decimal // USD per unit
 	date         time.Time
+	manual       bool
 	basisUnknown bool // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
 }
 
@@ -68,6 +69,9 @@ func Build8949(rows []Row) []Form8949Row {
 	var out []Form8949Row
 
 	for _, r := range sorted {
+		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+			continue
+		}
 		// NFT acquisition via mint: establishes the NFT's cost basis.
 		if r.Category == "nft_mint" {
 			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
@@ -118,18 +122,40 @@ func Build8949(rows []Row) []Form8949Row {
 		if asset == "" {
 			asset = r.Denom
 		}
-		if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch {
+		if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch && (r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride) {
 			asset = r.AssetIdentity.RawDenom
 		}
 		switch {
 		case r.Direction == "in" && r.Category != "fee":
 			// acquisition
+			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownFor(r.Category)
+			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
+				cost = r.ManualBasisUSD.DivRound(r.Amount, 64)
+				acquired = *r.ManualAcquiredDate
+				unknown = false
+			}
 			lots[asset] = append(lots[asset], lot{
-				qty: r.Amount, cost: r.PriceUSD, date: r.Time,
-				basisUnknown: basisUnknownFor(r.Category),
+				qty: r.Amount, cost: cost, date: acquired,
+				basisUnknown: unknown, manual: r.ManualBasisUSD != nil,
 			})
+			sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
 
 		case r.Direction == "out":
+			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
+				remaining := r.Amount
+				for remaining.IsPositive() && len(lots[asset]) > 0 {
+					q := lots[asset]
+					take := decimal.Min(remaining, q[0].qty)
+					remaining = remaining.Sub(take)
+					if take.Equal(q[0].qty) {
+						lots[asset] = q[1:]
+					} else {
+						q[0].qty = q[0].qty.Sub(take)
+					}
+				}
+				out = append(out, Form8949Row{Description: r.Amount.String() + " " + asset + " (user-supplied basis/value)", DateAcquired: r.ManualAcquiredDate.UTC().Format("01/02/2006"), DateSold: r.Time.UTC().Format("01/02/2006"), Proceeds: r.ValueUSD, CostBasis: *r.ManualBasisUSD, GainLoss: r.ValueUSD.Sub(*r.ManualBasisUSD), LongTerm: r.Time.Sub(*r.ManualAcquiredDate) > 365*24*time.Hour})
+				break
+			}
 			// disposal (incl. fee spends): consume FIFO
 			remaining := r.Amount
 			disposalPrice := r.PriceUSD
@@ -154,6 +180,9 @@ func Build8949(rows []Row) []Form8949Row {
 				take := decimal.Min(remaining, l.qty)
 				proceeds := take.Mul(disposalPrice)
 				desc := take.String() + " " + asset
+				if l.manual {
+					desc += " (user-supplied basis)"
+				}
 				var cost, gain decimal.Decimal
 				if l.basisUnknown {
 					// We saw this lot arrive (transfer/IBC-in) but not its true
@@ -189,9 +218,9 @@ func Build8949(rows []Row) []Form8949Row {
 }
 
 // CountUnknownBasis returns how many 8949 lines have an unresolved cost basis.
-// Zero means this is a "pure on-chain wallet" (INF-205): every disposal traces
-// to a known acquisition (reward, commission, swap, NFT mint/buy), so the 8949
-// is fully correct on its own. Nonzero means the wallet received assets from
+// Zero means no missing basis remains in these rows; a basis may be supplied
+// explicitly by the user rather than verified on chain. Such lots are labelled
+// in the description. Nonzero means the wallet received assets from
 // outside our view (an exchange withdrawal, IBC-in, or an untracked sender) —
 // steer those users to a full-history aggregator instead.
 func CountUnknownBasis(rows []Form8949Row) int {

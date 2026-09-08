@@ -45,6 +45,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /report-job", s.handleReportJob)
+	mux.HandleFunc("GET /asset-review", s.handleAssetReview)
 	mux.HandleFunc("GET /8949", s.handle8949)
 	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
 	mux.HandleFunc("GET /income", s.handleIncome)
@@ -74,9 +75,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	chain := def(q.Get("chain"), "mainnet")
 	format := def(q.Get("format"), "summ")
-	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTaxError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv")
@@ -92,9 +93,9 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chain := def(q.Get("chain"), "mainnet")
-	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTaxError(w, err)
 		return
 	}
 	// One address per call (rowsFor above is single-address), so every lot here
@@ -122,9 +123,9 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chain := def(q.Get("chain"), "mainnet")
-	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTaxError(w, err)
 		return
 	}
 	form := Build8949(rows)
@@ -157,9 +158,9 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chain := def(q.Get("chain"), "mainnet")
-	rows, err := s.rowsFor(chain, addr, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTaxError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv")
@@ -182,6 +183,9 @@ func buildIncomeCSV(rows []Row, address, recognition string) string {
 	total := decimal.Zero
 	missingDenoms := map[string]bool{}
 	for _, row := range rows {
+		if row.Excluded {
+			continue
+		}
 		if row.Category != "reward" && row.Category != "commission" {
 			continue
 		}
@@ -191,10 +195,10 @@ func buildIncomeCSV(rows []Row, address, recognition string) string {
 		}
 		_ = cw.Write([]string{
 			address, row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
-			row.Amount.String(), row.PriceUSD.String(), row.ValueUSD.StringFixed(2), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger,
+			row.Amount.String(), row.PriceUSD.String(), rowValueText(row), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger,
 		})
 	}
-	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.StringFixed(2), "", "", "", ""})
+	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.String(), "", "", "", ""})
 	_ = cw.Write([]string{address, "", "RECOGNITION POLICY", "", "", "", "", recognition, "", "", "", ""})
 	if len(missingDenoms) > 0 {
 		denoms := make([]string, 0, len(missingDenoms))
@@ -231,22 +235,12 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
 	// An entity may hold several wallets; the $1,000 deduction is per return, so
 	// sum staking income across all of them, then compute one 990-T.
-	ubti := decimal.Zero
-	priceMissingRows := 0
-	for _, a := range strings.Split(addr, ",") {
-		a = strings.TrimSpace(a)
-		if a == "" {
-			continue
-		}
-		rows, err := s.rowsFor(chain, a, start, end)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		addrUBTI, addrMissing := sumUBTI(rows)
-		ubti = ubti.Add(addrUBTI)
-		priceMissingRows += addrMissing
+	rows, err := s.rowsForRequest(r, chain, strings.Split(addr, ","), start, end)
+	if err != nil {
+		writeTaxError(w, err)
+		return
 	}
+	ubti, priceMissingRows := sumUBTI(rows)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(compute990T(ubti, priceMissingRows, recognition))
 }
@@ -257,6 +251,9 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 func sumUBTI(rows []Row) (ubti decimal.Decimal, priceMissingRows int) {
 	ubti = decimal.Zero
 	for _, row := range rows {
+		if row.Excluded {
+			continue
+		}
 		if row.Category != "reward" && row.Category != "commission" {
 			continue
 		}
@@ -345,6 +342,10 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	// in-memory cache hits.
 	s.prewarmPrices(chain, events, fees)
 
+	memos, err := s.eventMemos(events)
+	if err != nil {
+		return nil, err
+	}
 	var validatorNames map[string]string
 	for _, event := range events {
 		if event.ValidatorAddress != "" {
@@ -354,19 +355,13 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	}
 	out := make([]Row, 0, len(events)+len(fees))
 	for _, e := range events {
-		dir := "in"
-		switch e.Category {
-		case string(tax.CategoryTransfer), string(tax.CategoryIBCOut), string(tax.CategoryNFTSale), string(tax.CategorySwap):
-			// Disposer (FromAddr) sends; everyone else (ToAddr) acquires.
-			if e.FromAddr == addr {
-				dir = "out"
-			}
-		}
+		dir := eventDirection(e, addr)
 		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
 		row.Asset = e.Asset
 		row.ValidatorAddress = e.ValidatorAddress
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
+		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
 		out = append(out, row)
 	}
 	for _, f := range fees {
@@ -468,11 +463,10 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	if atomMismatch {
 		identity = &AssetIdentity{ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
 			BaseToken: base, Treatment: "unreviewed", Note: "Did not match the official Cosmos Hub ATOM denom. Native ATOM pricing is disabled; user treatment has not been selected."}
-		symbol = "ATOM-UNVERIFIED"
 	}
 	if unverifiedFactory {
 		// Source-chain metadata verifies ATOMREWARDS and its display exponent.
-		symbol, decimals, assumed, isIBC = junoFactoryUatomSymbol, 6, false, true
+		decimals, assumed, isIBC = 6, false, true
 		identity.TokenName = "ATOMREWARDS"
 		identity.SourceChain = "juno-1"
 		identity.ChannelPath = "transfer/channel-141/transfer/channel-42"

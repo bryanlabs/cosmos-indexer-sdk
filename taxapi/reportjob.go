@@ -1,7 +1,9 @@
 package taxapi
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -24,14 +26,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 // these addresses than what was last computed, a max age backstop, or an
 // explicit resync request.
 type ReportJob struct {
-	ID        uint   `gorm:"primaryKey"`
-	Key       string `gorm:"uniqueIndex"`
-	Chain     string
-	Addresses string // comma-joined, sorted; for display/debugging only, not the cache key
-	Format    string
-	Status    string // pending | ready | failed
-	CSV       string `gorm:"type:text"`
-	RowCount  int
+	ID                uint   `gorm:"primaryKey"`
+	Key               string `gorm:"uniqueIndex"`
+	Chain             string
+	Addresses         string // comma-joined, sorted; for display/debugging only, not the cache key
+	Format            string
+	Status            string // pending | ready | failed
+	CSV               string `gorm:"type:text"`
+	RowCount          int
+	ReviewFingerprint string
 	// ComputedThrough is when this computation started (not the data's own
 	// timestamps): a report is stale once any of its addresses has a
 	// taxable_event newer than this.
@@ -104,20 +107,29 @@ func (s *Server) hasNewerActivity(addresses []string, since time.Time) (bool, er
 // getOrStartReportJob returns the current status for this key, kicking off a
 // fresh computation if there's no usable cached one (missing, stale, failed,
 // or resync=true). It never blocks on the computation itself.
-func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool) (*ReportJob, error) {
-	key := canonicalReportKey(chain, addresses, startStr, endStr, format)
+func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions) (*ReportJob, error) {
+	canonical, err := CanonicalAssetDecisionsJSON(decisions)
+	if err != nil {
+		return nil, assetReviewInputError{err}
+	}
+	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|review:%x", sha256.Sum256([]byte(canonical)))
 
 	var job ReportJob
-	err := s.db.Where("key = ?", key).First(&job).Error
+	err = s.db.Where("key = ?", key).First(&job).Error
 	found := err == nil
 	if err != nil && err != gorm.ErrRecordNotFound {
 		return nil, err
 	}
 
-	needsCompute := !found ||
-		job.Status == ReportJobFailed ||
-		resync ||
-		(job.Status == ReportJobReady && s.reportIsStale(&job, addresses))
+	stale := found && job.Status == ReportJobReady && s.reportIsStale(&job, addresses)
+	if found && job.Status == ReportJobReady && !stale && !resync {
+		fingerprint, err := s.currentReviewFingerprint(chain, addresses, start, end)
+		if err != nil {
+			return nil, err
+		}
+		stale = fingerprint != job.ReviewFingerprint
+	}
+	needsCompute := !found || resync || stale
 	// A job already pending (someone else's request, or ours from a moment
 	// ago) is left alone; the caller just polls it.
 	if !needsCompute || job.Status == ReportJobPending {
@@ -144,7 +156,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		return nil, err
 	}
 
-	go s.computeReportJob(key, chain, addresses, start, end, format)
+	go s.computeReportJob(key, chain, addresses, start, end, format, decisions)
 
 	job.Status = ReportJobPending
 	return &job, nil
@@ -152,34 +164,29 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 
 // computeReportJob does the actual work in the background and persists the
 // result (or the error) when done.
-func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string) {
+func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string, decisions AssetDecisions) {
 	defer inFlight.Delete(key)
 	computedThrough := nowUTC()
 
-	var all []Row
-	for _, addr := range addresses {
-		rows, err := s.rowsFor(chain, addr, start, end)
-		if err != nil {
-			s.db.Model(&ReportJob{}).Where("key = ?", key).
-				Updates(map[string]any{"status": ReportJobFailed, "error": err.Error()})
-			return
-		}
-		all = append(all, rows...)
+	all, err := s.reviewedRows(chain, addresses, start, end, decisions, true)
+	if err != nil {
+		s.db.Model(&ReportJob{}).Where("key = ?", key).Updates(map[string]any{"status": ReportJobFailed, "error": err.Error()})
+		return
 	}
-
 	var buf strings.Builder
-	if err := WriteCSV(&buf, format, all); err != nil {
+	if err := WritePreviewCSV(&buf, format, all); err != nil {
 		s.db.Model(&ReportJob{}).Where("key = ?", key).
 			Updates(map[string]any{"status": ReportJobFailed, "error": err.Error()})
 		return
 	}
 
 	s.db.Model(&ReportJob{}).Where("key = ?", key).Updates(map[string]any{
-		"status":           ReportJobReady,
-		"csv":              buf.String(),
-		"row_count":        len(all),
-		"computed_through": computedThrough,
-		"error":            "",
+		"status":             ReportJobReady,
+		"csv":                buf.String(),
+		"row_count":          len(all),
+		"computed_through":   computedThrough,
+		"review_fingerprint": reviewFingerprint(all),
+		"error":              "",
 	})
 }
 
@@ -198,14 +205,23 @@ func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 	}
 	chain := def(q.Get("chain"), "mainnet")
 	format := def(q.Get("format"), "summ")
+	if format != "summ" && format != "cryptotaxcalculator" {
+		http.Error(w, "report-job is preview only; use /events for tax exports", 400)
+		return
+	}
+	decisions, err := decisionsFromRequest(r)
+	if err != nil {
+		writeTaxError(w, err)
+		return
+	}
 	startStr, endStr := q.Get("start"), q.Get("end")
 	start := dateParam(startStr, time.Time{})
 	end := dateParam(endStr, nowUTC().AddDate(0, 0, 1))
 	resync := q.Get("resync") == "true"
 
-	job, err := s.getOrStartReportJob(chain, addresses, start, end, startStr, endStr, format, resync)
+	job, err := s.getOrStartReportJob(chain, addresses, start, end, startStr, endStr, format, resync, decisions)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTaxError(w, err)
 		return
 	}
 

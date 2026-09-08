@@ -168,9 +168,9 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 	chain := def(q.Get("chain"), "mainnet")
 	start := dateParam(q.Get("start"), time.Time{})
 	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
-	rows, err := s.rowsFor(chain, addr, start, end)
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, start, end)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTaxError(w, err)
 		return
 	}
 
@@ -179,6 +179,9 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 	priceMissing := 0
 	symbol := s.native.Symbol
 	for _, row := range rows {
+		if row.Excluded {
+			continue
+		}
 		if row.Category != "reward" && row.Category != "commission" {
 			continue
 		}

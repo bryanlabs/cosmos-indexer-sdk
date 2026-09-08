@@ -16,7 +16,9 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
 - `cosmos-tax-sdk-postgres` — the database.
 
 ## The BryanLabs tax layer (the part you'll usually touch)
-- `taxapi/` — the HTTP API: `server.go` (routes), `balances.go` (`/balance` = live
+- `taxapi/` — the HTTP API: `server.go` (routes), `assetreview_runtime.go`
+  (`/asset-review` readiness/audit and explicit per-record decisions; see
+  `taxapi/ASSET-REVIEW.md`), `balances.go` (`/balance` = live
   node read via `NODE_REST_API`, persisted to `balance_snapshots`), `form8949.go`,
   `form990t.go` (reports/forms).
 - `taxapid/main.go` — the API daemon entrypoint.
@@ -84,9 +86,10 @@ running anything against an archive.
 
 ## Gotchas
 - Token names and suffixes are not asset identity. The Juno tokenfactory `uatom`
-  voucher in `taxapi/assetidentity.go` is not native ATOM. Keep its raw denom,
-  separate display/FIFO identity, and unknown price. Never map it to `uatom`
-  pricing merely because metadata calls it ATOM.
+  voucher in `taxapi/assetidentity.go` is not native ATOM. Retain its reported
+  label and original evidence with a suspected-spam flag. Require an explicit
+  per-record exclusion or user-supplied token/value/basis before tax downloads.
+  Never infer native ATOM equivalence or a zero value from its label.
 - ibc-go v10 serves traces at `/ibc/apps/transfer/v1/denoms/{hash}` with
   `denom.base` and ordered `denom.trace`. The old `denom_traces` route can return
   501. Confirm the route's counterparty chain IDs before trusting token origin.
