@@ -37,6 +37,7 @@ func TestClassifyDelegatorRewardFromEvents(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "500uatom"}),
+		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "500uatom"}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "500" || out[0].ToAddr != del {
@@ -52,6 +53,7 @@ func TestClassifyRewardRedirectedToWithdrawAddressStillAttributesToDelegator(t *
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "500uatom"}),
+		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "500uatom"}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "500" || out[0].ToAddr != del {
@@ -96,6 +98,7 @@ func TestClassifyRedelegateRewardRedirectedToWithdrawAddressStillAttributesToDel
 	msg := &stakingtypes.MsgBeginRedelegate{DelegatorAddress: del, ValidatorSrcAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "250uatom"}),
+		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "250uatom"}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "250" || out[0].ToAddr != del {
@@ -110,6 +113,7 @@ func TestClassifyAuthzExecRestake(t *testing.T) {
 	exec := authz.NewMsgExec(sdk.AccAddress("grantee-bot-addr"), []sdk.Msg{inner})
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "750uatom"}, [2]string{"authz_msg_index", "0"}),
+		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "750uatom"}, [2]string{"authz_msg_index", "0"}),
 	}}
 	out := classify(&exec, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "750" || out[0].ToAddr != del {
@@ -148,6 +152,7 @@ func TestClassifyRewardNoDoubleCount(t *testing.T) {
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "7240259uatom"}),
 		ev("transfer", [2]string{"recipient", del}, [2]string{"sender", val}, [2]string{"amount", "7240259uatom"}),
+		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "7240259uatom"}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Amount != "7240259" {

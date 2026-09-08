@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"time"
@@ -25,6 +26,11 @@ type Row struct {
 	TxHash    string
 	Asset     string // non-fungible asset id "<collection>/<token_id>" for nft_sale
 	IsIBC     bool   // true when Denom is an IBC trace path (Symbol is the resolved base)
+	// Validator attribution is populated for staking rewards and auto-withdrawals.
+	// It is carried in descriptions for import formats that support a note field.
+	ValidatorAddress string
+	ValidatorMoniker string
+	RewardTrigger    string
 	// DecimalsAssumed is true when neither the oracle nor the chain's bank module
 	// could resolve this denom, so decimals fell back to a bare guess (6). Amount,
 	// PriceUSD and ValueUSD for this row may be wrong and should not be trusted
@@ -47,6 +53,14 @@ func (r Row) description() string {
 		d = r.Category + " " + r.Asset
 	} else if r.IsIBC {
 		d = "ibc " + r.Denom
+	}
+	if r.ValidatorAddress != "" {
+		metadata, _ := json.Marshal(struct {
+			ValidatorAddress string `json:"validator_address"`
+			ValidatorMoniker string `json:"validator_moniker"`
+			RewardTrigger    string `json:"reward_trigger"`
+		}{r.ValidatorAddress, r.ValidatorMoniker, r.RewardTrigger})
+		d += " | staking_metadata=" + string(metadata)
 	}
 	if r.DecimalsAssumed {
 		d += " (decimals unknown, amount may be wrong)"
@@ -94,6 +108,9 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		}
 
 	case "cointracker":
+		// CoinTracker accepts exactly these eight columns and has no description or
+		// metadata field. Validator attribution is therefore unavailable in this
+		// export; use generic or a description-supporting format instead.
 		_ = w.Write([]string{"Date", "Received Quantity", "Received Currency", "Sent Quantity", "Sent Currency", "Fee Amount", "Fee Currency", "Tag"})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
@@ -176,12 +193,13 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	case "generic":
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing"}) //nolint:lll
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				r.Symbol, r.Denom, r.Amount.String(), refPrice(r.PriceUSD), usd(r.ValueUSD),
 				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
+				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger,
 			})
 		}
 
@@ -240,6 +258,22 @@ func refPrice(d decimal.Decimal) string {
 		return ""
 	}
 	return d.String()
+}
+
+// spreadsheetLabel prevents an untrusted standalone text cell from being
+// interpreted as a spreadsheet formula. Description JSON is deliberately not
+// passed through this helper because it starts with the event category and must
+// retain its exact structured metadata.
+func spreadsheetLabel(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r', '\n':
+		return "'" + s
+	default:
+		return s
+	}
 }
 
 func boolStr(b bool) string {

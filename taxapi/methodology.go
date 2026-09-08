@@ -13,17 +13,21 @@ type Methodology struct {
 	AggregationRule      string   `json:"aggregation_rule"`
 	FallbackOrder        []string `json:"fallback_order"`
 	MissingPriceHandling string   `json:"missing_price_handling"`
+	RewardClassification string   `json:"reward_classification"`
+	ValidatorMetadata    string   `json:"validator_metadata"`
 }
 
 const (
-	MethodologyVersion = "v2"
+	MethodologyVersion = "v3"
 	MethodologyDate    = "2026-09-08"
 )
 
 func currentMethodology() Methodology {
 	return Methodology{
-		Version:       MethodologyVersion,
-		EffectiveDate: MethodologyDate,
+		RewardClassification: "Delegator reward income includes only executed withdraw_rewards events, split by validator and denomination. Delegated, undelegated and redelegated principal is not income. Auto-withdrawals during staking operations, including both redelegation validators, are included. Fees are separate.",
+		ValidatorMetadata:    "The operator address comes from the withdrawal event. Monikers are current chain REST labels at report generation, not historical names or evidence of validator jurisdiction. CoinTracker's fixed import schema has no metadata field; use the Generic or Income CSV for validator attribution.",
+		Version:              MethodologyVersion,
+		EffectiveDate:        MethodologyDate,
 		Sources: []string{
 			"wasm-indexer oracle /price endpoint (chain-registry + scraped IBC/CosmWasm-token price feeds)",
 		},

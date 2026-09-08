@@ -3,6 +3,7 @@ package tax
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -50,10 +51,24 @@ type Parser struct{ ID string }
 func (p *Parser) Identifier() string { return p.ID }
 
 func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, cfg config.IndexConfig) (*any, error) {
-	events := classify(cosmosMsg, log)
-	if len(events) == 0 {
-		return nil, nil
+	if log != nil {
+		for _, event := range log.Events {
+			if event.Type != "withdraw_rewards" {
+				continue
+			}
+			groups, err := rewardAttributeGroups(event)
+			if err != nil {
+				return nil, err
+			}
+			for _, a := range groups {
+				if _, err := sdk.ParseCoinsNormalized(a["amount"]); err != nil {
+					return nil, fmt.Errorf("tax: malformed withdraw_rewards amount: %w", err)
+				}
+			}
+		}
 	}
+	events := classify(cosmosMsg, log)
+	// Persist empty results too, so reclassification removes stale rows.
 	v := any(events)
 	return &v, nil
 }
@@ -93,14 +108,14 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 	// auto-withdrawal uses the same withdraw-address routing as an explicit
 	// MsgWithdrawDelegatorReward, so it needs the same redirect-safe attribution.
 	case *stakingtypes.MsgDelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "delegate")...)
 	case *stakingtypes.MsgUndelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "undelegate")...)
 	case *stakingtypes.MsgBeginRedelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redelegate")...)
 
 	case *disttypes.MsgWithdrawDelegatorReward:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress)...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "claim")...)
 
 	case *disttypes.MsgWithdrawValidatorCommission:
 		for recv, coins := range receivedCoinsByReceiver(log) {
@@ -109,6 +124,7 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 					Category: string(CategoryCommission),
 					ToAddr:   recv,
 					Amount:   c.Amount.String(), Denom: c.Denom,
+					ValidatorAddress: m.ValidatorAddress, RewardTrigger: "commission",
 				})
 			}
 		}
@@ -204,20 +220,22 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 	if !ok {
 		return errors.New("tax: unexpected dataset type")
 	}
-	for i := range events {
-		events[i].MessageID = message.ID
-		events[i].SubIndex = i
-		events[i].BlockHeight = message.Tx.Block.Height
-		events[i].Timestamp = message.Tx.Block.TimeStamp
-		events[i].TxHash = message.Tx.Hash
-		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "message_id"}, {Name: "sub_index"}},
-			DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash"}),
-		}).Create(&events[i]).Error; err != nil {
-			return err
+	return db.Transaction(func(tx *gorm.DB) error {
+		for i := range events {
+			events[i].MessageID = message.ID
+			events[i].SubIndex = i
+			events[i].BlockHeight = message.Tx.Block.Height
+			events[i].Timestamp = message.Tx.Block.TimeStamp
+			events[i].TxHash = message.Tx.Hash
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "message_id"}, {Name: "sub_index"}},
+				DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash", "validator_address", "reward_trigger"}),
+			}).Create(&events[i]).Error; err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		return tx.Where("message_id = ? AND sub_index >= ?", message.ID, len(events)).Delete(&TaxableEvent{}).Error
+	})
 }
 
 // nftSaleEvents turns each wasm-finalize-sale event (CosmWasm NFT marketplace,
@@ -360,30 +378,84 @@ func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 	return total
 }
 
-// delegatorRewardEvents attributes a withdrawn reward to the delegator even
-// when they've redirected withdrawals to a different address via
-// MsgSetWithdrawAddress (INF-213): income is recognized by whoever has
-// dominion and control over it (Rev. Rul. 2023-14), the delegator who directed
-// the withdrawal, not wherever they asked the tokens to land. Grouping by
-// whichever receiver actually shows up in the log (like
-// MsgWithdrawValidatorCommission already does below) rather than filtering to
-// an exact address match is what finds the reward when the real on-chain
-// receiver is the withdraw address, not the delegator -- an exact-match lookup
-// finds nothing there and silently drops the income entirely.
-func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
-	total := sdk.NewCoins()
-	for _, coins := range receivedCoinsByReceiver(log) {
-		total = total.Add(coins...)
-	}
+// delegatorRewardEvents reads only distribution's authoritative withdraw_rewards
+// events. coin_received also includes principal credited to staking pools and
+// must never be used to infer rewards. Attribute income to the event's delegator
+// even when its payment is redirected to a different withdrawal address.
+// Redelegation may withdraw from BOTH validators; retain each event separately.
+func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger string) []TaxableEvent {
 	var out []TaxableEvent
-	for _, c := range total {
-		out = append(out, TaxableEvent{
-			Category: string(CategoryReward),
-			ToAddr:   delegator,
-			Amount:   c.Amount.String(), Denom: c.Denom,
-		})
+	if log == nil {
+		return out
+	}
+	for _, event := range log.Events {
+		if event.Type != "withdraw_rewards" {
+			continue
+		}
+		groups, err := rewardAttributeGroups(event)
+		if err != nil {
+			continue
+		}
+		for _, a := range groups {
+			// Older SDKs omit the delegator, so use the message's delegator.
+			if a["delegator"] != "" && a["delegator"] != delegator {
+				continue
+			}
+			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			if err != nil {
+				continue
+			}
+			for _, coin := range coins {
+				if !coin.IsPositive() {
+					continue
+				}
+				out = append(out, TaxableEvent{
+					Category: string(CategoryReward), ToAddr: delegator,
+					Amount: coin.Amount.String(), Denom: coin.Denom,
+					ValidatorAddress: a["validator"], RewardTrigger: trigger,
+				})
+			}
+		}
 	}
 	return out
+}
+
+// Older SDK ABCI logs combine same-type events into one ordered attribute list.
+// Split repeated reward fields instead of flattening away all but the last
+// validator. Modern per-event logs are the single-group case. Delegator was
+// absent in older SDKs; the message supplies that identity in that case.
+func rewardAttributeGroups(event indexerTxTypes.LogMessageEvent) ([]map[string]string, error) {
+	var groups []map[string]string
+	current := map[string]string{}
+	flush := func() error {
+		if len(current) == 0 {
+			return nil
+		}
+		if _, ok := current["amount"]; !ok || current["validator"] == "" {
+			return errors.New("tax: incomplete withdraw_rewards event")
+		}
+		groups = append(groups, current)
+		current = map[string]string{}
+		return nil
+	}
+	for _, a := range event.Attributes {
+		if a.Key != "amount" && a.Key != "validator" && a.Key != "delegator" {
+			continue
+		}
+		if _, exists := current[a.Key]; exists {
+			if err := flush(); err != nil {
+				return nil, err
+			}
+		}
+		current[a.Key] = a.Value
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 {
+		return nil, errors.New("tax: empty withdraw_rewards event")
+	}
+	return groups, nil
 }
 
 // ibcCallbackErrorPrefix is what ibc-go's callbacks middleware prepends to the

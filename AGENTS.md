@@ -49,9 +49,9 @@ Three rules if you add another:
 2. **Prefer events over payloads for amounts.** IBC v2 payloads on the Hub arrive
    solidity-ABI encoded from the Ethereum bridge; the `fungible_token_packet`
    event already carries sender/receiver/denom/amount. LSM reward amounts are not
-   on the message at all and come from `withdraw_tokenize_share_reward` — do not
-   reuse `delegatorRewardEvents`, which sums `coin_received` and double counts
-   LSM's module-account hop.
+   on the message at all and come from `withdraw_tokenize_share_reward`. Do not
+   attribute the internal module-account withdrawal to the owner or count both
+   sides of LSM's module-account hop.
 3. **Watch for the `ibccallbackerror-` prefix.** A failed destination callback
    makes ibc-go re-emit that execution's events with that prefix on the type *and*
    every attribute key. The transfer still happened.
@@ -83,6 +83,15 @@ gap re-index tool and a completeness verifier live in
 running anything against an archive.
 
 ## Gotchas
+- Delegator income comes only from `withdraw_rewards` events, never summed
+  `coin_received` events (staking pools receive delegated principal). A
+  redelegation may auto-withdraw rewards from both source and destination
+  validators; preserve each event's validator, denomination, and amount.
+- Reclassification must remove stale tax rows even when the new output is empty.
+  Use the backed-up, dry-run-first `taxrepair/` CLI for historical correction,
+  and bump the report methodology version to avoid reusing stale report caches.
+- Validator monikers are current chain REST display labels, not historical
+  identities or proof of jurisdiction. The event's operator address is canonical.
 - The top-level `README.md` is the **upstream** (generic) doc; the BryanLabs-specific
   code is the `tax*` dirs + `Dockerfile.tax`, on the `tax-layer` branch.
 - Build the deployed image from `Dockerfile.tax`, not the plain `Dockerfile`.

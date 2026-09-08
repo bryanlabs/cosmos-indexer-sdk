@@ -1,9 +1,17 @@
 package taxapi
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestReportCacheIncludesCorrectedRewardVersion(t *testing.T) {
+	key := canonicalReportKey("mainnet", []string{"cosmos1wallet"}, "2026-01-01", "2027-01-01", "summ")
+	if !strings.HasPrefix(key, MethodologyVersion+"|") || strings.HasPrefix(key, "v2|") {
+		t.Fatalf("old inflated reward reports must not be reused: %s", key)
+	}
+}
 
 func TestCanonicalReportKeySameAddressSetAnyOrderCaseWhitespace(t *testing.T) {
 	a := canonicalReportKey("mainnet", []string{"cosmos1Abc", " cosmos1Def "}, "2026-01-01", "2026-02-01", "summ")

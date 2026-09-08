@@ -50,6 +50,11 @@ type TaxableEvent struct {
 	FromAddr string `gorm:"index:idx_tax_from"`
 	ToAddr   string `gorm:"index:idx_tax_to"`
 
+	// ValidatorAddress is the operator address on the reward withdrawal event.
+	// RewardTrigger distinguishes explicit claims from staking auto-withdrawals.
+	ValidatorAddress string
+	RewardTrigger    string
+
 	BlockHeight int64     `gorm:"index:idx_tax_height"`
 	Timestamp   time.Time `gorm:"index:idx_tax_time"`
 	TxHash      string    `gorm:"index:idx_tax_txhash"`

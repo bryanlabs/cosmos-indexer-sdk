@@ -178,7 +178,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 func buildIncomeCSV(rows []Row, address, recognition string) string {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash"})
+	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash", "validator_address", "validator_moniker", "reward_trigger"})
 	total := decimal.Zero
 	missingDenoms := map[string]bool{}
 	for _, row := range rows {
@@ -191,11 +191,11 @@ func buildIncomeCSV(rows []Row, address, recognition string) string {
 		}
 		_ = cw.Write([]string{
 			address, row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
-			row.Amount.String(), row.PriceUSD.String(), row.ValueUSD.StringFixed(2), row.TxHash,
+			row.Amount.String(), row.PriceUSD.String(), row.ValueUSD.StringFixed(2), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger,
 		})
 	}
-	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.StringFixed(2), ""})
-	_ = cw.Write([]string{address, "", "RECOGNITION POLICY", "", "", "", "", recognition, ""})
+	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.StringFixed(2), "", "", "", ""})
+	_ = cw.Write([]string{address, "", "RECOGNITION POLICY", "", "", "", "", recognition, "", "", "", ""})
 	if len(missingDenoms) > 0 {
 		denoms := make([]string, 0, len(missingDenoms))
 		for sym := range missingDenoms {
@@ -204,7 +204,7 @@ func buildIncomeCSV(rows []Row, address, recognition string) string {
 		sort.Strings(denoms)
 		_ = cw.Write([]string{address, "", "WARNING", "", "", "", "",
 			fmt.Sprintf("no price found for: %s -- TOTAL above excludes their value, actual income is higher", strings.Join(denoms, ", ")),
-			"",
+			"", "", "", "",
 		})
 	}
 	cw.Flush()
@@ -303,6 +303,29 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		return nil, err
 	}
 
+	// Do not publish old inflated classifications for wallets not yet repaired.
+	// LSM reward rows have a different parser and are not part of this repair.
+	var legacyIDs []uint
+	for _, event := range events {
+		if event.Category == "reward" && event.RewardTrigger == "" {
+			legacyIDs = append(legacyIDs, event.MessageID)
+		}
+	}
+	if len(legacyIDs) > 0 {
+		var legacyCount int64
+		if err := s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
+			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, []string{
+				"/cosmos.staking.v1beta1.MsgDelegate", "/cosmos.staking.v1beta1.MsgUndelegate",
+				"/cosmos.staking.v1beta1.MsgBeginRedelegate", "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
+				"/cosmos.authz.v1beta1.MsgExec",
+			}).Count(&legacyCount).Error; err != nil {
+			return nil, err
+		}
+		if legacyCount > 0 {
+			return nil, fmt.Errorf("historical staking data for this wallet is awaiting correction; no totals have been returned")
+		}
+	}
+
 	// Fees (generic SDK Fee table): a spend by the payer.
 	var fees []feeRec
 	_ = s.db.Table("fees").
@@ -322,6 +345,13 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	// in-memory cache hits.
 	s.prewarmPrices(chain, events, fees)
 
+	var validatorNames map[string]string
+	for _, event := range events {
+		if event.ValidatorAddress != "" {
+			validatorNames = s.oracle.ValidatorMonikers()
+			break
+		}
+	}
 	out := make([]Row, 0, len(events)+len(fees))
 	for _, e := range events {
 		dir := "in"
@@ -334,6 +364,9 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		}
 		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
 		row.Asset = e.Asset
+		row.ValidatorAddress = e.ValidatorAddress
+		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
+		row.RewardTrigger = e.RewardTrigger
 		out = append(out, row)
 	}
 	for _, f := range fees {
