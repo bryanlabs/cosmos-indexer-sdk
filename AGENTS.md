@@ -83,6 +83,13 @@ gap re-index tool and a completeness verifier live in
 running anything against an archive.
 
 ## Gotchas
+- Token names and suffixes are not asset identity. The Juno tokenfactory `uatom`
+  voucher in `taxapi/assetidentity.go` is not native ATOM. Keep its raw denom,
+  separate display/FIFO identity, and unknown price. Never map it to `uatom`
+  pricing merely because metadata calls it ATOM.
+- ibc-go v10 serves traces at `/ibc/apps/transfer/v1/denoms/{hash}` with
+  `denom.base` and ordered `denom.trace`. The old `denom_traces` route can return
+  501. Confirm the route's counterparty chain IDs before trusting token origin.
 - Delegator income comes only from `withdraw_rewards` events, never summed
   `coin_received` events (staking pools receive delegated principal). A
   redelegation may auto-withdraw rewards from both source and destination

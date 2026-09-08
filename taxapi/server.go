@@ -462,6 +462,11 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	if symbol == "" {
 		symbol = base
 	}
+	unverifiedFactory := isUnverifiedJunoFactoryUatom(chain, denom, base)
+	if unverifiedFactory {
+		// Keep a separate identity so this cannot enter native ATOM totals/FIFO.
+		symbol, decimals, assumed, isIBC = junoFactoryUatomSymbol, 6, true, true
+	}
 	amt, err := decimal.NewFromString(amountBase)
 	if err != nil {
 		amt = decimal.Zero
@@ -478,7 +483,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	if !found && base != denom {
 		usdF, found = s.oracle.PriceAt(chain, denom, date)
 	}
-	if found {
+	if found && !unverifiedFactory {
 		price = decimal.NewFromFloat(usdF)
 	} else {
 		priceMissing = true

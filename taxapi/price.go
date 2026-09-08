@@ -130,6 +130,10 @@ func fixedUSDStablecoinPrice(chain, denom string) (float64, bool) {
 // confirmed $0 (INF-201). A found price is cached indefinitely; other misses are
 // cached for priceMissTTL so a transient gap still gets retried.
 func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
+	base, _ := ibcBaseDenom(denom)
+	if isUnverifiedJunoFactoryUatom(chain, denom, base) {
+		return 0, false
+	}
 	key := chain + "|" + denom + "|" + date
 
 	o.mu.Lock()
