@@ -19,13 +19,13 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v5"
-	MethodologyDate    = "2026-09-08"
+	MethodologyVersion = "v6"
+	MethodologyDate    = "2026-09-09"
 )
 
 func currentMethodology() Methodology {
 	return Methodology{
-		AssetIdentity:        "Suspected-spam and token-identity mismatches retain their reported labels, raw denominations, source traces and transaction memos. Their preview is provisional and tax downloads are blocked until explicit per-record decisions. Users may exclude a receipt as valueless or enter any token ticker, quantity, total USD value, total USD cost basis and acquisition date. Overrides are user-supplied, not oracle-verified, and apply only to that report. Original on-chain records are never changed. Excluded receipts remain in preview and review audit JSON.",
+		AssetIdentity:        "Suspected-spam and token-identity mismatches retain their reported labels, raw denominations, source traces and transaction memos. Their preview is provisional and tax downloads are blocked until explicit per-record decisions. Users may exclude a receipt as valueless or enter any token ticker, quantity, total USD value, total USD cost basis and acquisition date. Overrides are user-supplied, not oracle-verified, and apply only to that report. Original on-chain records are never changed. Valueless receipts remain visible with explicit zero value and basis in the preview and Generic CSV, with source evidence retained in review audit JSON. They remain excluded from tax calculations and other tax-software imports to prevent automatic pricing.",
 		RewardClassification: "Delegator reward income includes only executed withdraw_rewards events, split by validator and denomination. Delegated, undelegated and redelegated principal is not income. Auto-withdrawals during staking operations, including both redelegation validators, are included. Fees are separate.",
 		ValidatorMetadata:    "The operator address comes from the withdrawal event. Monikers are current chain REST labels at report generation, not historical names or evidence of validator jurisdiction. CoinTracker's fixed import schema has no metadata field; use the Generic or Income CSV for validator attribution.",
 		Version:              MethodologyVersion,

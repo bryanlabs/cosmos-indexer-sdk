@@ -102,7 +102,11 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	}
 	kept := make([]Row, 0, len(rows))
 	for _, row := range rows {
-		if !row.Excluded {
+		// Generic is an audit-capable CSV with explicit treatment and manual
+		// value/basis fields. Preserve excluded receipts there at their explicit
+		// zero treatment. Other import formats can auto-value unsupported assets,
+		// so retain their longstanding exclusion behavior.
+		if !row.Excluded || format == "generic" {
 			kept = append(kept, row)
 		}
 	}
@@ -271,7 +275,7 @@ func (r Row) reviewIdentity() *AssetIdentity {
 	if r.AssetDecision != nil {
 		identity.Treatment = r.AssetDecision.Mode
 		if r.AssetDecision.Mode == AssetDecisionExclude {
-			identity.Note = "Explicitly treated as valueless/excluded by the user. The source receipt remains in preview and audit records."
+			identity.Note = "Explicitly excluded by the user with manual zero value and basis. The original quantity and source receipt remain in preview and generic audit records; exclusion keeps it out of tax calculations."
 		} else {
 			identity.Note = "Explicit user override of token, quantity, value, basis and acquisition date. These are user-supplied inputs, not verified on-chain identity or oracle prices."
 		}
@@ -285,7 +289,16 @@ func reviewMode(r Row) string {
 	return r.AssetDecision.Mode
 }
 func manualField(r Row, field string) string {
-	if r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride {
+	if r.AssetDecision == nil {
+		return ""
+	}
+	if r.AssetDecision.Mode == AssetDecisionExclude {
+		if field == "value" || field == "basis" {
+			return decimal.Zero.String()
+		}
+		return ""
+	}
+	if r.AssetDecision.Mode != AssetDecisionOverride {
 		return ""
 	}
 	switch field {
@@ -345,13 +358,13 @@ func ctcType(r Row) string {
 }
 
 func rowPriceText(r Row) string {
-	if r.AssetDecision != nil && r.AssetDecision.Mode == AssetDecisionOverride {
+	if r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude) {
 		return r.PriceUSD.String()
 	}
 	return refPrice(r.PriceUSD)
 }
 func rowValueText(r Row) string {
-	if r.AssetDecision != nil && r.AssetDecision.Mode == AssetDecisionOverride {
+	if r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude) {
 		return r.ValueUSD.String()
 	}
 	return usd(r.ValueUSD)

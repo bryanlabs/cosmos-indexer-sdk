@@ -73,9 +73,13 @@ necessary. No excess rows or decisions are silently discarded.
 
 ## Effects of explicit choices
 
-Exclusion omits the record from tax CSVs and financial calculations, but retains
-it in preview and the review audit. It does not delete an on-chain record or erase
-an actual transaction fee.
+Exclusion sets an explicit user-supplied zero price, value, and basis while
+preserving the original quantity and immutable source identity evidence. It keeps
+`Excluded=true`, so the receipt is omitted from financial calculations, FIFO, and
+native-asset totals. It remains in previews and the Generic CSV audit export with
+its metadata and zero treatment. Other tax-software import formats continue to
+omit it because they may auto-value unsupported assets. Exclusion does not delete
+an on-chain record or erase an actual transaction fee.
 
 Override applies the user's token, quantity and total USD value. Its separate
 manual basis and acquisition date feed FIFO. The original asset evidence remains
@@ -83,10 +87,11 @@ attached, and basis derived from user input is labelled as user-supplied, not
 chain-verified. An override does not change the original transaction category or
 physical balance snapshots.
 
-The Generic CSV has explicit manual value/basis/date/treatment columns. Manual
-source CSV values preserve sub-cent precision; currency-formatted tax PDFs may
-round for presentation. Other
-formats retain the decision in their existing description or note where supported.
+The Generic CSV has explicit manual value/basis/date/treatment columns and
+retains excluded rows at explicit zero value and basis. Manual source CSV values
+preserve sub-cent precision; currency-formatted tax PDFs may round for
+presentation. Other formats retain the decision in their existing description or
+note where supported.
 CoinTracker's fixed quantity-only import has no metadata/value/basis columns;
 retain the review audit and enter basis in the destination software if necessary.
 The evidence ZIP includes `asset-review-decisions.json`, and the preview can

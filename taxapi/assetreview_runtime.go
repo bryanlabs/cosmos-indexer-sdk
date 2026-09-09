@@ -48,6 +48,15 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 		}
 		row.AssetDecision = &decision
 		if decision.Mode == AssetDecisionExclude {
+			// Keep the indexed quantity and identity evidence intact, while making
+			// the user's explicit valueless treatment machine-readable in previews
+			// and the generic audit CSV. Excluded remains the guard that keeps this
+			// unverified asset out of FIFO and native-asset totals.
+			zero := decimal.Zero
+			row.PriceUSD = zero
+			row.ValueUSD = zero
+			row.ManualBasisUSD = &zero
+			row.PriceMissing = false
 			row.Excluded = true
 			continue
 		}
