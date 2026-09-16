@@ -154,7 +154,7 @@ func TestAssetReviewHTTPGateAndExplicitDecisions(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatal(rr.Code, rr.Body.String())
 	}
-	if rows := csvRecords(t, rr.Body.String()); len(rows) != 2 || rows[1][19] != "exclude" || rows[1][20] != "0" || rows[1][21] != "0" {
+	if rows := csvRecords(t, rr.Body.String()); len(rows) != 2 || rows[1][4] != "ATOMREWARDS" || rows[1][19] != "exclude" || rows[1][20] != "0" || rows[1][21] != "0" {
 		t.Fatalf("generic CSV did not retain explicit zero exclusion: %v", rows)
 	}
 	excludedPreview := waitPreview(t, s, wallet, exclusion)
@@ -320,7 +320,7 @@ func TestExcludedReceiptHasExplicitZeroTreatmentOnlyInGenericAndPreview(t *testi
 	original := Row{
 		Time: time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC), Category: "transfer", Direction: "in",
 		Symbol: "ATOM", Denom: junoFactoryUatomVoucher, Amount: d(10000), PriceMissing: true,
-		AssetIdentity: &AssetIdentity{RecordID: "id", RawAmount: "10000000000", RawDenom: junoFactoryUatomVoucher, Memo: "source evidence"},
+		AssetIdentity: &AssetIdentity{RecordID: "id", ReportedLabel: "ATOM", TokenName: "ATOMREWARDS", RawAmount: "10000000000", RawDenom: junoFactoryUatomVoucher, Memo: "source evidence"},
 	}
 	excluded, err := ApplyAssetDecisions([]Row{original}, AssetDecisions{"id": {Mode: AssetDecisionExclude}})
 	if err != nil {
@@ -341,7 +341,7 @@ func TestExcludedReceiptHasExplicitZeroTreatmentOnlyInGenericAndPreview(t *testi
 	}
 
 	generic := csvRecords(t, mustWriteCSV(t, "generic", excluded))
-	if len(generic) != 2 || generic[1][6] != "10000" || generic[1][7] != "0" || generic[1][8] != "0" || generic[1][19] != "exclude" || generic[1][20] != "0" || generic[1][21] != "0" || !strings.Contains(generic[1][18], "manual zero value and basis") {
+	if len(generic) != 2 || generic[1][4] != "ATOMREWARDS" || generic[1][6] != "10000" || generic[1][7] != "0" || generic[1][8] != "0" || generic[1][19] != "exclude" || generic[1][20] != "0" || generic[1][21] != "0" || !strings.Contains(generic[1][18], "manual zero value and basis") {
 		t.Fatalf("generic CSV lost excluded metadata or explicit zero treatment: %v", generic)
 	}
 	for _, format := range []string{"koinly", "cointracker", "coinledger", "cryptotaxcalculator", "summ", "cryptio", "bitwave"} {

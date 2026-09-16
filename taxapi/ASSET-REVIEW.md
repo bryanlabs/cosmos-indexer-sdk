@@ -1,6 +1,6 @@
 # Explicit suspected-spam asset review
 
-Methodology v5 keeps suspected-spam and identity-mismatch receipts visible with
+Methodology v7 keeps suspected-spam and identity-mismatch receipts visible with
 their reported labels, original denomination, amount, wallet, transaction memo,
 and available source-chain trace. Suspicion is not a finding of fraud or a tax
 classification. No token identity, valuation, or exclusion is preselected.
@@ -88,10 +88,17 @@ chain-verified. An override does not change the original transaction category or
 physical balance snapshots.
 
 The Generic CSV has explicit manual value/basis/date/treatment columns and
-retains excluded rows at explicit zero value and basis. Manual source CSV values
-preserve sub-cent precision; currency-formatted tax PDFs may round for
-presentation. Other formats retain the decision in their existing description or
-note where supported.
+retains excluded rows at explicit zero value and basis. For an explicitly excluded
+identity mismatch only, its `asset` display uses the trimmed issuer token name
+when it is not `ATOM` or `uatom`; an empty or ATOM-like unverified name becomes
+`UNVERIFIED (denom: <full raw denom>)`. This is a Generic CSV display aid only:
+issuer names are not unique asset identity and do not establish native-ATOM
+equivalence. The original reported label, raw denomination, preview evidence,
+and record ID remain unchanged. User override tickers remain authoritative,
+including an intentional `ATOM` override. Manual source CSV values preserve
+sub-cent precision; currency-formatted tax PDFs may round for presentation.
+Other formats retain the decision in their existing description or note where
+supported.
 CoinTracker's fixed quantity-only import has no metadata/value/basis columns;
 retain the review audit and enter basis in the destination software if necessary.
 The evidence ZIP includes `asset-review-decisions.json`, and the preview can

@@ -146,6 +146,57 @@ func TestGenericCSVProtectsValidatorMonikerFormula(t *testing.T) {
 	}
 }
 
+func TestGenericCSVExcludedIdentityDisplay(t *testing.T) {
+	const rawDenom = "factory/juno1issuer/uatom"
+	identity := func(name string) *AssetIdentity {
+		return &AssetIdentity{RecordID: "review-id", ReportedLabel: "ATOM", TokenName: name, RawDenom: rawDenom}
+	}
+	excluded := func(name string) Row {
+		return Row{Symbol: "ATOM", Denom: rawDenom, AssetIdentity: identity(name), AssetDecision: &AssetDecision{Mode: AssetDecisionExclude}, Excluded: true}
+	}
+
+	for _, tc := range []struct {
+		name string
+		row  Row
+		want string
+	}{
+		{"named mismatch", excluded(" ATOMREWARDS "), "ATOMREWARDS"},
+		{"other named mismatch", excluded("AIRDROP67"), "AIRDROP67"},
+		{"empty issuer name", excluded(""), "UNVERIFIED (denom: " + rawDenom + ")"},
+		{"issuer calls it ATOM", excluded("aToM"), "UNVERIFIED (denom: " + rawDenom + ")"},
+		{"issuer calls it uatom", excluded("uatom"), "UNVERIFIED (denom: " + rawDenom + ")"},
+		{"official atom match", func() Row { r := excluded("ATOM"); r.AssetIdentity.OfficialAtomMatch = true; return r }(), "ATOM"},
+		{"formula-prefixed issuer name", excluded("=AIRDROP"), "'=AIRDROP"},
+		{"native atom", Row{Symbol: "ATOM", Denom: "uatom"}, "ATOM"},
+		{"genuine ibc atom", Row{Symbol: "ATOM", Denom: "ibc/GENUINE", IsIBC: true}, "ATOM"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			records := readExport(t, "generic", []Row{tc.row})
+			if got := records[1][4]; got != tc.want {
+				t.Fatalf("asset = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	row := excluded("ATOMREWARDS")
+	records := readExport(t, "generic", []Row{row})
+	var metadata AssetIdentity
+	if err := json.Unmarshal([]byte(records[1][18]), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.ReportedLabel != "ATOM" || metadata.TokenName != "ATOMREWARDS" || metadata.RawDenom != rawDenom {
+		t.Fatalf("generic display changed identity evidence: %+v", metadata)
+	}
+	if row.Symbol != "ATOM" || row.AssetIdentity.ReportedLabel != "ATOM" {
+		t.Fatal("generic display mutated original row evidence")
+	}
+
+	override := Row{Symbol: "ATOM", Denom: rawDenom, AssetIdentity: identity("ATOMREWARDS"), AssetDecision: &AssetDecision{Mode: AssetDecisionOverride}}
+	if got := readExport(t, "generic", []Row{override})[1][4]; got != "ATOM" {
+		t.Fatalf("user override asset = %q, want ATOM", got)
+	}
+}
+
 func TestWriteCSVGenericRetainsSameTransactionValidatorRows(t *testing.T) {
 	first := rewardRow()
 	first.TxHash = "same-transaction"

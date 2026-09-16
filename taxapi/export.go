@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -239,7 +240,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
-				r.Symbol, r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
+				genericAssetDisplay(r), r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
 				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
 				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, "value"), manualField(r, "basis"), manualField(r, "date"),
 			})
@@ -250,6 +251,26 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 	}
 	w.Flush()
 	return w.Error()
+}
+
+// genericAssetDisplay clarifies only explicitly excluded, identity-mismatched
+// receipts in the Generic audit CSV. It never changes the source Row or its
+// identity metadata, and user overrides retain their chosen Symbol verbatim.
+func genericAssetDisplay(r Row) string {
+	if r.AssetIdentity == nil || r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionExclude {
+		return r.Symbol
+	}
+
+	name := strings.TrimSpace(r.AssetIdentity.TokenName)
+	if name != "" && (r.AssetIdentity.OfficialAtomMatch || (!strings.EqualFold(name, "atom") && !strings.EqualFold(name, "uatom"))) {
+		return spreadsheetLabel(name)
+	}
+
+	denom := r.AssetIdentity.RawDenom
+	if denom == "" {
+		denom = r.Denom
+	}
+	return spreadsheetLabel("UNVERIFIED (denom: " + denom + ")")
 }
 
 func stakingMetadataJSON(r Row) string {
