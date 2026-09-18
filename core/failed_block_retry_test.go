@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -120,7 +121,8 @@ func (suite *FailedBlockRetryLoopSuite) TestRetryEnqueuesEligibleHeightsWithConf
 	stop := make(chan struct{})
 	defer close(stop)
 
-	go FailedBlockRetryLoop(suite.db, suite.retryCfg(), suite.chainID, "LoopTest", enqueueChan, stop)
+	noFloor := func() (int64, error) { return 0, nil }
+	go FailedBlockRetryLoop(suite.db, suite.retryCfg(), suite.chainID, "LoopTest", noFloor, enqueueChan, stop)
 
 	retried := make([]int64, 0, 2)
 	for range 2 {
@@ -136,13 +138,56 @@ func (suite *FailedBlockRetryLoopSuite) TestRetryEnqueuesEligibleHeightsWithConf
 	suite.Assert().Equal([]int64{300, 301}, retried, "eligible heights are retried oldest-first; exhausted heights are skipped")
 }
 
+func (suite *FailedBlockRetryLoopSuite) TestRetrySkipsHeightsBelowNodeFloor() {
+	stale := time.Now().UTC().Add(-2 * time.Hour)
+	suite.seed(600, 1, &stale) // below the floor returned by the fake node
+	suite.seed(700, 1, &stale) // within node history
+
+	enqueueChan := make(chan *EnqueueData, 4)
+	stop := make(chan struct{})
+	defer close(stop)
+
+	floor := func() (int64, error) { return 650, nil }
+	go FailedBlockRetryLoop(suite.db, suite.retryCfg(), suite.chainID, "LoopTest", floor, enqueueChan, stop)
+
+	select {
+	case data := <-enqueueChan:
+		suite.Assert().Equal(int64(700), data.Height, "only heights the node can serve are retried")
+	case <-time.After(5 * time.Second):
+		suite.Require().FailNow("timed out waiting for retried heights")
+	}
+	select {
+	case data := <-enqueueChan:
+		suite.Require().FailNow("height below the node floor must not be enqueued, got %d", data.Height)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func (suite *FailedBlockRetryLoopSuite) TestRetrySkipsCycleWhenFloorUnavailable() {
+	suite.seed(800, 1, nil)
+
+	enqueueChan := make(chan *EnqueueData, 4)
+	stop := make(chan struct{})
+	defer close(stop)
+
+	brokenFloor := func() (int64, error) { return 0, errors.New("rpc down") }
+	go FailedBlockRetryLoop(suite.db, suite.retryCfg(), suite.chainID, "LoopTest", brokenFloor, enqueueChan, stop)
+
+	select {
+	case data := <-enqueueChan:
+		suite.Require().FailNow("cycle must be skipped when the node floor is unavailable, got %d", data.Height)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 func (suite *FailedBlockRetryLoopSuite) TestRetryRepeatsAfterIntervalAndStopsCleanly() {
 	suite.seed(400, 0, nil)
 
 	enqueueChan := make(chan *EnqueueData, 4)
 	stop := make(chan struct{})
 
-	go FailedBlockRetryLoop(suite.db, suite.retryCfg(), suite.chainID, "LoopTest", enqueueChan, stop)
+	noFloor := func() (int64, error) { return 0, nil }
+	go FailedBlockRetryLoop(suite.db, suite.retryCfg(), suite.chainID, "LoopTest", noFloor, enqueueChan, stop)
 
 	// First pass fires immediately.
 	select {

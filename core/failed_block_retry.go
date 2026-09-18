@@ -8,6 +8,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// NodeHeightFloorFn reports the earliest height the RPC node can currently
+// serve. Pruning advances, so it must be consulted fresh every retry cycle.
+type NodeHeightFloorFn func() (int64, error)
+
 // failedBlockRetrySendTimeout bounds how long the retry loop waits for room in
 // the enqueue channel before deferring the remaining heights to the next cycle.
 // The head-indexing enqueue function keeps that channel near capacity, so the
@@ -20,7 +24,11 @@ const failedBlockRetrySendTimeout = time.Minute
 // the same transaction that writes the block (see IndexNewBlock), so no
 // special-casing is needed here. Blocks that keep failing accumulate Attempts
 // until they exceed maxAttempts, then they are reported as stuck and skipped.
-func FailedBlockRetryLoop(db *gorm.DB, cfg config.IndexConfig, chainID uint, chainName string, enqueueChan chan<- *EnqueueData, stop <-chan struct{}) {
+//
+// Heights below the RPC node's earliest available height are never retried:
+// the node cannot serve them, so each attempt would be a guaranteed failure.
+// They are reported each cycle until an archive backfill indexes them.
+func FailedBlockRetryLoop(db *gorm.DB, cfg config.IndexConfig, chainID uint, chainName string, nodeHeightFloor NodeHeightFloorFn, enqueueChan chan<- *EnqueueData, stop <-chan struct{}) {
 	interval := time.Duration(cfg.Base.FailedBlockRetryIntervalSeconds) * time.Second
 	if interval <= 0 {
 		interval = 10 * time.Minute
@@ -36,7 +44,7 @@ func FailedBlockRetryLoop(db *gorm.DB, cfg config.IndexConfig, chainID uint, cha
 
 	// First pass runs immediately so a restarted indexer behaves like the
 	// legacy reattempt-failed-blocks startup sweep.
-	retryFailedBlocks(db, cfg, chainID, chainName, enqueueChan, interval, batchSize, maxAttempts)
+	retryFailedBlocks(db, cfg, chainID, chainName, nodeHeightFloor, enqueueChan, interval, batchSize, maxAttempts)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -45,13 +53,29 @@ func FailedBlockRetryLoop(db *gorm.DB, cfg config.IndexConfig, chainID uint, cha
 		case <-stop:
 			return
 		case <-ticker.C:
-			retryFailedBlocks(db, cfg, chainID, chainName, enqueueChan, interval, batchSize, maxAttempts)
+			retryFailedBlocks(db, cfg, chainID, chainName, nodeHeightFloor, enqueueChan, interval, batchSize, maxAttempts)
 		}
 	}
 }
 
-func retryFailedBlocks(db *gorm.DB, cfg config.IndexConfig, chainID uint, chainName string, enqueueChan chan<- *EnqueueData, interval time.Duration, batchSize, maxAttempts int) {
-	heights, err := dbTypes.FailedBlockRetryHeights(db, chainID, interval, maxAttempts, batchSize)
+func retryFailedBlocks(db *gorm.DB, cfg config.IndexConfig, chainID uint, chainName string, nodeHeightFloor NodeHeightFloorFn, enqueueChan chan<- *EnqueueData, interval time.Duration, batchSize, maxAttempts int) {
+	// Pruning advances, so the floor must be fetched fresh every cycle rather
+	// than cached. If it cannot be fetched, skip the cycle: retrying without
+	// a floor risks burning attempts on heights the node has already pruned.
+	nodeEarliest, err := nodeHeightFloor()
+	if err != nil {
+		config.Log.Errorf("Failed block retry: could not query node block range, skipping this cycle. Err: %v", err)
+		return
+	}
+
+	belowFloorTotal, belowFloorSamples, err := dbTypes.BelowFloorFailedBlockCount(db, chainID, nodeEarliest, 10)
+	if err != nil {
+		config.Log.Errorf("Failed block retry: could not count below-floor failed blocks. Err: %v", err)
+	} else if belowFloorTotal > 0 {
+		config.Log.Warnf("Failed block retry: %d failed block(s) are older than the node's earliest available height %d and cannot be retried from this RPC; archive backfill required. Sample heights: %v", belowFloorTotal, nodeEarliest, belowFloorSamples)
+	}
+
+	heights, err := dbTypes.FailedBlockRetryHeights(db, chainID, interval, maxAttempts, nodeEarliest, batchSize)
 	if err != nil {
 		config.Log.Errorf("Failed block retry: could not query failed blocks. Err: %v", err)
 		return

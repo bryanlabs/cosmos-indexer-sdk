@@ -193,17 +193,40 @@ func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName
 // FailedBlockRetryHeights returns up to limit heights currently recorded in
 // failed_blocks for the chain that are due for a reattempt: never retried, or
 // last attempted before retryInterval ago, and under maxAttempts total tries.
-// Heights are returned oldest-first so recovery proceeds in chain order.
-func FailedBlockRetryHeights(db *gorm.DB, chainID uint, retryInterval time.Duration, maxAttempts int, limit int) ([]int64, error) {
+// Heights below minHeight are excluded: the RPC node cannot serve them, so
+// retrying would burn the attempt budget on guaranteed failures. Heights are
+// returned oldest-first so recovery proceeds in chain order.
+func FailedBlockRetryHeights(db *gorm.DB, chainID uint, retryInterval time.Duration, maxAttempts int, minHeight int64, limit int) ([]int64, error) {
 	var heights []int64
 	query := db.Model(&models.FailedBlock{}).
 		Where("blockchain_id = ?::int", chainID).
+		Where("height >= ?", minHeight).
 		Where("last_attempted_at IS NULL OR last_attempted_at <= ?", time.Now().UTC().Add(-retryInterval))
 	if maxAttempts > 0 {
 		query = query.Where("COALESCE(attempts, 0) < ?", maxAttempts)
 	}
 	err := query.Order("height asc").Limit(limit).Pluck("height", &heights).Error
 	return heights, err
+}
+
+// BelowFloorFailedBlockCount reports failed blocks older than minHeight (the
+// RPC node's earliest available height). They cannot be fetched by the indexer
+// and stay in failed_blocks until an archive backfill indexes them, so the
+// retry loop surfaces them to the operator instead of burning attempts.
+func BelowFloorFailedBlockCount(db *gorm.DB, chainID uint, minHeight int64, sampleLimit int) (int64, []int64, error) {
+	var total int64
+	query := db.Model(&models.FailedBlock{}).
+		Where("blockchain_id = ?::int", chainID).
+		Where("height < ?", minHeight)
+	if err := query.Count(&total).Error; err != nil {
+		return 0, nil, err
+	}
+	if total == 0 {
+		return 0, nil, nil
+	}
+	var samples []int64
+	err := query.Order("height asc").Limit(sampleLimit).Pluck("height", &samples).Error
+	return total, samples, err
 }
 
 // StuckFailedBlockCount reports how many failed blocks have exhausted their

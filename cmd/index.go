@@ -323,7 +323,11 @@ func index(cmd *cobra.Command, args []string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			core.FailedBlockRetryLoop(idxr.DB, *idxr.Config, dbChainID, idxr.Config.Probe.ChainName, blockEnqueueChan, failedBlockRetryStop)
+			nodeHeightFloor := func() (int64, error) {
+				earliest, _, err := rpc.GetEarliestAndLatestBlockHeights(idxr.ChainClient)
+				return earliest, err
+			}
+			core.FailedBlockRetryLoop(idxr.DB, *idxr.Config, dbChainID, idxr.Config.Probe.ChainName, nodeHeightFloor, blockEnqueueChan, failedBlockRetryStop)
 		}()
 	} else if idxr.Config.Base.FailedBlockRetry {
 		config.Log.Warn("base.failed-block-retry is enabled but indexing is bounded (end-block, exit-when-caught-up, block-input-file or reindex-message-type); failed-block retry will not run")

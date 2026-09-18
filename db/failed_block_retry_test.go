@@ -106,24 +106,52 @@ func (suite *FailedBlockRetrySuite) TestFailedBlockRetryHeightsFiltering() {
 	suite.seedFailed(120, 1, &recent, "backing off") // not eligible: attempted too recently
 	suite.seedFailed(130, 5, &stale, "exhausted")    // not eligible: at max attempts
 
-	heights, err := FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 100)
+	heights, err := FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 0, 100)
 	suite.Require().NoError(err)
 	suite.Assert().Equal([]int64{100, 110}, heights)
 
-	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 1, 100)
+	// The node history floor excludes heights the RPC can no longer serve.
+	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 105, 100)
+	suite.Require().NoError(err)
+	suite.Assert().Equal([]int64{110}, heights)
+
+	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 1, 0, 100)
 	suite.Require().NoError(err)
 	suite.Assert().Equal([]int64{110}, heights, "max attempts 1 excludes every height that already used its attempt")
 
-	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 1)
+	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 0, 1)
 	suite.Require().NoError(err)
 	suite.Assert().Equal([]int64{100}, heights, "limit applies oldest-first")
 
 	// Unrelated chain rows must never be returned.
 	err = UpsertFailedBlock(suite.db, 900, "other-chain", "Other", errors.New("other chain failure"))
 	suite.Require().NoError(err)
-	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 100)
+	heights, err = FailedBlockRetryHeights(suite.db, suite.chainID, time.Hour, 5, 0, 100)
 	suite.Require().NoError(err)
 	suite.Assert().Equal([]int64{100, 110}, heights)
+}
+
+func (suite *FailedBlockRetrySuite) TestBelowFloorFailedBlockCount() {
+	suite.chainID = suite.setupChain()
+
+	suite.seedFailed(400, 1, nil, "below floor")
+	suite.seedFailed(410, 1, nil, "below floor")
+	suite.seedFailed(500, 1, nil, "within history")
+
+	total, samples, err := BelowFloorFailedBlockCount(suite.db, suite.chainID, 450, 1)
+	suite.Require().NoError(err)
+	suite.Assert().Equal(int64(2), total)
+	suite.Assert().Equal([]int64{400}, samples)
+
+	total, samples, err = BelowFloorFailedBlockCount(suite.db, suite.chainID, 450, 10)
+	suite.Require().NoError(err)
+	suite.Assert().Equal(int64(2), total)
+	suite.Assert().Equal([]int64{400, 410}, samples)
+
+	total, samples, err = BelowFloorFailedBlockCount(suite.db, suite.chainID, 350, 10)
+	suite.Require().NoError(err)
+	suite.Assert().Equal(int64(0), total)
+	suite.Assert().Empty(samples)
 }
 
 func (suite *FailedBlockRetrySuite) TestStuckFailedBlockCount() {
