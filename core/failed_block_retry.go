@@ -68,11 +68,11 @@ func retryFailedBlocks(db *gorm.DB, cfg config.IndexConfig, chainID uint, chainN
 		return
 	}
 
-	belowFloorTotal, belowFloorSamples, err := dbTypes.BelowFloorFailedBlockCount(db, chainID, nodeEarliest, 10)
+	belowFloorTotal, _, err := dbTypes.BelowFloorFailedBlockCount(db, chainID, nodeEarliest, 10)
 	if err != nil {
 		config.Log.Errorf("Failed block retry: could not count below-floor failed blocks. Err: %v", err)
 	} else if belowFloorTotal > 0 {
-		config.Log.Warnf("Failed block retry: %d failed block(s) are older than the node's earliest available height %d and cannot be retried from this RPC; archive backfill required. Sample heights: %v", belowFloorTotal, nodeEarliest, belowFloorSamples)
+		config.Log.Infof("Failed block retry: %d failed block(s) are older than the node's earliest available height %d; they are not retried and remain recorded in failed_blocks in case the node ever serves those heights again.", belowFloorTotal, nodeEarliest)
 	}
 
 	heights, err := dbTypes.FailedBlockRetryHeights(db, chainID, interval, maxAttempts, nodeEarliest, batchSize)
