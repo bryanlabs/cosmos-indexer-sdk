@@ -310,6 +310,25 @@ func index(cmd *cobra.Command, args []string) {
 	wg.Add(1)
 	go idxr.DoDBUpdates(&wg, txDataChan, blockEventsDataChan, dbChainID)
 
+	// Automatic failed-block backfill: periodically re-enqueue heights recorded
+	// in failed_blocks. Successful reprocessing deletes the row inside the
+	// block-write transaction; repeated failures are backoff-limited and
+	// reported once they exceed the attempt budget. Only started in continuous
+	// indexing mode: bounded runs (block input file, exit-when-caught-up, end
+	// block) close the enqueue channel when the range completes, which the
+	// retry loop does not survive. Those runs can use reattempt-failed-blocks.
+	failedBlockRetryStop := make(chan struct{})
+	continuousIndexing := idxr.Config.Base.EndBlock == -1 && !idxr.Config.Base.ExitWhenCaughtUp && idxr.Config.Base.BlockInputFile == "" && idxr.Config.Base.ReindexMessageType == ""
+	if idxr.Config.Base.FailedBlockRetry && continuousIndexing {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			core.FailedBlockRetryLoop(idxr.DB, *idxr.Config, dbChainID, idxr.Config.Probe.ChainName, blockEnqueueChan, failedBlockRetryStop)
+		}()
+	} else if idxr.Config.Base.FailedBlockRetry {
+		config.Log.Warn("base.failed-block-retry is enabled but indexing is bounded (end-block, exit-when-caught-up, block-input-file or reindex-message-type); failed-block retry will not run")
+	}
+
 	switch {
 	// If block enqueue function has been explicitly set, use that
 	case idxr.BlockEnqueueFunction != nil:
@@ -336,6 +355,9 @@ func index(cmd *cobra.Command, args []string) {
 		config.Log.Fatal("Block enqueue failed", err)
 	}
 
+	// Stop the failed-block retry loop before closing the enqueue channel so it
+	// cannot send on a closed channel.
+	close(failedBlockRetryStop)
 	close(blockEnqueueChan)
 
 	wg.Wait()

@@ -65,6 +65,12 @@ type FailedBlock struct {
 	Height       int64 `gorm:"uniqueIndex:failedchainheight"`
 	BlockchainID uint  `gorm:"uniqueIndex:failedchainheight"`
 	Chain        Chain `gorm:"foreignKey:BlockchainID"`
+	// Bookkeeping for automatic retries. Attempts counts every processing
+	// failure recorded for the height; LastAttemptedAt drives the retry
+	// backoff; LastError preserves why the last attempt failed.
+	Attempts        int `gorm:"default:0"`
+	LastError       string
+	LastAttemptedAt *time.Time
 }
 
 type FailedEventBlock struct {

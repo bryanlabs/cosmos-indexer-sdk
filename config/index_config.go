@@ -10,31 +10,35 @@ import (
 
 type IndexConfig struct {
 	Database Database
-	Base     indexBase
+	Base     IndexBase
 	Log      log
 	Probe    Probe
 	Flags    flags
 }
 
-type indexBase struct {
+type IndexBase struct {
 	throttlingBase
 	retryBase
-	ReindexMessageType          string `mapstructure:"reindex-message-type"`
-	ReattemptFailedBlocks       bool   `mapstructure:"reattempt-failed-blocks"`
-	StartBlock                  int64  `mapstructure:"start-block"`
-	EndBlock                    int64  `mapstructure:"end-block"`
-	BlockInputFile              string `mapstructure:"block-input-file"`
-	ReIndex                     bool   `mapstructure:"reindex"`
-	RPCWorkers                  int64  `mapstructure:"rpc-workers"`
-	SkipBlockByHeightRPCRequest bool   `mapstructure:"skip-block-by-height-rpc-request"`
-	BlockTimer                  int64  `mapstructure:"block-timer"`
-	WaitForChain                bool   `mapstructure:"wait-for-chain"`
-	WaitForChainDelay           int64  `mapstructure:"wait-for-chain-delay"`
-	TransactionIndexingEnabled  bool   `mapstructure:"index-transactions"`
-	ExitWhenCaughtUp            bool   `mapstructure:"exit-when-caught-up"`
-	BlockEventIndexingEnabled   bool   `mapstructure:"index-block-events"`
-	FilterFile                  string `mapstructure:"filter-file"`
-	Dry                         bool   `mapstructure:"dry"`
+	ReindexMessageType              string `mapstructure:"reindex-message-type"`
+	ReattemptFailedBlocks           bool   `mapstructure:"reattempt-failed-blocks"`
+	FailedBlockRetry                bool   `mapstructure:"failed-block-retry"`
+	FailedBlockRetryIntervalSeconds int    `mapstructure:"failed-block-retry-interval-seconds"`
+	FailedBlockRetryBatchSize       int    `mapstructure:"failed-block-retry-batch-size"`
+	FailedBlockRetryMaxAttempts     int    `mapstructure:"failed-block-retry-max-attempts"`
+	StartBlock                      int64  `mapstructure:"start-block"`
+	EndBlock                        int64  `mapstructure:"end-block"`
+	BlockInputFile                  string `mapstructure:"block-input-file"`
+	ReIndex                         bool   `mapstructure:"reindex"`
+	RPCWorkers                      int64  `mapstructure:"rpc-workers"`
+	SkipBlockByHeightRPCRequest     bool   `mapstructure:"skip-block-by-height-rpc-request"`
+	BlockTimer                      int64  `mapstructure:"block-timer"`
+	WaitForChain                    bool   `mapstructure:"wait-for-chain"`
+	WaitForChainDelay               int64  `mapstructure:"wait-for-chain-delay"`
+	TransactionIndexingEnabled      bool   `mapstructure:"index-transactions"`
+	ExitWhenCaughtUp                bool   `mapstructure:"exit-when-caught-up"`
+	BlockEventIndexingEnabled       bool   `mapstructure:"index-block-events"`
+	FilterFile                      string `mapstructure:"filter-file"`
+	Dry                             bool   `mapstructure:"dry"`
 }
 
 // Flags for specific, deeper indexing behavior
@@ -52,6 +56,10 @@ func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
 	cmd.PersistentFlags().StringVar(&conf.Base.BlockInputFile, "base.block-input-file", "", "A file location containing a JSON list of block heights to index. Will override start and end block flags.")
 	cmd.PersistentFlags().BoolVar(&conf.Base.ReIndex, "base.reindex", false, "if true, this will re-attempt to index blocks we have already indexed (defaults to false)")
 	cmd.PersistentFlags().BoolVar(&conf.Base.ReattemptFailedBlocks, "base.reattempt-failed-blocks", false, "re-enqueue failed blocks for reattempts at startup.")
+	cmd.PersistentFlags().BoolVar(&conf.Base.FailedBlockRetry, "base.failed-block-retry", false, "periodically re-enqueue failed blocks for reprocessing while indexing.")
+	cmd.PersistentFlags().IntVar(&conf.Base.FailedBlockRetryIntervalSeconds, "base.failed-block-retry-interval-seconds", 600, "seconds between failed-block retry cycles.")
+	cmd.PersistentFlags().IntVar(&conf.Base.FailedBlockRetryBatchSize, "base.failed-block-retry-batch-size", 100, "maximum failed blocks re-enqueued per retry cycle.")
+	cmd.PersistentFlags().IntVar(&conf.Base.FailedBlockRetryMaxAttempts, "base.failed-block-retry-max-attempts", 10, "retry attempts per failed block before it is reported as stuck.")
 	cmd.PersistentFlags().StringVar(&conf.Base.ReindexMessageType, "base.reindex-message-type", "", "a Cosmos message type URL. When set, the block enqueue method will reindex all blocks between start and end block that contain this message type.")
 	// block event indexing
 	cmd.PersistentFlags().BoolVar(&conf.Base.TransactionIndexingEnabled, "base.index-transactions", false, "enable transaction indexing?")
@@ -154,7 +162,7 @@ func CheckSuperfluousIndexKeys(keys []string) []string {
 	addProbeConfigKeys(validKeys)
 
 	// add base keys
-	for _, key := range getValidConfigKeys(indexBase{}, "base") {
+	for _, key := range getValidConfigKeys(IndexBase{}, "base") {
 		validKeys[key] = struct{}{}
 	}
 

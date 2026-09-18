@@ -23,7 +23,7 @@ func (indexer *Indexer) ProcessBlocks(wg *sync.WaitGroup, failedBlockHandler cor
 		if err != nil {
 			config.Log.Error("ProcessBlock: unhandled error", err)
 			failedBlockHandler(currentHeight, core.UnprocessableTxError, err)
-			err := dbTypes.UpsertFailedBlock(indexer.DB, currentHeight, indexer.Config.Probe.ChainID, indexer.Config.Probe.ChainName)
+			err := dbTypes.UpsertFailedBlock(indexer.DB, currentHeight, indexer.Config.Probe.ChainID, indexer.Config.Probe.ChainName, err)
 			if err != nil {
 				config.Log.Fatal("Failed to insert failed block", err)
 			}
@@ -84,7 +84,7 @@ func (indexer *Indexer) ProcessBlocks(wg *sync.WaitGroup, failedBlockHandler cor
 			if err != nil {
 				config.Log.Error("ProcessRpcTxs: unhandled error", err)
 				failedBlockHandler(currentHeight, core.UnprocessableTxError, err)
-				err := dbTypes.UpsertFailedBlock(indexer.DB, currentHeight, indexer.Config.Probe.ChainID, indexer.Config.Probe.ChainName)
+				err := dbTypes.UpsertFailedBlock(indexer.DB, currentHeight, indexer.Config.Probe.ChainID, indexer.Config.Probe.ChainName, err)
 				if err != nil {
 					config.Log.Fatal("Failed to insert failed block", err)
 				}

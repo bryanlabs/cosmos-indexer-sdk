@@ -18,6 +18,14 @@ dry = false # if true, indexing will occur but data will not be written to the d
 rpc-workers = 1
 reindex = true
 reattempt-failed-blocks = false
+# Automatic failed-block backfill. Failed blocks are re-enqueued every cycle
+# until they index cleanly; the failed_blocks row is deleted inside the same
+# transaction that writes the block, so retries cannot duplicate data.
+# Blocks that exceed failed-block-retry-max-attempts are logged as stuck.
+failed-block-retry = false
+failed-block-retry-interval-seconds = 600
+failed-block-retry-batch-size = 100
+failed-block-retry-max-attempts = 10
 
 # Provides a filter configuration to skip block events or message types based on patterns
 # filter-file="filter-config.json"

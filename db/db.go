@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
@@ -147,7 +148,10 @@ func GetHighestEventIndexedBlock(db *gorm.DB, chainID uint) (models.Block, error
 	return block, err
 }
 
-func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName string) error {
+// UpsertFailedBlock records a block-processing failure for later reattempt.
+// Each call increments Attempts and stores the cause and time so the retry
+// loop can back off and report permanently stuck heights.
+func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName string, failureErr error) error {
 	return db.Transaction(func(dbTransaction *gorm.DB) error {
 		failedBlock := models.FailedBlock{Height: blockHeight, Chain: models.Chain{ChainID: chainID, Name: chainName}}
 
@@ -156,12 +160,70 @@ func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName
 			return err
 		}
 
-		if err := dbTransaction.Where(&failedBlock).FirstOrCreate(&failedBlock).Error; err != nil {
+		failedBlock.BlockchainID = failedBlock.Chain.ID
+		if err := dbTransaction.
+			Where(models.FailedBlock{Height: failedBlock.Height, BlockchainID: failedBlock.BlockchainID}).
+			FirstOrCreate(&failedBlock).Error; err != nil {
 			config.Log.Error("Error creating failed block DB object.", err)
+			return err
+		}
+
+		updates := map[string]any{
+			"attempts":          gorm.Expr("COALESCE(attempts, 0) + 1"),
+			"last_attempted_at": time.Now().UTC(),
+		}
+		if failureErr != nil {
+			// Truncate: RPC/gRPC error strings can embed full response payloads.
+			const maxErrorLength = 2048
+			if len(failureErr.Error()) > maxErrorLength {
+				updates["last_error"] = failureErr.Error()[:maxErrorLength]
+			} else {
+				updates["last_error"] = failureErr.Error()
+			}
+		}
+
+		if err := dbTransaction.Model(&models.FailedBlock{}).Where("id = ?", failedBlock.ID).Updates(updates).Error; err != nil {
+			config.Log.Error("Error updating failed block retry bookkeeping.", err)
 			return err
 		}
 		return nil
 	})
+}
+
+// FailedBlockRetryHeights returns up to limit heights currently recorded in
+// failed_blocks for the chain that are due for a reattempt: never retried, or
+// last attempted before retryInterval ago, and under maxAttempts total tries.
+// Heights are returned oldest-first so recovery proceeds in chain order.
+func FailedBlockRetryHeights(db *gorm.DB, chainID uint, retryInterval time.Duration, maxAttempts int, limit int) ([]int64, error) {
+	var heights []int64
+	query := db.Model(&models.FailedBlock{}).
+		Where("blockchain_id = ?::int", chainID).
+		Where("last_attempted_at IS NULL OR last_attempted_at <= ?", time.Now().UTC().Add(-retryInterval))
+	if maxAttempts > 0 {
+		query = query.Where("COALESCE(attempts, 0) < ?", maxAttempts)
+	}
+	err := query.Order("height asc").Limit(limit).Pluck("height", &heights).Error
+	return heights, err
+}
+
+// StuckFailedBlockCount reports how many failed blocks have exhausted their
+// retry budget, plus up to sampleLimit example heights, for operator alerts.
+func StuckFailedBlockCount(db *gorm.DB, chainID uint, maxAttempts int, sampleLimit int) (int64, []int64, error) {
+	var total int64
+	query := db.Model(&models.FailedBlock{}).
+		Where("blockchain_id = ?::int", chainID)
+	if maxAttempts > 0 {
+		query = query.Where("COALESCE(attempts, 0) >= ?", maxAttempts)
+	}
+	if err := query.Count(&total).Error; err != nil {
+		return 0, nil, err
+	}
+	if total == 0 {
+		return 0, nil, nil
+	}
+	var samples []int64
+	err := query.Order("height asc").Limit(sampleLimit).Pluck("height", &samples).Error
+	return total, samples, err
 }
 
 func UpsertFailedEventBlock(db *gorm.DB, blockHeight int64, chainID string, chainName string) error {

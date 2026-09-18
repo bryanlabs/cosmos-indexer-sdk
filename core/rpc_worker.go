@@ -55,13 +55,11 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 		if err != nil {
 			// This is the only response we continue on. If we can't get the block, we can't index anything.
 			config.Log.Errorf("Error getting block %v from RPC. Err: %v", block, err)
-			err := dbTypes.UpsertFailedEventBlock(db, block.Height, chainStringID, cfg.Probe.ChainName)
-			if err != nil {
-				config.Log.Fatal("Failed to insert failed block event", err)
+			if upsertErr := dbTypes.UpsertFailedEventBlock(db, block.Height, chainStringID, cfg.Probe.ChainName); upsertErr != nil {
+				config.Log.Fatal("Failed to insert failed block event", upsertErr)
 			}
-			err = dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName)
-			if err != nil {
-				config.Log.Fatal("Failed to insert failed block", err)
+			if upsertErr := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName, err); upsertErr != nil {
+				config.Log.Fatal("Failed to insert failed block", upsertErr)
 			}
 			continue
 		}
@@ -108,9 +106,9 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 
 					if err != nil {
 						config.Log.Errorf("Error getting txs for block %v from RPC. Err: %v", block, err)
-						err := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName)
-						if err != nil {
-							config.Log.Fatal("Failed to insert failed block", err)
+						blockErr := err
+						if upsertErr := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName, blockErr); upsertErr != nil {
+							config.Log.Fatal("Failed to insert failed block", upsertErr)
 						}
 						currentHeightIndexerData.GetTxsResponse = nil
 						currentHeightIndexerData.BlockResultsData = nil
@@ -120,9 +118,9 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 						bresults, err = NormalizeCustomBlockResults(bresults)
 						if err != nil {
 							config.Log.Errorf("Error normalizing block results for block %v from RPC. Err: %v", block, err)
-							err := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName)
-							if err != nil {
-								config.Log.Fatal("Failed to insert failed block", err)
+							normalizeErr := err
+							if upsertErr := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName, normalizeErr); upsertErr != nil {
+								config.Log.Fatal("Failed to insert failed block", upsertErr)
 							}
 						} else {
 							currentHeightIndexerData.BlockResultsData = bresults
