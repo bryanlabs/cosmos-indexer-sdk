@@ -400,3 +400,149 @@ func TestPreviewMetadataCannotBeForgedByDescription(t *testing.T) {
 		t.Fatal("untrusted description became structured metadata")
 	}
 }
+
+func TestDenomAndPolicyDecisionsFanOutToReceipts(t *testing.T) {
+	s, _, wallet, id := assetReviewFixture(t)
+	// A second receipt of the same voucher on a later day, so a denom rule has
+	// two receipts to decide and a per-receipt decision has something to beat.
+	fixtureSecondReceipt(t, s)
+
+	rr := callAsset(t, s, "/asset-review", wallet, nil)
+	if rr.Code != 409 {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	var review struct {
+		Pending   int            `json:"pending"`
+		Groups    []ReviewGroup  `json:"groups"`
+		Glossary  []ReviewReason `json:"reason_glossary"`
+		Unmatched []string       `json:"unmatched_decision_keys"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &review); err != nil {
+		t.Fatal(err)
+	}
+	if review.Pending != 2 || len(review.Groups) != 1 || review.Groups[0].Receipts != 2 || review.Groups[0].Pending != 2 || review.Groups[0].DecisionKey != "denom:"+junoFactoryUatomVoucher || !review.Groups[0].SuspectedSpam || review.Groups[0].TotalQuantity != "20000" || len(review.Groups[0].RecordIDs) != 2 || review.Groups[0].SampleMemo == "" {
+		t.Fatalf("groups wrong: %+v", review.Groups)
+	}
+	if len(review.Glossary) != 4 {
+		t.Fatalf("glossary missing: %+v", review.Glossary)
+	}
+	for _, code := range []string{ReasonSpamMemo, ReasonLabelMismatch, ReasonUnverifiedFactory} {
+		found := false
+		for _, c := range review.Groups[0].ReasonCodes {
+			found = found || c == code
+		}
+		if !found {
+			t.Fatalf("reason code %s missing from %v", code, review.Groups[0].ReasonCodes)
+		}
+	}
+
+	// policy:spam excludes every suspected-spam receipt and stamps applied_from.
+	policy := AssetDecisions{DecisionKeySpamPolicy: {Mode: AssetDecisionExclude}}
+	rr = callAsset(t, s, "/events", wallet, policy)
+	if rr.Code != 200 {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rows := csvRecords(t, rr.Body.String())
+	if len(rows) != 3 || rows[1][19] != "exclude" || rows[2][19] != "exclude" {
+		t.Fatalf("policy did not exclude both receipts: %v", rows)
+	}
+	rr = callAsset(t, s, "/asset-review", wallet, policy)
+	if rr.Code != 200 {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	var decided struct {
+		Pending int   `json:"pending"`
+		Reviews []Row `json:"reviews"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &decided); err != nil {
+		t.Fatal(err)
+	}
+	if decided.Pending != 0 || len(decided.Reviews) != 2 || decided.Reviews[0].AssetDecision == nil || decided.Reviews[0].AssetDecision.AppliedFrom != DecisionKeySpamPolicy || !decided.Reviews[0].AssetIdentity.Excluded {
+		t.Fatalf("policy decision not materialized: %+v", decided.Reviews)
+	}
+
+	// spam_policy=valueless is the same thing as the policy key.
+	q := url.Values{"address": {wallet}, "addresses": {wallet}, "chain": {"mainnet"}, "start": {"2026-01-01"}, "end": {"2027-01-01"}, "format": {"generic"}, "spam_policy": {"valueless"}}
+	req := httptest.NewRequest("GET", "/events?"+q.Encode(), nil)
+	shorthand := httptest.NewRecorder()
+	s.Handler().ServeHTTP(shorthand, req)
+	if shorthand.Code != 200 || shorthand.Body.String() != rr.Body.String() && len(csvRecords(t, shorthand.Body.String())) != 3 {
+		t.Fatal(shorthand.Code, shorthand.Body.String())
+	}
+	q.Set("spam_policy", "sometimes")
+	bad := httptest.NewRecorder()
+	s.Handler().ServeHTTP(bad, httptest.NewRequest("GET", "/events?"+q.Encode(), nil))
+	if bad.Code != 400 {
+		t.Fatal("bad spam_policy accepted", bad.Code)
+	}
+
+	// A denom override prices each receipt by its own quantity, and a record
+	// decision for one receipt beats the denom rule. Idle denom keys are fine;
+	// idle record keys are not.
+	denomKey := "denom:" + junoFactoryUatomVoucher
+	rules := AssetDecisions{
+		denomKey:         {Mode: AssetDecisionOverride, Token: "FAKE", UnitValueUSD: "0.5"},
+		"denom:ibc/NOPE": {Mode: AssetDecisionExclude},
+		id:               {Mode: AssetDecisionExclude},
+	}
+	rr = callAsset(t, s, "/events", wallet, rules)
+	if rr.Code != 200 {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rows = csvRecords(t, rr.Body.String())
+	if len(rows) != 3 {
+		t.Fatalf("rows: %v", rows)
+	}
+	var excluded, priced int
+	for _, r := range rows[1:] {
+		switch r[19] {
+		case "exclude":
+			excluded++
+		case "override":
+			priced++
+			if r[4] != "FAKE" || r[6] != "10000" || r[8] != "5000" || r[20] != "5000" || r[21] != "5000" {
+				t.Fatalf("denom override not priced per receipt: %v", r)
+			}
+		}
+	}
+	if excluded != 1 || priced != 1 {
+		t.Fatalf("precedence wrong: %v", rows)
+	}
+	rr = callAsset(t, s, "/asset-review", wallet, rules)
+	if err := json.Unmarshal(rr.Body.Bytes(), &review); err != nil {
+		t.Fatal(err)
+	}
+	if len(review.Unmatched) != 1 || review.Unmatched[0] != "denom:ibc/NOPE" || review.Groups[0].Decision == nil || review.Groups[0].Decision.Token != "FAKE" {
+		t.Fatalf("unmatched/group decision wrong: %+v %+v", review.Unmatched, review.Groups)
+	}
+	for name, bad := range map[string]AssetDecisions{
+		"policy override":      {DecisionKeySpamPolicy: {Mode: AssetDecisionOverride, Token: "X", UnitValueUSD: "1"}},
+		"denom without unit":   {denomKey: {Mode: AssetDecisionOverride, Token: "X"}},
+		"denom with totals":    {denomKey: {Mode: AssetDecisionOverride, Token: "X", UnitValueUSD: "1", Quantity: "1"}},
+		"record with unit":     {id: {Mode: AssetDecisionOverride, Token: "X", UnitValueUSD: "1", Quantity: "1", ValueUSD: "1", CostBasisUSD: "1", AcquiredDate: "2026-05-01"}},
+		"applied_from forged":  {id: {Mode: AssetDecisionExclude, AppliedFrom: "policy:spam"}},
+		"unknown record still": {"mainnet|" + wallet + "|999|0": {Mode: AssetDecisionExclude}},
+	} {
+		rr := callAsset(t, s, "/events", wallet, bad)
+		if rr.Code != 400 {
+			t.Fatalf("%s accepted: %d %s", name, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func fixtureSecondReceipt(t *testing.T, s *Server) {
+	t.Helper()
+	for _, q := range []string{
+		"INSERT INTO blocks(id,chain_id,proposer_cons_address_id,height,time_stamp,tx_indexed) VALUES(2,1,1,31300000,'2026-05-27T08:15:44Z',true)",
+		"INSERT INTO txes(id,block_id,hash,code,memo) VALUES(2,2,'SCAMTX2',0,'Claim 10,000 ATOM at https://claim.invalid')",
+		"INSERT INTO messages(id,tx_id,message_type_id,message_index) VALUES(2,2,1,0)",
+	} {
+		if err := s.db.Exec(q).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	event := tax.TaxableEvent{MessageID: 2, SubIndex: 0, Category: "transfer", FromAddr: "sender", ToAddr: "cosmos1testwallet", Amount: "10000000000", Denom: junoFactoryUatomVoucher, BlockHeight: 31300000, Timestamp: time.Date(2026, 5, 27, 8, 15, 44, 0, time.UTC), TxHash: "SCAMTX2"}
+	if err := s.db.Omit("Message").Create(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+}

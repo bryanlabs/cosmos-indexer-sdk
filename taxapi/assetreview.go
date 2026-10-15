@@ -13,8 +13,8 @@ import (
 
 const (
 	// MaxAssetDecisionsJSONBytes bounds a user-supplied asset-review payload.
-	MaxAssetDecisionsJSONBytes = 64 << 10
-	MaxAssetDecisions          = 200
+	MaxAssetDecisionsJSONBytes = 256 << 10
+	MaxAssetDecisions          = 500
 	MaxAssetDecisionRecordID   = 256
 	MaxAssetDecisionToken      = 32
 )
@@ -24,8 +24,22 @@ const (
 	AssetDecisionOverride = "override"
 )
 
-// AssetDecision is an explicit treatment for one opaque tax-record ID. An
-// omitted map entry is unreviewed, never an implicit exclusion or override.
+// AssetDecision is an explicit treatment for a flagged receipt. An omitted
+// map entry is unreviewed, never an implicit exclusion or override.
+//
+// A decision is keyed one of three ways, most specific wins:
+//
+//	<record_id>          one receipt (quantity, value_usd, cost_basis_usd and
+//	                     acquired_date are totals for that receipt)
+//	denom:<raw_denom>    every flagged receipt of that token in the report;
+//	                     an override carries token and unit_value_usd, and each
+//	                     receipt's value and basis are quantity times that unit
+//	                     price on its own receipt date
+//	policy:spam          every receipt flagged with the spam_memo reason that
+//	                     has no more specific decision; exclude only
+//
+// AppliedFrom is set by the server on the materialized per-receipt decision to
+// say which key produced it; a request must not set it.
 type AssetDecision struct {
 	Mode         string `json:"mode"`
 	Token        string `json:"token,omitempty"`
@@ -33,11 +47,30 @@ type AssetDecision struct {
 	ValueUSD     string `json:"value_usd,omitempty"`
 	CostBasisUSD string `json:"cost_basis_usd,omitempty"`
 	AcquiredDate string `json:"acquired_date,omitempty"`
+	UnitValueUSD string `json:"unit_value_usd,omitempty"`
+	AppliedFrom  string `json:"applied_from,omitempty"`
 }
 
-// AssetDecisions is keyed by the opaque RecordID supplied by the report
-// builder. This package deliberately does not infer record IDs or asset values.
+// AssetDecisions is keyed by record ID, denom:<raw_denom> or policy:spam.
+// This package deliberately does not infer record IDs or asset values.
 type AssetDecisions map[string]AssetDecision
+
+const (
+	DecisionKeyDenomPrefix = "denom:"
+	DecisionKeySpamPolicy  = "policy:spam"
+)
+
+// decisionKeyKind classifies a decision key: "record", "denom" or "policy".
+func decisionKeyKind(key string) string {
+	switch {
+	case key == DecisionKeySpamPolicy:
+		return "policy"
+	case strings.HasPrefix(key, DecisionKeyDenomPrefix):
+		return "denom"
+	default:
+		return "record"
+	}
+}
 
 // ParseAssetDecisions parses and normalizes a bounded user-supplied JSON map.
 // It rejects unknown fields, malformed treatments, and ambiguous exclusions.
@@ -79,7 +112,10 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 		if err := requireJSONEOF(valueDecoder); err != nil {
 			return nil, fmt.Errorf("asset decision %q: %w", recordID, err)
 		}
-		normalized, err := NormalizeAssetDecision(decision)
+		if decision.AppliedFrom != "" {
+			return nil, fmt.Errorf("asset decision %q: applied_from is set by the server", recordID)
+		}
+		normalized, err := NormalizeKeyedDecision(recordID, decision)
 		if err != nil {
 			return nil, fmt.Errorf("asset decision %q: %w", recordID, err)
 		}
@@ -88,17 +124,58 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 	return out, nil
 }
 
-// NormalizeAssetDecision validates a decision and returns its canonical form.
-// Tokens are trimmed and uppercased. Decimal strings remain exactly as supplied
-// after validation so manually entered totals retain their explicit precision.
+// NormalizeKeyedDecision validates a decision against the shape its key
+// allows: a receipt override carries totals, a denom override carries a unit
+// price, and the spam policy can only exclude.
+func NormalizeKeyedDecision(key string, decision AssetDecision) (AssetDecision, error) {
+	switch decisionKeyKind(key) {
+	case "policy":
+		if decision.Mode != AssetDecisionExclude {
+			return AssetDecision{}, fmt.Errorf("policy:spam can only exclude (mode %q)", AssetDecisionExclude)
+		}
+		return NormalizeAssetDecision(decision)
+	case "denom":
+		if len(key) <= len(DecisionKeyDenomPrefix) {
+			return AssetDecision{}, fmt.Errorf("denom key needs a raw denomination after %q", DecisionKeyDenomPrefix)
+		}
+		if decision.Mode == AssetDecisionOverride {
+			if decision.Quantity != "" || decision.ValueUSD != "" || decision.CostBasisUSD != "" || decision.AcquiredDate != "" {
+				return AssetDecision{}, fmt.Errorf("a denom override carries token and unit_value_usd only; per-receipt totals belong on a record ID")
+			}
+			decision.Token = strings.ToUpper(strings.TrimSpace(decision.Token))
+			if err := validateToken(decision.Token); err != nil {
+				return AssetDecision{}, err
+			}
+			if err := validateDecimal(decision.UnitValueUSD, false); err != nil {
+				return AssetDecision{}, fmt.Errorf("unit_value_usd: %w", err)
+			}
+			return AssetDecision{Mode: AssetDecisionOverride, Token: decision.Token, UnitValueUSD: decision.UnitValueUSD}, nil
+		}
+		return NormalizeAssetDecision(decision)
+	default:
+		if decision.UnitValueUSD != "" {
+			return AssetDecision{}, fmt.Errorf("unit_value_usd belongs on a denom: key; a receipt override carries value_usd and cost_basis_usd totals")
+		}
+		return NormalizeAssetDecision(decision)
+	}
+}
+
+// NormalizeAssetDecision validates a per-receipt decision and returns its
+// canonical form. Tokens are trimmed and uppercased. Decimal strings remain
+// exactly as supplied after validation so manually entered totals retain
+// their explicit precision. AppliedFrom passes through untouched.
 func NormalizeAssetDecision(decision AssetDecision) (AssetDecision, error) {
+	applied := decision.AppliedFrom
 	switch decision.Mode {
 	case AssetDecisionExclude:
-		if decision.Token != "" || decision.Quantity != "" || decision.ValueUSD != "" || decision.CostBasisUSD != "" || decision.AcquiredDate != "" {
+		if decision.Token != "" || decision.Quantity != "" || decision.ValueUSD != "" || decision.CostBasisUSD != "" || decision.AcquiredDate != "" || decision.UnitValueUSD != "" {
 			return AssetDecision{}, fmt.Errorf("exclude must not include override fields")
 		}
-		return AssetDecision{Mode: AssetDecisionExclude}, nil
+		return AssetDecision{Mode: AssetDecisionExclude, AppliedFrom: applied}, nil
 	case AssetDecisionOverride:
+		if decision.UnitValueUSD != "" {
+			return AssetDecision{}, fmt.Errorf("unit_value_usd belongs on a denom: key")
+		}
 		decision.Token = strings.ToUpper(strings.TrimSpace(decision.Token))
 		if err := validateToken(decision.Token); err != nil {
 			return AssetDecision{}, err
@@ -132,7 +209,7 @@ func ValidateAssetDecisions(decisions AssetDecisions) error {
 		if err := validateRecordID(recordID); err != nil {
 			return err
 		}
-		if _, err := NormalizeAssetDecision(decision); err != nil {
+		if _, err := NormalizeKeyedDecision(recordID, decision); err != nil {
 			return fmt.Errorf("asset decision %q: %w", recordID, err)
 		}
 	}
@@ -158,7 +235,7 @@ func CanonicalAssetDecisionsJSON(decisions AssetDecisions) (string, error) {
 			out.WriteByte(',')
 		}
 		keyJSON, _ := json.Marshal(key)
-		normalized, _ := NormalizeAssetDecision(decisions[key])
+		normalized, _ := NormalizeKeyedDecision(key, decisions[key])
 		decisionJSON, _ := json.Marshal(normalized)
 		out.Write(keyJSON)
 		out.WriteByte(':')

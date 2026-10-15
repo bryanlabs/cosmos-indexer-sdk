@@ -8,6 +8,7 @@ type AssetIdentity struct {
 	Memo              string         `json:"memo"`
 	SuspectedSpam     bool           `json:"suspected_spam"`
 	Reasons           []string       `json:"reasons"`
+	ReasonCodes       []string       `json:"reason_codes"`
 	Decision          *AssetDecision `json:"decision,omitempty"`
 	Excluded          bool           `json:"excluded"`
 	ReportedLabel     string         `json:"reported_label"`

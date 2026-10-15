@@ -17,8 +17,9 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
 
 ## The BryanLabs tax layer (the part you'll usually touch)
 - `taxapi/` — the HTTP API: `server.go` (routes), `assetreview_runtime.go`
-  (`/asset-review` readiness/audit and explicit per-record decisions; see
-  `taxapi/ASSET-REVIEW.md`), `balances.go` (`/balance` = live
+  (`/asset-review` readiness/audit, decisions keyed by record ID,
+  `denom:<raw>` or `policy:spam`, groups per token and the reason glossary in
+  `reviewreasons.go`; see `taxapi/ASSET-REVIEW.md`), `balances.go` (`/balance` = live
   node read via `NODE_REST_API`, persisted to `balance_snapshots`), `form8949.go`,
   `form990t.go` (reports/forms).
 - Methodology v8 surfaces (2026-10-15): `tax/catalog.go` (everything the

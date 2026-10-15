@@ -64,13 +64,16 @@ func attachSpamEvidence(row *Row, event tax.TaxableEvent, chain, wallet, memo st
 	a.SuspectedSpam = suspicious
 	a.Note = "Review required. The reported label and original transaction remain visible. No valuation or exclusion is applied without your explicit choice."
 	if !a.OfficialAtomMatch && strings.EqualFold(a.ReportedLabel, "ATOM") {
-		a.Reasons = append(a.Reasons, "The raw denomination did not match official Cosmos Hub uatom; an ATOM label does not prove ATOM backing.")
+		a.addReason(ReasonLabelMismatch)
 	}
 	if knownSuspect {
-		a.Reasons = append(a.Reasons, "This is an issuer-created Juno tokenfactory asset, not native ATOM. No native ATOM backing or reliable market price has been verified.")
+		a.addReason(ReasonUnverifiedFactory)
 	}
 	if promotional {
-		a.Reasons = append(a.Reasons, "The transaction memo advertises a claim or airdrop at an external website. This is a suspected-spam signal, not proof of value.")
+		a.addReason(ReasonSpamMemo)
+	}
+	if len(a.ReasonCodes) == 0 {
+		a.addReason(ReasonIdentityMismatch)
 	}
 	if event.Denom == airdrop67Voucher {
 		a.SourceChain = "juno-1"

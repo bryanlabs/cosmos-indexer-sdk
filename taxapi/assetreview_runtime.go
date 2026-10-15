@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,10 +15,63 @@ import (
 type assetReviewRequired struct{ Pending int }
 
 func (e assetReviewRequired) Error() string {
-	return fmt.Sprintf("%d flagged receipt(s) need a decision before a tax CSV, document, journal or positions file can be produced. Each is a suspected-spam or identity-mismatch receipt: exclude it as valueless, or supply your own token, quantity, USD value and cost basis. Pass the decisions as the asset_decisions parameter (JSON object keyed by record_id from /asset-review; see /tax/api-docs), or save them in the report on the website first.", e.Pending)
+	return fmt.Sprintf("%d flagged receipt(s) need a decision before a tax CSV, document, journal or positions file can be produced. Each is a suspected-spam or identity-mismatch receipt: exclude it as valueless, or supply your own token and USD value. Pass the decisions as the asset_decisions parameter (JSON object; keys are a record_id from /asset-review, denom:<raw_denom> for every receipt of that token, or policy:spam for every suspected-spam receipt; spam_policy=valueless is the same as the policy key; see /tax/api-docs), or save them in the report on the website first.", e.Pending)
 }
 
 type assetReviewInputError struct{ error }
+
+// resolveDecision picks the most specific decision for a flagged row: the
+// receipt's own record ID, then denom:<raw_denom>, then policy:spam (which
+// only reaches receipts flagged as suspected spam).
+func resolveDecision(row *Row, decisions AssetDecisions) (AssetDecision, string, bool) {
+	id := row.AssetIdentity.RecordID
+	if d, ok := decisions[id]; ok {
+		return d, id, true
+	}
+	if denom := row.AssetIdentity.RawDenom; denom != "" {
+		key := DecisionKeyDenomPrefix + denom
+		if d, ok := decisions[key]; ok {
+			return d, key, true
+		}
+	}
+	if row.AssetIdentity.SuspectedSpam {
+		if d, ok := decisions[DecisionKeySpamPolicy]; ok {
+			return d, DecisionKeySpamPolicy, true
+		}
+	}
+	return AssetDecision{}, "", false
+}
+
+// materializeDecision turns a denom or policy decision into the per-receipt
+// form the exporters understand, stamping applied_from with the key so the
+// audit trail shows the receipt was decided by a rule rather than by hand.
+func materializeDecision(key string, decision AssetDecision, row *Row) (AssetDecision, error) {
+	kind := decisionKeyKind(key)
+	normalized, err := NormalizeKeyedDecision(key, decision)
+	if err != nil {
+		return AssetDecision{}, err
+	}
+	if kind == "record" {
+		return normalized, nil
+	}
+	if normalized.Mode == AssetDecisionExclude {
+		return AssetDecision{Mode: AssetDecisionExclude, AppliedFrom: key}, nil
+	}
+	if !row.Amount.IsPositive() {
+		return AssetDecision{}, fmt.Errorf("%s: receipt %s has no positive quantity to price; decide it by record ID", key, row.AssetIdentity.RecordID)
+	}
+	unit := decimal.RequireFromString(normalized.UnitValueUSD)
+	value := row.Amount.Mul(unit).RoundBank(18)
+	return AssetDecision{
+		Mode:         AssetDecisionOverride,
+		Token:        normalized.Token,
+		Quantity:     row.Amount.String(),
+		ValueUSD:     value.String(),
+		CostBasisUSD: value.String(),
+		AcquiredDate: row.Time.UTC().Format("2006-01-02"),
+		AppliedFrom:  key,
+	}, nil
+}
 
 func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 	if err := ValidateAssetDecisions(decisions); err != nil {
@@ -25,6 +79,7 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 	}
 	out := append([]Row(nil), rows...)
 	seen := map[string]bool{}
+	used := map[string]bool{}
 	for i := range out {
 		row := &out[i]
 		if row.AssetIdentity == nil {
@@ -38,11 +93,12 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 			return nil, fmt.Errorf("duplicate review record ID")
 		}
 		seen[id] = true
-		decision, ok := decisions[id]
+		raw, key, ok := resolveDecision(row, decisions)
 		if !ok {
 			continue
 		}
-		decision, err := NormalizeAssetDecision(decision)
+		used[key] = true
+		decision, err := materializeDecision(key, raw, row)
 		if err != nil {
 			return nil, err
 		}
@@ -77,13 +133,40 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 		row.DecimalsAssumed = false
 		row.Excluded = false
 	}
-	for id := range decisions {
-		if !seen[id] {
-			return nil, fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", id)
+	// A record ID that matches nothing is a stale or foreign decision and is
+	// refused. A denom or policy key that matches nothing is harmless: the token
+	// simply did not appear in this period, so a remembered rule can be sent
+	// with every report.
+	for key := range decisions {
+		if !used[key] && decisionKeyKind(key) == "record" {
+			return nil, fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", key)
 		}
 	}
 	return out, nil
 }
+
+// UnmatchedDecisionKeys lists the denom and policy keys that decided nothing
+// in these rows, so a client can show which remembered rules were idle.
+func UnmatchedDecisionKeys(rows []Row, decisions AssetDecisions) []string {
+	used := map[string]bool{}
+	for _, r := range rows {
+		if r.AssetDecision != nil && r.AssetDecision.AppliedFrom != "" {
+			used[r.AssetDecision.AppliedFrom] = true
+		}
+		if r.AssetIdentity != nil && r.AssetDecision != nil && r.AssetDecision.AppliedFrom == "" {
+			used[r.AssetIdentity.RecordID] = true
+		}
+	}
+	var out []string
+	for key := range decisions {
+		if !used[key] {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func PendingAssetReviews(rows []Row) int {
 	n := 0
 	for _, r := range rows {
@@ -129,6 +212,20 @@ func decisionsFromRequest(r *http.Request) (AssetDecisions, error) {
 	if err != nil {
 		return nil, assetReviewInputError{err}
 	}
+	// spam_policy=valueless is shorthand for {"policy:spam": {"mode": "exclude"}}:
+	// every receipt flagged as suspected spam without a more specific decision
+	// is treated as valueless. It becomes an ordinary decision key so caches,
+	// saved reports and the audit trail all carry it.
+	switch policy := r.URL.Query().Get("spam_policy"); policy {
+	case "", "ask":
+	case "valueless":
+		if d == nil {
+			d = AssetDecisions{}
+		}
+		d[DecisionKeySpamPolicy] = AssetDecision{Mode: AssetDecisionExclude}
+	default:
+		return nil, assetReviewInputError{fmt.Errorf("spam_policy must be ask or valueless")}
+	}
 	return d, nil
 }
 func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []string, start, end time.Time) ([]Row, error) {
@@ -146,6 +243,7 @@ func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []strin
 	}
 	return ApplyTags(rows, tags), nil
 }
+
 // errAwaitingCorrection is returned while a wallet still has staking rows
 // written by a methodology older than the current one. A replay is rewriting
 // them; until it reaches this wallet no totals are returned rather than a
@@ -196,5 +294,111 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 	if pending > 0 {
 		w.WriteHeader(http.StatusConflict)
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"pending": pending, "reviews": reviews, "decisions": decisions})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"pending":                 pending,
+		"reviews":                 reviews,
+		"groups":                  ReviewGroups(reviews, decisions),
+		"decisions":               decisions,
+		"unmatched_decision_keys": UnmatchedDecisionKeys(rows, decisions),
+		"reason_glossary":         ReviewReasonGlossary(),
+		"decision_keys": map[string]string{
+			"record_id":   "one receipt; override carries quantity, value_usd, cost_basis_usd and acquired_date totals",
+			"denom:<raw>": "every flagged receipt of that token in the report; override carries token and unit_value_usd, each receipt is priced quantity times unit on its own date",
+			"policy:spam": "every receipt flagged as suspected spam without a more specific decision; exclude only (spam_policy=valueless is the same thing)",
+		},
+	})
+}
+
+// ReviewGroup is one flagged token: the unit a person actually decides on.
+type ReviewGroup struct {
+	Denom         string         `json:"denom"`
+	DecisionKey   string         `json:"decision_key"`
+	ReportedLabel string         `json:"reported_label"`
+	TokenName     string         `json:"token_name"`
+	BaseToken     string         `json:"base_token"`
+	SourceChain   string         `json:"source_chain"`
+	ChannelPath   string         `json:"channel_path"`
+	SuspectedSpam bool           `json:"suspected_spam"`
+	ReasonCodes   []string       `json:"reason_codes"`
+	Receipts      int            `json:"receipts"`
+	Pending       int            `json:"pending"`
+	FirstDate     string         `json:"first_date"`
+	LastDate      string         `json:"last_date"`
+	TotalQuantity string         `json:"total_quantity"`
+	SampleMemo    string         `json:"sample_memo"`
+	RecordIDs     []string       `json:"record_ids"`
+	Decision      *AssetDecision `json:"decision,omitempty"`
+}
+
+// ReviewGroups folds flagged rows by raw denomination, newest token first by
+// pending count so the biggest pile is at the top.
+func ReviewGroups(reviews []Row, decisions AssetDecisions) []ReviewGroup {
+	byDenom := map[string]*ReviewGroup{}
+	order := []string{}
+	totals := map[string]decimal.Decimal{}
+	for _, r := range reviews {
+		a := r.AssetIdentity
+		if a == nil {
+			continue
+		}
+		denom := a.RawDenom
+		if denom == "" {
+			denom = r.Denom
+		}
+		g, ok := byDenom[denom]
+		if !ok {
+			g = &ReviewGroup{Denom: denom, DecisionKey: DecisionKeyDenomPrefix + denom, ReportedLabel: a.ReportedLabel, TokenName: a.TokenName, BaseToken: a.BaseToken, SourceChain: a.SourceChain, ChannelPath: a.ChannelPath}
+			if d, has := decisions[g.DecisionKey]; has {
+				dd := d
+				g.Decision = &dd
+			}
+			byDenom[denom] = g
+			order = append(order, denom)
+			totals[denom] = decimal.Zero
+		}
+		g.Receipts++
+		if r.AssetDecision == nil {
+			g.Pending++
+		}
+		g.SuspectedSpam = g.SuspectedSpam || a.SuspectedSpam
+		for _, c := range a.ReasonCodes {
+			found := false
+			for _, e := range g.ReasonCodes {
+				if e == c {
+					found = true
+				}
+			}
+			if !found {
+				g.ReasonCodes = append(g.ReasonCodes, c)
+			}
+		}
+		day := r.Time.UTC().Format("2006-01-02")
+		if g.FirstDate == "" || day < g.FirstDate {
+			g.FirstDate = day
+		}
+		if day > g.LastDate {
+			g.LastDate = day
+		}
+		if g.SampleMemo == "" && a.Memo != "" {
+			g.SampleMemo = a.Memo
+		}
+		g.RecordIDs = append(g.RecordIDs, a.RecordID)
+		totals[denom] = totals[denom].Add(r.Amount)
+	}
+	out := make([]ReviewGroup, 0, len(order))
+	for _, denom := range order {
+		g := byDenom[denom]
+		g.TotalQuantity = totals[denom].String()
+		if g.ReasonCodes == nil {
+			g.ReasonCodes = []string{}
+		}
+		out = append(out, *g)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Pending != out[j].Pending {
+			return out[i].Pending > out[j].Pending
+		}
+		return out[i].Receipts > out[j].Receipts
+	})
+	return out
 }

@@ -21,15 +21,32 @@ to matching flagged records in the requested wallets and date range. Unknown IDs
 invalid fields and conflicting modes are rejected. Original indexed records are
 never updated by this feature.
 
-The optional `asset_decisions` query parameter is a JSON object keyed by record ID.
-The web application uses the camel-case `assetDecisions` request-body field and
-forwards it to the SDK. Each entry is one of:
+The optional `asset_decisions` query parameter is a JSON object. The web
+application uses the camel-case `assetDecisions` request-body field and forwards
+it to the SDK. Keys come in three kinds, and the most specific one wins for each
+receipt:
+
+| Key | Reaches | Override shape |
+| --- | --- | --- |
+| `<record_id>` | that one receipt | totals: `quantity`, `value_usd`, `cost_basis_usd`, `acquired_date` |
+| `denom:<raw_denom>` | every flagged receipt of that token in the report | `token` and `unit_value_usd`; each receipt is priced quantity times unit, basis equals value, acquisition date is the receipt day |
+| `policy:spam` | every receipt flagged with reason `spam_memo` and no more specific decision | exclude only |
+
+`spam_policy=valueless` is query shorthand that inserts `policy:spam` as an
+exclude decision; `spam_policy=ask` (the default) inserts nothing. A decision a
+rule produced is materialized per receipt and carries `applied_from` with the
+key that produced it, so the audit CSV and the preview show whether a person
+decided the receipt or a rule did. `applied_from` is server-set and rejected on
+input. An unknown record ID is rejected (400) because it is stale or foreign. An
+idle `denom:` or `policy:` key is accepted and listed in
+`unmatched_decision_keys` of `/asset-review`, so a remembered rule can be sent
+with every report.
+
+Each entry is one of:
 
 ```json
 {"mode":"exclude"}
 ```
-
-or:
 
 ```json
 {
@@ -42,13 +59,32 @@ or:
 }
 ```
 
+```json
+{"mode":"override","token":"MYTOKEN","unit_value_usd":"0.5"}
+```
+
 The override token is free text, not an ATOM/USDC preset or registry lookup.
 Quantity is positive. USD value and basis are separate TOTAL amounts for the
 record, both manually entered and nonnegative. Explicit zero is valid; omission
 is not zero. The acquisition date must be valid and no later than the receipt.
-Plain decimals are bounded to 38 digits and 18 decimal places. At most 200 record
-decisions and 64 KiB of decision JSON are accepted; narrow the report range when
-necessary. No excess rows or decisions are silently discarded.
+Plain decimals are bounded to 38 digits and 18 decimal places. At most 500
+decisions and 256 KiB of decision JSON are accepted; narrow the report range
+when necessary. No excess rows or decisions are silently discarded.
+
+## Reason codes and groups
+
+Every flagged receipt carries `asset_identity.reason_codes` next to the
+human-readable `reasons`: `spam_memo`, `label_mismatch`, `unverified_factory`,
+or the fallback `identity_mismatch` when none of the three specific signals
+fired. The texts of the first three are part of the record fingerprint and
+never change; a new signal gets a new code. `/asset-review` returns
+`reason_glossary` (code, title, text, explainer, suggested treatment) so a site
+or an agent can explain a flag without hardcoding it, and `groups`: one entry
+per raw denomination with the reported label, token name, source chain,
+receipt and pending counts, first and last date, total quantity, reason codes,
+a sample memo, the record IDs, the `denom:` decision key, and the denom-level
+decision when one is in force. A person decides per group; the API still
+accepts per-receipt decisions for exceptions.
 
 ## Preview and export boundaries
 
@@ -114,5 +150,7 @@ Reset removes the explicit decision and blocks exports again until re-reviewed.
 `assetreview_http_test.go` runs a disposable PostgreSQL/HTTP fixture covering
 pending gates, retained previews, explicit exclusion, arbitrary token overrides,
 manual basis/date FIFO, exact zero values, source immutability, unknown-ID
-rejection, and cache separation. Frontend Node/SSR tests verify no selected mode
+rejection, cache separation, and (`TestDenomAndPolicyDecisionsFanOutToReceipts`)
+denom and policy fan-out, precedence, `spam_policy` shorthand, groups, and the
+reason glossary. Frontend Node/SSR tests verify no selected mode
 or default token, escaped memos, metadata integrity, and explicit manual values.
