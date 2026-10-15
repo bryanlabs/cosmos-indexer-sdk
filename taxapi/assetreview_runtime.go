@@ -14,7 +14,7 @@ import (
 type assetReviewRequired struct{ Pending int }
 
 func (e assetReviewRequired) Error() string {
-	return fmt.Sprintf("Review %d suspected-spam or identity-mismatch receipt(s) before generating a tax CSV or document. Choose exclusion or enter your own token, quantity, value and basis.", e.Pending)
+	return fmt.Sprintf("%d flagged receipt(s) need a decision before a tax CSV, document, journal or positions file can be produced. Each is a suspected-spam or identity-mismatch receipt: exclude it as valueless, or supply your own token, quantity, USD value and cost basis. Pass the decisions as the asset_decisions parameter (JSON object keyed by record_id from /asset-review; see /tax/api-docs), or save them in the report on the website first.", e.Pending)
 }
 
 type assetReviewInputError struct{ error }
@@ -179,7 +179,7 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
-	rows, err := s.reviewedRows(def(q.Get("chain"), "mainnet"), addresses, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)), decisions, true)
+	rows, err := s.reviewedRows(chainParam(q.Get("chain")), addresses, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)), decisions, true)
 	if err != nil {
 		writeTaxError(w, err)
 		return

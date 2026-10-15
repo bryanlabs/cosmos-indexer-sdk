@@ -48,6 +48,6 @@ func currentMethodology() Methodology {
 			"documented $1 USD peg for exact allowlisted USDC denominations when the oracle has no price",
 			"no synthetic fallback for any other asset: the row is flagged price_missing rather than valued at $0",
 		},
-		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated (see INF-201)",
+		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated",
 	}
 }

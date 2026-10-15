@@ -207,7 +207,7 @@ func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "addresses required", http.StatusBadRequest)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	format := def(q.Get("format"), "summ")
 	if format != "summ" && format != "cryptotaxcalculator" {
 		http.Error(w, "report-job is preview only; use /events for tax exports", 400)

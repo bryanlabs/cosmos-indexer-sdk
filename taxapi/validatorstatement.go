@@ -116,7 +116,7 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		http.Error(w, "the operator address failed its checksum; check it for a typo", http.StatusBadRequest)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	start := dateParam(q.Get("start"), time.Time{})
 	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
 

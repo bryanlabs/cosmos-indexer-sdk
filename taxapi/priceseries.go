@@ -28,7 +28,7 @@ type pricePoint struct {
 // given day (INF-203).
 func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	denom := def(q.Get("denom"), s.native.Denom)
 	end := dateParam(q.Get("end"), nowUTC())
 	start := dateParam(q.Get("start"), end.AddDate(0, 0, -90))

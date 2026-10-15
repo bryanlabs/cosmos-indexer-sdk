@@ -165,7 +165,7 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	start := dateParam(q.Get("start"), time.Time{})
 	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
 	rows, err := s.rowsForRequest(r, chain, []string{addr}, start, end)

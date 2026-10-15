@@ -164,7 +164,7 @@ func (s *Server) handleCreateWasmSubmission(w http.ResponseWriter, r *http.Reque
 	}
 
 	sub := WasmSubmission{
-		Chain:           def(body.Chain, "mainnet"),
+		Chain:           chainParam(body.Chain),
 		ContractAddress: body.ContractAddress,
 		Kind:            body.Kind,
 		Contact:         strings.TrimSpace(body.Contact),

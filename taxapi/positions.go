@@ -97,12 +97,13 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			}
 		}
 		if price, ok := priceAt(denoms[a]); ok {
-			p.MarketPriceUSD = price
-			p.MarketValueUSD = p.Quantity.Mul(price)
-			p.UnrealizedGainUSD = p.Quantity.Sub(p.BasisUnknownQty).Mul(price).Sub(p.CostBasisUSD)
+			p.MarketPriceUSD = price.Round(8)
+			p.MarketValueUSD = p.Quantity.Mul(price).Round(2)
+			p.UnrealizedGainUSD = p.Quantity.Sub(p.BasisUnknownQty).Mul(price).Sub(p.CostBasisUSD).Round(2)
 		} else {
 			p.PriceMissing = true
 		}
+		p.CostBasisUSD = p.CostBasisUSD.Round(2)
 		out = append(out, p)
 	}
 	return out
@@ -116,9 +117,13 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address required", http.StatusBadRequest)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	asOf := dateParam(q.Get("date"), nowUTC())
-	rows, err := s.rowsForRequest(r, chain, []string{addr}, time.Time{}, asOf.AddDate(0, 0, 1))
+	// Load the wallet's whole history, not just up to the as-of date, so the
+	// caller can pass the same asset_decisions a full report carries even when
+	// some flagged receipts fall after the as-of date. BuildPositions applies
+	// the date cut itself.
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, time.Time{}, nowUTC().AddDate(0, 0, 1))
 	if err != nil {
 		writeTaxError(w, err)
 		return
@@ -147,7 +152,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"address": addr, "chain": chain, "as_of": day, "methodology_version": MethodologyVersion,
-		"note":      "Open lots from acquisitions seen on chain, FIFO, per wallet. Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins are included in quantity because they are still owned.",
+		"note":      "Open lots from acquisitions seen in the indexed history (Cosmos Hub from 2025-12-31 onward), FIFO, per wallet. Coins acquired before the index starts are not represented. Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
 		"positions": positions,
 	})
 }

@@ -80,7 +80,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address required", http.StatusBadRequest)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	format := def(q.Get("format"), "summ")
 	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
@@ -106,7 +106,7 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address required", http.StatusBadRequest)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
@@ -136,7 +136,7 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "address required", http.StatusBadRequest)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
@@ -171,7 +171,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("recognition policy %q is not implemented yet; only %q is available today", recognition, RecognitionPolicyDefault), http.StatusNotImplemented)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
@@ -262,7 +262,7 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("recognition policy %q is not implemented yet; only %q is available today", recognition, RecognitionPolicyDefault), http.StatusNotImplemented)
 		return
 	}
-	chain := def(q.Get("chain"), "mainnet")
+	chain := chainParam(q.Get("chain"))
 	start := dateParam(q.Get("start"), time.Time{})
 	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
 	// An entity may hold several wallets; the $1,000 deduction is per return, so
@@ -552,6 +552,20 @@ func ibcBaseDenom(denom string) (string, bool) {
 		return denom, false
 	}
 	return strings.Join(parts[i:], "/"), true
+}
+
+// chainParam maps the chain names a caller may send to the oracle's key.
+// The website and the registry name Cosmos Hub "cosmoshub" (chain id
+// "cosmoshub-4"); the oracle and the price cache key it "mainnet". Before this
+// normaliser a request with chain=cosmoshub priced every row as missing.
+func chainParam(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "mainnet", "cosmoshub", "cosmoshub-4", "cosmos-hub", "cosmos":
+		return "mainnet"
+	case "testnet", "theta-testnet-001", "provider", "provider-testnet", "cosmoshub-testnet":
+		return "testnet"
+	}
+	return strings.TrimSpace(v)
 }
 
 func def(v, d string) string {
