@@ -58,8 +58,11 @@ var ValidatorJurisdictions = []ValidatorJurisdiction{
 }
 
 // JurisdictionByMoniker resolves a current on-chain moniker to a disclosed
-// jurisdiction: an exact match on the registry moniker, or one of the entry's
-// Match patterns. Comparison is case-insensitive after trimming.
+// jurisdiction. An exact match on a registry moniker wins over any pattern,
+// so "Staking Facilities" is never claimed by the "stakin*" pattern; a prefix
+// pattern only matches at a word boundary (the next character is not a
+// letter), so "Kraken03" and "kiln-beta" match while "Kilnworks" does not.
+// Comparison is case-insensitive after trimming.
 func JurisdictionByMoniker(moniker string) (ValidatorJurisdiction, bool) {
 	m := normalizeMoniker(moniker)
 	if m == "" {
@@ -69,6 +72,8 @@ func JurisdictionByMoniker(moniker string) (ValidatorJurisdiction, bool) {
 		if normalizeMoniker(j.Moniker) == m {
 			return j, true
 		}
+	}
+	for _, j := range ValidatorJurisdictions {
 		for _, pat := range j.Match {
 			if monikerMatches(m, normalizeMoniker(pat)) {
 				return j, true
@@ -87,7 +92,15 @@ func monikerMatches(m, pat string) bool {
 	case strings.HasPrefix(pat, "*") && strings.HasSuffix(pat, "*") && len(pat) > 2:
 		return strings.Contains(m, pat[1:len(pat)-1])
 	case strings.HasSuffix(pat, "*"):
-		return strings.HasPrefix(m, pat[:len(pat)-1])
+		prefix := pat[:len(pat)-1]
+		if !strings.HasPrefix(m, prefix) {
+			return false
+		}
+		if len(m) == len(prefix) {
+			return true
+		}
+		next := m[len(prefix)]
+		return !(('a' <= next && next <= 'z') || ('A' <= next && next <= 'Z'))
 	case strings.HasPrefix(pat, "*"):
 		return strings.HasSuffix(m, pat[1:])
 	default:

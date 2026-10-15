@@ -27,9 +27,9 @@ func TestJurisdictionByMoniker(t *testing.T) {
 			t.Errorf("%q: got %q ok=%v, want %q", moniker, j.Country, ok, want)
 		}
 	}
-	for _, moniker := range []string{"", "Binance Staking", "NodeStake", "Kilnworks", "stakinnotreally"} {
-		if _, ok := JurisdictionByMoniker(moniker); ok && moniker != "Kilnworks" && moniker != "stakinnotreally" {
-			t.Errorf("%q: unexpected match", moniker)
+	for _, moniker := range []string{"", "Binance Staking", "NodeStake", "Kilnworks", "stakinnotreally", "Stakingwithus"} {
+		if j, ok := JurisdictionByMoniker(moniker); ok {
+			t.Errorf("%q: unexpected match %q", moniker, j.Moniker)
 		}
 	}
 }
