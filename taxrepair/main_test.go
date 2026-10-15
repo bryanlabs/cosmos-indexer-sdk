@@ -1,6 +1,7 @@
 package main
 
 import (
+	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"testing"
 	"time"
 
@@ -30,5 +31,16 @@ func TestCanonicalComparisonAndRewardTotals(t *testing.T) {
 	changed[0].Detail = `{"x":"1"}`
 	if same(changed, expected) {
 		t.Fatal("a changed detail must count as a difference")
+	}
+}
+
+func TestTrivialLog(t *testing.T) {
+	noop := &txlog.LogMessage{Events: []txlog.LogMessageEvent{{Type: "message"}, {Type: "tx"}}}
+	if !trivialLog(noop) {
+		t.Fatal("message-only log must be trivial")
+	}
+	moved := &txlog.LogMessage{Events: []txlog.LogMessageEvent{{Type: "message"}, {Type: "coin_received"}}}
+	if trivialLog(moved) {
+		t.Fatal("coin movement is not trivial")
 	}
 }

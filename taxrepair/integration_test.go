@@ -136,7 +136,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("load got %d", len(rows))
 	}
-	plans, err := planBatch(db, codec, rows)
+	plans, _, err := planBatch(db, codec, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutBytes, err := planBatch(db, codec, rows)
+	withoutBytes, _, err := planBatch(db, codec, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if after[2][0].Amount != "35629" || after[2][1].Amount != "47507213" || after[2][0].BlockHeight != 30672572 {
 		t.Fatal(after[2])
 	}
-	again, err := planBatch(db, codec, rows)
+	again, _, err := planBatch(db, codec, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestRepairRejectsConcurrentChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := planBatch(db, codec, rows)
+	plans, _, err := planBatch(db, codec, rows)
 	if err != nil {
 		t.Fatal(err)
 	}

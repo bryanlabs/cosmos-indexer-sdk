@@ -157,7 +157,10 @@ func main() {
 	// Keep timeout settings on the one connection used for this repair.
 	sqlDB.SetMaxOpenConns(1)
 	sqlDB.SetMaxIdleConns(1)
-	if err := db.Exec("SET statement_timeout='60s'; SET lock_timeout='3s'").Error; err != nil {
+	// enable_seqscan=off keeps the planner on the (message_id,index) indexes
+	// for the per-batch event loads; with stale statistics it otherwise picks
+	// a sequential scan of the attributes table for every batch.
+	if err := db.Exec("SET statement_timeout='120s'; SET lock_timeout='3s'; SET enable_seqscan=off").Error; err != nil {
 		fatal(err.Error())
 	}
 	codec, err := repairCodec()
@@ -193,7 +196,7 @@ func main() {
 	if b != nil {
 		defer b.file.Close()
 	}
-	scanned, changed, zeroed := 0, 0, 0
+	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
 	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d\n", max, *apply, len(candidates))
@@ -205,10 +208,14 @@ func main() {
 		if len(rows) == 0 {
 			break
 		}
-		plans, err := planBatch(db, codec, rows)
+		plans, skips, err := planBatch(db, codec, rows)
 		if err != nil {
 			fatal(err.Error())
 		}
+		for _, sk := range skips {
+			fmt.Printf("skip message_id=%d type=%s reason=%s\n", sk.MessageID, sk.Type, sk.Reason)
+		}
+		skipped += len(skips)
 		scanned += len(rows)
 		for _, p := range plans {
 			changed++
@@ -227,7 +234,7 @@ func main() {
 			}
 		}
 		last = rows[len(rows)-1].ID
-		fmt.Printf("last_message_id=%d scanned=%d changed=%d zeroed=%d\n", last, scanned, changed, zeroed)
+		fmt.Printf("last_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d\n", last, scanned, changed, zeroed, skipped)
 	}
 	sum, err := b.verify()
 	if err != nil {
@@ -236,7 +243,32 @@ func main() {
 	if b != nil {
 		fmt.Printf("backup=%s sha256=%s records=%d\n", *path, sum, b.lines)
 	}
-	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", max, scanned, changed, zeroed, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
+	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", max, scanned, changed, zeroed, skipped, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
+	if skipped > 0 {
+		// Every skipped message is printed above; the run is incomplete until
+		// each one is explained or replayed from an archive node.
+		os.Exit(3)
+	}
+}
+
+// skip records a message the replay could not classify from its stored
+// events. It is left untouched and reported, never silently dropped.
+type skip struct {
+	MessageID uint
+	Type      string
+	Reason    string
+}
+
+// trivialLog reports whether a message emitted nothing beyond the generic
+// message and tx events, meaning no funds, shares or tokens moved. A
+// no-op IBC receive of an already relayed packet looks like this.
+func trivialLog(log *txlog.LogMessage) bool {
+	for _, e := range log.Events {
+		if e.Type != "message" && e.Type != "tx" {
+			return false
+		}
+	}
+	return true
 }
 
 func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
@@ -268,9 +300,9 @@ func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 	}
 	return out, nil
 }
-func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup, error) {
+func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup, []skip, error) {
 	if len(rows) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	ids := make([]uint, len(rows))
 	for i, r := range rows {
@@ -278,12 +310,12 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	}
 	old, err := oldRows(db, ids)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var attrs []eventRow
 	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id IN ?", ids).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	logs := map[uint]*txlog.LogMessage{}
 	var lastMsg uint
@@ -304,9 +336,10 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 		lastMsg, lastIndex = a.MessageID, a.Index
 	}
 	plans := []backup{}
+	var skips []skip
 	for _, r := range rows {
 		if logs[r.ID] == nil {
-			return nil, fmt.Errorf("message %d missing event log", r.ID)
+			return nil, nil, fmt.Errorf("message %d missing event log", r.ID)
 		}
 		var expected []tax.TaxableEvent
 		if len(r.MessageBytes) == 0 {
@@ -318,7 +351,12 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 			}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("message %d classify: %w", r.ID, err)
+			if trivialLog(logs[r.ID]) {
+				expected, err = nil, nil
+			} else {
+				skips = append(skips, skip{r.ID, r.Type, err.Error()})
+				continue
+			}
 		}
 		for i := range expected {
 			expected[i].MessageID = r.ID
@@ -332,7 +370,7 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 		}
 		plans = append(plans, backup{r.ID, r.Type, base64.StdEncoding.EncodeToString(r.MessageBytes), old[r.ID], expected})
 	}
-	return plans, nil
+	return plans, skips, nil
 }
 func applyPlans(db *gorm.DB, plans []backup) error {
 	if len(plans) == 0 {
