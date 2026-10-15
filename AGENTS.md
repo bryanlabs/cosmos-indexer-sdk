@@ -24,9 +24,16 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
 - Methodology v8 surfaces (2026-10-15): `tax/catalog.go` (everything the
   indexer watches, served as `GET /catalog`; the website renders it as
   `/tax/coverage`, so a new category, contract or tag belongs here first),
-  `tax/jurisdictions.go` (validators that publicly disclosed their country,
-  matched to monikers by pattern: exact wins, a trailing `*` prefix stops at a
-  word boundary; `GET /validators/jurisdictions`), `tax/gaia_versions.go` (the reviewed Gaia releases and upcoming changes) with
+  `taxapi/attestation.go` (validator jurisdictions, on-chain only: the
+  scanner reads successful `txes` whose memo starts with
+  `bryanlabs-tax:jurisdiction v1 country=XX [entity="..."] [source=https://...]`
+  and records one when the signer is the operator account behind a
+  cosmosvaloper address; latest block wins, `country=none` revokes, the tx
+  hash is the source; `GET /validators/jurisdictions` lists them with the
+  validator's current status, `GET /validators/attest/check` validates a memo
+  and names the signer; reports take a `JurisdictionFunc` and everything
+  without an attestation is `undisclosed`; nothing is ever seeded or matched
+  by moniker), `tax/gaia_versions.go` (the reviewed Gaia releases and upcoming changes) with
   `taxapi/chainreleases.go` (the daily watcher that records
   `chain_release_checks` and flags unreviewed releases; `GET /chain/releases`),
   `taxapi/tags.go` (the `tags` query parameter on every export and report,
@@ -123,7 +130,9 @@ running anything against an archive.
   Use the backed-up, dry-run-first `taxrepair/` CLI for historical correction,
   and bump the report methodology version to avoid reusing stale report caches.
 - Validator monikers are current chain REST display labels, not historical
-  identities or proof of jurisdiction. The event's operator address is canonical.
+  identities or proof of jurisdiction. The event's operator address is canonical,
+  and a jurisdiction exists only as an attestation signed by that operator's
+  account (`taxapi/attestation.go`).
 - The top-level `README.md` is the **upstream** (generic) doc; the BryanLabs-specific
   code is the `tax*` dirs + `Dockerfile.tax`, on the `tax-layer` branch.
 - Build the deployed image from `Dockerfile.tax`, not the plain `Dockerfile`.
