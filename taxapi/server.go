@@ -89,6 +89,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=cosmos-tax-"+format+".csv")
+	// preview=1 is the same transport the report job uses: every row kept,
+	// with the category, taxable flag, detail and user tag appended, for the
+	// site's public JSON API rather than a tax-software import.
+	if q.Get("preview") == "1" && format == "cryptotaxcalculator" {
+		_ = WritePreviewCSV(w, format, rows)
+		return
+	}
 	_ = WriteCSV(w, format, rows)
 }
 
