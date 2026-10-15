@@ -146,6 +146,13 @@ func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []strin
 	}
 	return ApplyTags(rows, tags), nil
 }
+// errAwaitingCorrection is returned while a wallet still has staking rows
+// written by a methodology older than the current one. A replay is rewriting
+// them; until it reaches this wallet no totals are returned rather than a
+// wrong number. It is a temporary service state, not a server fault, so it is
+// surfaced as 503 with a Retry-After.
+var errAwaitingCorrection = errors.New("historical staking data for this wallet is awaiting correction under the current methodology; no totals are returned until the replay reaches it. Retry later")
+
 func writeTaxError(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError
 	var required assetReviewRequired
@@ -154,6 +161,9 @@ func writeTaxError(w http.ResponseWriter, err error) {
 		code = http.StatusConflict
 	} else if errors.As(err, &invalid) {
 		code = http.StatusBadRequest
+	} else if errors.Is(err, errAwaitingCorrection) {
+		code = http.StatusServiceUnavailable
+		w.Header().Set("Retry-After", "1800")
 	}
 	http.Error(w, err.Error(), code)
 }

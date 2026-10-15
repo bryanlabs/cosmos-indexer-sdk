@@ -351,7 +351,7 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 			return nil, err
 		}
 		if legacyCount > 0 {
-			return nil, fmt.Errorf("historical staking data for this wallet is awaiting correction; no totals have been returned")
+			return nil, errAwaitingCorrection
 		}
 	}
 
