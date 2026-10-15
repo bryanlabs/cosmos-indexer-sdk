@@ -2,7 +2,6 @@ package taxapi
 
 import (
 	"net/http"
-	"sort"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 )
@@ -46,46 +45,4 @@ func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
 		"gaia_releases":    tax.GaiaReleases,
 		"upcoming_changes": tax.UpcomingChainChanges,
 	})
-}
-
-func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, _ *http.Request) {
-	monikers := s.oracle.ValidatorMonikers()
-	type resolved struct {
-		tax.ValidatorJurisdiction
-		OperatorAddresses []string `json:"operator_addresses"`
-	}
-	out := make([]resolved, 0, len(tax.ValidatorJurisdictions))
-	disclosed := 0
-	for _, j := range tax.ValidatorJurisdictions {
-		r := resolved{ValidatorJurisdiction: j}
-		for addr, name := range monikers {
-			if got, ok := tax.JurisdictionByMoniker(name); ok && got.Moniker == j.Moniker {
-				r.OperatorAddresses = append(r.OperatorAddresses, addr)
-			}
-		}
-		sort.Strings(r.OperatorAddresses)
-		if len(r.OperatorAddresses) > 0 {
-			disclosed++
-		}
-		out = append(out, r)
-	}
-	writeJSON(w, map[string]any{
-		"basis":                 "Public self-disclosure on the operator's own website or company registration. Not a verification of tax residence. Validators without a disclosure are reported as undisclosed, never guessed.",
-		"validators_on_chain":   len(monikers),
-		"validators_disclosed":  disclosed,
-		"jurisdictions":         out,
-		"undisclosed_label":     undisclosedJurisdiction,
-		"how_to_request_change": "To add or correct a validator's jurisdiction, use the submission form under this table (or POST /api/tax/v1/wasm/submissions with kind validator_jurisdiction) with a link to the operator's public disclosure. Entries are reviewed against the source before they change.",
-	})
-}
-
-const undisclosedJurisdiction = "undisclosed"
-
-// jurisdictionLabel is the ISO country code for a validator moniker with a
-// public disclosure, or "undisclosed".
-func jurisdictionLabel(moniker string) string {
-	if j, ok := tax.JurisdictionByMoniker(moniker); ok {
-		return j.Country
-	}
-	return undisclosedJurisdiction
 }

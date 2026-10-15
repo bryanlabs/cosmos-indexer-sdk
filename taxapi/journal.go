@@ -37,9 +37,8 @@ type JournalLine struct {
 	// rewards, fees and other self-directed events).
 	Counterparty string `json:"counterparty"`
 	// Validator and ValidatorCountry are set on reward and commission lines:
-	// the operator moniker and the ISO country code from the disclosed
-	// jurisdiction registry ("undisclosed" when the operator has not
-	// disclosed one).
+	// the operator moniker and the ISO country code the operator attested on
+	// chain ("undisclosed" when there is no attestation).
 	Validator        string `json:"validator"`
 	ValidatorCountry string `json:"validator_country"`
 	// Methodology is the methodology version the line was produced under.
@@ -73,7 +72,7 @@ const (
 )
 
 // BuildJournal turns priced rows into balanced journal entries.
-func BuildJournal(input []Row) []JournalLine {
+func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	// Fee rows are loaded after event rows; a ledger wants strict date order.
 	rows := append([]Row(nil), input...)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Time.Before(rows[j].Time) })
@@ -126,7 +125,7 @@ func BuildJournal(input []Row) []JournalLine {
 			if validator == "" {
 				validator = r.ValidatorAddress
 			}
-			validatorCountry = jurisdictionLabel(r.ValidatorMoniker)
+			validatorCountry = jurisdiction(r.ValidatorAddress)
 		}
 		price := ""
 		if !r.PriceMissing && !r.Excluded {
@@ -304,7 +303,7 @@ func (s *Server) handleJournal(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
-	lines := BuildJournal(rows)
+	lines := BuildJournal(rows, s.jurisdictionFunc(chain))
 	if q.Get("format") == "json" {
 		writeJSON(w, map[string]any{"address": addr, "chain": chain, "methodology_version": MethodologyVersion, "lines": lines})
 		return

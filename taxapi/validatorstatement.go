@@ -258,7 +258,7 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, map[string]any{
 		"validator": val, "moniker": moniker, "chain": chain,
-		"jurisdiction":        jurisdictionLabel(moniker),
+		"jurisdiction":        s.jurisdictionLabel(chain, val),
 		"methodology_version": MethodologyVersion,
 		"recognition_policy":  RecognitionPolicyDefault,
 		"coverage":            cov,

@@ -383,7 +383,7 @@ func TestManualSubcentValueIsNotRoundedToZero(t *testing.T) {
 			}
 		}
 	}
-	income := csvRecords(t, buildIncomeCSV([]Row{row}, "wallet", RecognitionPolicyDefault))
+	income := csvRecords(t, buildIncomeCSV([]Row{row}, "wallet", RecognitionPolicyDefault, undisclosedAlways))
 	if income[1][7] != "0.004" || income[2][7] != "0.004" {
 		t.Fatal("income CSV lost subcent manual value")
 	}

@@ -23,7 +23,7 @@ type WasmSubmission struct {
 	ID              uint      `json:"id" gorm:"primaryKey"`
 	Chain           string    `json:"chain"`
 	ContractAddress string    `json:"contract_address" gorm:"index:idx_wasm_sub_contract"`
-	Kind            string    `json:"kind"` // "new_contract" | "capability_gap" | "validator_jurisdiction"
+	Kind            string    `json:"kind"` // "new_contract" | "capability_gap"
 	Contact         string    `json:"contact,omitempty"`
 	Note            string    `json:"note,omitempty"`
 	Status          string    `json:"status" gorm:"index:idx_wasm_sub_status"` // submitted | under_review | approved | declined
@@ -118,11 +118,11 @@ func (s *Server) handleWasmCoverage(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /wasm/submissions {chain, contract_address, kind, contact?, note?}
-// kind: "new_contract" (never seen this one), "capability_gap" (we index
-// it, but miss some activity type on it) or "validator_jurisdiction" (a
-// disclosed country for the validator registry; contract_address holds the
-// operator address and note the public source). Rate-limited per (remote addr,
-// contract) to stay spam-safe without needing accounts.
+// kind: "new_contract" (never seen this one) or "capability_gap" (we index
+// it, but miss some activity type on it). Validator jurisdictions are not
+// submitted here: operators attest them on chain (see attestation.go).
+// Rate-limited per (remote addr, contract) to stay spam-safe without needing
+// accounts.
 func (s *Server) handleCreateWasmSubmission(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Chain           string `json:"chain"`
@@ -142,18 +142,6 @@ func (s *Server) handleCreateWasmSubmission(w http.ResponseWriter, r *http.Reque
 	}
 	switch body.Kind {
 	case "new_contract", "capability_gap":
-	case "validator_jurisdiction":
-		// A jurisdiction disclosure for the validator registry. The operator
-		// address rides in contract_address; the note must carry the public
-		// source so the review has something to check against.
-		if !strings.HasPrefix(body.ContractAddress, "cosmosvaloper1") {
-			http.Error(w, "contract_address must be the validator's cosmosvaloper address for a validator_jurisdiction submission", http.StatusBadRequest)
-			return
-		}
-		if !strings.Contains(body.Note, "http://") && !strings.Contains(body.Note, "https://") {
-			http.Error(w, "note must include the URL of the operator's public disclosure", http.StatusBadRequest)
-			return
-		}
 	default:
 		body.Kind = "new_contract"
 	}

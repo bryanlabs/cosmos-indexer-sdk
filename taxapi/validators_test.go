@@ -52,7 +52,7 @@ func TestValidatorLookupFailureDoesNotInventNames(t *testing.T) {
 
 func TestIncomeCSVIncludesValidatorAndTrigger(t *testing.T) {
 	rows := []Row{{Category: "reward", Symbol: "ATOM", Amount: d(2), ValueUSD: d(4), ValidatorAddress: "cosmosvaloper1test", ValidatorMoniker: "Validator Name", RewardTrigger: "redelegate"}}
-	csv := buildIncomeCSV(rows, "wallet", RecognitionPolicyDefault)
+	csv := buildIncomeCSV(rows, "wallet", RecognitionPolicyDefault, undisclosedAlways)
 	if !strings.Contains(csv, "validator_address,validator_moniker,reward_trigger") || !strings.Contains(csv, "cosmosvaloper1test,Validator Name,redelegate") {
 		t.Fatal(csv)
 	}

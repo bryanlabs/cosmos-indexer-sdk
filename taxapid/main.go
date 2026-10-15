@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
@@ -80,8 +81,14 @@ func main() {
 		log.Printf("chain release table migrate: %v", err)
 	}
 
+	// Validator jurisdiction attestations: operator-signed memos found in txes.
+	if err := taxapi.AttestationsMigrate(db); err != nil {
+		log.Printf("attestation table migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
+	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)

@@ -20,12 +20,15 @@ func (o *Oracle) ValidatorMonikers() map[string]string {
 		return o.validators
 	}
 	names := map[string]string{}
+	status := map[string]string{}
 	key := ""
 	seen := map[string]bool{}
 	for page := 0; page < 10; page++ {
 		var body struct {
 			Validators []struct {
 				Address     string `json:"operator_address"`
+				Status      string `json:"status"`
+				Jailed      bool   `json:"jailed"`
 				Description struct {
 					Moniker string `json:"moniker"`
 				} `json:"description"`
@@ -46,11 +49,13 @@ func (o *Oracle) ValidatorMonikers() map[string]string {
 		for _, v := range body.Validators {
 			if v.Address != "" {
 				names[v.Address] = v.Description.Moniker
+				status[v.Address] = validatorStatusLabel(v.Status, v.Jailed)
 			}
 		}
 		key = body.Pagination.NextKey
 		if key == "" {
 			o.validators = names
+			o.validatorStatus = status
 			o.validatorsAt = nowUTC()
 			return names
 		}
@@ -61,4 +66,29 @@ func (o *Oracle) ValidatorMonikers() map[string]string {
 	}
 	o.validatorsAt = nowUTC().Add(-55 * time.Minute)
 	return o.validators
+}
+
+// ValidatorStatuses returns the current bonding status per operator address:
+// "bonded", "unbonding", "unbonded", or "jailed" (jailed overrides the
+// bonding state). Same refresh and fallback as ValidatorMonikers.
+func (o *Oracle) ValidatorStatuses() map[string]string {
+	o.ValidatorMonikers()
+	o.validatorMu.Lock()
+	defer o.validatorMu.Unlock()
+	return o.validatorStatus
+}
+
+func validatorStatusLabel(status string, jailed bool) string {
+	if jailed {
+		return "jailed"
+	}
+	switch status {
+	case "BOND_STATUS_BONDED":
+		return "bonded"
+	case "BOND_STATUS_UNBONDING":
+		return "unbonding"
+	case "BOND_STATUS_UNBONDED":
+		return "unbonded"
+	}
+	return "unknown"
 }

@@ -154,7 +154,7 @@ func TestJournalBalancesAndPositionsTrackOpenLots(t *testing.T) {
 	for i := range rows {
 		rows[i].Time = rows[0].Time.Add(time.Duration(i) * time.Hour)
 	}
-	lines := BuildJournal(rows)
+	lines := BuildJournal(rows, undisclosedAlways)
 	var debit, credit decimal.Decimal
 	for _, l := range lines {
 		if l.Debit != "" {
@@ -208,10 +208,7 @@ func TestCatalogCoversEveryCategory(t *testing.T) {
 			t.Fatalf("category %s missing from catalog", c)
 		}
 	}
-	if j, ok := tax.JurisdictionByMoniker("chorus one"); !ok || j.Country != "CH" {
-		t.Fatalf("jurisdiction lookup failed: %+v %v", j, ok)
-	}
-	if jurisdictionLabel("Anonymous Validator") != "undisclosed" {
-		t.Fatal("unknown validators must read undisclosed")
+	if undisclosedAlways("cosmosvaloper1anonymous") != "undisclosed" {
+		t.Fatal("validators without an attestation must read undisclosed")
 	}
 }

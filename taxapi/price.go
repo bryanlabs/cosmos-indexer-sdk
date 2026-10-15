@@ -32,9 +32,10 @@ type Oracle struct {
 	prices      map[string]priceCacheEntry      // "chain|denom|date" -> price (cached; see PriceAt)
 	denomTraces map[string]denomTraceCacheEntry // ibc hash -> trace (cached; see DenomTrace)
 
-	validatorMu  sync.Mutex
-	validators   map[string]string
-	validatorsAt time.Time
+	validatorMu     sync.Mutex
+	validators      map[string]string
+	validatorStatus map[string]string // operator -> bonded | unbonding | unbonded | jailed
+	validatorsAt    time.Time
 }
 
 // priceMissTTL bounds how long a "no price found" result is trusted before

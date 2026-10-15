@@ -34,6 +34,9 @@ type Server struct {
 	db     *gorm.DB
 	oracle *Oracle
 	native NativeAsset
+
+	attestOnce sync.Once
+	attest     *attestationCache
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -61,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /positions", s.handlePositions)
 	mux.HandleFunc("GET /validator-statement", s.handleValidatorStatement)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
+	mux.HandleFunc("GET /validators/attest/check", s.handleAttestationCheck)
 	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
 	mux.HandleFunc("GET /wasm/coverage", s.handleWasmCoverage)
 	mux.HandleFunc("POST /wasm/submissions", s.handleCreateWasmSubmission)
@@ -179,7 +183,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/csv")
 	w.Header().Set("Content-Disposition", "attachment; filename=income-schedule1-990t.csv")
-	_, _ = w.Write([]byte(buildIncomeCSV(rows, addr, recognition)))
+	_, _ = w.Write([]byte(buildIncomeCSV(rows, addr, recognition, s.jurisdictionFunc(chain))))
 }
 
 // buildIncomeCSV renders the reward/commission rows as the income-report CSV:
@@ -190,7 +194,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 // (several of these concatenated) reads as per-wallet subtotals, never a
 // pooled figure (Rev. Proc. 2024-28, see INF-204). recognition is printed on
 // the report so the policy behind these numbers is never implicit (INF-206).
-func buildIncomeCSV(rows []Row, address, recognition string) string {
+func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction JurisdictionFunc) string {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
 	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash", "validator_address", "validator_moniker", "reward_trigger", "validator_jurisdiction", "source"})
@@ -210,7 +214,7 @@ func buildIncomeCSV(rows []Row, address, recognition string) string {
 		}
 		jur := ""
 		if row.Category == "reward" || row.Category == "commission" {
-			jur = jurisdictionLabel(row.ValidatorMoniker)
+			jur = jurisdiction(row.ValidatorAddress)
 			byJurisdiction[jur] = byJurisdiction[jur].Add(row.ValueUSD)
 		}
 		typ := row.Category
