@@ -26,15 +26,15 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `/tax/coverage`, so a new category, contract or tag belongs here first),
   `tax/jurisdictions.go` (validators that publicly disclosed their country,
   matched to monikers by pattern: exact wins, a trailing `*` prefix stops at a
-  word boundary; `GET /validators/jurisdictions`), `taxapi/chainreleases.go`
-  (reviewed Gaia releases plus the daily watcher that records
+  word boundary; `GET /validators/jurisdictions`), `tax/gaia_versions.go` (the reviewed Gaia releases and upcoming changes) with
+  `taxapi/chainreleases.go` (the daily watcher that records
   `chain_release_checks` and flags unreviewed releases; `GET /chain/releases`),
   `taxapi/tags.go` (the `tags` query parameter on every export and report,
   vocabulary in `tax/catalog.go`), `taxapi/journal.go` (double-entry USD ledger),
   `taxapi/positions.go` (open lots), `taxapi/validatorstatement.go` (monthly
   commission and delegator rewards). `/events?preview=1` emits the preview
   columns the website parses. A Gaia release that changes event shapes gets a
-  review entry in `taxapi/chainreleases.go`, not a silent parser change.
+  review entry in `tax/gaia_versions.go`, not a silent parser change.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message
