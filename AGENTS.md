@@ -30,9 +30,17 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `taxapi/chainreleases.go` (the daily watcher that records
   `chain_release_checks` and flags unreviewed releases; `GET /chain/releases`),
   `taxapi/tags.go` (the `tags` query parameter on every export and report,
-  vocabulary in `tax/catalog.go`), `taxapi/journal.go` (double-entry USD ledger),
-  `taxapi/positions.go` (open lots), `taxapi/validatorstatement.go` (monthly
-  commission and delegator rewards). `/events?preview=1` emits the preview
+  vocabulary in `tax/catalog.go`), `taxapi/journal.go` (double-entry USD ledger
+  in date order with `price_usd`, `counterparty`, `validator`,
+  `validator_country` and `methodology_version` per line),
+  `taxapi/positions.go` (open lots, USD rounded to cents, loads the whole
+  history so out-of-window `asset_decisions` are accepted),
+  `taxapi/validatorstatement.go` (monthly commission and delegator rewards over
+  the `idx_tax_validator` partial index; `coverage` reports the index bounds
+  and the replay cursor, which skips LSM reward rows the replay never
+  rewrites). Every handler normalises `chain` through `chainParam` in
+  `taxapi/server.go` (`cosmoshub`, `cosmoshub-4` and `mainnet` are the same
+  oracle key); never read `q.Get("chain")` raw. `/events?preview=1` emits the preview
   columns the website parses. A Gaia release that changes event shapes gets a
   review entry in `tax/gaia_versions.go`, not a silent parser change.
 - `taxapid/main.go` — the API daemon entrypoint.
