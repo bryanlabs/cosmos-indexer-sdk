@@ -75,7 +75,7 @@ func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, _ *http.Req
 		"validators_disclosed":  disclosed,
 		"jurisdictions":         out,
 		"undisclosed_label":     undisclosedJurisdiction,
-		"how_to_request_change": "Open a wasm or validator submission on the site with the public source; entries are reviewed against the source before they change.",
+		"how_to_request_change": "To add or correct a validator's jurisdiction, use the submission form under this table (or POST /api/tax/v1/wasm/submissions with kind validator_jurisdiction) with a link to the operator's public disclosure. Entries are reviewed against the source before they change.",
 	})
 }
 
