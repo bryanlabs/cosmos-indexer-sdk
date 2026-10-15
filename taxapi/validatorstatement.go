@@ -79,11 +79,20 @@ func (s *Server) statementCoverage() statementCoverage {
 	}
 	_ = s.db.Table("taxable_events").Select("MIN(timestamp) AS start, MAX(timestamp) AS \"end\"").Scan(&bounds).Error
 	c.IndexStart, c.IndexEnd = bounds.Start, bounds.End
+	// The replay rewrites reward rows written by the staking and distribution
+	// messages listed in rowsFor; LSM reward rows (MsgWithdrawAllTokenizeShareRecordReward)
+	// keep an empty trigger and are not part of it, so the cursor must look
+	// past them or the statement would report the replay as never finishing.
+	// The earliest legacy rows come off the partial index in timestamp order;
+	// joining only that slice to message types keeps this under a second.
 	var cursor struct{ Cursor *time.Time }
-	_ = s.db.Table("taxable_events").
-		Select("MIN(timestamp) AS cursor").
-		Where("category = 'reward' AND COALESCE(reward_trigger, '') = ''").
-		Scan(&cursor).Error
+	_ = s.db.Raw(`SELECT MIN(x.timestamp) AS cursor FROM (
+			SELECT te.timestamp, te.message_id FROM taxable_events te
+			WHERE te.category = 'reward' AND COALESCE(te.reward_trigger, '') = ''
+			ORDER BY te.timestamp LIMIT 20000) x
+		JOIN messages m ON m.id = x.message_id
+		JOIN message_types mt ON mt.id = m.message_type_id
+		WHERE mt.message_type IN ?`, replayedMessageTypes).Scan(&cursor).Error
 	c.ReplayCursor = cursor.Cursor
 	c.Complete = c.ReplayCursor == nil
 	switch {

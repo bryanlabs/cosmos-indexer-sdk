@@ -320,6 +320,15 @@ type feeRec struct {
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),
 // resolves denoms + USD prices, and returns normalized Rows.
+// replayedMessageTypes are the messages whose reward rows the methodology
+// replay rewrites. A reward row from one of these with an empty trigger is a
+// legacy row the replay has not reached.
+var replayedMessageTypes = []string{
+	"/cosmos.staking.v1beta1.MsgDelegate", "/cosmos.staking.v1beta1.MsgUndelegate",
+	"/cosmos.staking.v1beta1.MsgBeginRedelegate", "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
+	"/cosmos.authz.v1beta1.MsgExec",
+}
+
 func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error) {
 	meta := s.oracle.Denoms(chain)
 
@@ -343,11 +352,7 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	if len(legacyIDs) > 0 {
 		var legacyCount int64
 		if err := s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
-			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, []string{
-				"/cosmos.staking.v1beta1.MsgDelegate", "/cosmos.staking.v1beta1.MsgUndelegate",
-				"/cosmos.staking.v1beta1.MsgBeginRedelegate", "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
-				"/cosmos.authz.v1beta1.MsgExec",
-			}).Count(&legacyCount).Error; err != nil {
+			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, replayedMessageTypes).Count(&legacyCount).Error; err != nil {
 			return nil, err
 		}
 		if legacyCount > 0 {
