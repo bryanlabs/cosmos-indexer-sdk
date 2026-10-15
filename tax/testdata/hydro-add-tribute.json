@@ -1,0 +1,140 @@
+{
+ "message_id": 10901223,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "33404124",
+ "hash": "C1E5573901CC72BA4CFB06B8F09929CDD4B9652772672C5413FACCEA2D64180D",
+ "timestamp": "2026-10-14T10:25:52Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1tn7mu7wqwtt46ry3k735dxhh8s5ew4s4d35hra"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1tn7mu7wqwtt46ry3k735dxhh8s5ew4s4d35hra"
+    },
+    {
+     "key": "amount",
+     "value": "10ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos17ryrjncgq8rrmxy0x8wrq0pcessp28xna4pw5sv506mfg3fhwj4qn89chn"
+    },
+    {
+     "key": "amount",
+     "value": "10ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos17ryrjncgq8rrmxy0x8wrq0pcessp28xna4pw5sv506mfg3fhwj4qn89chn"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1tn7mu7wqwtt46ry3k735dxhh8s5ew4s4d35hra"
+    },
+    {
+     "key": "amount",
+     "value": "10ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos17ryrjncgq8rrmxy0x8wrq0pcessp28xna4pw5sv506mfg3fhwj4qn89chn"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos17ryrjncgq8rrmxy0x8wrq0pcessp28xna4pw5sv506mfg3fhwj4qn89chn"
+    },
+    {
+     "key": "action",
+     "value": "add_tribute"
+    },
+    {
+     "key": "depositor",
+     "value": "cosmos1tn7mu7wqwtt46ry3k735dxhh8s5ew4s4d35hra"
+    },
+    {
+     "key": "round_id",
+     "value": "565"
+    },
+    {
+     "key": "tranche_id",
+     "value": "2"
+    },
+    {
+     "key": "proposal_id",
+     "value": "3070"
+    },
+    {
+     "key": "tribute_id",
+     "value": "407"
+    },
+    {
+     "key": "funds",
+     "value": "10ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

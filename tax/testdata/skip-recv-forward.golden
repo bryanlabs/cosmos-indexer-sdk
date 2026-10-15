@@ -1,0 +1,2 @@
+ibc_in|4006132680214333|transfer/channel-0/transfer/08-wasm-1369/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2||osmo1m8wg4vxkefhs374qxmmqpyusgz289wmulex5qdwpfx7jnrxzer5s9cv83q|cosmos1lqu9662kd4my6dww4gzp3730vew0gkwe0nl9ztjh0n5da0a8zc4swsvd22||skip_forward|{"protocol":"skip-go","routed_from_hub":"true"}
+ibc_out|3941955719529401|transfer/08-wasm-1369/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2||cosmos1lqu9662kd4my6dww4gzp3730vew0gkwe0nl9ztjh0n5da0a8zc4swsvd22|0x12034f7e6bb3F35b230F4AE0D93849927acE69f6||skip_forward|{"protocol":"skip-go","routed_from_hub":"true"}

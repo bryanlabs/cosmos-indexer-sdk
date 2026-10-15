@@ -3,6 +3,7 @@ package tax
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -75,8 +76,15 @@ func TestLegacyWithdrawalsWithoutDelegatorAndFlattenedValidators(t *testing.T) {
 func TestDelegatePrincipalMainnetIsNotReward(t *testing.T) {
 	msg := &staking.MsgDelegate{DelegatorAddress: "cosmos1ts4vwmfccwjv0vehlzd4x5rw5xzljjnhgm7gnz", ValidatorAddress: "cosmosvaloper1clpqr4nrk4khgkxj78fcwwh6dl3uw4epsluffn", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
 	log := rewardFixture(t, "delegate-principal")
-	if out := classify(msg, log); len(out) != 0 {
-		t.Fatalf("94,405 ATOM principal became income: %+v", out)
+	out := classify(msg, log)
+	for _, e := range out {
+		if Category(e.Category).Taxable() {
+			t.Fatalf("94,405 ATOM principal became income: %+v", out)
+		}
+	}
+	// The principal is still recorded, as a non-taxable delegate row.
+	if len(out) != 1 || out[0].Category != string(CategoryDelegate) || out[0].Amount != "94405000000" || out[0].FromAddr != msg.DelegatorAddress || out[0].ValidatorAddress != msg.ValidatorAddress {
+		t.Fatalf("principal record wrong: %+v", out)
 	}
 	p := &Parser{}
 	dataset, err := p.ParseMessage(msg, log, config.IndexConfig{})
@@ -109,9 +117,21 @@ func TestRedelegateMainnetSeparatesBothValidators(t *testing.T) {
 	src := "cosmosvaloper1gjtvly9lel6zskvwtvlg5vhwpu9c9waw7sxzwx"
 	dst := "cosmosvaloper13x77yexvf6qexfjg9czp6jhpv7vpjdwwkyhe4p"
 	msg := &staking.MsgBeginRedelegate{DelegatorAddress: wallet, ValidatorSrcAddress: src, ValidatorDstAddress: dst, Amount: sdk.NewInt64Coin("uatom", 18885870000)}
-	out := classify(msg, rewardFixture(t, "redelegate-two-validators"))
+	all := classify(msg, rewardFixture(t, "redelegate-two-validators"))
+	var out []TaxableEvent
+	var records []TaxableEvent
+	for _, e := range all {
+		if e.Category == string(CategoryReward) {
+			out = append(out, e)
+		} else {
+			records = append(records, e)
+		}
+	}
 	if len(out) != 2 {
-		t.Fatalf("must retain two validator rewards: %+v", out)
+		t.Fatalf("must retain two validator rewards: %+v", all)
+	}
+	if len(records) != 1 || records[0].Category != string(CategoryRedelegate) || records[0].Amount != "18885870000" || records[0].ValidatorAddress != dst || !strings.Contains(records[0].Detail, src) {
+		t.Fatalf("redelegate principal record wrong: %+v", records)
 	}
 	if out[0].ValidatorAddress != src || out[0].Amount != "35629" || out[1].ValidatorAddress != dst || out[1].Amount != "47507213" {
 		t.Fatalf("bad reward attribution: %+v", out)

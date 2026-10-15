@@ -1,0 +1,154 @@
+{
+ "message_id": 10688807,
+ "message_type": "/cosmos.gov.v1.MsgSubmitProposal",
+ "height": "33268626",
+ "hash": "84286805F057C572B70CA7BAA6EF10565F2C6658AE99435F2EF7B51B164F4597",
+ "timestamp": "2026-10-05T11:58:17Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmos.gov.v1.MsgSubmitProposal"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1705swa2kgn9pvancafzl254f63a3jda9ngdnc7"
+    },
+    {
+     "key": "module",
+     "value": "gov"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "submit_proposal",
+   "attributes": [
+    {
+     "key": "proposal_id",
+     "value": "1058"
+    },
+    {
+     "key": "proposal_proposer",
+     "value": "cosmos1705swa2kgn9pvancafzl254f63a3jda9ngdnc7"
+    },
+    {
+     "key": "proposal_messages",
+     "value": ""
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1705swa2kgn9pvancafzl254f63a3jda9ngdnc7"
+    },
+    {
+     "key": "amount",
+     "value": "500000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos10d07y265gmmuvt4z0w9aw880jnsr700j6zn9kn"
+    },
+    {
+     "key": "amount",
+     "value": "500000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos10d07y265gmmuvt4z0w9aw880jnsr700j6zn9kn"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1705swa2kgn9pvancafzl254f63a3jda9ngdnc7"
+    },
+    {
+     "key": "amount",
+     "value": "500000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1705swa2kgn9pvancafzl254f63a3jda9ngdnc7"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "proposal_deposit",
+   "attributes": [
+    {
+     "key": "depositor",
+     "value": "cosmos1705swa2kgn9pvancafzl254f63a3jda9ngdnc7"
+    },
+    {
+     "key": "amount",
+     "value": "500000000uatom"
+    },
+    {
+     "key": "proposal_id",
+     "value": "1058"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "submit_proposal",
+   "attributes": [
+    {
+     "key": "voting_period_start",
+     "value": "1058"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

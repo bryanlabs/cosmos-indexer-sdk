@@ -1,0 +1,2 @@
+ibc_in|31118877169262764147|transfer/cosmoshub-0/transfer/channel-1353/uallo||0x8e95d57c11d59398748999b7c6cd9226f25b3dcd|cosmos1lqu9662kd4my6dww4gzp3730vew0gkwe0nl9ztjh0n5da0a8zc4swsvd22||skip_forward|{"protocol":"skip-go","routed_from_hub":"true"}
+ibc_out|31118877169262764147|transfer/channel-1353/uallo||cosmos1lqu9662kd4my6dww4gzp3730vew0gkwe0nl9ztjh0n5da0a8zc4swsvd22|allo1czrgm9frws60lckmgc5m7syxyw83l8jcjxygdq||skip_forward|{"protocol":"skip-go","routed_from_hub":"true"}

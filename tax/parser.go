@@ -16,6 +16,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
+	govv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
+	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
@@ -31,6 +33,11 @@ var MessageTypeURLs = []string{
 	"/cosmos.staking.v1beta1.MsgDelegate",
 	"/cosmos.staking.v1beta1.MsgUndelegate",
 	"/cosmos.staking.v1beta1.MsgBeginRedelegate",
+	"/cosmos.staking.v1beta1.MsgCancelUnbondingDelegation",
+	"/cosmos.gov.v1.MsgDeposit",
+	"/cosmos.gov.v1.MsgSubmitProposal",
+	"/cosmos.gov.v1beta1.MsgDeposit",
+	"/cosmos.gov.v1beta1.MsgSubmitProposal",
 	"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
 	"/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission",
 	"/cosmos.authz.v1beta1.MsgExec",
@@ -39,6 +46,9 @@ var MessageTypeURLs = []string{
 	"/cosmwasm.wasm.v1.MsgExecuteContract",
 	TypeURLWithdrawTokenizeShareReward,
 	TypeURLWithdrawAllTokenizeShareReward,
+	TypeURLTokenizeShares,
+	TypeURLRedeemTokensForShares,
+	TypeURLTransferTokenizeShareRecord,
 	TypeURLV2RecvPacket,
 	TypeURLTFMint,
 	TypeURLTFForceTransfer,
@@ -107,12 +117,47 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 	// SDK auto-withdraws pending rewards on each — that reward is income. This
 	// auto-withdrawal uses the same withdraw-address routing as an explicit
 	// MsgWithdrawDelegatorReward, so it needs the same redirect-safe attribution.
+	// The principal itself is recorded too (record-only categories), so a
+	// controller can reconcile liquid against bonded balances.
 	case *stakingtypes.MsgDelegate:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "delegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
 	case *stakingtypes.MsgUndelegate:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "undelegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
 	case *stakingtypes.MsgBeginRedelegate:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redelegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+	case *stakingtypes.MsgCancelUnbondingDelegation:
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+
+	// Governance deposits are refundable, so record-only.
+	case *govv1.MsgDeposit:
+		events = append(events, govDepositEvents(log, m.Depositor)...)
+	case *govv1.MsgSubmitProposal:
+		events = append(events, govDepositEvents(log, m.Proposer)...)
+	case *govv1beta1.MsgDeposit:
+		events = append(events, govDepositEvents(log, m.Depositor)...)
+	case *govv1beta1.MsgSubmitProposal:
+		events = append(events, govDepositEvents(log, m.Proposer)...)
+
+	// Tokenizing or redeeming LSM shares auto-withdraws the delegator's pending
+	// rewards exactly like a delegate does, and redeeming also settles the
+	// record's accrued reward through withdraw_tokenize_share_reward. Both are
+	// income; the conversion itself is record-only.
+	case *MsgTokenizeShares:
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "tokenize")...)
+		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
+	case *MsgRedeemTokensForShares:
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redeem")...)
+		for _, e := range tokenizeShareRewardEvents(log, m.DelegatorAddress) {
+			e.RewardTrigger = "redeem"
+			events = append(events, e)
+		}
+		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
+	case *MsgTransferTokenizeShareRecord:
+		events = append(events, lsmRecordEvents(log, m.Sender)...)
 
 	case *disttypes.MsgWithdrawDelegatorReward:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "claim")...)
@@ -158,19 +203,21 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 		}
 
 	case *transfertypes.MsgTransfer:
+		trigger, detail := ibcMemoIntent(m.Memo)
 		events = append(events, TaxableEvent{
 			Category: string(CategoryIBCOut),
 			FromAddr: m.Sender, ToAddr: m.Receiver,
 			Amount: m.Token.Amount.String(), Denom: m.Token.Denom,
+			RewardTrigger: trigger, Detail: detailJSON(detail),
 		})
 
 	// CosmWasm contract calls. The dominant taxable case on Cosmos Hub is NFT
 	// marketplace sales (Stargaze Marketplace v2), which emit an authoritative
 	// wasm-finalize-sale event carrying the asset, price, seller and buyer.
+	// Beyond sales, the Hub's contracts run auctions, vaults, voting locks,
+	// reward distributors, raffles and name services; see protocols.go.
 	case *wasmtypes.MsgExecuteContract:
-		events = append(events, nftSaleEvents(log)...)
-		events = append(events, swapEvents(log)...)
-		events = append(events, nftMintEvents(log)...)
+		events = append(events, wasmExecuteEvents(log)...)
 
 	// A tokenfactory mint credits the recipient with newly created coins, which
 	// is an acquisition for them. Cosmos Hub's observed traffic is STARS
@@ -199,16 +246,41 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 	// packet payload, because v2 payloads on Cosmos Hub arrive solidity-ABI
 	// encoded from the Ethereum bridge. See tax/ibcv2.go.
 	case *MsgRecvPacketV2:
-		events = append(events, ibcV2ReceiveEvents(log)...)
+		for _, e := range ibcV2ReceiveEvents(log) {
+			if isSkipRouterHop(log, e.ToAddr) {
+				e.RewardTrigger = "skip_forward"
+				e.Detail = detailJSON(map[string]string{"protocol": "skip-go", "routed_from_hub": "true"})
+			}
+			events = append(events, e)
+		}
+		events = append(events, skipForwardEvents(log)...)
 
 	case *chantypes.MsgRecvPacket:
+		// An NFT bridge packet lands on a wasm.<ics721> port and carries
+		// NonFungibleTokenPacketData instead of coins.
+		if strings.HasPrefix(m.Packet.GetDestPort(), "wasm.") {
+			var nft nftPacketData
+			if err := json.Unmarshal(m.Packet.GetData(), &nft); err == nil && len(nft.TokenIDs) > 0 {
+				events = append(events, ics721ReceiveEvents(log, nft)...)
+			}
+			break
+		}
 		var data transfertypes.FungibleTokenPacketData
 		if err := json.Unmarshal(m.Packet.GetData(), &data); err == nil && data.Amount != "" {
-			events = append(events, TaxableEvent{
+			e := TaxableEvent{
 				Category: string(CategoryIBCIn),
 				FromAddr: data.Sender, ToAddr: data.Receiver,
 				Amount: data.Amount, Denom: data.Denom,
-			})
+			}
+			if isSkipRouterHop(log, data.Receiver) {
+				e.RewardTrigger = "skip_forward"
+				e.Detail = detailJSON(map[string]string{"protocol": "skip-go", "routed_from_hub": "true"})
+			} else if trigger, detail := ibcMemoIntent(data.Memo); trigger != "" {
+				e.RewardTrigger = trigger
+				e.Detail = detailJSON(detail)
+			}
+			events = append(events, e)
+			events = append(events, skipForwardEvents(log)...)
 		}
 	}
 
@@ -229,7 +301,7 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 			events[i].TxHash = message.Tx.Hash
 			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "message_id"}, {Name: "sub_index"}},
-				DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash", "validator_address", "reward_trigger"}),
+				DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash", "validator_address", "reward_trigger", "detail"}),
 			}).Create(&events[i]).Error; err != nil {
 				return err
 			}

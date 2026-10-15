@@ -1,0 +1,73 @@
+{
+ "message_id": 10639109,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "33237833",
+ "hash": "D18273B06BA156EA8DB486533B3739D2BF10A6522EDB43E6159744EDCE77E48C",
+ "timestamp": "2026-10-03T11:12:36Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos159mec2taphzekz90g399gj37ujp64cddz069v0"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1lklfvutud7gtz7f036jtxkm2wzf83hp2uj8kf4nn33tejyfm6g5qqhhdrk"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1lklfvutud7gtz7f036jtxkm2wzf83hp2uj8kf4nn33tejyfm6g5qqhhdrk"
+    },
+    {
+     "key": "action",
+     "value": "burn"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos159mec2taphzekz90g399gj37ujp64cddz069v0"
+    },
+    {
+     "key": "owner",
+     "value": "cosmos159mec2taphzekz90g399gj37ujp64cddz069v0"
+    },
+    {
+     "key": "token_id",
+     "value": "840"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

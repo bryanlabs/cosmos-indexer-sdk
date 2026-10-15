@@ -1,0 +1,133 @@
+{
+ "message_id": 10253536,
+ "message_type": "/cosmos.gov.v1.MsgDeposit",
+ "height": "33013278",
+ "hash": "613B829576F3C46357E98F48CC11F18D974E11409F73B530737EB35530505BA9",
+ "timestamp": "2026-09-17T14:59:29Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmos.gov.v1.MsgDeposit"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1az7rk9kukju026t0mz8jlus924hj7kqrlqz0ye"
+    },
+    {
+     "key": "module",
+     "value": "gov"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1az7rk9kukju026t0mz8jlus924hj7kqrlqz0ye"
+    },
+    {
+     "key": "amount",
+     "value": "450000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos10d07y265gmmuvt4z0w9aw880jnsr700j6zn9kn"
+    },
+    {
+     "key": "amount",
+     "value": "450000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos10d07y265gmmuvt4z0w9aw880jnsr700j6zn9kn"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1az7rk9kukju026t0mz8jlus924hj7kqrlqz0ye"
+    },
+    {
+     "key": "amount",
+     "value": "450000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1az7rk9kukju026t0mz8jlus924hj7kqrlqz0ye"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "proposal_deposit",
+   "attributes": [
+    {
+     "key": "depositor",
+     "value": "cosmos1az7rk9kukju026t0mz8jlus924hj7kqrlqz0ye"
+    },
+    {
+     "key": "amount",
+     "value": "450000000uatom"
+    },
+    {
+     "key": "proposal_id",
+     "value": "1055"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "proposal_deposit",
+   "attributes": [
+    {
+     "key": "voting_period_start",
+     "value": "1055"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,270 @@
+{
+ "message_id": 9763875,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "32668232",
+ "hash": "C0CA4A0D89BA280C6C57850EEC56A755B194FFF7B001FDDA68DA5B02458AC8D7",
+ "timestamp": "2026-08-25T20:04:01Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1aq8wxq6kjftknzkyza5u5l9rz76lxsd88dxsp0"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos16qh8ly7zkae754a84tkv2hauee3z3u4mpcpsw0lchps03a72wrkske49ns"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm-auction_settled",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos16qh8ly7zkae754a84tkv2hauee3z3u4mpcpsw0lchps03a72wrkske49ns"
+    },
+    {
+     "key": "protocol_version",
+     "value": "1"
+    },
+    {
+     "key": "timestamp",
+     "value": "1787688241"
+    },
+    {
+     "key": "inscription_id",
+     "value": "2b29bbd4b1aeda21e4f3e916e687d0190fd7ebf67913c5ff5bb9407d4f2f47fd"
+    },
+    {
+     "key": "auction_id",
+     "value": "5"
+    },
+    {
+     "key": "seller",
+     "value": "cosmos18av2j9mzvltakcr04ld7s6j8dg2h4q8clsay3t"
+    },
+    {
+     "key": "winner",
+     "value": "cosmos1t956cl47cegq253gduen7ezpxdeawhat7rfdmv"
+    },
+    {
+     "key": "amount",
+     "value": "20000"
+    },
+    {
+     "key": "platform_fee_amount",
+     "value": "0"
+    },
+    {
+     "key": "platform_fee_bps",
+     "value": "0"
+    },
+    {
+     "key": "fee_wallet",
+     "value": "cosmos1aq8wxq6kjftknzkyza5u5l9rz76lxsd88dxsp0"
+    },
+    {
+     "key": "seller_amount",
+     "value": "20000"
+    },
+    {
+     "key": "denomination",
+     "value": "uatom"
+    },
+    {
+     "key": "end_time",
+     "value": "1785259724"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm-ownership_transferred",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos16qh8ly7zkae754a84tkv2hauee3z3u4mpcpsw0lchps03a72wrkske49ns"
+    },
+    {
+     "key": "protocol_version",
+     "value": "1"
+    },
+    {
+     "key": "timestamp",
+     "value": "1787688241"
+    },
+    {
+     "key": "inscription_id",
+     "value": "2b29bbd4b1aeda21e4f3e916e687d0190fd7ebf67913c5ff5bb9407d4f2f47fd"
+    },
+    {
+     "key": "auction_id",
+     "value": "5"
+    },
+    {
+     "key": "creation_tx_hash",
+     "value": "bd58b0079e7fc1e51399ab6b7a315f3b436cd73d75cb4a71f81aec39fd982b8b"
+    },
+    {
+     "key": "creator",
+     "value": "cosmos1w9ee57gnduzm4l9h6xwn9tee9pyh8wlr4r9r35"
+    },
+    {
+     "key": "previous_owner",
+     "value": "cosmos18av2j9mzvltakcr04ld7s6j8dg2h4q8clsay3t"
+    },
+    {
+     "key": "new_owner",
+     "value": "cosmos1t956cl47cegq253gduen7ezpxdeawhat7rfdmv"
+    },
+    {
+     "key": "seller",
+     "value": "cosmos18av2j9mzvltakcr04ld7s6j8dg2h4q8clsay3t"
+    },
+    {
+     "key": "winner",
+     "value": "cosmos1t956cl47cegq253gduen7ezpxdeawhat7rfdmv"
+    },
+    {
+     "key": "amount",
+     "value": "20000"
+    },
+    {
+     "key": "denomination",
+     "value": "uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm-inscription_released",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos16qh8ly7zkae754a84tkv2hauee3z3u4mpcpsw0lchps03a72wrkske49ns"
+    },
+    {
+     "key": "protocol_version",
+     "value": "1"
+    },
+    {
+     "key": "timestamp",
+     "value": "1787688241"
+    },
+    {
+     "key": "inscription_id",
+     "value": "2b29bbd4b1aeda21e4f3e916e687d0190fd7ebf67913c5ff5bb9407d4f2f47fd"
+    },
+    {
+     "key": "creation_tx_hash",
+     "value": "bd58b0079e7fc1e51399ab6b7a315f3b436cd73d75cb4a71f81aec39fd982b8b"
+    },
+    {
+     "key": "creator",
+     "value": "cosmos1w9ee57gnduzm4l9h6xwn9tee9pyh8wlr4r9r35"
+    },
+    {
+     "key": "current_owner",
+     "value": "cosmos1t956cl47cegq253gduen7ezpxdeawhat7rfdmv"
+    },
+    {
+     "key": "registration_status",
+     "value": "released"
+    },
+    {
+     "key": "release_reason",
+     "value": "auction_settled"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos16qh8ly7zkae754a84tkv2hauee3z3u4mpcpsw0lchps03a72wrkske49ns"
+    },
+    {
+     "key": "amount",
+     "value": "20000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos18av2j9mzvltakcr04ld7s6j8dg2h4q8clsay3t"
+    },
+    {
+     "key": "amount",
+     "value": "20000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos18av2j9mzvltakcr04ld7s6j8dg2h4q8clsay3t"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos16qh8ly7zkae754a84tkv2hauee3z3u4mpcpsw0lchps03a72wrkske49ns"
+    },
+    {
+     "key": "amount",
+     "value": "20000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

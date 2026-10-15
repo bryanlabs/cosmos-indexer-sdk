@@ -1,0 +1,136 @@
+{
+ "message_id": 10375926,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "33086777",
+ "hash": "F78F698B2316F673AFAC507133B66C134B423F35EDAF0174BCF1252AB80A36DB",
+ "timestamp": "2026-09-23T12:11:36Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1uhy0n40nkdcgvsvcgylnhemyuc9hhgup4zxp32"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1uhy0n40nkdcgvsvcgylnhemyuc9hhgup4zxp32"
+    },
+    {
+     "key": "amount",
+     "value": "250000000cosmosvaloper1jlr62guqwrwkdt4m3y00zh2rrsamhjf9num5xr/118897"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1tj45y3729uu07pv8hq50pfx9u790rh6e0qssucs3yusxaag32t8svhlxgw"
+    },
+    {
+     "key": "amount",
+     "value": "250000000cosmosvaloper1jlr62guqwrwkdt4m3y00zh2rrsamhjf9num5xr/118897"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1tj45y3729uu07pv8hq50pfx9u790rh6e0qssucs3yusxaag32t8svhlxgw"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1uhy0n40nkdcgvsvcgylnhemyuc9hhgup4zxp32"
+    },
+    {
+     "key": "amount",
+     "value": "250000000cosmosvaloper1jlr62guqwrwkdt4m3y00zh2rrsamhjf9num5xr/118897"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1tj45y3729uu07pv8hq50pfx9u790rh6e0qssucs3yusxaag32t8svhlxgw"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1tj45y3729uu07pv8hq50pfx9u790rh6e0qssucs3yusxaag32t8svhlxgw"
+    },
+    {
+     "key": "action",
+     "value": "lock_tokens"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1uhy0n40nkdcgvsvcgylnhemyuc9hhgup4zxp32"
+    },
+    {
+     "key": "lock_id",
+     "value": "3000"
+    },
+    {
+     "key": "locked_tokens",
+     "value": "250000000cosmosvaloper1jlr62guqwrwkdt4m3y00zh2rrsamhjf9num5xr/118897"
+    },
+    {
+     "key": "lock_start",
+     "value": "1790165496.202374017"
+    },
+    {
+     "key": "lock_end",
+     "value": "1798049496.202374017"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

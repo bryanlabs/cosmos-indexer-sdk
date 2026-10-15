@@ -1,0 +1,124 @@
+{
+ "message_id": 10910718,
+ "message_type": "/cosmos.staking.v1beta1.MsgCancelUnbondingDelegation",
+ "height": "33411376",
+ "hash": "3131BCE03A7DD826BF319B1ACFCA0DC8D0A42458E3DA4ACB0769F412EA0AE941",
+ "timestamp": "2026-10-14T21:54:01Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmos.staking.v1beta1.MsgCancelUnbondingDelegation"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1sh9u9ljw8ujqtlunk2pph2dh5uvga60dlsc4q0"
+    },
+    {
+     "key": "module",
+     "value": "staking"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1tygms3xhhs3yv487phx3dw4a95jn7t7lpm470r"
+    },
+    {
+     "key": "amount",
+     "value": "5094045uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1fl48vsnmsdzcv85q5d2q4z5ajdha8yu34mf0eh"
+    },
+    {
+     "key": "amount",
+     "value": "5094045uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1fl48vsnmsdzcv85q5d2q4z5ajdha8yu34mf0eh"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1tygms3xhhs3yv487phx3dw4a95jn7t7lpm470r"
+    },
+    {
+     "key": "amount",
+     "value": "5094045uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1tygms3xhhs3yv487phx3dw4a95jn7t7lpm470r"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "cancel_unbonding_delegation",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "5094045uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1gf3dm2mvqhymts6ksrstlyuu2m8pw6dhfp9md2"
+    },
+    {
+     "key": "delegator",
+     "value": "cosmos1sh9u9ljw8ujqtlunk2pph2dh5uvga60dlsc4q0"
+    },
+    {
+     "key": "creation_height",
+     "value": "33300734"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

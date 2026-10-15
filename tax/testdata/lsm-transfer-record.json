@@ -1,0 +1,52 @@
+{
+ "message_id": 10903608,
+ "message_type": "/gaia.liquid.v1beta1.MsgTransferTokenizeShareRecord",
+ "height": "33406081",
+ "hash": "407F37203C74D166813BB1C6071E27D0938151C7C34025E7D85922EDE4CF375C",
+ "timestamp": "2026-10-14T13:31:23Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/gaia.liquid.v1beta1.MsgTransferTokenizeShareRecord"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1t0a5n0ydqfld2gcqkltmxurxl4lcmmdukvkvce"
+    },
+    {
+     "key": "module",
+     "value": "liquid"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer_tokenize_share_record",
+   "attributes": [
+    {
+     "key": "share_record_id",
+     "value": "122244"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1t0a5n0ydqfld2gcqkltmxurxl4lcmmdukvkvce"
+    },
+    {
+     "key": "share_owner",
+     "value": "cosmos1dm724l9g8edzhz76dsdkcmvtz2jvte3fkzjxu9"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

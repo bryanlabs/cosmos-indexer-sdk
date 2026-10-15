@@ -1,0 +1,144 @@
+{
+ "message_id": 10319512,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "33054089",
+ "hash": "04CE58131FC28886FCCF69B4B187A5BD16855341364FF7769FAB8A8D9602BABE",
+ "timestamp": "2026-09-20T07:23:15Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1mjvjg93dhs85zpe9947y75auv8gkg05x455une"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos15pnu29h8gqpsfwhv2l8t2uv3n4fc6cv5k00tq0uk6c78h5ysql4sja3f3d"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos15pnu29h8gqpsfwhv2l8t2uv3n4fc6cv5k00tq0uk6c78h5ysql4sja3f3d"
+    },
+    {
+     "key": "action",
+     "value": "claim_tribute"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1mjvjg93dhs85zpe9947y75auv8gkg05x455une"
+    },
+    {
+     "key": "round_id",
+     "value": "21"
+    },
+    {
+     "key": "tranche_id",
+     "value": "1"
+    },
+    {
+     "key": "proposal_id",
+     "value": "114"
+    },
+    {
+     "key": "tribute_id",
+     "value": "0"
+    },
+    {
+     "key": "tribute_receiver",
+     "value": "cosmos1mjvjg93dhs85zpe9947y75auv8gkg05x455une"
+    },
+    {
+     "key": "tribute_amount",
+     "value": "18184591ibc/6B8A3F5C2AD51CD6171FA41A7E8C35AD594AB69226438DB94450436EA57B3A89"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos15pnu29h8gqpsfwhv2l8t2uv3n4fc6cv5k00tq0uk6c78h5ysql4sja3f3d"
+    },
+    {
+     "key": "amount",
+     "value": "18184591ibc/6B8A3F5C2AD51CD6171FA41A7E8C35AD594AB69226438DB94450436EA57B3A89"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1mjvjg93dhs85zpe9947y75auv8gkg05x455une"
+    },
+    {
+     "key": "amount",
+     "value": "18184591ibc/6B8A3F5C2AD51CD6171FA41A7E8C35AD594AB69226438DB94450436EA57B3A89"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1mjvjg93dhs85zpe9947y75auv8gkg05x455une"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos15pnu29h8gqpsfwhv2l8t2uv3n4fc6cv5k00tq0uk6c78h5ysql4sja3f3d"
+    },
+    {
+     "key": "amount",
+     "value": "18184591ibc/6B8A3F5C2AD51CD6171FA41A7E8C35AD594AB69226438DB94450436EA57B3A89"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

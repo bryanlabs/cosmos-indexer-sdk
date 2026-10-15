@@ -1,0 +1,293 @@
+{
+ "message_id": 10303511,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "33043160",
+ "hash": "32810C1F3A4CD314A21082C87C2727288DB8150EC08CB1DA70B0F350D25AEA90",
+ "timestamp": "2026-09-19T14:08:36Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "amount",
+     "value": "13500000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "amount",
+     "value": "13500000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "amount",
+     "value": "13500000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "action",
+     "value": "deposit"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "deposit_amount",
+     "value": "13500000"
+    },
+    {
+     "key": "vault_shares_minted",
+     "value": "11485382"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coinbase",
+   "attributes": [
+    {
+     "key": "minter",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "tf_mint",
+   "attributes": [
+    {
+     "key": "mint_to_address",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1ml5rty2c37lfsd6mj4etw2csmzy55jy8yll5z9"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r"
+    },
+    {
+     "key": "amount",
+     "value": "11485382factory/cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r/inflow_atom_ushare"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}
