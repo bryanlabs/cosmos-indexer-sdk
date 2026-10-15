@@ -28,7 +28,11 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-var urls = []string{"/cosmos.staking.v1beta1.MsgDelegate", "/cosmos.staking.v1beta1.MsgUndelegate", "/cosmos.staking.v1beta1.MsgBeginRedelegate", "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward", "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec"}
+// urls are every message type the production parser classifies and that can
+// be replayed from the stored event log: the event-only types ReconstructMsg
+// rebuilds, authz (handled event by event) and validator commission (kept
+// from the stored rows with the operator address verified).
+var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec")
 
 type row struct {
 	models.Message
@@ -45,14 +49,19 @@ type eventRow struct {
 	Value     string
 	AttrIndex uint64
 }
+
+// backup holds what a restore needs: the rows as they were and the rows
+// written. The event log is not copied; it is immutable in the database.
 type backup struct {
 	MessageID uint               `json:"message_id"`
 	Type      string             `json:"message_type"`
-	Bytes     string             `json:"message_bytes"`
+	Bytes     string             `json:"message_bytes,omitempty"`
 	Old       []tax.TaxableEvent `json:"old"`
 	Expected  []tax.TaxableEvent `json:"expected"`
-	Log       *txlog.LogMessage  `json:"log"`
 }
+
+// totals sums amounts by category, denom and trigger so the before and after
+// pictures of a replay can be compared.
 type totals map[string]map[string]map[string]string
 
 type backupWriter struct {
@@ -227,7 +236,7 @@ func main() {
 	if b != nil {
 		fmt.Printf("backup=%s sha256=%s records=%d\n", *path, sum, b.lines)
 	}
-	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d apply=%t\nold_changed_rewards=%s\nnew_changed_rewards=%s\n", max, scanned, changed, zeroed, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
+	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", max, scanned, changed, zeroed, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
 }
 
 func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
@@ -321,7 +330,7 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 		if same(old[r.ID], expected) {
 			continue
 		}
-		plans = append(plans, backup{r.ID, r.Type, base64.StdEncoding.EncodeToString(r.MessageBytes), old[r.ID], expected, logs[r.ID]})
+		plans = append(plans, backup{r.ID, r.Type, base64.StdEncoding.EncodeToString(r.MessageBytes), old[r.ID], expected})
 	}
 	return plans, nil
 }
@@ -399,7 +408,7 @@ func same(a, b []tax.TaxableEvent) bool {
 	}
 	for i := range a {
 		x, y := a[i], b[i]
-		if x.MessageID != y.MessageID || x.SubIndex != y.SubIndex || x.Category != y.Category || x.Amount != y.Amount || x.Denom != y.Denom || x.Asset != y.Asset || x.FromAddr != y.FromAddr || x.ToAddr != y.ToAddr || x.BlockHeight != y.BlockHeight || !x.Timestamp.Equal(y.Timestamp) || x.TxHash != y.TxHash || x.ValidatorAddress != y.ValidatorAddress || x.RewardTrigger != y.RewardTrigger {
+		if x.MessageID != y.MessageID || x.SubIndex != y.SubIndex || x.Category != y.Category || x.Amount != y.Amount || x.Denom != y.Denom || x.Asset != y.Asset || x.FromAddr != y.FromAddr || x.ToAddr != y.ToAddr || x.BlockHeight != y.BlockHeight || !x.Timestamp.Equal(y.Timestamp) || x.TxHash != y.TxHash || x.ValidatorAddress != y.ValidatorAddress || x.RewardTrigger != y.RewardTrigger || x.Detail != y.Detail {
 			return false
 		}
 	}
@@ -407,22 +416,23 @@ func same(a, b []tax.TaxableEvent) bool {
 }
 func add(t totals, events []tax.TaxableEvent) {
 	for _, e := range events {
-		if e.Category != "reward" {
-			continue
+		denom := e.Denom
+		if denom == "" {
+			denom = "rows"
 		}
-		if t[e.ToAddr] == nil {
-			t[e.ToAddr] = map[string]map[string]string{}
+		if t[e.Category] == nil {
+			t[e.Category] = map[string]map[string]string{}
 		}
-		if t[e.ToAddr][e.Denom] == nil {
-			t[e.ToAddr][e.Denom] = map[string]string{}
+		if t[e.Category][denom] == nil {
+			t[e.Category][denom] = map[string]string{}
 		}
 		prior := new(big.Int)
-		prior.SetString(t[e.ToAddr][e.Denom][e.RewardTrigger], 10)
+		prior.SetString(t[e.Category][denom][e.RewardTrigger], 10)
 		amount, ok := new(big.Int).SetString(e.Amount, 10)
 		if !ok {
-			continue
+			amount = big.NewInt(1)
 		}
-		t[e.ToAddr][e.Denom][e.RewardTrigger] = prior.Add(prior, amount).String()
+		t[e.Category][denom][e.RewardTrigger] = prior.Add(prior, amount).String()
 	}
 }
 func jsonTotals(t totals) string { b, _ := json.Marshal(t); return string(b) }

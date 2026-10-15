@@ -49,6 +49,20 @@ func basisUnknownFor(category string) bool {
 	return category == "transfer" || category == "ibc_in"
 }
 
+// basisUnknownForRow extends basisUnknownFor with the user's tag: a receipt
+// tagged income, airdrop or payment is income at its receipt-time value, so
+// that value is its basis; a gift received keeps the giver's basis, which we
+// cannot see.
+func basisUnknownForRow(r Row) bool {
+	switch r.UserTag {
+	case TagIncome, TagAirdrop, TagPayment:
+		return false
+	case TagGift:
+		return true
+	}
+	return basisUnknownFor(r.Category)
+}
+
 // Build8949 runs a per-asset FIFO over the priced rows and emits one 8949 line
 // per disposal lot consumed. NOTE: this is a basic engine — cost basis for
 // units acquired before the queried window is unknown (treated as 0 / "Various");
@@ -70,6 +84,12 @@ func Build8949(rows []Row) []Form8949Row {
 
 	for _, r := range sorted {
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+			continue
+		}
+		// Record-only rows describe where the user's own assets went; they
+		// are neither acquisitions nor disposals. The same holds for rows the
+		// user tagged as an internal transfer, a protocol deposit or spam.
+		if !r.isTaxable() || r.UserTag == TagInternalTransfer || r.UserTag == TagProtocolDeposit || r.UserTag == TagSpam {
 			continue
 		}
 		// NFT acquisition via mint: establishes the NFT's cost basis.
@@ -128,7 +148,7 @@ func Build8949(rows []Row) []Form8949Row {
 		switch {
 		case r.Direction == "in" && r.Category != "fee":
 			// acquisition
-			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownFor(r.Category)
+			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownForRow(r)
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
 				cost = r.ManualBasisUSD.DivRound(r.Amount, 64)
 				acquired = *r.ManualAcquiredDate

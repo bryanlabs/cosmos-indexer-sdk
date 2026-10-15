@@ -140,3 +140,9 @@ var ReplayableTypeURLs = []string{
 	"/ibc.core.channel.v1.MsgRecvPacket",
 	TypeURLV2RecvPacket,
 }
+
+// StakingPrincipalFromLog exposes the staking principal rule for replay tools
+// that classify authz inner messages event by event.
+func StakingPrincipalFromLog(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
+	return stakingPrincipalEvents(log, delegator)
+}

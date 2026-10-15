@@ -107,12 +107,15 @@ func (s *Server) hasNewerActivity(addresses []string, since time.Time) (bool, er
 // getOrStartReportJob returns the current status for this key, kicking off a
 // fresh computation if there's no usable cached one (missing, stale, failed,
 // or resync=true). It never blocks on the computation itself.
-func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions) (*ReportJob, error) {
+func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions, tags UserTags) (*ReportJob, error) {
 	canonical, err := CanonicalAssetDecisionsJSON(decisions)
 	if err != nil {
 		return nil, assetReviewInputError{err}
 	}
 	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|review:%x", sha256.Sum256([]byte(canonical)))
+	if len(tags) > 0 {
+		key += fmt.Sprintf("|tags:%x", sha256.Sum256([]byte(tags.Canonical())))
+	}
 
 	var job ReportJob
 	err = s.db.Where("key = ?", key).First(&job).Error
@@ -156,7 +159,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		return nil, err
 	}
 
-	go s.computeReportJob(key, chain, addresses, start, end, format, decisions)
+	go s.computeReportJob(key, chain, addresses, start, end, format, decisions, tags)
 
 	job.Status = ReportJobPending
 	return &job, nil
@@ -164,7 +167,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 
 // computeReportJob does the actual work in the background and persists the
 // result (or the error) when done.
-func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string, decisions AssetDecisions) {
+func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string, decisions AssetDecisions, tags UserTags) {
 	defer inFlight.Delete(key)
 	computedThrough := nowUTC()
 
@@ -173,6 +176,7 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 		s.db.Model(&ReportJob{}).Where("key = ?", key).Updates(map[string]any{"status": ReportJobFailed, "error": err.Error()})
 		return
 	}
+	all = ApplyTags(all, tags)
 	var buf strings.Builder
 	if err := WritePreviewCSV(&buf, format, all); err != nil {
 		s.db.Model(&ReportJob{}).Where("key = ?", key).
@@ -214,12 +218,17 @@ func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
+	tags, err := tagsFromRequest(r)
+	if err != nil {
+		writeTaxError(w, err)
+		return
+	}
 	startStr, endStr := q.Get("start"), q.Get("end")
 	start := dateParam(startStr, time.Time{})
 	end := dateParam(endStr, nowUTC().AddDate(0, 0, 1))
 	resync := q.Get("resync") == "true"
 
-	job, err := s.getOrStartReportJob(chain, addresses, start, end, startStr, endStr, format, resync, decisions)
+	job, err := s.getOrStartReportJob(chain, addresses, start, end, startStr, endStr, format, resync, decisions, tags)
 	if err != nil {
 		writeTaxError(w, err)
 		return

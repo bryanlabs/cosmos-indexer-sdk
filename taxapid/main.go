@@ -75,6 +75,10 @@ func main() {
 	if err := db.AutoMigrate(&taxapi.ReportJob{}); err != nil {
 		log.Fatalf("report job table migrate: %v", err)
 	}
+	// Release watcher runs (taxwatch CronJob) served at /chain/releases.
+	if err := db.AutoMigrate(&taxapi.ChainReleaseCheck{}); err != nil {
+		log.Printf("chain release table migrate: %v", err)
+	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())

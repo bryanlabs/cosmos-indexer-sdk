@@ -56,12 +56,17 @@ func (s *Server) currentReviewFingerprint(chain string, addresses []string, star
 	}
 	return reviewFingerprint(rows), nil
 }
+
+// eventDirection is the row's direction from addr's point of view: out when
+// addr is the sender. Rewards and commission are always received, and a
+// self-transfer counts as a receive.
 func eventDirection(e tax.TaxableEvent, addr string) string {
 	switch e.Category {
-	case string(tax.CategoryTransfer), string(tax.CategoryIBCOut), string(tax.CategoryNFTSale), string(tax.CategorySwap):
-		if e.FromAddr == addr {
-			return "out"
-		}
+	case string(tax.CategoryReward), string(tax.CategoryCommission):
+		return "in"
+	}
+	if e.FromAddr == addr && e.ToAddr != addr {
+		return "out"
 	}
 	return "in"
 }

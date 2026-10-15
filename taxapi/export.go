@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/shopspring/decimal"
 )
 
@@ -48,6 +49,37 @@ type Row struct {
 	// means "unknown" (INF-201); consumers must not sum it as a real zero without
 	// surfacing the gap.
 	PriceMissing bool
+	// PriceImplied is true when PriceUSD was derived from the other leg of the
+	// same swap (same transaction) because the oracle had no price for this
+	// asset: the user gave up X USD of ATOM, so the shares received are worth X.
+	PriceImplied bool
+	// Detail is the parser's protocol context JSON (contract, protocol name,
+	// proposal id, Skip destination, ...). Empty for plain rows.
+	Detail string
+	// UserTag is the user's own classification of this transaction (see
+	// tags.go). It never changes the on-chain record; it changes the label an
+	// exporter emits and whether Form 8949 sees a disposal.
+	UserTag string
+}
+
+// isTaxable mirrors tax.Category.Taxable; fees count as taxable spends.
+// Record-only rows stay in the preview, Generic CSV and journal and are kept
+// out of tax-software imports and Form 8949.
+func (r Row) isTaxable() bool {
+	return r.Category == "fee" || tax.Category(r.Category).Taxable()
+}
+
+// taxImportable reports whether a row belongs in a tax-software import.
+// Record-only rows and rows the user tagged spam or protocol_deposit do not.
+func (r Row) taxImportable() bool {
+	if !r.isTaxable() {
+		return false
+	}
+	switch r.UserTag {
+	case TagSpam, TagProtocolDeposit:
+		return false
+	}
+	return true
 }
 
 // description is the human/tax note; NFT sales name the asset, IBC rows carry the
@@ -64,6 +96,18 @@ func (r Row) description() string {
 	if r.ValidatorAddress != "" {
 		d += " | staking_metadata=" + stakingMetadataJSON(r)
 	}
+	if r.RewardTrigger != "" && r.Category != "reward" && r.Category != "commission" {
+		d += " | source=" + r.RewardTrigger
+	}
+	if r.Detail != "" {
+		d += " | detail=" + r.Detail
+	}
+	if r.UserTag != "" {
+		d += " | user_tag=" + r.UserTag
+	}
+	if r.PriceImplied {
+		d += " (price implied from the other swap leg)"
+	}
 	if r.AssetIdentity != nil {
 		metadata, _ := json.Marshal(r.reviewIdentity())
 		d += " | asset_identity=" + string(metadata)
@@ -79,6 +123,9 @@ func (r Row) description() string {
 
 // label maps our category to a human/tax label.
 func (r Row) label() string {
+	if l, ok := koinlyTagLabel(r); ok {
+		return l
+	}
 	switch r.Category {
 	case "reward", "commission":
 		return "staking"
@@ -88,6 +135,10 @@ func (r Row) label() string {
 		return "nft"
 	case "swap":
 		return "swap"
+	case "income":
+		return "income"
+	case "expense":
+		return "cost"
 	default:
 		if r.Direction == "in" {
 			return "receive"
@@ -104,10 +155,10 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 	kept := make([]Row, 0, len(rows))
 	for _, row := range rows {
 		// Generic is an audit-capable CSV with explicit treatment and manual
-		// value/basis fields. Preserve excluded receipts there at their explicit
-		// zero treatment. Other import formats can auto-value unsupported assets,
-		// so retain their longstanding exclusion behavior.
-		if !row.Excluded || format == "generic" {
+		// value/basis fields. Preserve excluded receipts and record-only rows
+		// there. Other import formats can auto-value unsupported assets or read
+		// a record as a disposal, so they receive only importable rows.
+		if format == "generic" || (!row.Excluded && row.taxImportable()) {
 			kept = append(kept, row)
 		}
 	}
@@ -128,9 +179,9 @@ func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
 	if err != nil {
 		return err
 	}
-	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata")
+	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", "Taxable", "Detail", "Price Implied", "User Tag", "Source")
 	for i, row := range rows {
-		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row))
+		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, boolStr(row.isTaxable()), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger)
 	}
 	return csv.NewWriter(out).WriteAll(records)
 }
@@ -157,10 +208,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 		_ = w.Write([]string{"Date", "Received Quantity", "Received Currency", "Sent Quantity", "Sent Currency", "Fee Amount", "Fee Currency", "Tag"})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
-			tag := ""
-			if r.Category == "reward" || r.Category == "commission" {
-				tag = "staked"
-			}
+			tag := coinTrackerTag(r)
 			_ = w.Write([]string{
 				r.Time.UTC().Format("01/02/2006 15:04:05"),
 				recvAmt, recvCur, sentAmt, sentCur, "", "", tag,
@@ -174,13 +222,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 		_ = w.Write([]string{"Date (UTC)", "Platform", "Asset Sent", "Amount Sent", "Asset Received", "Amount Received", "Fee Currency", "Fee Amount", "Type", "Description", "TxHash"})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
-			typ := "Deposit"
-			if r.Direction == "out" {
-				typ = "Withdrawal"
-			}
-			if r.Category == "reward" || r.Category == "commission" {
-				typ = "Staking"
-			}
+			typ := coinLedgerType(r)
 			_ = w.Write([]string{
 				r.Time.UTC().Format("01/02/2006 15:04:05"),
 				"Cosmos", sentCur, sentAmt, recvCur, recvAmt, "", "", typ, r.description(), r.TxHash,
@@ -236,13 +278,14 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 	case "generic":
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date"}) //nolint:lll
+		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", "detail"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				genericAssetDisplay(r), r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
 				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
 				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, "value"), manualField(r, "basis"), manualField(r, "date"),
+				boolStr(r.isTaxable()), boolStr(r.PriceImplied), r.UserTag, r.Detail,
 			})
 		}
 
@@ -357,11 +400,27 @@ func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
 }
 
 func ctcType(r Row) string {
+	if t, ok := ctcTagType(r); ok {
+		return t
+	}
 	switch r.Category {
 	case "reward", "commission":
 		return "staking"
 	case "fee":
 		return "fee"
+	case "income":
+		return "income"
+	case "expense":
+		return "expense"
+	case "protocol_deposit", "delegate", "tokenize_shares", "gov_deposit":
+		return "staking-deposit"
+	case "protocol_withdrawal", "undelegate", "redeem_shares":
+		return "staking-withdrawal"
+	case "nft_transfer", "nft_burn", "redelegate", "cancel_unbonding", "share_record":
+		if r.Direction == "in" {
+			return "transfer-in"
+		}
+		return "transfer-out"
 	case "nft_sale", "swap":
 		// Disposal leg = sell, acquisition leg = buy.
 		if r.Direction == "out" {

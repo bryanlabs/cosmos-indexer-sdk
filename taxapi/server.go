@@ -55,6 +55,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
+	mux.HandleFunc("GET /catalog", s.handleCatalog)
+	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
+	mux.HandleFunc("GET /journal", s.handleJournal)
+	mux.HandleFunc("GET /positions", s.handlePositions)
+	mux.HandleFunc("GET /validator-statement", s.handleValidatorStatement)
+	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
+	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
 	mux.HandleFunc("GET /wasm/coverage", s.handleWasmCoverage)
 	mux.HandleFunc("POST /wasm/submissions", s.handleCreateWasmSubmission)
 	mux.HandleFunc("GET /wasm/submissions", s.handleListWasmSubmissions)
@@ -179,27 +186,45 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 func buildIncomeCSV(rows []Row, address, recognition string) string {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash", "validator_address", "validator_moniker", "reward_trigger"})
+	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash", "validator_address", "validator_moniker", "reward_trigger", "validator_jurisdiction", "source"})
 	total := decimal.Zero
+	byJurisdiction := map[string]decimal.Decimal{}
 	missingDenoms := map[string]bool{}
 	for _, row := range rows {
 		if row.Excluded {
 			continue
 		}
-		if row.Category != "reward" && row.Category != "commission" {
+		if !isIncomeRow(row) {
 			continue
 		}
 		total = total.Add(row.ValueUSD)
 		if row.PriceMissing {
 			missingDenoms[row.Symbol] = true
 		}
+		jur := ""
+		if row.Category == "reward" || row.Category == "commission" {
+			jur = jurisdictionLabel(row.ValidatorMoniker)
+			byJurisdiction[jur] = byJurisdiction[jur].Add(row.ValueUSD)
+		}
+		typ := row.Category
+		if row.Category == "income" || row.UserTag != "" {
+			typ = incomeType(row)
+		}
 		_ = cw.Write([]string{
-			address, row.Time.UTC().Format("2006-01-02"), row.Category, row.Symbol, row.Denom,
-			row.Amount.String(), row.PriceUSD.String(), rowValueText(row), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger,
+			address, row.Time.UTC().Format("2006-01-02"), typ, row.Symbol, row.Denom,
+			row.Amount.String(), row.PriceUSD.String(), rowValueText(row), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger, jur, incomeSource(row),
 		})
 	}
-	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.String(), "", "", "", ""})
-	_ = cw.Write([]string{address, "", "RECOGNITION POLICY", "", "", "", "", recognition, "", "", "", ""})
+	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.String(), "", "", "", "", "", ""})
+	jurs := make([]string, 0, len(byJurisdiction))
+	for j := range byJurisdiction {
+		jurs = append(jurs, j)
+	}
+	sort.Strings(jurs)
+	for _, j := range jurs {
+		_ = cw.Write([]string{address, "", "SUBTOTAL staking by validator jurisdiction", "", "", "", "", byJurisdiction[j].String(), "", "", "", "", j, ""})
+	}
+	_ = cw.Write([]string{address, "", "RECOGNITION POLICY", "", "", "", "", recognition, "", "", "", "", "", ""})
 	if len(missingDenoms) > 0 {
 		denoms := make([]string, 0, len(missingDenoms))
 		for sym := range missingDenoms {
@@ -208,7 +233,7 @@ func buildIncomeCSV(rows []Row, address, recognition string) string {
 		sort.Strings(denoms)
 		_ = cw.Write([]string{address, "", "WARNING", "", "", "", "",
 			fmt.Sprintf("no price found for: %s -- TOTAL above excludes their value, actual income is higher", strings.Join(denoms, ", ")),
-			"", "", "", "",
+			"", "", "", "", "", "",
 		})
 	}
 	cw.Flush()
@@ -361,9 +386,11 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		row.ValidatorAddress = e.ValidatorAddress
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
+		row.Detail = e.Detail
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
 		out = append(out, row)
 	}
+	implySwapPrices(out)
 	for _, f := range fees {
 		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, "fee", "out", f.Denom, f.Amount, addr, ""))
 	}

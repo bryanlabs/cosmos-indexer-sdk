@@ -23,7 +23,12 @@ func TestCanonicalComparisonAndRewardTotals(t *testing.T) {
 	}
 	totals := totals{}
 	add(totals, append(expected, tax.TaxableEvent{Category: "reward", ToAddr: "wallet", Amount: "3", Denom: "uatom", RewardTrigger: "claim"}))
-	if totals["wallet"]["uatom"]["claim"] != "5" {
-		t.Fatalf("aggregate = %q", totals["wallet"]["uatom"]["claim"])
+	if totals["reward"]["uatom"]["claim"] != "5" {
+		t.Fatalf("aggregate = %q", totals["reward"]["uatom"]["claim"])
+	}
+	changed := append([]tax.TaxableEvent(nil), expected...)
+	changed[0].Detail = `{"x":"1"}`
+	if same(changed, expected) {
+		t.Fatal("a changed detail must count as a difference")
 	}
 }

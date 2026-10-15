@@ -136,7 +136,15 @@ func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []strin
 	if err != nil {
 		return nil, err
 	}
-	return s.reviewedRows(chain, addresses, start, end, decisions, false)
+	tags, err := tagsFromRequest(r)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.reviewedRows(chain, addresses, start, end, decisions, false)
+	if err != nil {
+		return nil, err
+	}
+	return ApplyTags(rows, tags), nil
 }
 func writeTaxError(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError

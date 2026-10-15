@@ -9,7 +9,6 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	dist "github.com/cosmos/cosmos-sdk/x/distribution/types"
-	staking "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
 func attributes(e txlog.LogMessageEvent) map[string]string {
@@ -48,19 +47,11 @@ func fromStoredLog(typ string, log *txlog.LogMessage, old []tax.TaxableEvent) ([
 	if typ == "/cosmos.authz.v1beta1.MsgExec" {
 		return authzFromStoredLog(log, old)
 	}
-	if sender == "" {
-		return nil, fmt.Errorf("stored message has no action/sender event")
-	}
 	switch typ {
-	case "/cosmos.staking.v1beta1.MsgDelegate":
-		return parse(&staking.MsgDelegate{DelegatorAddress: sender}, log)
-	case "/cosmos.staking.v1beta1.MsgUndelegate":
-		return parse(&staking.MsgUndelegate{DelegatorAddress: sender}, log)
-	case "/cosmos.staking.v1beta1.MsgBeginRedelegate":
-		return parse(&staking.MsgBeginRedelegate{DelegatorAddress: sender}, log)
-	case "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward":
-		return parse(&dist.MsgWithdrawDelegatorReward{DelegatorAddress: sender}, log)
 	case "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission":
+		if sender == "" {
+			return nil, fmt.Errorf("stored message has no action/sender event")
+		}
 		validator := ""
 		for _, e := range log.Events {
 			if e.Type == "withdraw_commission" {
@@ -85,7 +76,13 @@ func fromStoredLog(typ string, log *txlog.LogMessage, old []tax.TaxableEvent) ([
 		}
 		return out, nil
 	}
-	return nil, fmt.Errorf("unsupported stored type %s", typ)
+	// Everything else is rebuilt from events and run through the production
+	// parser exactly as the live indexer runs it.
+	msg, err := tax.ReconstructMsg(typ, log)
+	if err != nil {
+		return nil, err
+	}
+	return parse(msg, log)
 }
 
 // For authz without body bytes, preserve non-reward classifications verbatim.
@@ -110,12 +107,44 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 			triggers[key] = "redelegate"
 		}
 	}
+	// Rows this function recomputes (rewards and staking principal records)
+	// are dropped from the old set so a second replay is a no-op; anything
+	// else the original indexing produced is preserved verbatim.
+	recomputed := map[string]bool{"reward": true, string(tax.CategoryDelegate): true, string(tax.CategoryUndelegate): true, string(tax.CategoryRedelegate): true, string(tax.CategoryCancelUnbonding): true}
 	out := []tax.TaxableEvent{}
 	for _, e := range old {
-		if e.Category != "reward" {
+		if !recomputed[e.Category] {
 			e.ID = 0
 			out = append(out, e)
 		}
+	}
+	// The delegator of each inner message, from its reward withdrawal when
+	// the staking event itself does not name one.
+	delegatorByIndex := map[string]string{}
+	for _, event := range log.Events {
+		if event.Type == "withdraw_rewards" {
+			a := attributes(event)
+			if a["delegator"] != "" {
+				delegatorByIndex[a["authz_msg_index"]] = a["delegator"]
+			}
+		}
+	}
+	var principal []tax.TaxableEvent
+	for _, event := range log.Events {
+		switch event.Type {
+		case "delegate", "unbond", "redelegate", "cancel_unbonding_delegation":
+		default:
+			continue
+		}
+		a := attributes(event)
+		who := a["delegator"]
+		if who == "" {
+			who = delegatorByIndex[a["authz_msg_index"]]
+		}
+		if who == "" {
+			return nil, fmt.Errorf("authz staking event names no delegator; needs original transaction body")
+		}
+		principal = append(principal, tax.StakingPrincipalFromLog(&txlog.LogMessage{Events: []txlog.LogMessageEvent{event}}, who)...)
 	}
 	for _, event := range log.Events {
 		if event.Type != "withdraw_rewards" {
@@ -138,5 +167,6 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 		}
 		out = append(out, rows...)
 	}
+	out = append(out, principal...)
 	return out, nil
 }

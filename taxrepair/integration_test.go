@@ -50,7 +50,7 @@ func scratch(t *testing.T) *gorm.DB {
  CREATE TABLE message_event_attribute_keys(id bigserial primary key,key text);
  CREATE TABLE message_events(id bigserial primary key,message_id bigint,index bigint,message_event_type_id bigint);
  CREATE TABLE message_event_attributes(id bigserial primary key,message_event_id bigint,index bigint,message_event_attribute_key_id bigint,value text);
- CREATE TABLE taxable_events(id bigserial primary key,message_id bigint REFERENCES messages(id),sub_index bigint,category text,amount text,denom text,asset text,from_addr text,to_addr text,block_height bigint,timestamp timestamptz,tx_hash text,validator_address text,reward_trigger text,UNIQUE(message_id,sub_index));`
+ CREATE TABLE taxable_events(id bigserial primary key,message_id bigint REFERENCES messages(id),sub_index bigint,category text,amount text,denom text,asset text,from_addr text,to_addr text,block_height bigint,timestamp timestamptz,tx_hash text,validator_address text,reward_trigger text,detail text,UNIQUE(message_id,sub_index));`
 	if err := db.Exec(sql).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,9 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || len(plans[0].Expected) != 0 || len(plans[1].Expected) != 2 {
+	// The delegate becomes one principal record; the redelegate keeps its two
+	// reward rows and gains a principal record.
+	if len(plans) != 2 || len(plans[0].Expected) != 1 || len(plans[1].Expected) != 3 || plans[0].Expected[0].Category != string(tax.CategoryDelegate) || plans[1].Expected[2].Category != string(tax.CategoryRedelegate) {
 		t.Fatalf("wrong plan: %+v", plans)
 	}
 	// Production does not retain message bytes. The ordered action/sender and
@@ -197,7 +199,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after[1]) != 0 || !same(after[2], plans[1].Expected) {
+	if !same(after[1], plans[0].Expected) || !same(after[2], plans[1].Expected) {
 		t.Fatalf("bad replacement: %+v", after)
 	}
 	if after[2][0].Amount != "35629" || after[2][1].Amount != "47507213" || after[2][0].BlockHeight != 30672572 {
