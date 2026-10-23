@@ -1,2 +1,7 @@
 config.toml
-.env
+.git
+**/.git
+**/.env
+**/.env.*
+**/.venv
+**/node_modules
