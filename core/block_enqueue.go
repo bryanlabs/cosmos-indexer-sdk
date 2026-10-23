@@ -205,33 +205,21 @@ func GenerateDefaultEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client 
 	endBlock := cfg.Base.EndBlock
 	var latestBlock int64 = math.MaxInt64
 	reindexing := cfg.Base.ReIndex
-	// var lastBlock = cfg.Base.EndBlock
-	// var latestBlock int64 = math.MaxInt64
 
 	if startBlock <= 0 {
 		startBlock = 1
 	}
 
-	var blocksFromStart []models.Block
-
 	if !reindexing {
-		var err error
 		config.Log.Info("Reindexing is disabled, skipping blocks that have already been indexed")
-		// We need to pick up where we last left off, find blocks after start and skip already indexed blocks
-		blocksFromStart, err = dbTypes.GetBlocksFromStart(db, chainID, startBlock, endBlock)
-		if err != nil {
-			return nil, err
-		}
-
 	} else {
 		config.Log.Info("Reindexing is enabled starting from initial start height")
 	}
 
 	return func(blockChan chan *EnqueueData) error {
-		blocksInDB := make(map[int64]models.Block)
-		for _, block := range blocksFromStart {
-			blocksInDB[block.Height] = block
-		}
+		window := indexedBlockWindow{load: func(start, end int64) ([]dbTypes.BlockIndexState, error) {
+			return dbTypes.GetBlockIndexWindow(db, chainID, start, end)
+		}}
 
 		if len(failedBlockEnqueueData) > 0 && cfg.Base.ReattemptFailedBlocks {
 			config.Log.Info("Re-enqueuing failed blocks")
@@ -289,50 +277,24 @@ func GenerateDefaultEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client 
 
 				// Already at the latest block, wait for the next block to be available.
 				for currBlock < latestBlock && (currBlock <= endBlock || endBlock == -1) && len(blockChan) != cap(blockChan) {
-					// if we are not re-indexing, skip curr block if already indexed
-					block, blockExists := blocksInDB[currBlock]
-
-					// Skip blocks already in DB that do not need indexing according to the config
-					if !reindexing && blockExists {
-						config.Log.Debugf("Block %d already in DB, checking if it needs indexing", currBlock)
-
-						needsIndex := false
-
-						if cfg.Base.BlockEventIndexingEnabled && !block.BlockEventsIndexed {
-							needsIndex = true
-						} else if cfg.Base.TransactionIndexingEnabled && !block.TxIndexed {
-							needsIndex = true
+					var block dbTypes.BlockIndexState
+					var blockExists bool
+					if !reindexing {
+						last := latestBlock - 1
+						if endBlock != -1 && endBlock < last {
+							last = endBlock
 						}
-
-						if !needsIndex {
-							config.Log.Debugf("Block %d already indexed, skipping", currBlock)
-							currBlock++
-							continue
+						block, blockExists, err = window.lookup(currBlock, last)
+						if err != nil {
+							return err
 						}
-						config.Log.Debugf("Block %d needs indexing, adding to queue", currBlock)
-						blockChan <- &EnqueueData{
-							Height:            currBlock,
-							IndexBlockEvents:  cfg.Base.BlockEventIndexingEnabled && !block.BlockEventsIndexed,
-							IndexTransactions: cfg.Base.TransactionIndexingEnabled && !block.TxIndexed,
-						}
-
-						delete(blocksInDB, currBlock)
-
+					}
+					work := blockIndexWork(currBlock, block, blockExists, cfg.Base.BlockEventIndexingEnabled, cfg.Base.TransactionIndexingEnabled)
+					if work == nil {
 						currBlock++
-
-						if cfg.Base.Throttling != 0 {
-							time.Sleep(time.Second * time.Duration(cfg.Base.Throttling))
-						}
-
 						continue
 					}
-
-					// Add the new block to the queue
-					blockChan <- &EnqueueData{
-						Height:            currBlock,
-						IndexBlockEvents:  cfg.Base.BlockEventIndexingEnabled,
-						IndexTransactions: cfg.Base.TransactionIndexingEnabled,
-					}
+					blockChan <- work
 					currBlock++
 
 					if cfg.Base.Throttling != 0 {
