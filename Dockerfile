@@ -1,4 +1,10 @@
+# The wasmvm v1.2.3 static library links against LFS64 symbols that newer musl
+# dropped, so the build stays on Alpine 3.18 with the Go 1.26 toolchain copied in.
+FROM golang:1.26-alpine AS go
+
 FROM golang:1.22-alpine3.18 AS build-env
+RUN rm -rf /usr/local/go
+COPY --from=go /usr/local/go /usr/local/go
 
 # Customize to your build env
 
