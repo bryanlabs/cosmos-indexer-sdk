@@ -10,7 +10,7 @@ on:
     branches:
       - main
 env:
-  GO_VERSION: '^1.22'
+  GO_VERSION: '^1.26'
 
 jobs:
   pre-commit:
