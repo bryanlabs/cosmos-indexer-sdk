@@ -19,12 +19,12 @@ import (
 
 func TestOpaqueEvidenceDecodingPaths(t *testing.T) {
 	for _, mixed := range []bool{false, true} {
-		for _, path := range []string{"block", "rpc"} {
+		for _, path := range []string{"block", testRPCPath} {
 			t.Run(path+map[bool]string{true: "/mixed", false: "/unknown-only"}[mixed], func(t *testing.T) {
 				c := client.MakeCodecConfig()
 				bank.RegisterInterfaces(c.InterfaceRegistry)
 				cl := &client.ChainClient{Codec: c}
-				messages := []*codectypes.Any{{TypeUrl: "/future.MsgUnknown", Value: []byte{8, 1, 18, 2, 'x', 'y'}}}
+				messages := []*codectypes.Any{{TypeUrl: testUnknownMessageType, Value: []byte{8, 1, 18, 2, 'x', 'y'}}}
 				if mixed {
 					known, err := codectypes.NewAnyWithValue(&bank.MsgSend{})
 					require.NoError(t, err)
@@ -38,7 +38,7 @@ func TestOpaqueEvidenceDecodingPaths(t *testing.T) {
 				}
 				now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 				cfg := &config.IndexConfig{}
-				if path == "rpc" {
+				if path == testRPCPath {
 					result, _, err := ProcessRPCTXs(cfg, nil, cl, nil, nil, &tx.GetTxsEventResponse{Txs: []*tx.Tx{{Body: body, AuthInfo: auth}}, TxResponses: []*sdk.TxResponse{{Height: 1, TxHash: "ABC", Timestamp: now.Format(time.RFC3339), Logs: logs}}}, nil)
 					require.NoError(t, err)
 					require.Len(t, result, 1)
@@ -51,6 +51,7 @@ func TestOpaqueEvidenceDecodingPaths(t *testing.T) {
 					require.Len(t, m.MessageEvents, 2)
 					require.Equal(t, "second", m.MessageEvents[0].Attributes[0].MessageEventAttributeKey.Key)
 					require.Len(t, result[0].Tx.Fees, 1)
+					require.True(t, m.Message.Opaque)
 				} else {
 					bb, err := body.Marshal()
 					require.NoError(t, err)
@@ -70,6 +71,7 @@ func TestOpaqueEvidenceDecodingPaths(t *testing.T) {
 					require.Len(t, m.MessageEvents, 2)
 					require.Equal(t, uint64(1), m.MessageEvents[1].MessageEvent.Index)
 					require.Len(t, result[0].Tx.Fees, 1)
+					require.True(t, m.Message.Opaque)
 				}
 			})
 		}

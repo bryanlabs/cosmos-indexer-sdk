@@ -204,8 +204,8 @@ func ParseTXMessageTypeConfig(messageTypeConfigs []json.RawMessage) ([]filter.Me
 			return nil, parserError
 		}
 
-		switch {
-		case newFilter.Type == MessageTypeKey:
+		switch newFilter.Type {
+		case MessageTypeKey:
 			newFilter := filter.DefaultMessageTypeFilter{}
 			err := json.Unmarshal(messageTypeConfig, &newFilter)
 			if err != nil {
@@ -218,7 +218,7 @@ func ParseTXMessageTypeConfig(messageTypeConfigs []json.RawMessage) ([]filter.Me
 				return nil, parserError
 			}
 			messageTypeFilters = append(messageTypeFilters, newFilter)
-		case newFilter.Type == MessageTypeRegex:
+		case MessageTypeRegex:
 			newFilter := filter.MessageTypeRegexFilter{}
 			err := json.Unmarshal(messageTypeConfig, &newFilter)
 			if err != nil {

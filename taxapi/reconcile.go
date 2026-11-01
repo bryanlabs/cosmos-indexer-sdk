@@ -39,7 +39,11 @@ type CoverageReport struct {
 	Rows             []CoverageRow `json:"rows"`
 	// Gaps are types that appeared on chain but the parser does not handle —
 	// the explicit "here is what we are NOT yet reporting" list.
-	Gaps []CoverageRow `json:"gaps"`
+	Gaps                 []CoverageRow `json:"gaps"`
+	ParserErrors         int64         `json:"parser_errors"`
+	DecodeErrors         int64         `json:"decode_errors"`
+	OpaqueMessages       int64         `json:"opaque_messages"`
+	ParserDecodeComplete bool          `json:"parser_decode_complete"`
 }
 
 // typeCount is one row of the reconciliation query: a message type and how many
@@ -51,13 +55,15 @@ type typeCount struct {
 }
 
 // coverage runs the reconciliation query over [start,end) and summarizes it.
-func (s *Server) coverage(start, end time.Time) (*CoverageReport, error) {
+func (s *Server) coverage(chain string, start, end time.Time) (*CoverageReport, error) {
 	var rows []typeCount
 	if err := s.db.Table("messages").
 		Select("message_types.message_type AS message_type, COUNT(DISTINCT messages.id) AS total, COUNT(DISTINCT taxable_events.message_id) AS classified").
 		Joins("JOIN message_types ON message_types.id = messages.message_type_id").
 		Joins("JOIN txes ON txes.id = messages.tx_id").
 		Joins("JOIN blocks ON blocks.id = txes.block_id").
+		Joins("JOIN chains ON chains.id = blocks.chain_id").
+		Where("chains.chain_id IN ?", chainIDs(chain)).
 		Joins("LEFT JOIN taxable_events ON taxable_events.message_id = messages.id").
 		Where("blocks.time_stamp >= ? AND blocks.time_stamp < ?", start, end).
 		Group("message_types.message_type").
@@ -65,15 +71,23 @@ func (s *Server) coverage(start, end time.Time) (*CoverageReport, error) {
 		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	return summarizeCoverage(rows, start, end), nil
+	readiness, err := s.classificationReadiness(chain, nil, start, end)
+	if err != nil {
+		return nil, err
+	}
+	report := summarizeCoverage(rows, start, end)
+	report.ParserErrors, report.DecodeErrors = readiness.ParserErrors, readiness.DecodeErrors
+	report.OpaqueMessages = readiness.OpaqueMessages
+	report.ParserDecodeComplete = readiness.ParserDecodeComplete
+	return report, nil
 }
 
 // summarizeCoverage turns raw per-type counts into the reconciliation report,
 // splitting types into supported vs gaps. Pure (no DB) so it is unit-testable.
 func summarizeCoverage(rows []typeCount, start, end time.Time) *CoverageReport {
 	rep := &CoverageReport{
-		Start: start.UTC().Format("2006-01-02"),
-		End:   end.UTC().Format("2006-01-02"),
+		Start: start.UTC().Format(apiDateLayout),
+		End:   end.UTC().Format(apiDateLayout),
 		Rows:  make([]CoverageRow, 0, len(rows)),
 		Gaps:  []CoverageRow{},
 	}

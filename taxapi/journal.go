@@ -79,7 +79,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	var out []JournalLine
 	swapsByTx := map[string][]Row{}
 	for _, r := range rows {
-		if r.Category == "swap" {
+		if r.Category == apiSwap {
 			swapsByTx[r.TxHash] = append(swapsByTx[r.TxHash], r)
 		}
 	}
@@ -89,7 +89,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			continue
 		}
 		id := fmt.Sprintf("%s-%d", shortHash(r.TxHash), i)
-		date := r.Time.UTC().Format("2006-01-02")
+		date := r.Time.UTC().Format(apiDateLayout)
 		memo := r.Category
 		if r.RewardTrigger != "" {
 			memo += " " + r.RewardTrigger
@@ -113,10 +113,10 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		val := r.ValueUSD
 		counterparty := ""
 		switch {
-		case r.Category == "reward", r.Category == "commission", r.Category == "fee":
+		case r.Category == apiReward, r.Category == apiCommission, r.Category == apiFee:
 		case r.Direction == "in" && r.From != "":
 			counterparty = r.From
-		case r.Direction == "out" && r.To != "":
+		case r.Direction == apiOut && r.To != "":
 			counterparty = r.To
 		}
 		validator, validatorCountry := "", ""
@@ -132,8 +132,10 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			price = r.PriceUSD.String()
 		}
 		line := func(account string, debit bool) JournalLine {
-			l := JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: account, Asset: r.Symbol, Quantity: r.Amount.String(), Category: r.Category, Memo: memo,
-				PriceUSD: price, Counterparty: counterparty, Validator: validator, ValidatorCountry: validatorCountry, Methodology: MethodologyVersion}
+			l := JournalLine{
+				Date: date, TxHash: r.TxHash, EntryID: id, Account: account, Asset: r.Symbol, Quantity: r.Amount.String(), Category: r.Category, Memo: memo,
+				PriceUSD: price, Counterparty: counterparty, Validator: validator, ValidatorCountry: validatorCountry, Methodology: MethodologyVersion,
+			}
 			if !r.PriceMissing {
 				if debit {
 					l.Debit = val.StringFixed(2)
@@ -148,17 +150,17 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.UserTag == TagSpam:
 			out = append(out, JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctSpam, Asset: r.Symbol, Quantity: r.Amount.String(), Category: r.Category, Memo: memo, Counterparty: counterparty, Methodology: MethodologyVersion})
 			continue
-		case r.Category == "fee":
+		case r.Category == apiFee:
 			out = append(out, line(acctFees, true), line(asset, false))
-		case r.Category == "reward":
+		case r.Category == apiReward:
 			out = append(out, line(asset, true), line(acctStakingIncome, false))
-		case r.Category == "commission":
+		case r.Category == apiCommission:
 			out = append(out, line(asset, true), line(acctCommission, false))
-		case r.Category == "income":
+		case r.Category == TagIncome:
 			out = append(out, line(asset, true), line(acctProtocolIncome+": "+titleTrigger(r.RewardTrigger), false))
-		case r.Category == "expense":
+		case r.Category == TagExpense:
 			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(asset, false))
-		case r.Category == "swap":
+		case r.Category == apiSwap:
 			if swapDone[r.TxHash] {
 				continue
 			}
@@ -167,7 +169,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			var debits, credits decimal.Decimal
 			for _, leg := range legs {
 				lr := leg
-				legLine := JournalLine{Date: date, TxHash: lr.TxHash, EntryID: id, Account: acctDigitalAssets + ": " + lr.Symbol, Asset: lr.Symbol, Quantity: lr.Amount.String(), Category: "swap", Memo: memo}
+				legLine := JournalLine{Date: date, TxHash: lr.TxHash, EntryID: id, Account: acctDigitalAssets + ": " + lr.Symbol, Asset: lr.Symbol, Quantity: lr.Amount.String(), Category: apiSwap, Memo: memo}
 				if !lr.PriceMissing {
 					if lr.Direction == "in" {
 						legLine.Debit = lr.ValueUSD.StringFixed(2)
@@ -180,7 +182,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 				out = append(out, legLine)
 			}
 			if diff := debits.Sub(credits); !diff.IsZero() {
-				plug := JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctSwapDifference, Category: "swap", Memo: memo + " (legs priced independently)"}
+				plug := JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctSwapDifference, Category: apiSwap, Memo: memo + " (legs priced independently)"}
 				if diff.IsPositive() {
 					plug.Credit = diff.StringFixed(2)
 				} else {
@@ -188,18 +190,18 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 				}
 				out = append(out, plug)
 			}
-		case r.Category == "nft_sale":
+		case r.Category == apiNFTSale:
 			nft := acctNFTAssets + ": " + r.Asset
 			if in {
 				out = append(out, line(nft, true), line(asset, false))
 			} else {
 				out = append(out, line(asset, true), line(nft, false))
 			}
-		case r.Category == "nft_mint":
+		case r.Category == apiNFTMint:
 			out = append(out, line(acctNFTAssets+": "+r.Asset, true), line(asset, false))
-		case r.Category == "nft_transfer", r.Category == "nft_burn", r.Category == "share_record", r.Category == "redelegate":
+		case r.Category == "nft_transfer", r.Category == "nft_burn", r.Category == "share_record", r.Category == apiRedelegate:
 			out = append(out, JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctNFTAssets, Asset: r.Asset, Quantity: r.Amount.String(), Category: r.Category, Memo: memo + " (memo entry, no USD movement)"})
-		case r.Category == "delegate", r.Category == "cancel_unbonding":
+		case r.Category == apiDelegate, r.Category == "cancel_unbonding":
 			out = append(out, line(acctStakedAssets+": "+r.Symbol, true), line(asset, false))
 		case r.Category == "undelegate":
 			out = append(out, line(acctUnbondingAssets+": "+r.Symbol, true), line(acctStakedAssets+": "+r.Symbol, false))
@@ -209,7 +211,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			out = append(out, line(acctStakedAssets+": "+r.Symbol, true), line(acctLiquidShares+": "+r.Symbol, false))
 		case r.Category == "gov_deposit":
 			out = append(out, line(acctGovDeposits, true), line(asset, false))
-		case r.Category == "protocol_deposit" || r.UserTag == TagProtocolDeposit:
+		case r.Category == TagProtocolDeposit || r.UserTag == TagProtocolDeposit:
 			if in {
 				out = append(out, line(asset, true), line(acctInProtocol+": "+r.Symbol, false))
 			} else {
@@ -273,7 +275,7 @@ func shortHash(h string) string {
 // WriteJournalCSV writes journal lines with a trial-balance footer.
 func WriteJournalCSV(out io.Writer, lines []JournalLine) error {
 	w := csv.NewWriter(out)
-	_ = w.Write([]string{"date_utc", "tx_hash", "entry_id", "account", "debit_usd", "credit_usd", "asset", "quantity", "price_usd", "category", "memo", "counterparty", "validator", "validator_country", "methodology_version"})
+	_ = w.Write([]string{apiDateUTC, apiTxHash, "entry_id", "account", "debit_usd", "credit_usd", apiAsset, "quantity", "price_usd", apiCategory, apiMemo, "counterparty", apiValidator, "validator_country", apiMethodologyVersion})
 	var debits, credits decimal.Decimal
 	for _, l := range lines {
 		_ = w.Write([]string{l.Date, l.TxHash, l.EntryID, l.Account, l.Debit, l.Credit, spreadsheetLabel(l.Asset), l.Quantity, l.PriceUSD, l.Category, l.Memo, l.Counterparty, l.Validator, l.ValidatorCountry, l.Methodology})
@@ -284,7 +286,7 @@ func WriteJournalCSV(out io.Writer, lines []JournalLine) error {
 			credits = credits.Add(c)
 		}
 	}
-	_ = w.Write([]string{"", "", "TOTAL", "", debits.StringFixed(2), credits.StringFixed(2), "", "", "", "", "trial balance: debits equal credits", "", "", "", MethodologyVersion})
+	_ = w.Write([]string{"", "", apiTotalLabel, "", debits.StringFixed(2), credits.StringFixed(2), "", "", "", "", "trial balance: debits equal credits", "", "", "", MethodologyVersion})
 	w.Flush()
 	return w.Error()
 }
@@ -292,23 +294,23 @@ func WriteJournalCSV(out io.Writer, lines []JournalLine) error {
 // GET /journal?address=&chain=&start=&end=&format=csv|json
 func (s *Server) handleJournal(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := strings.TrimSpace(q.Get("address"))
+	addr := strings.TrimSpace(q.Get(apiAddress))
 	if addr == "" {
-		http.Error(w, "address required", http.StatusBadRequest)
+		http.Error(w, apiAddressRequired, http.StatusBadRequest)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	chain := chainParam(q.Get(apiChain))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
 		return
 	}
 	lines := BuildJournal(rows, s.jurisdictionFunc(chain))
-	if q.Get("format") == "json" {
-		writeJSON(w, map[string]any{"address": addr, "chain": chain, "methodology_version": MethodologyVersion, "lines": lines})
+	if q.Get(apiFormat) == "json" {
+		writeJSON(w, map[string]any{apiAddress: addr, apiChain: chain, apiMethodologyVersion: MethodologyVersion, "lines": lines})
 		return
 	}
-	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=gl-journal.csv")
+	w.Header().Set(apiContentType, apiCSVContentType)
+	w.Header().Set(apiContentDisposition, "attachment; filename=gl-journal.csv")
 	_ = WriteJournalCSV(w, lines)
 }

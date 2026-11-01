@@ -33,6 +33,7 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 	rpcClient := rpc.URIClient{
 		Address: chainClient.Config.RPCAddr,
 		Client:  &http.Client{},
+		JSONRPC: cfg.Base.BlockResultsJSONRPC,
 	}
 
 	if cfg.Base.ArchiveHTTPClient != nil {
@@ -158,9 +159,10 @@ func NormalizeCustomBlockResults(blockResults *rpc.CustomBlockResults) (*rpc.Cus
 			isEndBlock := false
 			for _, attr := range event.Attributes {
 				if attr.Key == "mode" {
-					if attr.Value == "BeginBlock" {
+					switch attr.Value {
+					case "BeginBlock":
 						isBeginBlock = true
-					} else if attr.Value == "EndBlock" {
+					case "EndBlock":
 						isEndBlock = true
 					}
 				} else {

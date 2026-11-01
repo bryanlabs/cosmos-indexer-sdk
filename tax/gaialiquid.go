@@ -24,7 +24,8 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
-// Type URLs as they appear on chain.
+// Type URLs as they appear on chain. These are public protobuf identifiers, not credentials.
+// #nosec G101 -- tokenization message identifiers are public on-chain type URLs.
 const (
 	TypeURLTokenizeShares                 = "/gaia.liquid.v1beta1.MsgTokenizeShares"
 	TypeURLRedeemTokensForShares          = "/gaia.liquid.v1beta1.MsgRedeemTokensForShares"
@@ -67,6 +68,7 @@ func LegacyLSMMsgTypes() map[string]sdk.Msg {
 	}
 }
 
+// #nosec G101 -- legacy tokenization identifiers are public on-chain type URLs.
 const (
 	LegacyTypeURLTokenizeShares                 = "/cosmos.staking.v1beta1.MsgTokenizeShares"
 	LegacyTypeURLRedeemTokensForShares          = "/cosmos.staking.v1beta1.MsgRedeemTokensForShares"
@@ -84,28 +86,33 @@ const (
 // independent of gogoproto's global registration table.
 type LegacyMsgTokenizeShares struct{ MsgTokenizeShares }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgTokenizeShares) XXX_MessageName() string { return LegacyTypeURLTokenizeShares[1:] }
 
 type LegacyMsgRedeemTokensForShares struct{ MsgRedeemTokensForShares }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgRedeemTokensForShares) XXX_MessageName() string {
 	return LegacyTypeURLRedeemTokensForShares[1:]
 }
 
 type LegacyMsgTransferTokenizeShareRecord struct{ MsgTransferTokenizeShareRecord }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgTransferTokenizeShareRecord) XXX_MessageName() string {
 	return LegacyTypeURLTransferTokenizeShareRecord[1:]
 }
 
 type LegacyMsgDisableTokenizeShares struct{ MsgDisableTokenizeShares }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgDisableTokenizeShares) XXX_MessageName() string {
 	return LegacyTypeURLDisableTokenizeShares[1:]
 }
 
 type LegacyMsgEnableTokenizeShares struct{ MsgEnableTokenizeShares }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgEnableTokenizeShares) XXX_MessageName() string {
 	return LegacyTypeURLEnableTokenizeShares[1:]
 }
@@ -114,6 +121,7 @@ type LegacyMsgWithdrawTokenizeShareRecordReward struct {
 	MsgWithdrawTokenizeShareRecordReward
 }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgWithdrawTokenizeShareRecordReward) XXX_MessageName() string {
 	return LegacyTypeURLWithdrawTokenizeShareReward[1:]
 }
@@ -122,6 +130,7 @@ type LegacyMsgWithdrawAllTokenizeShareRecordReward struct {
 	MsgWithdrawAllTokenizeShareRecordReward
 }
 
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgWithdrawAllTokenizeShareRecordReward) XXX_MessageName() string {
 	return LegacyTypeURLWithdrawAllTokenizeShareReward[1:]
 }
@@ -134,14 +143,18 @@ type LegacyMsgValidatorBond struct {
 	ValidatorAddress string `protobuf:"bytes,2,opt,name=validator_address,json=validatorAddress,proto3"`
 }
 
-func (m *LegacyMsgValidatorBond) Reset()                { *m = LegacyMsgValidatorBond{} }
-func (*LegacyMsgValidatorBond) ProtoMessage()           {}
+func (m *LegacyMsgValidatorBond) Reset()      { *m = LegacyMsgValidatorBond{} }
+func (*LegacyMsgValidatorBond) ProtoMessage() {}
+
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgValidatorBond) XXX_MessageName() string { return LegacyTypeURLValidatorBond[1:] }
+
 func (m *LegacyMsgValidatorBond) String() string {
 	return fmt.Sprintf("MsgValidatorBond{%s}", m.DelegatorAddress)
 }
 func (*LegacyMsgValidatorBond) ValidateBasic() error           { return nil }
 func (m *LegacyMsgValidatorBond) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
+
 func (m *LegacyMsgValidatorBond) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)
@@ -161,14 +174,18 @@ type LegacyMsgUnbondValidator struct {
 	ValidatorAddress string `protobuf:"bytes,1,opt,name=validator_address,json=validatorAddress,proto3"`
 }
 
-func (m *LegacyMsgUnbondValidator) Reset()                { *m = LegacyMsgUnbondValidator{} }
-func (*LegacyMsgUnbondValidator) ProtoMessage()           {}
+func (m *LegacyMsgUnbondValidator) Reset()      { *m = LegacyMsgUnbondValidator{} }
+func (*LegacyMsgUnbondValidator) ProtoMessage() {}
+
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*LegacyMsgUnbondValidator) XXX_MessageName() string { return LegacyTypeURLUnbondValidator[1:] }
+
 func (m *LegacyMsgUnbondValidator) String() string {
 	return fmt.Sprintf("MsgUnbondValidator{%s}", m.ValidatorAddress)
 }
 func (*LegacyMsgUnbondValidator) ValidateBasic() error           { return nil }
 func (m *LegacyMsgUnbondValidator) GetSigners() []sdk.AccAddress { return signerOf(m.ValidatorAddress) }
+
 func (m *LegacyMsgUnbondValidator) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)
@@ -313,6 +330,7 @@ func (m *MsgRedeemTokensForShares) String() string {
 }
 func (m *MsgRedeemTokensForShares) ValidateBasic() error         { return nil }
 func (m *MsgRedeemTokensForShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
+
 func (m *MsgRedeemTokensForShares) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)
@@ -331,7 +349,7 @@ func (m *MsgRedeemTokensForShares) Unmarshal(b []byte) error {
 
 type MsgTransferTokenizeShareRecord struct {
 	rawMsg
-	TokenizeShareRecordId uint64 `protobuf:"varint,1,opt,name=tokenize_share_record_id,json=tokenizeShareRecordId,proto3" json:"tokenize_share_record_id,omitempty"`
+	TokenizeShareRecordID uint64 `protobuf:"varint,1,opt,name=tokenize_share_record_id,json=tokenizeShareRecordId,proto3" json:"tokenize_share_record_id,omitempty"`
 	Sender                string `protobuf:"bytes,2,opt,name=sender,proto3" json:"sender,omitempty"`
 	NewOwner              string `protobuf:"bytes,3,opt,name=new_owner,json=newOwner,proto3" json:"new_owner,omitempty"`
 }
@@ -339,7 +357,7 @@ type MsgTransferTokenizeShareRecord struct {
 func (m *MsgTransferTokenizeShareRecord) Reset()        { *m = MsgTransferTokenizeShareRecord{} }
 func (m *MsgTransferTokenizeShareRecord) ProtoMessage() {}
 func (m *MsgTransferTokenizeShareRecord) String() string {
-	return fmt.Sprintf("MsgTransferTokenizeShareRecord{%d}", m.TokenizeShareRecordId)
+	return fmt.Sprintf("MsgTransferTokenizeShareRecord{%d}", m.TokenizeShareRecordID)
 }
 func (m *MsgTransferTokenizeShareRecord) ValidateBasic() error         { return nil }
 func (m *MsgTransferTokenizeShareRecord) GetSigners() []sdk.AccAddress { return signerOf(m.Sender) }
@@ -349,7 +367,7 @@ func (m *MsgTransferTokenizeShareRecord) Unmarshal(b []byte) error {
 	return scanFields(b, func(f wireField) error {
 		switch f.num {
 		case 1:
-			m.TokenizeShareRecordId = f.varint
+			m.TokenizeShareRecordID = f.varint
 		case 2:
 			m.Sender = string(f.bytes)
 		case 3:
@@ -373,6 +391,7 @@ func (m *MsgDisableTokenizeShares) String() string {
 }
 func (m *MsgDisableTokenizeShares) ValidateBasic() error         { return nil }
 func (m *MsgDisableTokenizeShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
+
 func (m *MsgDisableTokenizeShares) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)
@@ -396,6 +415,7 @@ func (m *MsgEnableTokenizeShares) String() string {
 }
 func (m *MsgEnableTokenizeShares) ValidateBasic() error         { return nil }
 func (m *MsgEnableTokenizeShares) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
+
 func (m *MsgEnableTokenizeShares) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)
@@ -412,7 +432,7 @@ func (m *MsgEnableTokenizeShares) Unmarshal(b []byte) error {
 type MsgWithdrawTokenizeShareRecordReward struct {
 	rawMsg
 	OwnerAddress string `protobuf:"bytes,1,opt,name=owner_address,json=ownerAddress,proto3" json:"owner_address,omitempty"`
-	RecordId     uint64 `protobuf:"varint,2,opt,name=record_id,json=recordId,proto3" json:"record_id,omitempty"`
+	RecordID     uint64 `protobuf:"varint,2,opt,name=record_id,json=recordId,proto3" json:"record_id,omitempty"`
 }
 
 func (m *MsgWithdrawTokenizeShareRecordReward) Reset()        { *m = MsgWithdrawTokenizeShareRecordReward{} }
@@ -424,6 +444,7 @@ func (m *MsgWithdrawTokenizeShareRecordReward) ValidateBasic() error { return ni
 func (m *MsgWithdrawTokenizeShareRecordReward) GetSigners() []sdk.AccAddress {
 	return signerOf(m.OwnerAddress)
 }
+
 func (m *MsgWithdrawTokenizeShareRecordReward) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)
@@ -432,7 +453,7 @@ func (m *MsgWithdrawTokenizeShareRecordReward) Unmarshal(b []byte) error {
 		case 1:
 			m.OwnerAddress = string(f.bytes)
 		case 2:
-			m.RecordId = f.varint
+			m.RecordID = f.varint
 		}
 		return nil
 	})
@@ -454,6 +475,7 @@ func (m *MsgWithdrawAllTokenizeShareRecordReward) ValidateBasic() error { return
 func (m *MsgWithdrawAllTokenizeShareRecordReward) GetSigners() []sdk.AccAddress {
 	return signerOf(m.OwnerAddress)
 }
+
 func (m *MsgWithdrawAllTokenizeShareRecordReward) Unmarshal(b []byte) error {
 	m.Reset()
 	m.keep(b)

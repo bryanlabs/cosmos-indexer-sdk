@@ -2,10 +2,9 @@ package taxapi
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -34,8 +33,8 @@ type BalanceSnapshot struct {
 // UpsertBalanceSnapshot writes (or replaces) the snapshot for an address+date.
 func UpsertBalanceSnapshot(db *gorm.DB, s *BalanceSnapshot) error {
 	return db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "address"}, {Name: "date"}},
-		DoUpdates: clause.AssignmentColumns([]string{"liquid", "staked", "reward", "height"}),
+		Columns:   []clause.Column{{Name: apiAddress}, {Name: apiDate}},
+		DoUpdates: clause.AssignmentColumns([]string{apiLiquid, apiStaked, apiReward, "height"}),
 	}).Create(s).Error
 }
 
@@ -67,20 +66,8 @@ type balCoin struct {
 	Amount string `json:"amount"`
 }
 
-func balGetJSON(url string, out interface{}) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d for %s", resp.StatusCode, url)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(body, out)
+func balGetJSON(origin, path string, query url.Values, out any) error {
+	return configuredJSONGet(&http.Client{Timeout: 8 * time.Second}, origin, path, query, out)
 }
 
 // getNativeHoldings reads liquid bank balance, bonded delegations, and
@@ -96,7 +83,7 @@ func getNativeHoldings(host, address string, native NativeAsset) (nativeHoldings
 	var bal struct {
 		Balances []balCoin `json:"balances"`
 	}
-	if err := balGetJSON(fmt.Sprintf("%s/cosmos/bank/v1beta1/balances/%s?pagination.limit=1000", host, address), &bal); err != nil {
+	if err := balGetJSON(host, "/cosmos/bank/v1beta1/balances/"+address, url.Values{apiPaginationLimit: {"1000"}}, &bal); err != nil {
 		return h, err
 	}
 	for _, c := range bal.Balances {
@@ -112,7 +99,7 @@ func getNativeHoldings(host, address string, native NativeAsset) (nativeHoldings
 			Balance balCoin `json:"balance"`
 		} `json:"delegation_responses"`
 	}
-	if err := balGetJSON(fmt.Sprintf("%s/cosmos/staking/v1beta1/delegations/%s?pagination.limit=1000", host, address), &del); err == nil {
+	if err := balGetJSON(host, "/cosmos/staking/v1beta1/delegations/"+address, url.Values{apiPaginationLimit: {"1000"}}, &del); err == nil {
 		var staked float64
 		for _, d := range del.DelegationResponses {
 			if d.Balance.Denom == native.Denom {
@@ -127,7 +114,7 @@ func getNativeHoldings(host, address string, native NativeAsset) (nativeHoldings
 	var rew struct {
 		Total []balCoin `json:"total"`
 	}
-	if err := balGetJSON(fmt.Sprintf("%s/cosmos/distribution/v1beta1/delegators/%s/rewards", host, address), &rew); err == nil {
+	if err := balGetJSON(host, "/cosmos/distribution/v1beta1/delegators/"+address+"/rewards", nil, &rew); err == nil {
 		for _, c := range rew.Total {
 			if c.Denom == native.Denom {
 				if v, err := strconv.ParseFloat(c.Amount, 64); err == nil {
@@ -150,30 +137,30 @@ func getNativeHoldings(host, address string, native NativeAsset) (nativeHoldings
 // Node REST endpoint for live reads comes from NODE_REST_API.
 func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	address := strings.TrimSpace(q.Get("address"))
+	address := strings.TrimSpace(q.Get(apiAddress))
 	if address == "" {
 		http.Error(w, "address is required", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 
-	if q.Get("history") == "true" {
+	if q.Get("history") == apiTrue {
 		rows := GetBalanceSnapshotHistory(s.db, address)
 		series := make([]map[string]any, 0, len(rows))
 		for _, b := range rows {
 			series = append(series, map[string]any{
-				"date": b.Date.UTC().Format("2006-01-02"), "liquid": b.Liquid,
-				"staked": b.Staked, "reward": b.Reward, "total": b.Liquid + b.Staked + b.Reward,
+				apiDate: b.Date.UTC().Format(apiDateLayout), apiLiquid: b.Liquid,
+				apiStaked: b.Staked, apiReward: b.Reward, apiTotal: b.Liquid + b.Staked + b.Reward,
 			})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"address": address, "symbol": s.native.Symbol, "history": series})
+		_ = json.NewEncoder(w).Encode(map[string]any{apiAddress: address, apiSymbol: s.native.Symbol, "history": series})
 		return
 	}
 
 	// "As of" a past date: serve from snapshots only (can't historically re-fetch).
 	var asOf time.Time
-	if d := q.Get("date"); d != "" {
-		if t, err := time.Parse("2006-01-02", d); err == nil {
+	if d := q.Get(apiDate); d != "" {
+		if t, err := time.Parse(apiDateLayout, d); err == nil {
 			asOf = t
 		}
 	}
@@ -207,9 +194,9 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeBalance(w http.ResponseWriter, address string, b BalanceSnapshot, live bool) {
 	out := map[string]any{
-		"address": address, "symbol": s.native.Symbol, "date": b.Date.UTC().Format("2006-01-02"),
-		"liquid": b.Liquid, "staked": b.Staked, "reward": b.Reward,
-		"total": b.Liquid + b.Staked + b.Reward,
+		apiAddress: address, apiSymbol: s.native.Symbol, apiDate: b.Date.UTC().Format(apiDateLayout),
+		apiLiquid: b.Liquid, apiStaked: b.Staked, apiReward: b.Reward,
+		apiTotal: b.Liquid + b.Staked + b.Reward,
 	}
 	if live {
 		out["live"] = true

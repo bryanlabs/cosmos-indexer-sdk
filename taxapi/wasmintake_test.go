@@ -42,19 +42,19 @@ func TestLimitersWithDifferentConfigsAreIndependent(t *testing.T) {
 	generous := newLimiter(30, time.Minute)
 
 	for i := 0; i < 2; i++ {
-		if !strict.allow("client") {
+		if !strict.allow(apiClient) {
 			t.Fatalf("strict limiter call %d should be allowed", i+1)
 		}
 	}
-	if strict.allow("client") {
+	if strict.allow(apiClient) {
 		t.Fatal("strict limiter should reject the 3rd call (limit is 2)")
 	}
 	for i := 0; i < 30; i++ {
-		if !generous.allow("client") {
+		if !generous.allow(apiClient) {
 			t.Fatalf("generous limiter call %d should be allowed (limit is 30)", i+1)
 		}
 	}
-	if generous.allow("client") {
+	if generous.allow(apiClient) {
 		t.Fatal("generous limiter should reject the 31st call")
 	}
 }

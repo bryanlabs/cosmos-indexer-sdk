@@ -22,11 +22,11 @@ import (
 // This defines the custom message parser for the delegation and undelegation message type
 // It implements the MessageParser interface
 type MsgDelegateUndelegateParser struct {
-	Id string
+	ID string
 }
 
 func (c *MsgDelegateUndelegateParser) Identifier() string {
-	return c.Id
+	return c.ID
 }
 
 func (c *MsgDelegateUndelegateParser) ParseMessage(cosmosMsg stdTypes.Msg, log *indexerTxTypes.LogMessage, cfg config.IndexConfig) (*any, error) {
@@ -217,8 +217,8 @@ func main() {
 
 	// Register the custom message parser for the delegation message types. Our parser can handle both delegate and undelegate messages.
 	// However, they must be uniquely identified by the Identifier() method. This will make identifying any parser errors easier.
-	delegateParser := &MsgDelegateUndelegateParser{Id: "delegate"}
-	undelegateParser := &MsgDelegateUndelegateParser{Id: "undelegate"}
+	delegateParser := &MsgDelegateUndelegateParser{ID: "delegate"}
+	undelegateParser := &MsgDelegateUndelegateParser{ID: "undelegate"}
 	indexer.RegisterCustomMessageParser("/cosmos.staking.v1beta1.MsgDelegate", delegateParser)
 	indexer.RegisterCustomMessageParser("/cosmos.staking.v1beta1.MsgUndelegate", undelegateParser)
 

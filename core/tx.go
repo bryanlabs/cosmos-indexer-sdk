@@ -91,7 +91,7 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 		// We can entirely ignore failed TXs in downstream parsers, because according to the Cosmos specification, a single failed message in a TX fails the whole TX
 		if txResult.Code == 0 {
 			logs, err = types.ParseABCILogs(txResult.Log)
-			if err != nil {
+			if err != nil || (len(logs) == 0 && len(txResult.Events) != 0) {
 				logs, err = indexerEvents.ParseTxEventsToMessageIndexEvents(len(txFull.Body.Messages), txResult.Events)
 			}
 		} else {
@@ -129,6 +129,9 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 			}
 
 			currMsg := txFull.Body.Messages[msgIdx].GetCachedValue()
+			if currMsg == nil {
+				currMsg = decodeKnownEnvelope(wireBody.Messages[msgIdx])
+			}
 
 			if currMsg != nil {
 				msg := currMsg.(types.Msg)
@@ -308,6 +311,9 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 			}
 
 			currMsg := currTx.Body.Messages[msgIdx].GetCachedValue()
+			if currMsg == nil {
+				currMsg = decodeKnownEnvelope(currTx.Body.Messages[msgIdx])
+			}
 			messagesRaw = append(messagesRaw, currTx.Body.Messages[msgIdx].Value)
 
 			// If we reached here, unpacking the entire TX raw was not successful
@@ -491,6 +497,7 @@ func ProcessTx(cfg *config.IndexConfig, db *gorm.DB, tx txtypes.MergedTx, messag
 			messageType, currMessageDBWrapper := ProcessMessage(messageIndex, message, messageTypeURLs[messageIndex], messageLog, uniqueEventTypes, uniqueEventAttributeKeys)
 			currMessageDBWrapper.Message.MessageBytes = messagesRaw[messageIndex]
 			currMessageDBWrapper.PreserveOpaqueEvidence = opaque
+			currMessageDBWrapper.Message.Opaque = opaque
 			uniqueMessageTypes[messageType] = currMessageDBWrapper.Message.MessageType
 			config.Log.Debug(fmt.Sprintf("[Block: %v] [TX: %v] Found msg of type '%v'.", tx.TxResponse.Height, tx.TxResponse.TxHash, messageType))
 
@@ -591,9 +598,16 @@ func ProcessSigners(cl *client.ChainClient, authInfo *cosmosTx.AuthInfo, message
 
 // Processes fees into model form, applying denoms and addresses to them
 func ProcessFees(db *gorm.DB, authInfo cosmosTx.AuthInfo, signers []models.Address) ([]models.Fee, error) {
-	feeCoins := authInfo.Fee.Amount
-	payer := authInfo.Fee.GetPayer()
 	fees := []models.Fee{}
+	if authInfo.Fee == nil {
+		return fees, nil
+	}
+	feeCoins := authInfo.Fee.Amount
+	// Fee grants deduct the bank balance of the granter, not the signer.
+	payer := authInfo.Fee.GetGranter()
+	if payer == "" {
+		payer = authInfo.Fee.GetPayer()
+	}
 
 	for _, coin := range feeCoins {
 		zeroFee := big.NewInt(0)

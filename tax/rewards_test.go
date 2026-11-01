@@ -43,7 +43,7 @@ func TestMalformedRewardFailsInsteadOfDeletingIncome(t *testing.T) {
 	msg := &distribution.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	for _, amount := range []string{"not-coins", "-12uatom"} {
 		log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
-			ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", amount}),
+			ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, amount}),
 		}}
 		if _, err := (&Parser{}).ParseMessage(msg, log, config.IndexConfig{}); err == nil {
 			t.Fatalf("malformed reward amount %q silently accepted", amount)
@@ -53,7 +53,7 @@ func TestMalformedRewardFailsInsteadOfDeletingIncome(t *testing.T) {
 
 func TestLegacyWithdrawalsWithoutDelegatorAndFlattenedValidators(t *testing.T) {
 	log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
-		ev("withdraw_rewards", [2]string{"amount", "35629uatom"}, [2]string{"validator", "source"}, [2]string{"amount", "47507213uatom"}, [2]string{"validator", "destination"}),
+		ev("withdraw_rewards", [2]string{attributeAmount, "35629uatom"}, [2]string{attributeValidator, "source"}, [2]string{attributeAmount, "47507213uatom"}, [2]string{attributeValidator, "destination"}),
 	}}
 	for _, msg := range []sdk.Msg{&staking.MsgBeginRedelegate{DelegatorAddress: del}, &distribution.MsgWithdrawDelegatorReward{DelegatorAddress: del}} {
 		data, err := (&Parser{}).ParseMessage(msg, log, config.IndexConfig{})
@@ -67,14 +67,14 @@ func TestLegacyWithdrawalsWithoutDelegatorAndFlattenedValidators(t *testing.T) {
 	}
 	inner := &distribution.MsgWithdrawDelegatorReward{DelegatorAddress: del}
 	exec := authz.NewMsgExec(sdk.AccAddress("grantee"), []sdk.Msg{inner})
-	log.Events[0].Attributes = append(log.Events[0].Attributes, txlog.Attribute{Key: "authz_msg_index", Value: "0"})
+	log.Events[0].Attributes = append(log.Events[0].Attributes, txlog.Attribute{Key: attributeAuthzMsgIndex, Value: "0"})
 	if out := classify(&exec, log); len(out) != 2 {
 		t.Fatalf("legacy authz rewards lost: %+v", out)
 	}
 }
 
 func TestDelegatePrincipalMainnetIsNotReward(t *testing.T) {
-	msg := &staking.MsgDelegate{DelegatorAddress: "cosmos1ts4vwmfccwjv0vehlzd4x5rw5xzljjnhgm7gnz", ValidatorAddress: "cosmosvaloper1clpqr4nrk4khgkxj78fcwwh6dl3uw4epsluffn", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
+	msg := &staking.MsgDelegate{DelegatorAddress: "cosmos1ts4vwmfccwjv0vehlzd4x5rw5xzljjnhgm7gnz", ValidatorAddress: "cosmosvaloper1clpqr4nrk4khgkxj78fcwwh6dl3uw4epsluffn", Amount: sdk.NewInt64Coin(fixtureNativeDenom, 94405000000)}
 	log := rewardFixture(t, "delegate-principal")
 	out := classify(msg, log)
 	for _, e := range out {
@@ -102,12 +102,12 @@ func TestClaimMulticoinMainnetKeepsValidator(t *testing.T) {
 	}
 	amounts := map[string]string{}
 	for _, e := range out {
-		if e.ValidatorAddress != validator || e.RewardTrigger != "claim" || e.ToAddr != wallet {
+		if e.ValidatorAddress != validator || e.RewardTrigger != actionClaim || e.ToAddr != wallet {
 			t.Fatalf("bad attribution: %+v", e)
 		}
 		amounts[e.Denom] = e.Amount
 	}
-	if amounts["uatom"] != "939305598" || amounts["ibc/27BCBC098A3AE31C80E18A3EA7A516F2530B7362F83D7992A4D7888DBB586D33"] != "243" {
+	if amounts[fixtureNativeDenom] != "939305598" || amounts["ibc/27BCBC098A3AE31C80E18A3EA7A516F2530B7362F83D7992A4D7888DBB586D33"] != "243" {
 		t.Fatal(amounts)
 	}
 }
@@ -116,7 +116,7 @@ func TestRedelegateMainnetSeparatesBothValidators(t *testing.T) {
 	wallet := "cosmos1f3vdsge09avpxsym5233xgskwv2q5s3cg57dcs"
 	src := "cosmosvaloper1gjtvly9lel6zskvwtvlg5vhwpu9c9waw7sxzwx"
 	dst := "cosmosvaloper13x77yexvf6qexfjg9czp6jhpv7vpjdwwkyhe4p"
-	msg := &staking.MsgBeginRedelegate{DelegatorAddress: wallet, ValidatorSrcAddress: src, ValidatorDstAddress: dst, Amount: sdk.NewInt64Coin("uatom", 18885870000)}
+	msg := &staking.MsgBeginRedelegate{DelegatorAddress: wallet, ValidatorSrcAddress: src, ValidatorDstAddress: dst, Amount: sdk.NewInt64Coin(fixtureNativeDenom, 18885870000)}
 	all := classify(msg, rewardFixture(t, "redelegate-two-validators"))
 	var out []TaxableEvent
 	var records []TaxableEvent
@@ -151,11 +151,11 @@ func TestStakingAutoWithdrawIgnoresPoolPrincipal(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
-				ev("coin_received", [2]string{"receiver", "staking-pool"}, [2]string{"amount", "94405000000uatom"}),
-				ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "500uatom"}),
-				ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "500uatom"}),
-				ev("withdraw_rewards", [2]string{"delegator", other}, [2]string{"validator", val}, [2]string{"amount", "100uatom"}),
-				ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "0uatom"}),
+				ev(eventCoinReceived, [2]string{attributeReceiver, "staking-pool"}, [2]string{attributeAmount, "94405000000uatom"}),
+				ev(eventCoinReceived, [2]string{attributeReceiver, other}, [2]string{attributeAmount, fixtureHalfMilliAtom}),
+				ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureHalfMilliAtom}),
+				ev("withdraw_rewards", [2]string{attributeDelegator, other}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureTenthMilliAtom}),
+				ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, "0uatom"}),
 			}}
 			out := classify(msg, log)
 			if len(out) != 1 || out[0].Amount != "500" || out[0].RewardTrigger != name || out[0].ValidatorAddress != val {
@@ -169,11 +169,11 @@ func TestAuthzClaimAndDelegateDoNotCountTwice(t *testing.T) {
 	inner := []sdk.Msg{&distribution.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}, &staking.MsgDelegate{DelegatorAddress: del, ValidatorAddress: val}}
 	msg := authz.NewMsgExec(sdk.AccAddress("grantee"), inner)
 	log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
-		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "500uatom"}, [2]string{"authz_msg_index", "0"}),
-		ev("coin_received", [2]string{"receiver", "pool"}, [2]string{"amount", "500uatom"}, [2]string{"authz_msg_index", "1"}),
+		ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureHalfMilliAtom}, [2]string{attributeAuthzMsgIndex, "0"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, "pool"}, [2]string{attributeAmount, fixtureHalfMilliAtom}, [2]string{attributeAuthzMsgIndex, "1"}),
 	}}
 	out := classify(&msg, log)
-	if len(out) != 1 || out[0].Amount != "500" || out[0].RewardTrigger != "claim" {
+	if len(out) != 1 || out[0].Amount != "500" || out[0].RewardTrigger != actionClaim {
 		t.Fatalf("authz double counted: %+v", out)
 	}
 }

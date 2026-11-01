@@ -15,7 +15,7 @@ func TestArchiveGuardGlobalBudgetAndPacing(t *testing.T) {
 		mu.Lock()
 		times = append(times, time.Now())
 		mu.Unlock()
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
 	interval := 30 * time.Millisecond

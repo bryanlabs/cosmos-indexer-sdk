@@ -140,10 +140,10 @@ func OperatorAccount(operator string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasSuffix(hrp, "valoper") {
+	if !strings.HasSuffix(hrp, apiValoper) {
 		return "", fmt.Errorf("%q is not an operator address", operator)
 	}
-	return bech32.ConvertAndEncode(strings.TrimSuffix(hrp, "valoper"), bz)
+	return bech32.ConvertAndEncode(strings.TrimSuffix(hrp, apiValoper), bz)
 }
 
 // AccountOperator is the inverse of OperatorAccount.
@@ -152,10 +152,10 @@ func AccountOperator(account string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if strings.HasSuffix(hrp, "valoper") || strings.HasSuffix(hrp, "valcons") {
+	if strings.HasSuffix(hrp, apiValoper) || strings.HasSuffix(hrp, "valcons") {
 		return "", fmt.Errorf("%q is not an account address", account)
 	}
-	return bech32.ConvertAndEncode(hrp+"valoper", bz)
+	return bech32.ConvertAndEncode(hrp+apiValoper, bz)
 }
 
 // attestationCache is the current attestation per operator address, rebuilt
@@ -246,10 +246,10 @@ func (s *Server) scanAttestationsOnce() (int, error) {
 
 // chainOfID maps an indexed chain id to the API's chain name.
 func chainOfID(chainID string) string {
-	if strings.HasPrefix(chainID, "provider") || strings.Contains(chainID, "testnet") {
-		return "testnet"
+	if strings.HasPrefix(chainID, apiProvider) || strings.Contains(chainID, apiTestnet) {
+		return apiTestnet
 	}
-	return "mainnet"
+	return apiMainnet
 }
 
 func (s *Server) reloadAttestations() error {
@@ -342,7 +342,7 @@ var AttestationHowTo = map[string]any{
 
 // GET /validators/jurisdictions: every operator with a current attestation.
 func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, r *http.Request) {
-	chain := chainParam(r.URL.Query().Get("chain"))
+	chain := chainParam(r.URL.Query().Get(apiChain))
 	if err := s.reloadAttestations(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -373,7 +373,7 @@ func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, r *http.Req
 		status := statuses[a.OperatorAddress]
 		if status == "" {
 			if _, known := monikers[a.OperatorAddress]; known {
-				status = "unknown"
+				status = apiUnknown
 			} else {
 				status = "not a validator"
 			}
@@ -395,8 +395,8 @@ func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, r *http.Req
 		return out[i].Moniker < out[j].Moniker
 	})
 	writeJSON(w, map[string]any{
-		"basis":                "On-chain self-attestation only. Each row is a transaction signed by the validator's operator account carrying a bryanlabs-tax:jurisdiction memo; the transaction hash is the source. Nothing is inferred from monikers, websites or company registers. It records what the operator attested, not a verification of tax residence. Validators without an attestation are reported as undisclosed, never guessed.",
-		"chain":                chain,
+		apiBasis:               "On-chain self-attestation only. Each row is a transaction signed by the validator's operator account carrying a bryanlabs-tax:jurisdiction memo; the transaction hash is the source. Nothing is inferred from monikers, websites or company registers. It records what the operator attested, not a verification of tax residence. Validators without an attestation are reported as undisclosed, never guessed.",
+		apiChain:               chain,
 		"validators_on_chain":  len(monikers),
 		"validators_disclosed": disclosed,
 		"jurisdictions":        out,
@@ -409,14 +409,14 @@ func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, r *http.Req
 // Optionally ?operator=cosmosvaloper1... returns the account that must sign.
 func (s *Server) handleAttestationCheck(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	memo := q.Get("memo")
-	resp := map[string]any{"memo": memo}
+	memo := q.Get(apiMemo)
+	resp := map[string]any{apiMemo: memo}
 	parsed, err := ParseAttestationMemo(memo)
 	if err != nil {
-		resp["valid"] = false
-		resp["error"] = err.Error()
+		resp[apiValid] = false
+		resp[apiError] = err.Error()
 	} else {
-		resp["valid"] = true
+		resp[apiValid] = true
 		resp["parsed"] = parsed
 	}
 	if op := strings.TrimSpace(q.Get("operator")); op != "" {
@@ -427,10 +427,10 @@ func (s *Server) handleAttestationCheck(w http.ResponseWriter, r *http.Request) 
 			resp["operator_address"] = op
 			resp["must_be_signed_by"] = acct
 			if name, ok := s.oracle.ValidatorMonikers()[op]; ok {
-				resp["moniker"] = name
-				resp["status"] = s.oracle.ValidatorStatuses()[op]
+				resp[apiMoniker] = name
+				resp[apiStatus] = s.oracle.ValidatorStatuses()[op]
 			} else {
-				resp["status"] = "not a validator on this chain"
+				resp[apiStatus] = "not a validator on this chain"
 			}
 		}
 	}

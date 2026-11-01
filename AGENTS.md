@@ -84,9 +84,13 @@ Three rules if you add another:
    on the message at all and come from `withdraw_tokenize_share_reward`. Do not
    attribute the internal module-account withdrawal to the owner or count both
    sides of LSM's module-account hop.
-3. **Watch for the `ibccallbackerror-` prefix.** A failed destination callback
-   makes ibc-go re-emit that execution's events with that prefix on the type *and*
-   every attribute key. The transfer still happened.
+3. **Do not treat `ibccallbackerror-` events as committed credits.** Core
+   ibc-go v8/v10 re-emits discarded application receive caches with that prefix
+   on the type *and* every attribute key. A lower app's `success=true` can precede
+   an enclosing middleware error acknowledgement. Require unprefixed app success
+   and bank evidence. A separately failed optional callback may leave a transfer
+   committed, but that is version/middleware dependent, not guaranteed by the
+   prefix. Unreconciled successful receives persist a classification error.
 
 An undecodable message is retained as opaque evidence (`core/opaque.go` and
 `core/tx.go`): original type URL, index, bytes and ordered events. It is not

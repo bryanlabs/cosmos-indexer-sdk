@@ -66,7 +66,7 @@ type Row struct {
 // Record-only rows stay in the preview, Generic CSV and journal and are kept
 // out of tax-software imports and Form 8949.
 func (r Row) isTaxable() bool {
-	return r.Category == "fee" || tax.Category(r.Category).Taxable()
+	return r.Category == apiFee || tax.Category(r.Category).Taxable()
 }
 
 // taxImportable reports whether a row belongs in a tax-software import.
@@ -88,15 +88,15 @@ func (r Row) taxImportable() bool {
 // silently reporting a possibly-wrong amount.
 func (r Row) description() string {
 	d := r.Category
-	if (r.Category == "nft_sale" || r.Category == "nft_mint") && r.Asset != "" {
+	if (r.Category == apiNFTSale || r.Category == apiNFTMint) && r.Asset != "" {
 		d = r.Category + " " + r.Asset
 	} else if r.IsIBC {
 		d = "ibc " + r.Denom
 	}
 	if r.ValidatorAddress != "" {
-		d += " | staking_metadata=" + stakingMetadataJSON(r)
+		d += apiStakingMetadata + stakingMetadataJSON(r)
 	}
-	if r.RewardTrigger != "" && r.Category != "reward" && r.Category != "commission" {
+	if r.RewardTrigger != "" && r.Category != apiReward && r.Category != apiCommission {
 		d += " | source=" + r.RewardTrigger
 	}
 	if r.Detail != "" {
@@ -127,28 +127,31 @@ func (r Row) label() string {
 		return l
 	}
 	switch r.Category {
-	case "reward", "commission":
-		return "staking"
-	case "fee":
-		return "fee"
-	case "nft_sale", "nft_mint":
+	case apiReward, apiCommission:
+		return apiStaking
+	case apiFee:
+		return apiFee
+	case apiNFTSale, apiNFTMint:
 		return "nft"
-	case "swap":
-		return "swap"
-	case "income":
-		return "income"
-	case "expense":
-		return "cost"
+	case apiSwap:
+		return apiSwap
+	case TagIncome:
+		return TagIncome
+	case TagExpense:
+		return apiCost
 	default:
 		if r.Direction == "in" {
 			return "receive"
 		}
-		return "send"
+		return apiSend
 	}
 }
 
 // WriteCSV writes rows in the requested platform format.
 func WriteCSV(out io.Writer, format string, rows []Row) error {
+	if readiness := readinessForRows(rows); readiness.PendingSemanticReviews > 0 {
+		return reportReadinessRequired{readiness}
+	}
 	if pending := PendingAssetReviews(rows); pending > 0 {
 		return assetReviewRequired{pending}
 	}
@@ -158,7 +161,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 		// value/basis fields. Preserve excluded receipts and record-only rows
 		// there. Other import formats can auto-value unsupported assets or read
 		// a record as a disposal, so they receive only importable rows.
-		if format == "generic" || (!row.Excluded && row.taxImportable()) {
+		if format == apiGeneric || (!row.Excluded && row.taxImportable()) {
 			kept = append(kept, row)
 		}
 	}
@@ -168,7 +171,7 @@ func WriteCSV(out io.Writer, format string, rows []Row) error {
 // Internal preview transport retains pending and user-excluded receipts. It is
 // not a tax-software download; the tax export entrypoint always gates reviews.
 func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
-	if format != "cryptotaxcalculator" && format != "summ" {
+	if format != apiCryptotaxcalculator && format != apiSumm {
 		return fmt.Errorf("preview format must be cryptotaxcalculator or summ")
 	}
 	var buf bytes.Buffer
@@ -179,9 +182,9 @@ func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
 	if err != nil {
 		return err
 	}
-	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", "Taxable", "Detail", "Price Implied", "User Tag", "Source")
+	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", apiTaxable, apiPreviewDetail, "Price Implied", "User Tag", "Source")
 	for i, row := range rows {
-		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, boolStr(row.isTaxable()), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger)
+		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, previewTaxableText(row), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger)
 	}
 	return csv.NewWriter(out).WriteAll(records)
 }
@@ -190,8 +193,8 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 	w := csv.NewWriter(out)
 
 	switch format {
-	case "koinly":
-		_ = w.Write([]string{"Date", "Sent Amount", "Sent Currency", "Received Amount", "Received Currency", "Fee Amount", "Fee Currency", "Net Worth Amount", "Net Worth Currency", "Label", "Description", "TxHash"})
+	case apiKoinly:
+		_ = w.Write([]string{apiHeaderDate, "Sent Amount", apiSentCurrency, "Received Amount", apiReceivedCurrency, apiFeeAmountHeader, apiFeeCurrencyHeader, "Net Worth Amount", "Net Worth Currency", "Label", apiDescription, apiHeaderTxHash})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
 			_ = w.Write([]string{
@@ -201,11 +204,11 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			})
 		}
 
-	case "cointracker":
+	case apiCointracker:
 		// CoinTracker accepts exactly these eight columns and has no description or
 		// metadata field. Validator attribution is therefore unavailable in this
 		// export; use generic or a description-supporting format instead.
-		_ = w.Write([]string{"Date", "Received Quantity", "Received Currency", "Sent Quantity", "Sent Currency", "Fee Amount", "Fee Currency", "Tag"})
+		_ = w.Write([]string{apiHeaderDate, "Received Quantity", apiReceivedCurrency, "Sent Quantity", apiSentCurrency, apiFeeAmountHeader, apiFeeCurrencyHeader, "Tag"})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
 			tag := coinTrackerTag(r)
@@ -215,11 +218,11 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			})
 		}
 
-	case "coinledger":
+	case apiCoinledger:
 		// Universal Manual Import Template: dates must read Month-Day-Year, and
 		// "Type" comes from CoinLedger's fixed vocabulary (Deposit/Withdrawal/
 		// Staking/...), not a free-text label.
-		_ = w.Write([]string{"Date (UTC)", "Platform", "Asset Sent", "Amount Sent", "Asset Received", "Amount Received", "Fee Currency", "Fee Amount", "Type", "Description", "TxHash"})
+		_ = w.Write([]string{"Date (UTC)", "Platform", "Asset Sent", "Amount Sent", "Asset Received", "Amount Received", apiFeeCurrencyHeader, apiFeeAmountHeader, apiTypeHeader, apiDescription, apiHeaderTxHash})
 		for _, r := range rows {
 			sentAmt, sentCur, recvAmt, recvCur := splitDir(r)
 			typ := coinLedgerType(r)
@@ -229,9 +232,9 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			})
 		}
 
-	case "summ", "cryptotaxcalculator":
+	case apiSumm, apiCryptotaxcalculator:
 		// Richest format: carries our oracle reference price per unit.
-		_ = w.Write([]string{"Timestamp (UTC)", "Type", "Base Currency", "Base Amount", "Quote Currency (Optional)", "Quote Amount (Optional)", "Fee Currency (Optional)", "Fee Amount (Optional)", "From (Optional)", "To (Optional)", "Blockchain (Optional)", "ID (Optional)", "Description (Optional)", "Reference Price Per Unit (Optional)", "Reference Price Currency (Optional)"}) //nolint:lll
+		_ = w.Write([]string{apiTimestampUTC, apiTypeHeader, apiBaseCurrency, apiBaseAmount, apiQuoteCurrencyOptional, apiQuoteAmountOptional, apiFeeCurrencyOptional, apiFeeAmountOptional, apiFromOptional, apiToOptional, apiBlockchainOptional, apiIDOptional, apiDescriptionOptional, apiReferencePricePerUnitOptional, apiReferencePriceCurrencyOptional}) //nolint:lll
 		for _, r := range rows {
 			typ := ctcType(r)
 			_ = w.Write([]string{
@@ -241,32 +244,32 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			})
 		}
 
-	case "cryptio":
+	case apiCryptio:
 		// Cryptio custom-CSV template (enterprise sub-ledger). Strict schema.
-		_ = w.Write([]string{"transactionDate", "orderType", "txhash", "incomingAsset", "incomingVolume", "incomingUnitRate", "incomingTransactionValue", "outgoingAsset", "outgoingVolume", "outgoingUnitRate", "outgoingTransactionValue", "feeAsset", "feeVolume", "feeUnitRate", "feeTransactionValue", "otherParties", "note"}) //nolint:lll
+		_ = w.Write([]string{"transactionDate", "orderType", "txhash", "incomingAsset", "incomingVolume", "incomingUnitRate", "incomingTransactionValue", "outgoingAsset", "outgoingVolume", "outgoingUnitRate", "outgoingTransactionValue", "feeAsset", "feeVolume", "feeUnitRate", "feeTransactionValue", "otherParties", apiNote}) //nolint:lll
 		for _, r := range rows {
 			date := r.Time.UTC().Format("2006-01-02 15:04:05")
 			amt, rate, val := r.Amount.String(), rowPriceText(r), rowValueText(r)
-			if r.Direction == "in" && r.Category != "fee" {
+			if r.Direction == "in" && r.Category != apiFee {
 				_ = w.Write([]string{date, "deposit", r.TxHash, r.Symbol, amt, rate, val, "", "", "", "", "", "", "", "", party(r), r.description()})
 			} else {
 				ot := "withdraw"
-				if r.Category == "fee" {
-					ot = "fee"
+				if r.Category == apiFee {
+					ot = apiFee
 				}
 				_ = w.Write([]string{date, ot, r.TxHash, "", "", "", "", r.Symbol, amt, rate, val, "", "", "", "", party(r), r.description()})
 			}
 		}
 
-	case "bitwave":
+	case apiBitwave:
 		// Bitwave enterprise accounting; core columns + a unique id per line.
-		_ = w.Write([]string{"id", "date", "type", "amount", "amountTicker", "txHash", "contactAddress", "category"})
+		_ = w.Write([]string{"id", apiDate, apiType, apiAmount, "amountTicker", "txHash", "contactAddress", apiCategory})
 		for i, r := range rows {
 			typ := "Deposit"
-			if r.Direction == "out" {
+			if r.Direction == apiOut {
 				typ = "Withdrawal"
 			}
-			if r.Category == "fee" {
+			if r.Category == apiFee {
 				typ = "Fee"
 			}
 			_ = w.Write([]string{
@@ -275,22 +278,22 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			})
 		}
 
-	case "generic":
+	case apiGeneric:
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", "detail"}) //nolint:lll
+		_ = w.Write([]string{apiDateUTC, apiTxHash, apiCategory, "direction", apiAsset, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, "from", "to", "nft_asset", apiChain, "decimals_assumed", apiPriceMissing, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", apiDetail}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				genericAssetDisplay(r), r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
-				r.From, r.To, r.Asset, "cosmoshub-4", boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
-				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, "value"), manualField(r, "basis"), manualField(r, "date"),
+				r.From, r.To, r.Asset, apiHubChainID, boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
+				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, apiValue), manualField(r, apiBasis), manualField(r, apiDate),
 				boolStr(r.isTaxable()), boolStr(r.PriceImplied), r.UserTag, r.Detail,
 			})
 		}
 
 	default: // fall through to koinly for unknown formats
-		return WriteCSV(out, "koinly", rows)
+		return WriteCSV(out, apiKoinly, rows)
 	}
 	w.Flush()
 	return w.Error()
@@ -305,7 +308,7 @@ func genericAssetDisplay(r Row) string {
 	}
 
 	name := strings.TrimSpace(r.AssetIdentity.TokenName)
-	if name != "" && (r.AssetIdentity.OfficialAtomMatch || (!strings.EqualFold(name, "atom") && !strings.EqualFold(name, "uatom"))) {
+	if name != "" && (r.AssetIdentity.OfficialAtomMatch || (!strings.EqualFold(name, "atom") && !strings.EqualFold(name, apiUatom))) {
 		return spreadsheetLabel(name)
 	}
 
@@ -313,7 +316,7 @@ func genericAssetDisplay(r Row) string {
 	if denom == "" {
 		denom = r.Denom
 	}
-	return spreadsheetLabel("UNVERIFIED (denom: " + denom + ")")
+	return spreadsheetLabel(apiUnverifiedDenomPrefix + denom + ")")
 }
 
 func stakingMetadataJSON(r Row) string {
@@ -335,7 +338,7 @@ func (r Row) reviewIdentity() *AssetIdentity {
 	identity := *r.AssetIdentity
 	identity.Decision = r.AssetDecision
 	identity.Excluded = r.Excluded
-	identity.Treatment = "unreviewed"
+	identity.Treatment = apiUnreviewed
 	if r.AssetDecision != nil {
 		identity.Treatment = r.AssetDecision.Mode
 		if r.AssetDecision.Mode == AssetDecisionExclude {
@@ -346,18 +349,20 @@ func (r Row) reviewIdentity() *AssetIdentity {
 	}
 	return &identity
 }
+
 func reviewMode(r Row) string {
 	if r.AssetDecision == nil {
 		return ""
 	}
 	return r.AssetDecision.Mode
 }
+
 func manualField(r Row, field string) string {
 	if r.AssetDecision == nil {
 		return ""
 	}
 	if r.AssetDecision.Mode == AssetDecisionExclude {
-		if field == "value" || field == "basis" {
+		if field == apiValue || field == apiBasis {
 			return decimal.Zero.String()
 		}
 		return ""
@@ -366,11 +371,11 @@ func manualField(r Row, field string) string {
 		return ""
 	}
 	switch field {
-	case "value":
+	case apiValue:
 		return r.AssetDecision.ValueUSD
-	case "basis":
+	case apiBasis:
 		return r.AssetDecision.CostBasisUSD
-	case "date":
+	case apiDate:
 		return r.AssetDecision.AcquiredDate
 	}
 	return ""
@@ -393,7 +398,7 @@ func party(r Row) string {
 }
 
 func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
-	if r.Direction == "out" {
+	if r.Direction == apiOut {
 		return r.Amount.String(), r.Symbol, "", ""
 	}
 	return "", "", r.Amount.String(), r.Symbol
@@ -404,36 +409,36 @@ func ctcType(r Row) string {
 		return t
 	}
 	switch r.Category {
-	case "reward", "commission":
-		return "staking"
-	case "fee":
-		return "fee"
-	case "income":
-		return "income"
-	case "expense":
-		return "expense"
-	case "protocol_deposit", "delegate", "tokenize_shares", "gov_deposit":
+	case apiReward, apiCommission:
+		return apiStaking
+	case apiFee:
+		return apiFee
+	case TagIncome:
+		return TagIncome
+	case TagExpense:
+		return TagExpense
+	case TagProtocolDeposit, apiDelegate, "tokenize_shares", "gov_deposit":
 		return "staking-deposit"
 	case "protocol_withdrawal", "undelegate", "redeem_shares":
 		return "staking-withdrawal"
-	case "nft_transfer", "nft_burn", "redelegate", "cancel_unbonding", "share_record":
+	case "nft_transfer", "nft_burn", apiRedelegate, "cancel_unbonding", "share_record":
 		if r.Direction == "in" {
 			return "transfer-in"
 		}
 		return "transfer-out"
-	case "nft_sale", "swap":
+	case apiNFTSale, apiSwap:
 		// Disposal leg = sell, acquisition leg = buy.
-		if r.Direction == "out" {
+		if r.Direction == apiOut {
 			return "sell"
 		}
 		return "buy"
-	case "nft_mint":
+	case apiNFTMint:
 		return "buy" // acquisition
 	default:
 		if r.Direction == "in" {
 			return "receive"
 		}
-		return "send"
+		return apiSend
 	}
 }
 
@@ -443,6 +448,7 @@ func rowPriceText(r Row) string {
 	}
 	return refPrice(r.PriceUSD)
 }
+
 func rowValueText(r Row) string {
 	if r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude) {
 		return r.ValueUSD.String()
@@ -482,7 +488,7 @@ func spreadsheetLabel(s string) string {
 
 func boolStr(b bool) string {
 	if b {
-		return "true"
+		return apiTrue
 	}
-	return "false"
+	return apiFalse
 }

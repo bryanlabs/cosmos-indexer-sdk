@@ -32,7 +32,7 @@ func TestAttestationScanner(t *testing.T) {
 	var db *gorm.DB
 	if err := pool.Retry(func() error {
 		var e error
-		db, e = dbpkg.PostgresDbConnect(resource.GetBoundIP("5432/tcp"), resource.GetPort("5432/tcp"), "test", "test", "test", "silent")
+		db, e = dbpkg.PostgresDbConnect(resource.GetBoundIP(apiPostgresPort), resource.GetPort(apiPostgresPort), apiTest, apiTest, apiTest, "silent")
 		return e
 	}); err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestAttestationScanner(t *testing.T) {
 		}
 	}
 	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		_, _ = w.Write([]byte(`{"validators":[{"operator_address":"` + operator + `","status":"BOND_STATUS_UNBONDED","jailed":true,"description":{"moniker":"strangelove"}}],"pagination":{"next_key":""}}`))
 	}))
 	defer rest.Close()
@@ -85,13 +85,13 @@ func TestAttestationScanner(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("recorded %d attestations, want 1", n)
 	}
-	if got := s.jurisdictionLabel("mainnet", operator); got != "US" {
+	if got := s.jurisdictionLabel(apiMainnet, operator); got != "US" {
 		t.Fatalf("jurisdiction %q, want US", got)
 	}
-	if got := s.jurisdictionLabel("mainnet", "cosmosvaloper1other"); got != "undisclosed" {
+	if got := s.jurisdictionLabel(apiMainnet, "cosmosvaloper1other"); got != undisclosedJurisdiction {
 		t.Fatalf("unattested operator %q, want undisclosed", got)
 	}
-	if got := s.jurisdictionLabel("testnet", operator); got != "undisclosed" {
+	if got := s.jurisdictionLabel(apiTestnet, operator); got != undisclosedJurisdiction {
 		t.Fatalf("attestation must not leak across chains: %q", got)
 	}
 
@@ -101,7 +101,7 @@ func TestAttestationScanner(t *testing.T) {
 	}
 
 	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/validators/jurisdictions?chain=cosmoshub", nil))
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(apiMethodGET, "/validators/jurisdictions?chain=cosmoshub", nil))
 	if rr.Code != 200 {
 		t.Fatalf("registry: %d %s", rr.Code, rr.Body.String())
 	}
@@ -125,7 +125,7 @@ func TestAttestationScanner(t *testing.T) {
 		t.Fatalf("registry %+v", reg)
 	}
 	j := reg.Jurisdictions[0]
-	if j.OperatorAddress != operator || j.AccountAddress != account || j.Moniker != "strangelove" || j.Status != "jailed" || j.Country != "US" || j.TxHash != "ATTEST1" || j.Revoked {
+	if j.OperatorAddress != operator || j.AccountAddress != account || j.Moniker != "strangelove" || j.Status != apiJailed || j.Country != "US" || j.TxHash != "ATTEST1" || j.Revoked {
 		t.Fatalf("row %+v", j)
 	}
 	if reg.HowToAttest["memo_format"] == nil {
@@ -144,11 +144,11 @@ func TestAttestationScanner(t *testing.T) {
 	if n, err := s.scanAttestationsOnce(); err != nil || n != 1 {
 		t.Fatalf("revoke scan: n=%d err=%v", n, err)
 	}
-	if got := s.jurisdictionLabel("mainnet", operator); got != "undisclosed" {
+	if got := s.jurisdictionLabel(apiMainnet, operator); got != undisclosedJurisdiction {
 		t.Fatalf("after revoke %q, want undisclosed", got)
 	}
 	rr = httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/validators/jurisdictions", nil))
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(apiMethodGET, "/validators/jurisdictions", nil))
 	if err := json.Unmarshal(rr.Body.Bytes(), &reg); err != nil {
 		t.Fatal(err)
 	}
@@ -158,12 +158,12 @@ func TestAttestationScanner(t *testing.T) {
 
 	// The check endpoint explains a memo and names the signer.
 	rr = httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/validators/attest/check?memo=bryanlabs-tax:jurisdiction+v1+country=ch&operator="+operator, nil))
+	s.Handler().ServeHTTP(rr, httptest.NewRequest(apiMethodGET, "/validators/attest/check?memo=bryanlabs-tax:jurisdiction+v1+country=ch&operator="+operator, nil))
 	var chk map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &chk); err != nil {
 		t.Fatal(err)
 	}
-	if chk["valid"] != true || chk["must_be_signed_by"] != account || chk["status"] != "jailed" {
+	if chk[apiValid] != true || chk["must_be_signed_by"] != account || chk[apiStatus] != apiJailed {
 		t.Fatalf("check %+v", chk)
 	}
 }

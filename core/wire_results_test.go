@@ -38,7 +38,8 @@ func TestKnownTransferOriginalWireBytes(t *testing.T) {
 	// Modern SDK marshaling inserts 32 00, even though it has no semantic effect.
 	original := []byte{10, 8, 't', 'r', 'a', 'n', 's', 'f', 'e', 'r', 18, 9, 'c', 'h', 'a', 'n', 'n', 'e', 'l', '-', '0'}
 	sender := "cosmos1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqnrql8a"
-	original = append(original, 34, byte(len(sender)))
+	require.Len(t, sender, 45)
+	original = append(original, 34, 45)
 	original = append(original, []byte(sender)...)
 	var msg transfer.MsgTransfer
 	require.NoError(t, msg.Unmarshal(original))
@@ -52,8 +53,10 @@ func TestKnownTransferOriginalWireBytes(t *testing.T) {
 	raw, err := (&tx.TxRaw{BodyBytes: body, AuthInfoBytes: auth}).Marshal()
 	require.NoError(t, err)
 	cfg := &config.IndexConfig{}
-	wrappers, _, err := ProcessRPCBlockByHeightTXs(cfg, nil, &client.ChainClient{Codec: c}, nil, nil, &ctypes.ResultBlock{Block: &tm.Block{Header: tm.Header{Height: 1, Time: time.Now()}, Data: tm.Data{Txs: tm.Txs{raw}}}}, &rpc.CustomBlockResults{Height: 1, TxsResults: []*abci.ResponseDeliverTx{{Log: "[]"}}}, nil)
+	wrappers, _, err := ProcessRPCBlockByHeightTXs(cfg, nil, &client.ChainClient{Codec: c}, nil, nil, &ctypes.ResultBlock{Block: &tm.Block{Header: tm.Header{Height: 1, Time: time.Now()}, Data: tm.Data{Txs: tm.Txs{raw}}}}, &rpc.CustomBlockResults{Height: 1, TxsResults: []*abci.ResponseDeliverTx{{Log: "[]", Events: []abci.Event{{Type: "transfer", Attributes: []abci.EventAttribute{{Key: "msg_index", Value: "0"}, {Key: "amount", Value: "7uatom"}}}}}}}, nil)
 	require.NoError(t, err)
 	require.Len(t, wrappers, 1)
 	require.Equal(t, original, wrappers[0].Messages[0].Message.MessageBytes)
+	require.Len(t, wrappers[0].Messages[0].MessageEvents, 1, "SDK 0.50 flat events must survive a valid but empty log array")
+	require.Equal(t, "transfer", wrappers[0].Messages[0].MessageEvents[0].MessageEvent.MessageEventType.Type)
 }

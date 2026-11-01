@@ -74,14 +74,15 @@ func (indexer *Indexer) ProcessBlocks(wg *sync.WaitGroup, failedBlockHandler cor
 			var txDBWrappers []dbTypes.TxDBWrapper
 			var err error
 
-			if blockData.GetTxsResponse == nil && blockData.BlockResultsData == nil {
+			switch {
+			case blockData.GetTxsResponse == nil && blockData.BlockResultsData == nil:
 				err = fmt.Errorf("missing transaction data for block %d", currentHeight)
-			} else if blockData.GetTxsResponse != nil && (len(blockData.GetTxsResponse.Txs) != len(blockData.BlockData.Block.Txs) || len(blockData.GetTxsResponse.TxResponses) != len(blockData.BlockData.Block.Txs)) {
+			case blockData.GetTxsResponse != nil && (len(blockData.GetTxsResponse.Txs) != len(blockData.BlockData.Block.Txs) || len(blockData.GetTxsResponse.TxResponses) != len(blockData.BlockData.Block.Txs)):
 				err = fmt.Errorf("transaction search count mismatch for block %d", currentHeight)
-			} else if blockData.GetTxsResponse != nil {
+			case blockData.GetTxsResponse != nil:
 				config.Log.Debug("Processing TXs from RPC TX Search response")
 				txDBWrappers, _, err = core.ProcessRPCTXs(indexer.Config, indexer.DB, indexer.ChainClient, indexer.MessageTypeFilters, indexer.MessageFilters, blockData.GetTxsResponse, indexer.CustomMessageParserRegistry)
-			} else if blockData.BlockResultsData != nil {
+			case blockData.BlockResultsData != nil:
 				config.Log.Debug("Processing TXs from BlockResults search response")
 				txDBWrappers, _, err = core.ProcessRPCBlockByHeightTXs(indexer.Config, indexer.DB, indexer.ChainClient, indexer.MessageTypeFilters, indexer.MessageFilters, blockData.BlockData, blockData.BlockResultsData, indexer.CustomMessageParserRegistry)
 			}

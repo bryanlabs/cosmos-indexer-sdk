@@ -72,10 +72,10 @@ func TestOperatorAccountRoundTrip(t *testing.T) {
 }
 
 func TestValidatorStatusLabel(t *testing.T) {
-	if validatorStatusLabel("BOND_STATUS_BONDED", true) != "jailed" {
+	if validatorStatusLabel(apiBondStatusBonded, true) != apiJailed {
 		t.Fatal("jailed wins")
 	}
-	if validatorStatusLabel("BOND_STATUS_UNBONDING", false) != "unbonding" || validatorStatusLabel("BOND_STATUS_BONDED", false) != "bonded" || validatorStatusLabel("", false) != "unknown" {
+	if validatorStatusLabel("BOND_STATUS_UNBONDING", false) != "unbonding" || validatorStatusLabel(apiBondStatusBonded, false) != "bonded" || validatorStatusLabel("", false) != apiUnknown {
 		t.Fatal("status mapping")
 	}
 }

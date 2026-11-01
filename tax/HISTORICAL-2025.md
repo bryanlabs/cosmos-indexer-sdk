@@ -39,6 +39,30 @@ aggregate legacy reward settlement and principal/income separation. Registering
 only the new Gaia namespace misses actual early-2025 messages. Historical
 release entries remain explicitly unreviewed until the broader audit finishes.
 
+## Receive classification safety
+
+IBC receive success requires committed application and bank evidence, not just
+transaction code zero, packet contents or a lower app's `success=true` event.
+Core ibc-go v8.5.1, v8.5.2, v8.7.0 and v10.1.1 v1 keep the app cache only for
+successful or async acknowledgements. Their `ibccallbackerror-` events come from
+discarded caches.
+The v10.1.1 channel-v2 keeper caches each payload separately: earlier unprefixed
+successful payloads can remain committed even if a later payload produces the
+packet-wide sentinel error acknowledgement. Do not infer blanket rollback or
+blanket acquisition from that acknowledgement alone.
+
+Optional callback behavior is version specific. callbacks/v1 v8.7.0 returns the
+app acknowledgement after an optional callback execution error. In v10.1.1,
+callbacks/v1 returns an error acknowledgement and callbacks/v2 returns Failure;
+core discards that application's cache. All versions require
+actual unprefixed bank credits before recognizing a receipt. Receive amounts
+are reconciled against packet-derived local denomination candidates, never a
+same-sized arbitrary callback coin. A successful receive without unambiguous
+committed credit is a persistent parser classification failure, not complete
+empty output. Partial known payloads/siblings remain diagnostic only until the
+message is resolved. Historical replay must remove stale rows and retain the
+parser failure in one transaction; prefix-only excerpts prove no acquisition.
+
 ## Evidence and request safety
 
 Historical intake enables `[flags] index-tx-message-raw` and message events.

@@ -480,7 +480,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 
 				if len(messagesEventsSlice) != 0 {
 					if err := dbTransaction.Clauses(clause.OnConflict{
-						Columns:   []clause.Column{{Name: "message_id"}, {Name: "index"}},
+						Columns:   []clause.Column{{Name: "message_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"message_event_type_id"}),
 					}).Create(messagesEventsSlice).Error; err != nil {
 						config.Log.Error("Error getting/creating message events.", err)
@@ -502,7 +502,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 
 				if len(messagesEventsAttributesSlice) != 0 {
 					if err := dbTransaction.Clauses(clause.OnConflict{
-						Columns:   []clause.Column{{Name: "message_event_id"}, {Name: "index"}},
+						Columns:   []clause.Column{{Name: "message_event_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"value", "message_event_attribute_key_id"}),
 					}).Create(messagesEventsAttributesSlice).Error; err != nil {
 						config.Log.Error("Error getting/creating message event attributes.", err)
@@ -619,8 +619,8 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "type"}},
-			DoUpdates: clause.AssignmentColumns([]string{"type"}),
+			Columns:   []clause.Column{{Name: columnType}},
+			DoUpdates: clause.AssignmentColumns([]string{columnType}),
 		}).Create(messageTypesSlice).Error; err != nil {
 			config.Log.Error("Error getting/creating message event types.", err)
 			return nil, err
@@ -660,8 +660,8 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 
 	if len(messageEventAttributeKeysSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"key"}),
+			Columns:   []clause.Column{{Name: columnKey}},
+			DoUpdates: clause.AssignmentColumns([]string{columnKey}),
 		}).Create(messageEventAttributeKeysSlice).Error; err != nil {
 			config.Log.Error("Error getting/creating message event attribute keys.", err)
 			return nil, err
@@ -677,6 +677,9 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 }
 
 func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, blockDBWrapper []TxDBWrapper, messageParserTrackers map[string]models.MessageParser) error {
+	if dryRun {
+		return nil
+	}
 	return db.Transaction(func(dbTransaction *gorm.DB) error {
 		for _, tx := range blockDBWrapper {
 			for _, message := range tx.Messages {
@@ -685,7 +688,7 @@ func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, bloc
 
 						// Pre clear old errors
 						if parsedData.Parser != nil {
-							err := DeleteCustomMessageParserError(db, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()])
+							err := DeleteCustomMessageParserError(dbTransaction, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()])
 							if err != nil {
 								config.Log.Error("Error clearing block event error.", err)
 								return err
@@ -705,8 +708,13 @@ func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, bloc
 								config.Log.Error("Error indexing message.", err)
 								return err
 							}
-						} else if parsedData.Error != nil {
-							err := CreateMessageParserError(db, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()], parsedData.Error)
+						} else if parsedData.Error != nil && parsedData.Parser != nil {
+							if invalidator, ok := (*parsedData.Parser).(parsers.MessageParseFailureInvalidator); ok {
+								if err := invalidator.InvalidateMessage(dbTransaction, message.Message); err != nil {
+									return err
+								}
+							}
+							err := CreateMessageParserError(dbTransaction, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()], parsedData.Error)
 							if err != nil {
 								config.Log.Error("Error inserting message parser error.", err)
 								return err

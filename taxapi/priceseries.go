@@ -28,10 +28,10 @@ type pricePoint struct {
 // given day (INF-203).
 func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	chain := chainParam(q.Get("chain"))
-	denom := def(q.Get("denom"), s.native.Denom)
-	end := dateParam(q.Get("end"), nowUTC())
-	start := dateParam(q.Get("start"), end.AddDate(0, 0, -90))
+	chain := chainParam(q.Get(apiChain))
+	denom := def(q.Get(apiDenom), s.native.Denom)
+	end := dateParam(q.Get(apiEnd), nowUTC())
+	start := dateParam(q.Get(apiStart), end.AddDate(0, 0, -90))
 
 	if end.Before(start) {
 		http.Error(w, "end must be on or after start", http.StatusBadRequest)
@@ -44,16 +44,16 @@ func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 
 	points := make([]pricePoint, 0, int(end.Sub(start).Hours()/24)+1)
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
-		dateStr := d.Format("2006-01-02")
+		dateStr := d.Format(apiDateLayout)
 		usd, found := s.oracle.PriceAt(chain, denom, dateStr)
 		points = append(points, pricePoint{Date: dateStr, USD: usd, Found: found})
 	}
 
-	if def(q.Get("format"), "json") == "csv" {
-		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-price-series.csv", denom))
+	if def(q.Get(apiFormat), "json") == apiCSV {
+		w.Header().Set(apiContentType, apiCSVContentType)
+		w.Header().Set(apiContentDisposition, fmt.Sprintf("attachment; filename=%s-price-series.csv", denom))
 		cw := csv.NewWriter(w)
-		_ = cw.Write([]string{"date", "denom", "usd", "found", "methodology_version"})
+		_ = cw.Write([]string{apiDate, apiDenom, "usd", "found", apiMethodologyVersion})
 		for _, p := range points {
 			usdStr := ""
 			if p.Found {
@@ -65,16 +65,16 @@ func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"chain":               chain,
-		"denom":               denom,
-		"methodology_version": MethodologyVersion,
+		apiChain:              chain,
+		apiDenom:              denom,
+		apiMethodologyVersion: MethodologyVersion,
 		"points":              points,
 	})
 }
 
 func (s *Server) handleMethodology(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(currentMethodology())
 }

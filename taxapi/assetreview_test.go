@@ -19,7 +19,7 @@ func TestParseAssetDecisionsAcceptsArbitraryTickerAndZeroTotals(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := decisions["chain|wallet|message|0"]
-	if got.Token != "MYTOKEN" || got.Quantity != "1.25" || got.ValueUSD != "0" || got.CostBasisUSD != "0.00" {
+	if got.Token != apiTestOverrideToken || got.Quantity != "1.25" || got.ValueUSD != "0" || got.CostBasisUSD != apiZeroUSD {
 		t.Fatalf("override was changed: %+v", got)
 	}
 }
@@ -62,7 +62,7 @@ func TestAssetDecisionsAreCanonicalAndSorted(t *testing.T) {
 	}
 	b := AssetDecisions{
 		"a": {Mode: AssetDecisionExclude},
-		"z": {Mode: AssetDecisionOverride, Token: "MYTOKEN", Quantity: "1", ValueUSD: "0", CostBasisUSD: "0", AcquiredDate: "2026-02-03"},
+		"z": {Mode: AssetDecisionOverride, Token: apiTestOverrideToken, Quantity: "1", ValueUSD: "0", CostBasisUSD: "0", AcquiredDate: "2026-02-03"},
 	}
 	left, err := CanonicalAssetDecisionsJSON(a)
 	if err != nil {

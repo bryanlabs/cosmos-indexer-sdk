@@ -196,12 +196,12 @@ func setupIndex(cmd *cobra.Command, args []string) error {
 
 // SetupIndexer sets up the "indexer" package Indexer instance with the configuration, database, and chain client
 func setupIndexer() *indexerPackage.Indexer {
+	config.ProtectEndpointLogs(indexer.Config.Probe.RPC)
 	var err error
 
 	config.SetChainConfig(indexer.Config.Probe.AccountPrefix)
 
 	indexer.ChainClient, err = probe.GetProbeClient(indexer.Config.Probe, indexer.CustomModuleBasics, indexer.CustomMsgTypeRegistry)
-
 	if err != nil {
 		config.Log.Fatal("Failed to create probe client", err)
 	}
@@ -212,16 +212,21 @@ func setupIndexer() *indexerPackage.Indexer {
 		if guardErr != nil {
 			config.Log.Fatal("Failed to create archive HTTP client", guardErr)
 		}
-		// A fresh connection per request disables Transport's transparent retries
-		// on reused connections, keeping the external request budget honest.
 		transport, ok := guardedClient.Transport.(*http.Transport)
 		if !ok {
 			config.Log.Fatal("Archive guard requires an HTTP transport", nil)
 		}
-		transport.DisableKeepAlives = true
+		// URI GET requests need fresh connections to prevent transparent retries.
+		// JSON-RPC POST can reuse connections with body replay explicitly disabled.
+		transport.DisableKeepAlives = !base.BlockResultsJSONRPC
+		transport.MaxIdleConnsPerHost = 32
+		var archiveTransport http.RoundTripper = transport
+		if base.BlockResultsJSONRPC {
+			archiveTransport = rpc.NoReplayPOSTTransport{Transport: transport}
+		}
 		guardedClient.Timeout = base.ArchiveHTTPTimeout
 		guardedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
-		guardedClient.Transport = &rpc.ArchiveGuard{Transport: transport, Interval: base.ArchiveRequestInterval, Budget: base.ArchiveRequestBudget, OnOpen: func(err error) {
+		guardedClient.Transport = &rpc.ArchiveGuard{Transport: archiveTransport, Interval: base.ArchiveRequestInterval, Budget: base.ArchiveRequestBudget, MaxConcurrent: base.ArchiveMaxConcurrent, EvidenceDir: base.ArchiveEvidenceDir, OnOpen: func(err error) {
 			config.Log.Fatal("Archive guard stopped indexing; progress already committed is retained", err)
 		}}
 		guardedRPC, guardErr := rpchttp.NewWithClient(indexer.Config.Probe.RPC, "/websocket", guardedClient)

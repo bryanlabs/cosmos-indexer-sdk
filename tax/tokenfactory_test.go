@@ -61,13 +61,13 @@ func TestTFMintWithoutMintToAddressCreditsSender(t *testing.T) {
 func TestTokenFactoryNonValueMessagesProduceNoEvent(t *testing.T) {
 	coin := append(fieldBytes(1, "factory/x/ufoo"), fieldBytes(2, "500")...)
 	burn := &MsgTFBurn{}
-	if err := burn.Unmarshal(append(fieldBytes(1, "cosmos1abc"), nested(2, coin)...)); err != nil {
+	if err := burn.Unmarshal(append(fieldBytes(1, fixtureCosmosAddress), nested(2, coin)...)); err != nil {
 		t.Fatalf("burn unmarshal: %v", err)
 	}
 	if burn.Amount != "500" {
 		t.Fatalf("burn amount = %q", burn.Amount)
 	}
-	for _, m := range []sdkMsg{burn, &MsgTFCreateDenom{Sender: "cosmos1abc", Subdenom: "ufoo"}, &MsgTFChangeAdmin{Sender: "cosmos1abc"}} {
+	for _, m := range []sdkMsg{burn, &MsgTFCreateDenom{Sender: fixtureCosmosAddress, Subdenom: "ufoo"}, &MsgTFChangeAdmin{Sender: fixtureCosmosAddress}} {
 		if out := classify(m, &indexerTxTypes.LogMessage{}); len(out) != 0 {
 			t.Fatalf("%T produced %d events", m, len(out))
 		}
