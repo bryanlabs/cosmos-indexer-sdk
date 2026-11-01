@@ -38,7 +38,8 @@ var GaiaReleases = []GaiaRelease{
 	{"v28.1.1", "2026-09-30", "0.53.4", 0, "CWA-2026-006 response: CosmWasm code upload and instantiation disabled.", "None. Existing contracts kept executing; coverage of execute events is unchanged.", true},
 	{"v28.2.1", "2026-10-01", "0.53.4", 33073000, "Re-enables CosmWasm upload and instantiation (Prop 1055). Adds the v28.2.0 upgrade handler.", "None.", true},
 	{"v28.3.1", "2026-10-01", "0.53.4", 33086741, "One-time bank balance migration on cosmoshub-4 at height 33,086,741 after the 24.8 hour halt.", "The migration changed balances without transactions. Balance reconstruction treats the halt block as a boundary; no taxable rows are affected.", true},
-	{"v29.0.0", "2026-10-09", "0.53.8", 0, "Removes x/params and the legacy ParameterChangeProposal governance route; deletes the deprecated provider store; CometBFT 0.38.25.", "None. The tax layer never read legacy governance parameters. Gov deposits and proposals are parsed from gov v1 and v1beta1 messages, both unchanged.", true},
+	{"v29.0.0", "2026-10-09", "0.53.8", 33618500, "Removes x/params and the legacy ParameterChangeProposal governance route; deletes the deprecated provider store; CometBFT 0.38.25; Cosmos SDK 0.53.4 to 0.53.8.", "None (reviewed 2026-10-31 after the upgrade). Attribute keys of withdraw_rewards, withdraw_commission, delegate, unbond, redelegate, cancel_unbonding_delegation and proposal_deposit are unchanged in SDK 0.53.8. New withdraw_addr_redirected event: staking messages now fail instead of paying rewards to a blocked withdraw address, and module-driven withdrawals reroute to the owner or the community pool; neither path applies to a wallet that signs its own transactions, and none fired in the first 53,364 blocks. Every height since the upgrade is indexed with no failed blocks, and a taxrepair dry run over those messages matched the stored rows.", true},
+	{"v29.0.1", "2026-10-23", "0.53.8", 0, "Binary-only release: Go 1.26.10.", "None. No state or event changes.", true},
 }
 
 // LatestKnownGaiaRelease is the newest reviewed release.
@@ -59,5 +60,6 @@ func KnownGaiaRelease(tag string) (GaiaRelease, bool) {
 // UpcomingChainChanges records announced changes that are not yet released,
 // so a reviewer knows what to watch for.
 var UpcomingChainChanges = []string{
-	"Cosmos SDK 0.54 or 0.55 is planned for the Hub within weeks of v29. The tax layer depends on event shapes (coin_spent, coin_received, transfer, withdraw_rewards, delegate, unbond, redelegate, wasm) that have been stable since SDK 0.47; the release watcher flags the first release on a new SDK line for review of event attribute names.",
+	"Cosmos SDK 0.54 or 0.55 is not adopted yet: v29.0.1 and gaia main remain on SDK 0.53.8 (checked 2026-10-31). The tax layer depends on event shapes (coin_spent, coin_received, transfer, withdraw_rewards, delegate, unbond, redelegate, proposal_deposit, wasm) that have been stable since SDK 0.47; the release watcher flags the first release on a new SDK line for review of event attribute names.",
+	"gaia#4199 (merged 2026-10-29, backport #4200) restores decoding of historical ParameterChangeProposal content for node queries; expect it in a v29 patch release. The indexer decodes proposals with its own codec, so no tax-layer effect is expected.",
 }
