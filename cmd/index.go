@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
-	jsonrpcclient "github.com/cometbft/cometbft/rpc/jsonrpc/client"
 	"io"
 	"net/http"
 	"os"
@@ -18,6 +16,8 @@ import (
 	indexerPackage "github.com/DefiantLabs/cosmos-indexer/indexer"
 	"github.com/DefiantLabs/cosmos-indexer/probe"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
+	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
+	jsonrpcclient "github.com/cometbft/cometbft/rpc/jsonrpc/client"
 	"github.com/spf13/cobra"
 )
 
