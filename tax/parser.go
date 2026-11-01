@@ -46,6 +46,15 @@ var MessageTypeURLs = []string{
 	"/cosmwasm.wasm.v1.MsgExecuteContract",
 	TypeURLWithdrawTokenizeShareReward,
 	TypeURLWithdrawAllTokenizeShareReward,
+	LegacyTypeURLTokenizeShares,
+	LegacyTypeURLRedeemTokensForShares,
+	LegacyTypeURLTransferTokenizeShareRecord,
+	LegacyTypeURLDisableTokenizeShares,
+	LegacyTypeURLEnableTokenizeShares,
+	LegacyTypeURLValidatorBond,
+	LegacyTypeURLUnbondValidator,
+	LegacyTypeURLWithdrawTokenizeShareReward,
+	LegacyTypeURLWithdrawAllTokenizeShareReward,
 	TypeURLTokenizeShares,
 	TypeURLRedeemTokensForShares,
 	TypeURLTransferTokenizeShareRecord,
@@ -89,6 +98,19 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 	var events []TaxableEvent
 
 	switch m := cosmosMsg.(type) {
+	// The legacy SDK fork emits the same economic events as x/liquid. Its
+	// WithdrawAll emits one aggregate reward event rather than one per record;
+	// tokenizeShareRewardEvents handles both without counting module transfers.
+	case *LegacyMsgTokenizeShares:
+		return classify(&m.MsgTokenizeShares, log)
+	case *LegacyMsgRedeemTokensForShares:
+		return classify(&m.MsgRedeemTokensForShares, log)
+	case *LegacyMsgTransferTokenizeShareRecord:
+		return classify(&m.MsgTransferTokenizeShareRecord, log)
+	case *LegacyMsgWithdrawTokenizeShareRecordReward:
+		return classify(&m.MsgWithdrawTokenizeShareRecordReward, log)
+	case *LegacyMsgWithdrawAllTokenizeShareRecordReward:
+		return classify(&m.MsgWithdrawAllTokenizeShareRecordReward, log)
 	case *banktypes.MsgSend:
 		for _, c := range m.Amount {
 			events = append(events, TaxableEvent{

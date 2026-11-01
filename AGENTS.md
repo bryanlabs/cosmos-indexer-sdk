@@ -66,8 +66,8 @@ Upgrading the SDK is not viable, so those messages are declared by hand and
 registered under their real type URLs via `RegisterCustomMsgTypesByTypeURLs`
 (probe's registry is the same object the decoder uses, so this works).
 
-Covered today: Gaia `x/liquid` (LSM, tokenized-share reward income), IBC channel
-v2 (inbound bridge transfers), and tokenfactory (minted balances, STARS on the
+Covered today: Gaia `x/liquid` and pre-v24 SDK-fork LSM namespaces
+(tokenized-share reward income), IBC channel v2 (inbound bridge transfers), and tokenfactory (minted balances, STARS on the
 Hub). Field numbers come from each project's own `.proto`; nested Coins that no
 taxable event depends on are kept as raw bytes.
 
@@ -88,15 +88,17 @@ Three rules if you add another:
    makes ibc-go re-emit that execution's events with that prefix on the type *and*
    every attribute key. The transfer still happened.
 
-An undecodable message is skipped individually (`core/tx.go`); it does not fail
-the block. Before that fix one unknown type destroyed every unrelated
-transaction in its block.
+An undecodable message is retained as opaque evidence (`core/opaque.go` and
+`core/tx.go`): original type URL, index, bytes and ordered events. It is not
+classified by guessing, and does not silently disappear from an indexed block.
+A nonzero fee with no resolvable payer defers its block rather than inventing
+an address. Raw-disabled upserts must not erase existing raw bytes.
 
-Deliberately left undecoded, having checked on chain that their transactions
-move only fees and tips: `ibc.core.client` v1/v2 updates, `interchain_security`
-provider messages, `interchain_accounts` controller messages, and
-`cosmos.gov.v1.MsgSubmitProposal` (refundable deposit; gov v1beta1 is not
-classified either).
+Some `ibc.core.client`, `interchain_security` provider and
+`interchain_accounts` controller messages remain opaque. Historical provider
+allocation is not a second wallet income event; actual consumer-denominated
+reward withdrawals still matter. Governance v1 and v1beta1 deposits are
+classified as principal records, not income.
 
 ## Who consumes it
 The platform mono-app `/tax` section. The web app calls this API via `TAX_SDK_API_URL`
@@ -112,7 +114,13 @@ The in-cluster Hub fullnode is pruned, so history before the live indexer's
 `start-block` needs an archive node. Jobs, the failed-block re-attempt pass, the
 gap re-index tool and a completeness verifier live in
 `bare-metal/cluster/apps/cosmos-tax-sdk-backfill/` — read that README before
-running anything against an archive.
+running anything against an archive. Historical 2025 version changes, contract
+candidates and acceptance gates are documented in `tax/HISTORICAL-2025.md`.
+The optional archive HTTP guard requires bounded input, hard request pacing,
+a timeout, budget and zero RPC retries; a 403/429 stops the run. Historical
+`tx_search` can omit transactions present in blocks. Prefer block bytes plus
+execution results (`skip-block-by-height-rpc-request=true`) and independently
+verify their counts before claiming completeness.
 
 ## Gotchas
 - Token names and suffixes are not asset identity. The Juno tokenfactory `uatom`
@@ -143,7 +151,8 @@ running anything against an archive.
   fully indexed, and the `cosmos-tax` Grafana dashboard shows it.
 - `throttling` is a float used as `time.Duration(f)`, so anything below 1
   truncates to zero. Configs that look throttled are not; `rpc-workers` is the
-  only real rate control.
+  practical legacy rate control. Guarded archive runs additionally pace every
+  actual HTTP call through one shared transport.
 - `index-message-events` is read from the `[flags]` section, not `[base]`. Every
   config in the fleet sets it under `[base]`, where it is silently ignored, which
   is why `message_event_attributes` is the largest table in the database.

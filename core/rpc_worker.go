@@ -35,6 +35,10 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 		Client:  &http.Client{},
 	}
 
+	if cfg.Base.ArchiveHTTPClient != nil {
+		rpcClient.Client = cfg.Base.ArchiveHTTPClient
+	}
+
 	for {
 		// Get the next block to process
 		block, open := <-blockEnqueueChan

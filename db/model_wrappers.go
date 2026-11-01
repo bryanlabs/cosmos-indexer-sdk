@@ -42,9 +42,11 @@ type TxDBWrapper struct {
 }
 
 type MessageDBWrapper struct {
-	Message               models.Message
-	MessageEvents         []MessageEventDBWrapper
-	MessageParsedDatasets []parsers.MessageParsedData
+	// PreserveOpaqueEvidence bypasses optional raw/event storage for undecodable messages.
+	PreserveOpaqueEvidence bool
+	Message                models.Message
+	MessageEvents          []MessageEventDBWrapper
+	MessageParsedDatasets  []parsers.MessageParsedData
 }
 
 type MessageEventDBWrapper struct {

@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -17,6 +19,11 @@ type IndexConfig struct {
 }
 
 type IndexBase struct {
+	ArchiveGuard           bool          `mapstructure:"archive-guard"`
+	ArchiveRequestInterval time.Duration `mapstructure:"archive-request-interval"`
+	ArchiveRequestBudget   uint64        `mapstructure:"archive-request-budget"`
+	ArchiveHTTPTimeout     time.Duration `mapstructure:"archive-http-timeout"`
+	ArchiveHTTPClient      *http.Client  `mapstructure:"-"`
 	throttlingBase
 	retryBase
 	ReindexMessageType              string `mapstructure:"reindex-message-type"`
@@ -50,6 +57,10 @@ type flags struct {
 }
 
 func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
+	cmd.PersistentFlags().BoolVar(&conf.Base.ArchiveGuard, "base.archive-guard", false, "enable fail-closed archive HTTP request guard (bounded runs only)")
+	cmd.PersistentFlags().DurationVar(&conf.Base.ArchiveRequestInterval, "base.archive-request-interval", time.Second, "minimum interval between actual archive HTTP requests")
+	cmd.PersistentFlags().Uint64Var(&conf.Base.ArchiveRequestBudget, "base.archive-request-budget", 50000, "maximum actual archive HTTP requests")
+	cmd.PersistentFlags().DurationVar(&conf.Base.ArchiveHTTPTimeout, "base.archive-http-timeout", 15*time.Second, "archive HTTP request timeout")
 	// chain indexing
 	cmd.PersistentFlags().Int64Var(&conf.Base.StartBlock, "base.start-block", 0, "block to start indexing at (use -1 to resume from highest block indexed)")
 	cmd.PersistentFlags().Int64Var(&conf.Base.EndBlock, "base.end-block", -1, "block to stop indexing at (use -1 to index indefinitely")
@@ -85,6 +96,17 @@ func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
 }
 
 func (conf *IndexConfig) Validate() error {
+	if conf.Base.ArchiveGuard {
+		if conf.Base.ArchiveRequestInterval <= 0 || conf.Base.ArchiveRequestBudget == 0 || conf.Base.ArchiveHTTPTimeout <= 0 {
+			return errors.New("archive guard requires positive interval, budget and timeout")
+		}
+		if conf.Base.EndBlock <= 0 && conf.Base.BlockInputFile == "" {
+			return errors.New("archive guard requires end-block or block-input-file")
+		}
+		if conf.Base.RequestRetryAttempts != 0 {
+			return errors.New("archive guard requires base.request-retry-attempts=0")
+		}
+	}
 	err := validateDatabaseConf(conf.Database)
 	if err != nil {
 		return err

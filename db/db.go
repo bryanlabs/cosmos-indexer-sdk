@@ -267,6 +267,15 @@ func UpsertFailedEventBlock(db *gorm.DB, blockHeight int64, chainID string, chai
 }
 
 func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig) (models.Block, []TxDBWrapper, error) {
+	// Evidence for unknown messages is mandatory. Enable event persistence for
+	// this block without changing the caller's configuration.
+	for _, tx := range txs {
+		for _, message := range tx.Messages {
+			if message.PreserveOpaqueEvidence {
+				indexerConfig.Flags.IndexMessageEvents = true
+			}
+		}
+	}
 	// consider optimizing the transaction, but how? Ordering matters due to foreign key constraints
 	// Order required: Block -> (For each Tx: Signer Address -> Tx -> (For each Message: Message -> Taxable Events))
 	// Also, foreign key relations are struct value based so create needs to be called first to get right foreign key ID
@@ -441,7 +450,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 					}
 				}
 
-				if !indexerConfig.Flags.IndexTxMessageRaw {
+				if !indexerConfig.Flags.IndexTxMessageRaw && !tx.Messages[messageIndex].PreserveOpaqueEvidence {
 					tx.Messages[messageIndex].Message.MessageBytes = nil
 				}
 
@@ -451,7 +460,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 			if len(messagesSlice) != 0 {
 				if err := dbTransaction.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "tx_id"}, {Name: "message_index"}},
-					DoUpdates: clause.AssignmentColumns([]string{"message_type_id", "message_bytes"}),
+					DoUpdates: messageEvidenceUpdates(),
 				}).Create(messagesSlice).Error; err != nil {
 					config.Log.Error("Error getting/creating messages.", err)
 					return err

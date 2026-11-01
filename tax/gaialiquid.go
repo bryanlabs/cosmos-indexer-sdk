@@ -12,7 +12,7 @@
 //
 // The two reward messages matter: they are ATOM income. Like the distribution
 // module's withdraw, the amount is not on the message at all, it comes from the
-// transaction's coin_received events, so decoding the owner address is enough
+// transaction's withdraw_tokenize_share_reward events, so decoding the owner address is enough
 // to classify them.
 
 package tax
@@ -47,6 +47,137 @@ func GaiaLiquidMsgTypes() map[string]sdk.Msg {
 		TypeURLWithdrawTokenizeShareReward:    &MsgWithdrawTokenizeShareRecordReward{},
 		TypeURLWithdrawAllTokenizeShareReward: &MsgWithdrawAllTokenizeShareRecordReward{},
 	}
+}
+
+// LegacyLSMMsgTypes covers the pre-v24 SDK fork without registering the same Go
+// type under two URLs (the registry's reverse mapping must remain unambiguous).
+// Wire shapes: cosmos/cosmos-sdk tag v0.50.11-lsm, proto/cosmos/{staking,
+// distribution}/v1beta1/tx.proto. Gaia v23.3.0 go.mod pins that exact fork.
+func LegacyLSMMsgTypes() map[string]sdk.Msg {
+	return map[string]sdk.Msg{
+		LegacyTypeURLTokenizeShares:                 &LegacyMsgTokenizeShares{},
+		LegacyTypeURLRedeemTokensForShares:          &LegacyMsgRedeemTokensForShares{},
+		LegacyTypeURLTransferTokenizeShareRecord:    &LegacyMsgTransferTokenizeShareRecord{},
+		LegacyTypeURLDisableTokenizeShares:          &LegacyMsgDisableTokenizeShares{},
+		LegacyTypeURLEnableTokenizeShares:           &LegacyMsgEnableTokenizeShares{},
+		LegacyTypeURLValidatorBond:                  &LegacyMsgValidatorBond{},
+		LegacyTypeURLUnbondValidator:                &LegacyMsgUnbondValidator{},
+		LegacyTypeURLWithdrawTokenizeShareReward:    &LegacyMsgWithdrawTokenizeShareRecordReward{},
+		LegacyTypeURLWithdrawAllTokenizeShareReward: &LegacyMsgWithdrawAllTokenizeShareRecordReward{},
+	}
+}
+
+const (
+	LegacyTypeURLTokenizeShares                 = "/cosmos.staking.v1beta1.MsgTokenizeShares"
+	LegacyTypeURLRedeemTokensForShares          = "/cosmos.staking.v1beta1.MsgRedeemTokensForShares"
+	LegacyTypeURLTransferTokenizeShareRecord    = "/cosmos.staking.v1beta1.MsgTransferTokenizeShareRecord"
+	LegacyTypeURLDisableTokenizeShares          = "/cosmos.staking.v1beta1.MsgDisableTokenizeShares"
+	LegacyTypeURLEnableTokenizeShares           = "/cosmos.staking.v1beta1.MsgEnableTokenizeShares"
+	LegacyTypeURLValidatorBond                  = "/cosmos.staking.v1beta1.MsgValidatorBond"
+	LegacyTypeURLUnbondValidator                = "/cosmos.staking.v1beta1.MsgUnbondValidator"
+	LegacyTypeURLWithdrawTokenizeShareReward    = "/cosmos.distribution.v1beta1.MsgWithdrawTokenizeShareRecordReward"
+	LegacyTypeURLWithdrawAllTokenizeShareReward = "/cosmos.distribution.v1beta1.MsgWithdrawAllTokenizeShareRecordReward"
+)
+
+// The migrated messages have identical numbered fields. Embedding shares only
+// wire handling, not Go/protobuf identity. Explicit names also keep Any packing
+// independent of gogoproto's global registration table.
+type LegacyMsgTokenizeShares struct{ MsgTokenizeShares }
+
+func (*LegacyMsgTokenizeShares) XXX_MessageName() string { return LegacyTypeURLTokenizeShares[1:] }
+
+type LegacyMsgRedeemTokensForShares struct{ MsgRedeemTokensForShares }
+
+func (*LegacyMsgRedeemTokensForShares) XXX_MessageName() string {
+	return LegacyTypeURLRedeemTokensForShares[1:]
+}
+
+type LegacyMsgTransferTokenizeShareRecord struct{ MsgTransferTokenizeShareRecord }
+
+func (*LegacyMsgTransferTokenizeShareRecord) XXX_MessageName() string {
+	return LegacyTypeURLTransferTokenizeShareRecord[1:]
+}
+
+type LegacyMsgDisableTokenizeShares struct{ MsgDisableTokenizeShares }
+
+func (*LegacyMsgDisableTokenizeShares) XXX_MessageName() string {
+	return LegacyTypeURLDisableTokenizeShares[1:]
+}
+
+type LegacyMsgEnableTokenizeShares struct{ MsgEnableTokenizeShares }
+
+func (*LegacyMsgEnableTokenizeShares) XXX_MessageName() string {
+	return LegacyTypeURLEnableTokenizeShares[1:]
+}
+
+type LegacyMsgWithdrawTokenizeShareRecordReward struct {
+	MsgWithdrawTokenizeShareRecordReward
+}
+
+func (*LegacyMsgWithdrawTokenizeShareRecordReward) XXX_MessageName() string {
+	return LegacyTypeURLWithdrawTokenizeShareReward[1:]
+}
+
+type LegacyMsgWithdrawAllTokenizeShareRecordReward struct {
+	MsgWithdrawAllTokenizeShareRecordReward
+}
+
+func (*LegacyMsgWithdrawAllTokenizeShareRecordReward) XXX_MessageName() string {
+	return LegacyTypeURLWithdrawAllTokenizeShareReward[1:]
+}
+
+// ValidatorBond marks an existing delegation as validator bond, not a deposit
+// or income. UnbondValidator changes validator status, not delegator balances.
+type LegacyMsgValidatorBond struct {
+	rawMsg
+	DelegatorAddress string `protobuf:"bytes,1,opt,name=delegator_address,json=delegatorAddress,proto3"`
+	ValidatorAddress string `protobuf:"bytes,2,opt,name=validator_address,json=validatorAddress,proto3"`
+}
+
+func (m *LegacyMsgValidatorBond) Reset()                { *m = LegacyMsgValidatorBond{} }
+func (*LegacyMsgValidatorBond) ProtoMessage()           {}
+func (*LegacyMsgValidatorBond) XXX_MessageName() string { return LegacyTypeURLValidatorBond[1:] }
+func (m *LegacyMsgValidatorBond) String() string {
+	return fmt.Sprintf("MsgValidatorBond{%s}", m.DelegatorAddress)
+}
+func (*LegacyMsgValidatorBond) ValidateBasic() error           { return nil }
+func (m *LegacyMsgValidatorBond) GetSigners() []sdk.AccAddress { return signerOf(m.DelegatorAddress) }
+func (m *LegacyMsgValidatorBond) Unmarshal(b []byte) error {
+	m.Reset()
+	m.keep(b)
+	return scanFields(b, func(f wireField) error {
+		switch f.num {
+		case 1:
+			m.DelegatorAddress = string(f.bytes)
+		case 2:
+			m.ValidatorAddress = string(f.bytes)
+		}
+		return nil
+	})
+}
+
+type LegacyMsgUnbondValidator struct {
+	rawMsg
+	ValidatorAddress string `protobuf:"bytes,1,opt,name=validator_address,json=validatorAddress,proto3"`
+}
+
+func (m *LegacyMsgUnbondValidator) Reset()                { *m = LegacyMsgUnbondValidator{} }
+func (*LegacyMsgUnbondValidator) ProtoMessage()           {}
+func (*LegacyMsgUnbondValidator) XXX_MessageName() string { return LegacyTypeURLUnbondValidator[1:] }
+func (m *LegacyMsgUnbondValidator) String() string {
+	return fmt.Sprintf("MsgUnbondValidator{%s}", m.ValidatorAddress)
+}
+func (*LegacyMsgUnbondValidator) ValidateBasic() error           { return nil }
+func (m *LegacyMsgUnbondValidator) GetSigners() []sdk.AccAddress { return signerOf(m.ValidatorAddress) }
+func (m *LegacyMsgUnbondValidator) Unmarshal(b []byte) error {
+	m.Reset()
+	m.keep(b)
+	return scanFields(b, func(f wireField) error {
+		if f.num == 1 {
+			m.ValidatorAddress = string(f.bytes)
+		}
+		return nil
+	})
 }
 
 // rawMsg preserves the exact bytes a message was decoded from.

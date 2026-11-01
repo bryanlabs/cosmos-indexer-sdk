@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	rpchttp "github.com/cometbft/cometbft/rpc/client/http"
+	jsonrpcclient "github.com/cometbft/cometbft/rpc/jsonrpc/client"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -201,6 +204,32 @@ func setupIndexer() *indexerPackage.Indexer {
 
 	if err != nil {
 		config.Log.Fatal("Failed to create probe client", err)
+	}
+
+	if indexer.Config.Base.ArchiveGuard {
+		base := &indexer.Config.Base
+		guardedClient, guardErr := jsonrpcclient.DefaultHTTPClient(indexer.Config.Probe.RPC)
+		if guardErr != nil {
+			config.Log.Fatal("Failed to create archive HTTP client", guardErr)
+		}
+		// A fresh connection per request disables Transport's transparent retries
+		// on reused connections, keeping the external request budget honest.
+		transport, ok := guardedClient.Transport.(*http.Transport)
+		if !ok {
+			config.Log.Fatal("Archive guard requires an HTTP transport", nil)
+		}
+		transport.DisableKeepAlives = true
+		guardedClient.Timeout = base.ArchiveHTTPTimeout
+		guardedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }
+		guardedClient.Transport = &rpc.ArchiveGuard{Transport: transport, Interval: base.ArchiveRequestInterval, Budget: base.ArchiveRequestBudget, OnOpen: func(err error) {
+			config.Log.Fatal("Archive guard stopped indexing; progress already committed is retained", err)
+		}}
+		guardedRPC, guardErr := rpchttp.NewWithClient(indexer.Config.Probe.RPC, "/websocket", guardedClient)
+		if guardErr != nil {
+			config.Log.Fatal("Failed to create guarded RPC client", guardErr)
+		}
+		indexer.ChainClient.RPCClient = guardedRPC
+		base.ArchiveHTTPClient = guardedClient
 	}
 
 	// Depending on the app configuration, wait for the chain to catch up
