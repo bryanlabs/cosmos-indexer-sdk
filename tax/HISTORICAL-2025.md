@@ -67,6 +67,25 @@ block bytes plus `block_results`. The decoder requires matching transaction and
 result counts. Independent verification must compare those sources, not merely
 count messages already stored in our own database.
 
+## Canary outcome and regression gates
+
+The bounded canary stopped on another HTTP 429 even at a five-second interval.
+It wrote 20 of 24 planned block records. Independent reconciliation exposed a
+pre-existing transaction-ingestion failure at upgrade block 25002500:
+normalizing optional begin/end events failed, but missing transaction data was
+then written as an empty complete block. That block is now explicitly
+`tx_indexed=false` with a recoverable failed-block record. Its original body has
+three transactions. Nineteen other canary block records are transaction-indexed;
+this does not certify their economic classification or the year.
+
+A known MsgTransfer also exposed SDK re-marshaling before raw capture. Capture
+original Any payloads directly from TxRaw before calling the SDK decoder, and
+require exact type/index/byte agreement with independent block bodies. Preserved
+bytes are not automatically original bytes. Existing canary data needs replay
+after the regression fixes. No larger tranche runs while archive access is
+throttled. Canary logs and database evidence were retained before exact-name
+cleanup of temporary Kubernetes resources.
+
 ## Contract discovery
 
 Historical REST at height 29114835 returned 380 code IDs across four exhausted

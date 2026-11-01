@@ -58,7 +58,7 @@ func TestOpaqueEvidenceDecodingPaths(t *testing.T) {
 					require.NoError(t, err)
 					raw, err := (&tx.TxRaw{BodyBytes: bb, AuthInfoBytes: aa}).Marshal()
 					require.NoError(t, err)
-					result, _, err := ProcessRPCBlockByHeightTXs(cfg, nil, cl, nil, nil, &coretypes.ResultBlock{Block: &tmtypes.Block{Header: tmtypes.Header{Height: 1, Time: now}, Data: tmtypes.Data{Txs: tmtypes.Txs{raw}}}}, &rpc.CustomBlockResults{TxsResults: []*abci.ResponseDeliverTx{{Log: logs.String()}}}, nil)
+					result, _, err := ProcessRPCBlockByHeightTXs(cfg, nil, cl, nil, nil, &coretypes.ResultBlock{Block: &tmtypes.Block{Header: tmtypes.Header{Height: 1, Time: now}, Data: tmtypes.Data{Txs: tmtypes.Txs{raw}}}}, &rpc.CustomBlockResults{Height: 1, TxsResults: []*abci.ResponseDeliverTx{{Log: logs.String()}}}, nil)
 					require.NoError(t, err)
 					require.Len(t, result, 1)
 					require.Len(t, result[0].Messages, len(messages))

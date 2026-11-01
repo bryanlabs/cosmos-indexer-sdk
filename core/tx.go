@@ -33,8 +33,8 @@ func getUnexportedField(field reflect.Value) interface{} {
 }
 
 func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient, messageTypeFilters []filter.MessageTypeFilter, messageFilters []filter.MessageFilter, blockResults *coretypes.ResultBlock, resultBlockRes *rpc.CustomBlockResults, customParsers map[string][]parsers.MessageParser) ([]dbTypes.TxDBWrapper, *time.Time, error) {
-	if len(blockResults.Block.Txs) != len(resultBlockRes.TxsResults) {
-		config.Log.Fatalf("blockResults & resultBlockRes: different length")
+	if err := ValidateBlockTxResults(blockResults, resultBlockRes); err != nil {
+		return nil, nil, err
 	}
 
 	blockTime := &blockResults.Block.Time
@@ -51,6 +51,15 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 		var currMessages []types.Msg
 		var currLogMsgs []txtypes.LogMessage
 
+		// Capture wire payloads before SDK interface unpacking rewrites Any.Value.
+		var wireTx cosmosTx.TxRaw
+		if err := wireTx.Unmarshal(tendermintTx); err != nil {
+			return nil, blockTime, err
+		}
+		var wireBody cosmosTx.TxBody
+		if err := wireBody.Unmarshal(wireTx.BodyBytes); err != nil {
+			return nil, blockTime, err
+		}
 		txDecoder := cl.Codec.TxConfig.TxDecoder()
 
 		txBasic, err := txDecoder(tendermintTx)
@@ -68,6 +77,14 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 			txFull = iTx.(*cosmosTx.Tx)
 		}
 
+		if txFull.Body == nil || len(wireBody.Messages) != len(txFull.Body.Messages) {
+			return nil, blockTime, fmt.Errorf("wire/decoded message count mismatch")
+		}
+		for i, original := range wireBody.Messages {
+			if original == nil || txFull.Body.Messages[i] == nil || original.TypeUrl != txFull.Body.Messages[i].TypeUrl {
+				return nil, blockTime, fmt.Errorf("wire/decoded message type mismatch at index %d", i)
+			}
+		}
 		logs := types.ABCIMessageLogs{}
 
 		// Failed TXs do not have proper JSON in the .Log field, causing ParseABCILogs to fail to unmarshal the logs
@@ -145,7 +162,7 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 					continue
 				}
 
-				messagesRaw = append(messagesRaw, txFull.Body.Messages[msgIdx].Value)
+				messagesRaw = append(messagesRaw, wireBody.Messages[msgIdx].Value)
 				currMessages = append(currMessages, msg)
 				currLogMsgs = append(currLogMsgs, currTxLog)
 			} else {
@@ -155,12 +172,12 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 				// block and losing every other transaction in it.
 				config.Log.Warnf("[Block: %v] [TX: %v] Preserving opaque undecodable msg of type '%v' at index %d; classification is deferred.",
 					blockResults.Block.Height, tendermintHashToHex(txHash), txFull.Body.Messages[msgIdx].TypeUrl, msgIdx)
-				currMessages = append(currMessages, &OpaqueMessage{TypeURL: txFull.Body.Messages[msgIdx].TypeUrl, Raw: txFull.Body.Messages[msgIdx].Value})
+				currMessages = append(currMessages, &OpaqueMessage{TypeURL: txFull.Body.Messages[msgIdx].TypeUrl, Raw: wireBody.Messages[msgIdx].Value})
 				currLogMsgs = append(currLogMsgs, txtypes.LogMessage{
 					MessageIndex: msgIdx,
 					Events:       indexerEvents.StringEventstoNormalizedEvents(messageEvents(logs, msgIdx)),
 				})
-				messagesRaw = append(messagesRaw, txFull.Body.Messages[msgIdx].Value)
+				messagesRaw = append(messagesRaw, wireBody.Messages[msgIdx].Value)
 			}
 		}
 
@@ -240,6 +257,8 @@ func sanitizeMemo(memo string) string {
 }
 
 // ProcessRPCTXs - Given an RPC response, build out the more specific data used by the parser.
+// ProcessRPCTXs receives SDK-decoded messages. Their Value bytes may be normalized,
+// not original wire evidence. Use ProcessRPCBlockByHeightTXs for wire preservation.
 func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient, messageTypeFilters []filter.MessageTypeFilter, messageFilters []filter.MessageFilter, txEventResp *cosmosTx.GetTxsEventResponse, customParsers map[string][]parsers.MessageParser) ([]dbTypes.TxDBWrapper, *time.Time, error) {
 	var currTxDbWrappers []dbTypes.TxDBWrapper
 	var blockTime *time.Time

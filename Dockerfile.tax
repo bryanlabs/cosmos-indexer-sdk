@@ -23,7 +23,7 @@ FROM build AS test
 # The selected core/db tests exclude Docker-backed integration suites.
 RUN CGO_ENABLED=0 go test -p 4 ./tax && \
     CGO_ENABLED=0 go test -p 4 ./rpc ./config ./cmd && \
-    CGO_ENABLED=0 go test -p 4 ./core ./db -run '^(TestIndexedBlockWindow|TestBlockIndex|TestOpaque|TestFeePayer|TestMessageEvidence)' -count=1
+    CGO_ENABLED=0 go test -p 4 ./core ./db -run '^(TestIndexedBlockWindow|TestBlockIndex|TestOpaque|TestFeePayer|TestMessageEvidence|TestTxResults|TestKnownTransferOriginalWireBytes)' -count=1
 
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk add --no-cache ca-certificates && adduser -D -u 1137 tax

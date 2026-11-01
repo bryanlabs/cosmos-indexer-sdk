@@ -85,6 +85,7 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 				bresults, err = NormalizeCustomBlockResults(bresults)
 				if err != nil {
 					config.Log.Errorf("Error normalizing block results for block %v from RPC. Err: %v", block, err)
+					currentHeightIndexerData.BlockEventRequestsFailed = true
 					err := dbTypes.UpsertFailedEventBlock(db, block.Height, chainStringID, cfg.Probe.ChainName)
 					if err != nil {
 						config.Log.Fatal("Failed to insert failed block event", err)
@@ -119,9 +120,11 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 						// Only set failed when we can't get the block results either.
 						currentHeightIndexerData.TxRequestsFailed = true
 					} else {
-						bresults, err = NormalizeCustomBlockResults(bresults)
+						// Transaction execution results do not require begin/end event normalization.
+						err = ValidateBlockTxResults(blockData, bresults)
 						if err != nil {
-							config.Log.Errorf("Error normalizing block results for block %v from RPC. Err: %v", block, err)
+							config.Log.Errorf("Invalid transaction results for block %v from RPC. Err: %v", block, err)
+							currentHeightIndexerData.TxRequestsFailed = true
 							normalizeErr := err
 							if upsertErr := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName, normalizeErr); upsertErr != nil {
 								config.Log.Fatal("Failed to insert failed block", upsertErr)
@@ -142,6 +145,9 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 }
 
 func NormalizeCustomBlockResults(blockResults *rpc.CustomBlockResults) (*rpc.CustomBlockResults, error) {
+	if blockResults == nil {
+		return nil, fmt.Errorf("missing block results")
+	}
 	if len(blockResults.FinalizeBlockEvents) != 0 {
 		beginBlockEvents := []abci.Event{}
 		endBlockEvents := []abci.Event{}
