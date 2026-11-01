@@ -3,6 +3,7 @@ package tax
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
@@ -240,4 +241,30 @@ func TestSafetyV1IncompleteReceiveRetainsAuthzSiblingDiagnostically(t *testing.T
 	if out := safetyParseReceive(t, &chantypes.MsgRecvPacket{Packet: packet}, &txlog.LogMessage{Events: []txlog.LogMessageEvent{safetyReceive(fixtureOsmosisDenom)}}, true); len(out) != 0 {
 		t.Fatalf("malformed packet fabricated receipt: %+v", out)
 	}
+}
+
+// Shape of cosmoshub-4 23763495 tx 706ED2B0: PFM credits a derived
+// intermediate and forwards the coins on, so the packet receiver gets nothing.
+func TestSafetyV1ForwardPassThroughIsNotAcquisition(t *testing.T) {
+	const intermediate = "cosmos1intermediate"
+	data, err := json.Marshal(map[string]string{attributeSender: other, attributeReceiver: del, attributeAmount: "100", attributeDenom: safetyNativeReturn, "memo": `{"forward":{"receiver":"pryzm1next","port":"transfer","channel":"channel-859"}}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := safetyPacket(t, safetyNativeReturn)
+	packet.Data = data
+	msg := &chantypes.MsgRecvPacket{Packet: packet}
+	app := ev(eventFungibleTokenPacket, [2]string{attributeSender, other}, [2]string{attributeReceiver, intermediate}, [2]string{attributeAmount, "100"}, [2]string{attributeDenom, safetyNativeReturn}, [2]string{attributeSuccess, attributeTrue})
+	onward := ev("ibc_transfer", [2]string{attributeSender, intermediate}, [2]string{attributeReceiver, "pryzm1next"}, [2]string{attributeAmount, "100"}, [2]string{attributeDenom, fixtureNativeDenom})
+	events := append(safetyCredit(intermediate, fixtureNativeDenom), app, onward)
+	if out := safetyParseReceive(t, msg, &txlog.LogMessage{Events: events}, false); len(out) != 0 {
+		t.Fatalf("forward pass-through fabricated receipt: %+v", out)
+	}
+	// Without the onward transfer the coins stayed somewhere unexplained.
+	safetyParseReceive(t, msg, &txlog.LogMessage{Events: append(safetyCredit(intermediate, fixtureNativeDenom), app)}, true)
+	// A discarded onward transfer is not evidence either.
+	safetyParseReceive(t, msg, &txlog.LogMessage{Events: append(append(safetyCredit(intermediate, fixtureNativeDenom), app), safetyPrefix([]txlog.LogMessageEvent{onward})...)}, true)
+	// Without a forward memo the mismatch is still incomplete.
+	plain := &chantypes.MsgRecvPacket{Packet: safetyPacket(t, safetyNativeReturn)}
+	safetyParseReceive(t, plain, &txlog.LogMessage{Events: events}, true)
 }

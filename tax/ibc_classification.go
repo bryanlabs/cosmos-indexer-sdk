@@ -182,6 +182,9 @@ func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data tra
 		return nil, nil
 	}
 	if !success {
+		if ibcV1ForwardPassThrough(log, data) {
+			return nil, nil
+		}
 		return nil, []string{issue + " (packet/application event mismatch)"}
 	}
 	if packet.SourcePort != string(CategoryTransfer) || packet.DestinationPort != string(CategoryTransfer) || packet.SourceChannel == "" || packet.DestinationChannel == "" || data.Denom == "" {
@@ -192,6 +195,43 @@ func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data tra
 		return nil, []string{issue}
 	}
 	return []TaxableEvent{{Category: string(CategoryIBCIn), FromAddr: data.Sender, ToAddr: data.Receiver, Amount: coin.Amount.String(), Denom: coin.Denom}}, nil
+}
+
+// Packet-forward middleware rewrites the receiver to an intermediate account
+// derived from the channel and original sender, credits it, and sends the same
+// coins onward in the same message. No Hub account of the packet's receiver
+// ever holds them, so the hop is not an acquisition. Require the memo, the
+// app's success for the exact coins to that intermediate, and a committed
+// outbound transfer from it; anything else stays incomplete.
+func ibcV1ForwardPassThrough(log *txlog.LogMessage, data transfertypes.FungibleTokenPacketData) bool {
+	if trigger, _ := ibcMemoIntent(data.Memo); trigger != "pfm_forward" {
+		return false
+	}
+	intermediates := map[string]bool{}
+	for _, ev := range log.Events {
+		if ev.Type != eventFungibleTokenPacket || !ibcCommittedEvent(ev) {
+			continue
+		}
+		for _, a := range ibcReceiveGroups(ev) {
+			if a[attributeSuccess] == attributeTrue && a["error"] == "" && a[attributeAmount] == data.Amount && a[attributeDenom] == data.Denom && a[attributeReceiver] != "" && a[attributeReceiver] != data.Receiver {
+				intermediates[a[attributeReceiver]] = true
+			}
+		}
+	}
+	if len(intermediates) != 1 {
+		return false
+	}
+	for _, ev := range log.Events {
+		if ev.Type != "ibc_transfer" || !ibcCommittedEvent(ev) {
+			continue
+		}
+		for _, a := range ibcAttributeGroups(ev, attributeSender, attributeReceiver, attributeAmount, attributeDenom) {
+			if intermediates[a[attributeSender]] && a[attributeAmount] == data.Amount {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func ibcV1ReceiveCandidates(packetDenom string, packet chantypes.Packet) []string {
