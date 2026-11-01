@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -51,7 +50,7 @@ func materializeDecision(key string, decision AssetDecision, row *Row) (AssetDec
 	if err != nil {
 		return AssetDecision{}, err
 	}
-	if kind == "record" {
+	if kind == apiRecord {
 		return normalized, nil
 	}
 	if normalized.Mode == AssetDecisionExclude {
@@ -68,7 +67,7 @@ func materializeDecision(key string, decision AssetDecision, row *Row) (AssetDec
 		Quantity:     row.Amount.String(),
 		ValueUSD:     value.String(),
 		CostBasisUSD: value.String(),
-		AcquiredDate: row.Time.UTC().Format("2006-01-02"),
+		AcquiredDate: row.Time.UTC().Format(apiDateLayout),
 		AppliedFrom:  key,
 	}, nil
 }
@@ -119,7 +118,7 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 		qty := decimal.RequireFromString(decision.Quantity)
 		value := decimal.RequireFromString(decision.ValueUSD)
 		basis := decimal.RequireFromString(decision.CostBasisUSD)
-		acquired, _ := time.Parse("2006-01-02", decision.AcquiredDate)
+		acquired, _ := time.Parse(apiDateLayout, decision.AcquiredDate)
 		if acquired.After(row.Time.UTC()) {
 			return nil, fmt.Errorf("acquisition date cannot be after the receipt date")
 		}
@@ -138,7 +137,7 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 	// simply did not appear in this period, so a remembered rule can be sent
 	// with every report.
 	for key := range decisions {
-		if !used[key] && decisionKeyKind(key) == "record" {
+		if !used[key] && decisionKeyKind(key) == apiRecord {
 			return nil, fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", key)
 		}
 	}
@@ -176,35 +175,35 @@ func PendingAssetReviews(rows []Row) int {
 	}
 	return n
 }
+
 func (s *Server) reviewedRows(chain string, addresses []string, start, end time.Time, decisions AssetDecisions, allowPending bool) ([]Row, error) {
-	var rows []Row
-	seen := map[string]bool{}
-	for _, addr := range addresses {
-		addr = strings.TrimSpace(addr)
-		if addr == "" || seen[addr] {
-			continue
-		}
-		seen[addr] = true
-		next, err := s.rowsFor(chain, addr, start, end)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, next...)
+	addresses = normalizedWalletScope(addresses)
+	input, err := s.readReportInput(chain, addresses, start, end, false)
+	if err != nil {
+		return nil, err
 	}
+	return s.reviewedInputRows(chain, addresses, input, decisions, allowPending)
+}
+
+func applyReviewedRows(rows []Row, decisions AssetDecisions, allowPending bool) ([]Row, error) {
 	out, err := ApplyAssetDecisions(rows, decisions)
 	if err != nil {
 		return nil, assetReviewInputError{err}
+	}
+	if readiness := readinessForRows(out); readiness.PendingSemanticReviews > 0 && !allowPending {
+		return nil, reportReadinessRequired{readiness}
 	}
 	if pending := PendingAssetReviews(out); pending > 0 && !allowPending {
 		return nil, assetReviewRequired{pending}
 	}
 	return out, nil
 }
+
 func decisionsFromRequest(r *http.Request) (AssetDecisions, error) {
-	if len(r.URL.Query()["asset_decisions"]) > 1 {
+	if len(r.URL.Query()[apiAssetDecisions]) > 1 {
 		return nil, assetReviewInputError{fmt.Errorf("asset_decisions must be supplied once")}
 	}
-	raw := r.URL.Query().Get("asset_decisions")
+	raw := r.URL.Query().Get(apiAssetDecisions)
 	if raw == "" {
 		raw = "{}"
 	}
@@ -216,7 +215,7 @@ func decisionsFromRequest(r *http.Request) (AssetDecisions, error) {
 	// every receipt flagged as suspected spam without a more specific decision
 	// is treated as valueless. It becomes an ordinary decision key so caches,
 	// saved reports and the audit trail all carry it.
-	switch policy := r.URL.Query().Get("spam_policy"); policy {
+	switch policy := r.URL.Query().Get(apiSpamPolicy); policy {
 	case "", "ask":
 	case "valueless":
 		if d == nil {
@@ -228,6 +227,7 @@ func decisionsFromRequest(r *http.Request) (AssetDecisions, error) {
 	}
 	return d, nil
 }
+
 func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []string, start, end time.Time) ([]Row, error) {
 	decisions, err := decisionsFromRequest(r)
 	if err != nil {
@@ -255,19 +255,28 @@ func writeTaxError(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError
 	var required assetReviewRequired
 	var invalid assetReviewInputError
-	if errors.As(err, &required) {
+	var readiness reportReadinessRequired
+	if errors.As(err, &readiness) {
+		w.Header().Set(apiContentType, apiJSONContentType)
+		w.WriteHeader(http.StatusConflict)
+		writeJSON(w, map[string]any{apiStatus: "blocked", apiError: err.Error(), apiReadiness: readiness.Readiness})
+		return
+	}
+	switch {
+	case errors.As(err, &required):
 		code = http.StatusConflict
-	} else if errors.As(err, &invalid) {
+	case errors.As(err, &invalid):
 		code = http.StatusBadRequest
-	} else if errors.Is(err, errAwaitingCorrection) {
+	case errors.Is(err, errAwaitingCorrection):
 		code = http.StatusServiceUnavailable
 		w.Header().Set("Retry-After", "1800")
 	}
 	http.Error(w, err.Error(), code)
 }
+
 func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addresses := splitNonEmpty(def(q.Get("addresses"), q.Get("address")), ",")
+	addresses := splitNonEmpty(def(q.Get(apiAddresses), q.Get(apiAddress)), ",")
 	if len(addresses) == 0 {
 		http.Error(w, "addresses required", 400)
 		return
@@ -277,7 +286,7 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
-	rows, err := s.reviewedRows(chainParam(q.Get("chain")), addresses, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)), decisions, true)
+	rows, err := s.reviewedRows(chainParam(q.Get(apiChain)), addresses, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)), decisions, true)
 	if err != nil {
 		writeTaxError(w, err)
 		return
@@ -289,22 +298,31 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 			reviews = append(reviews, row)
 		}
 	}
-	pending := PendingAssetReviews(rows)
-	w.Header().Set("Content-Type", "application/json")
+	readiness := readinessForRows(rows)
+	pending := readiness.PendingAssetReviews + readiness.PendingSemanticReviews
+	semanticReviews := []Row{}
+	for _, row := range rows {
+		if semanticReviewReason(row) != "" {
+			semanticReviews = append(semanticReviews, row)
+		}
+	}
+	w.Header().Set(apiContentType, apiJSONContentType)
 	if pending > 0 {
 		w.WriteHeader(http.StatusConflict)
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"pending":                 pending,
+		ReportJobPending:          pending,
+		apiReadiness:              readiness,
+		"semantic_reviews":        semanticReviews,
 		"reviews":                 reviews,
 		"groups":                  ReviewGroups(reviews, decisions),
 		"decisions":               decisions,
 		"unmatched_decision_keys": UnmatchedDecisionKeys(rows, decisions),
 		"reason_glossary":         ReviewReasonGlossary(),
 		"decision_keys": map[string]string{
-			"record_id":   "one receipt; override carries quantity, value_usd, cost_basis_usd and acquired_date totals",
-			"denom:<raw>": "every flagged receipt of that token in the report; override carries token and unit_value_usd, each receipt is priced quantity times unit on its own date",
-			"policy:spam": "every receipt flagged as suspected spam without a more specific decision; exclude only (spam_policy=valueless is the same thing)",
+			"record_id":           "one receipt; override carries quantity, value_usd, cost_basis_usd and acquired_date totals",
+			"denom:<raw>":         "every flagged receipt of that token in the report; override carries token and unit_value_usd, each receipt is priced quantity times unit on its own date",
+			DecisionKeySpamPolicy: "every receipt flagged as suspected spam without a more specific decision; exclude only (spam_policy=valueless is the same thing)",
 		},
 	})
 }
@@ -372,7 +390,7 @@ func ReviewGroups(reviews []Row, decisions AssetDecisions) []ReviewGroup {
 				g.ReasonCodes = append(g.ReasonCodes, c)
 			}
 		}
-		day := r.Time.UTC().Format("2006-01-02")
+		day := r.Time.UTC().Format(apiDateLayout)
 		if g.FirstDate == "" || day < g.FirstDate {
 			g.FirstDate = day
 		}

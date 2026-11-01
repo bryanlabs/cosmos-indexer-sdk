@@ -33,8 +33,8 @@ func getUnexportedField(field reflect.Value) interface{} {
 }
 
 func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient, messageTypeFilters []filter.MessageTypeFilter, messageFilters []filter.MessageFilter, blockResults *coretypes.ResultBlock, resultBlockRes *rpc.CustomBlockResults, customParsers map[string][]parsers.MessageParser) ([]dbTypes.TxDBWrapper, *time.Time, error) {
-	if len(blockResults.Block.Txs) != len(resultBlockRes.TxsResults) {
-		config.Log.Fatalf("blockResults & resultBlockRes: different length")
+	if err := ValidateBlockTxResults(blockResults, resultBlockRes); err != nil {
+		return nil, nil, err
 	}
 
 	blockTime := &blockResults.Block.Time
@@ -51,6 +51,15 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 		var currMessages []types.Msg
 		var currLogMsgs []txtypes.LogMessage
 
+		// Capture wire payloads before SDK interface unpacking rewrites Any.Value.
+		var wireTx cosmosTx.TxRaw
+		if err := wireTx.Unmarshal(tendermintTx); err != nil {
+			return nil, blockTime, err
+		}
+		var wireBody cosmosTx.TxBody
+		if err := wireBody.Unmarshal(wireTx.BodyBytes); err != nil {
+			return nil, blockTime, err
+		}
 		txDecoder := cl.Codec.TxConfig.TxDecoder()
 
 		txBasic, err := txDecoder(tendermintTx)
@@ -68,13 +77,21 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 			txFull = iTx.(*cosmosTx.Tx)
 		}
 
+		if txFull.Body == nil || len(wireBody.Messages) != len(txFull.Body.Messages) {
+			return nil, blockTime, fmt.Errorf("wire/decoded message count mismatch")
+		}
+		for i, original := range wireBody.Messages {
+			if original == nil || txFull.Body.Messages[i] == nil || original.TypeUrl != txFull.Body.Messages[i].TypeUrl {
+				return nil, blockTime, fmt.Errorf("wire/decoded message type mismatch at index %d", i)
+			}
+		}
 		logs := types.ABCIMessageLogs{}
 
 		// Failed TXs do not have proper JSON in the .Log field, causing ParseABCILogs to fail to unmarshal the logs
 		// We can entirely ignore failed TXs in downstream parsers, because according to the Cosmos specification, a single failed message in a TX fails the whole TX
 		if txResult.Code == 0 {
 			logs, err = types.ParseABCILogs(txResult.Log)
-			if err != nil {
+			if err != nil || (len(logs) == 0 && len(txResult.Events) != 0) {
 				logs, err = indexerEvents.ParseTxEventsToMessageIndexEvents(len(txFull.Body.Messages), txResult.Events)
 			}
 		} else {
@@ -112,12 +129,15 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 			}
 
 			currMsg := txFull.Body.Messages[msgIdx].GetCachedValue()
+			if currMsg == nil {
+				currMsg = decodeKnownEnvelope(wireBody.Messages[msgIdx])
+			}
 
 			if currMsg != nil {
 				msg := currMsg.(types.Msg)
 				msgEvents := types.StringEvents{}
 				if txResult.Code == 0 {
-					msgEvents = logs[msgIdx].Events
+					msgEvents = messageEvents(logs, msgIdx)
 				}
 
 				currTxLog := txtypes.LogMessage{
@@ -145,22 +165,22 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 					continue
 				}
 
-				messagesRaw = append(messagesRaw, txFull.Body.Messages[msgIdx].Value)
+				messagesRaw = append(messagesRaw, wireBody.Messages[msgIdx].Value)
 				currMessages = append(currMessages, msg)
 				currLogMsgs = append(currLogMsgs, currTxLog)
 			} else {
 				// The message type is absent from this build's codec, which
 				// happens when the chain adds a module newer than the indexer's
-				// SDK version. Skip the single message rather than failing the
-				// block, which would drop every other transaction in it.
-				config.Log.Warnf("[Block: %v] [TX: %v] Skipping undecodable msg of type '%v' at index %d; the rest of the block is still indexed.",
+				// SDK version. Keep opaque evidence rather than failing the
+				// block and losing every other transaction in it.
+				config.Log.Warnf("[Block: %v] [TX: %v] Preserving opaque undecodable msg of type '%v' at index %d; classification is deferred.",
 					blockResults.Block.Height, tendermintHashToHex(txHash), txFull.Body.Messages[msgIdx].TypeUrl, msgIdx)
-				currMessages = append(currMessages, nil)
+				currMessages = append(currMessages, &OpaqueMessage{TypeURL: txFull.Body.Messages[msgIdx].TypeUrl, Raw: wireBody.Messages[msgIdx].Value})
 				currLogMsgs = append(currLogMsgs, txtypes.LogMessage{
 					MessageIndex: msgIdx,
+					Events:       indexerEvents.StringEventstoNormalizedEvents(messageEvents(logs, msgIdx)),
 				})
-				messagesRaw = append(messagesRaw, nil)
-				continue
+				messagesRaw = append(messagesRaw, wireBody.Messages[msgIdx].Value)
 			}
 		}
 
@@ -240,6 +260,8 @@ func sanitizeMemo(memo string) string {
 }
 
 // ProcessRPCTXs - Given an RPC response, build out the more specific data used by the parser.
+// ProcessRPCTXs receives SDK-decoded messages. Their Value bytes may be normalized,
+// not original wire evidence. Use ProcessRPCBlockByHeightTXs for wire preservation.
 func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient, messageTypeFilters []filter.MessageTypeFilter, messageFilters []filter.MessageFilter, txEventResp *cosmosTx.GetTxsEventResponse, customParsers map[string][]parsers.MessageParser) ([]dbTypes.TxDBWrapper, *time.Time, error) {
 	var currTxDbWrappers []dbTypes.TxDBWrapper
 	var blockTime *time.Time
@@ -289,6 +311,9 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 			}
 
 			currMsg := currTx.Body.Messages[msgIdx].GetCachedValue()
+			if currMsg == nil {
+				currMsg = decodeKnownEnvelope(currTx.Body.Messages[msgIdx])
+			}
 			messagesRaw = append(messagesRaw, currTx.Body.Messages[msgIdx].Value)
 
 			// If we reached here, unpacking the entire TX raw was not successful
@@ -309,11 +334,11 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 						msgIdx,
 						currTxResp.Code,
 					)
-					currMessages = append(currMessages, nil)
+					currMessages = append(currMessages, &OpaqueMessage{TypeURL: currTx.Body.Messages[msgIdx].TypeUrl, Raw: currTx.Body.Messages[msgIdx].Value})
 					currLogMsgs = append(currLogMsgs, txtypes.LogMessage{
 						MessageIndex: msgIdx,
+						Events:       indexerEvents.StringEventstoNormalizedEvents(messageEvents(currTxResp.Logs, msgIdx)),
 					})
-					messagesRaw[len(messagesRaw)-1] = nil
 					continue
 				}
 				currMsg = currMsgUnpack
@@ -321,7 +346,7 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 
 			if currMsg != nil {
 				msg := currMsg.(types.Msg)
-				msgEvents := currTxResp.Logs[msgIdx].Events
+				msgEvents := messageEvents(currTxResp.Logs, msgIdx)
 				currTxLog := txtypes.LogMessage{
 					MessageIndex: msgIdx,
 					Events:       indexerEvents.StringEventstoNormalizedEvents(msgEvents),
@@ -342,7 +367,7 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 					currLogMsgs = append(currLogMsgs, txtypes.LogMessage{
 						MessageIndex: msgIdx,
 					})
-					messagesRaw = append(messagesRaw, nil)
+					messagesRaw[len(messagesRaw)-1] = nil
 					continue
 				}
 
@@ -464,33 +489,34 @@ func ProcessTx(cfg *config.IndexConfig, db *gorm.DB, tx txtypes.MergedTx, messag
 	uniqueMessageTypes := make(map[string]models.MessageType)
 	uniqueEventTypes := make(map[string]models.MessageEventType)
 	uniqueEventAttributeKeys := make(map[string]models.MessageEventAttributeKey)
-	// non-zero code means the Tx was unsuccessful. We will still need to account for fees in both cases though.
-	if code == 0 {
-		for messageIndex, message := range tx.Tx.Body.Messages {
-			if message != nil {
-				messageLog := txtypes.GetMessageLogForIndex(tx.TxResponse.Log, messageIndex)
-				messageType, currMessageDBWrapper := ProcessMessage(messageIndex, message, messageTypeURLs[messageIndex], messageLog, uniqueEventTypes, uniqueEventAttributeKeys)
-				currMessageDBWrapper.Message.MessageBytes = messagesRaw[messageIndex]
-				uniqueMessageTypes[messageType] = currMessageDBWrapper.Message.MessageType
-				config.Log.Debug(fmt.Sprintf("[Block: %v] [TX: %v] Found msg of type '%v'.", tx.TxResponse.Height, tx.TxResponse.TxHash, messageType))
+	// Failed transactions retain fees and opaque evidence, but no known-message classifications.
+	for messageIndex, message := range tx.Tx.Body.Messages {
+		_, opaque := message.(*OpaqueMessage)
+		if message != nil && (code == 0 || opaque) {
+			messageLog := txtypes.GetMessageLogForIndex(tx.TxResponse.Log, messageIndex)
+			messageType, currMessageDBWrapper := ProcessMessage(messageIndex, message, messageTypeURLs[messageIndex], messageLog, uniqueEventTypes, uniqueEventAttributeKeys)
+			currMessageDBWrapper.Message.MessageBytes = messagesRaw[messageIndex]
+			currMessageDBWrapper.PreserveOpaqueEvidence = opaque
+			currMessageDBWrapper.Message.Opaque = opaque
+			uniqueMessageTypes[messageType] = currMessageDBWrapper.Message.MessageType
+			config.Log.Debug(fmt.Sprintf("[Block: %v] [TX: %v] Found msg of type '%v'.", tx.TxResponse.Height, tx.TxResponse.TxHash, messageType))
 
-				if customParsers != nil {
-					if customMessageParsers, ok := customParsers[messageType]; ok {
-						for index, customParser := range customMessageParsers {
-							// We deliberately ignore the error here, as we want to continue processing the message even if a custom parser fails
-							parsedData, err := customParser.ParseMessage(message, messageLog, *cfg)
+			if code == 0 && !opaque && customParsers != nil {
+				if customMessageParsers, ok := customParsers[messageType]; ok {
+					for index, customParser := range customMessageParsers {
+						// We deliberately ignore the error here, as we want to continue processing the message even if a custom parser fails
+						parsedData, err := customParser.ParseMessage(message, messageLog, *cfg)
 
-							currMessageDBWrapper.MessageParsedDatasets = append(currMessageDBWrapper.MessageParsedDatasets, parsers.MessageParsedData{
-								Data:   parsedData,
-								Error:  err,
-								Parser: &customMessageParsers[index],
-							})
-						}
+						currMessageDBWrapper.MessageParsedDatasets = append(currMessageDBWrapper.MessageParsedDatasets, parsers.MessageParsedData{
+							Data:   parsedData,
+							Error:  err,
+							Parser: &customMessageParsers[index],
+						})
 					}
 				}
-
-				messages = append(messages, currMessageDBWrapper)
 			}
+
+			messages = append(messages, currMessageDBWrapper)
 		}
 	}
 
@@ -572,9 +598,16 @@ func ProcessSigners(cl *client.ChainClient, authInfo *cosmosTx.AuthInfo, message
 
 // Processes fees into model form, applying denoms and addresses to them
 func ProcessFees(db *gorm.DB, authInfo cosmosTx.AuthInfo, signers []models.Address) ([]models.Fee, error) {
-	feeCoins := authInfo.Fee.Amount
-	payer := authInfo.Fee.GetPayer()
 	fees := []models.Fee{}
+	if authInfo.Fee == nil {
+		return fees, nil
+	}
+	feeCoins := authInfo.Fee.Amount
+	// Fee grants deduct the bank balance of the granter, not the signer.
+	payer := authInfo.Fee.GetGranter()
+	if payer == "" {
+		payer = authInfo.Fee.GetPayer()
+	}
 
 	for _, coin := range feeCoins {
 		zeroFee := big.NewInt(0)
@@ -588,6 +621,9 @@ func ProcessFees(db *gorm.DB, authInfo cosmosTx.AuthInfo, signers []models.Addre
 				payerAddr.Address = payer
 			} else if len(signers) > 0 {
 				payerAddr = signers[0]
+			}
+			if payerAddr.Address == "" {
+				return nil, fmt.Errorf("fee payer unresolved: nonzero %s fee has neither explicit payer nor decoded signer", coin.Denom)
 			}
 
 			fees = append(fees, models.Fee{Amount: amount, Denomination: denom, PayerAddress: payerAddr})

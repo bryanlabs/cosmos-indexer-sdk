@@ -93,10 +93,11 @@ func DoConfigureLogger(logPath string, logLevel string, prettyLogging bool) {
 			writers = io.MultiWriter(os.Stdout, file)
 		}
 	}
+	protected := redactingLogWriter{Writer: writers}
 	if prettyLogging {
-		zlog.Logger = zlog.Output(zerolog.ConsoleWriter{Out: writers})
+		zlog.Logger = zlog.Output(zerolog.ConsoleWriter{Out: protected})
 	} else {
-		zlog.Logger = zlog.Output(writers)
+		zlog.Logger = zlog.Output(protected)
 	}
 
 	// Set the log level (default to info)

@@ -99,10 +99,10 @@ type wasmCoverage struct {
 // actually classified, not a guess.
 func (s *Server) contractCoverage(contract string) wasmCoverage {
 	var categories []string
-	s.db.Table("taxable_events").
+	s.db.Table(apiTaxableEvents).
 		Where("asset LIKE ? OR from_addr = ? OR to_addr = ?", contract+"/%", contract, contract).
-		Distinct("category").
-		Pluck("category", &categories)
+		Distinct(apiCategory).
+		Pluck(apiCategory, &categories)
 	return wasmCoverage{Classified: len(categories) > 0, Capabilities: categories}
 }
 
@@ -110,10 +110,10 @@ func (s *Server) contractCoverage(contract string) wasmCoverage {
 func (s *Server) handleWasmCoverage(w http.ResponseWriter, r *http.Request) {
 	contract := strings.TrimSpace(r.URL.Query().Get("contract_address"))
 	if contract == "" {
-		http.Error(w, "contract_address is required", http.StatusBadRequest)
+		http.Error(w, apiContractRequired, http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(s.contractCoverage(contract))
 }
 
@@ -132,12 +132,12 @@ func (s *Server) handleCreateWasmSubmission(w http.ResponseWriter, r *http.Reque
 		Note            string `json:"note"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, apiInvalidJSONBody, http.StatusBadRequest)
 		return
 	}
 	body.ContractAddress = strings.TrimSpace(body.ContractAddress)
 	if body.ContractAddress == "" {
-		http.Error(w, "contract_address is required", http.StatusBadRequest)
+		http.Error(w, apiContractRequired, http.StatusBadRequest)
 		return
 	}
 	switch body.Kind {
@@ -163,7 +163,7 @@ func (s *Server) handleCreateWasmSubmission(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(sub)
 }
@@ -174,15 +174,15 @@ func (s *Server) handleCreateWasmSubmission(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleWasmSubmissionStatus(w http.ResponseWriter, r *http.Request) {
 	contract := strings.TrimSpace(r.URL.Query().Get("contract_address"))
 	if contract == "" {
-		http.Error(w, "contract_address is required", http.StatusBadRequest)
+		http.Error(w, apiContractRequired, http.StatusBadRequest)
 		return
 	}
 	resp := map[string]any{"coverage": s.contractCoverage(contract)}
 	var sub WasmSubmission
-	if s.db.Where("contract_address = ?", contract).Order("created_at desc").Limit(1).Find(&sub).RowsAffected > 0 {
+	if s.db.Where("contract_address = ?", contract).Order(apiCreatedAtDesc).Limit(1).Find(&sub).RowsAffected > 0 {
 		resp["submission"] = sub
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -191,8 +191,8 @@ func (s *Server) handleWasmSubmissionStatus(w http.ResponseWriter, r *http.Reque
 // boundary as every other endpoint; the frontend gates who can reach this
 // route to a real person before proxying the request.
 func (s *Server) handleListWasmSubmissions(w http.ResponseWriter, r *http.Request) {
-	tx := s.db.Order("created_at desc")
-	if status := r.URL.Query().Get("status"); status != "" {
+	tx := s.db.Order(apiCreatedAtDesc)
+	if status := r.URL.Query().Get(apiStatus); status != "" {
 		tx = tx.Where("status = ?", status)
 	}
 	var subs []WasmSubmission
@@ -200,7 +200,7 @@ func (s *Server) handleListWasmSubmissions(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(map[string]any{"submissions": subs})
 }
 
@@ -219,7 +219,7 @@ func (s *Server) handleUpdateWasmSubmission(w http.ResponseWriter, r *http.Reque
 		Reason string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, apiInvalidJSONBody, http.StatusBadRequest)
 		return
 	}
 	if !validWasmStatus[body.Status] {
@@ -227,7 +227,7 @@ func (s *Server) handleUpdateWasmSubmission(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	res := s.db.Model(&WasmSubmission{}).Where("id = ?", id).
-		Updates(map[string]any{"status": body.Status, "status_reason": body.Reason})
+		Updates(map[string]any{apiStatus: body.Status, "status_reason": body.Reason})
 	if res.Error != nil {
 		http.Error(w, res.Error.Error(), http.StatusInternalServerError)
 		return

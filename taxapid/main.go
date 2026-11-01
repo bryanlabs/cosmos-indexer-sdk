@@ -39,7 +39,7 @@ func nativeAssetFromEnv() taxapi.NativeAsset {
 		if n, err := strconv.Atoi(dec); err == nil {
 			native.Decimals = n
 		} else {
-			log.Printf("NATIVE_DECIMALS=%q is not an integer, keeping default %d", dec, native.Decimals)
+			log.Printf("NATIVE_DECIMALS is not an integer, keeping default %d", native.Decimals)
 		}
 	}
 	return native
@@ -92,7 +92,13 @@ func main() {
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)
-	if err := http.ListenAndServe(listen, srv.Handler()); err != nil {
+	httpServer := &http.Server{
+		Addr:              listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }

@@ -46,7 +46,7 @@ type lot struct {
 // could be an exchange withdrawal or a wallet we don't track — the FMV at
 // receipt is not necessarily what the user actually paid for it.
 func basisUnknownFor(category string) bool {
-	return category == "transfer" || category == "ibc_in"
+	return category == apiTransfer || category == "ibc_in"
 }
 
 // basisUnknownForRow extends basisUnknownFor with the user's tag: a receipt
@@ -93,19 +93,19 @@ func Build8949(rows []Row) []Form8949Row {
 			continue
 		}
 		// NFT acquisition via mint: establishes the NFT's cost basis.
-		if r.Category == "nft_mint" {
+		if r.Category == apiNFTMint {
 			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
 			continue
 		}
 
 		// NFT marketplace sale: dispose/acquire the NFT, valued in USD.
-		if r.Category == "nft_sale" {
+		if r.Category == apiNFTSale {
 			key := r.Asset
 			desc := "NFT " + r.Asset
 			switch r.Direction {
 			case "in": // buyer acquires the NFT; basis = USD paid
 				nftLots[key] = append(nftLots[key], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
-			case "out": // seller disposes the NFT; proceeds = USD received
+			case apiOut:
 				proceeds := r.ValueUSD
 				q := nftLots[key]
 				if len(q) == 0 {
@@ -113,8 +113,8 @@ func Build8949(rows []Row) []Form8949Row {
 					// view (bought elsewhere, or minted before the indexed window).
 					out = append(out, Form8949Row{
 						Description:  desc + basisUnknownNote,
-						DateAcquired: "Various",
-						DateSold:     r.Time.UTC().Format("01/02/2006"),
+						DateAcquired: apiVariousDates,
+						DateSold:     r.Time.UTC().Format(apiUSDateLayout),
 						Proceeds:     proceeds,
 						CostBasis:    decimal.Zero,
 						GainLoss:     proceeds,
@@ -125,8 +125,8 @@ func Build8949(rows []Row) []Form8949Row {
 					l := q[0]
 					out = append(out, Form8949Row{
 						Description:  desc,
-						DateAcquired: l.date.UTC().Format("01/02/2006"),
-						DateSold:     r.Time.UTC().Format("01/02/2006"),
+						DateAcquired: l.date.UTC().Format(apiUSDateLayout),
+						DateSold:     r.Time.UTC().Format(apiUSDateLayout),
 						Proceeds:     proceeds,
 						CostBasis:    l.cost,
 						GainLoss:     proceeds.Sub(l.cost),
@@ -146,7 +146,7 @@ func Build8949(rows []Row) []Form8949Row {
 			asset = r.AssetIdentity.RawDenom
 		}
 		switch {
-		case r.Direction == "in" && r.Category != "fee":
+		case r.Direction == "in" && r.Category != apiFee:
 			// acquisition
 			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownForRow(r)
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
@@ -160,7 +160,7 @@ func Build8949(rows []Row) []Form8949Row {
 			})
 			sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
 
-		case r.Direction == "out":
+		case r.Direction == apiOut:
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
 				remaining := r.Amount
 				for remaining.IsPositive() && len(lots[asset]) > 0 {
@@ -173,7 +173,7 @@ func Build8949(rows []Row) []Form8949Row {
 						q[0].qty = q[0].qty.Sub(take)
 					}
 				}
-				out = append(out, Form8949Row{Description: r.Amount.String() + " " + asset + " (user-supplied basis/value)", DateAcquired: r.ManualAcquiredDate.UTC().Format("01/02/2006"), DateSold: r.Time.UTC().Format("01/02/2006"), Proceeds: r.ValueUSD, CostBasis: *r.ManualBasisUSD, GainLoss: r.ValueUSD.Sub(*r.ManualBasisUSD), LongTerm: r.Time.Sub(*r.ManualAcquiredDate) > 365*24*time.Hour})
+				out = append(out, Form8949Row{Description: r.Amount.String() + " " + asset + " (user-supplied basis/value)", DateAcquired: r.ManualAcquiredDate.UTC().Format(apiUSDateLayout), DateSold: r.Time.UTC().Format(apiUSDateLayout), Proceeds: r.ValueUSD, CostBasis: *r.ManualBasisUSD, GainLoss: r.ValueUSD.Sub(*r.ManualBasisUSD), LongTerm: r.Time.Sub(*r.ManualAcquiredDate) > 365*24*time.Hour})
 				break
 			}
 			// disposal (incl. fee spends): consume FIFO
@@ -186,8 +186,8 @@ func Build8949(rows []Row) []Form8949Row {
 					proceeds := remaining.Mul(disposalPrice)
 					out = append(out, Form8949Row{
 						Description:  remaining.String() + " " + asset + basisUnknownNote,
-						DateAcquired: "Various",
-						DateSold:     r.Time.UTC().Format("01/02/2006"),
+						DateAcquired: apiVariousDates,
+						DateSold:     r.Time.UTC().Format(apiUSDateLayout),
 						Proceeds:     proceeds,
 						CostBasis:    decimal.Zero,
 						GainLoss:     proceeds,
@@ -217,8 +217,8 @@ func Build8949(rows []Row) []Form8949Row {
 				}
 				out = append(out, Form8949Row{
 					Description:  desc,
-					DateAcquired: l.date.UTC().Format("01/02/2006"),
-					DateSold:     r.Time.UTC().Format("01/02/2006"),
+					DateAcquired: l.date.UTC().Format(apiUSDateLayout),
+					DateSold:     r.Time.UTC().Format(apiUSDateLayout),
 					Proceeds:     proceeds,
 					CostBasis:    cost,
 					GainLoss:     gain,

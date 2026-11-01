@@ -11,7 +11,7 @@ import (
 
 func TestBlockIndexWindowQuery(t *testing.T) {
 	// DryRun plus disabled ping constructs SQL without contacting a database.
-	db, err := gorm.Open(postgres.New(postgres.Config{DSN: "host=127.0.0.1 port=1 user=unused dbname=unused sslmode=disable"}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	db, err := gorm.Open(postgres.New(postgres.Config{DSN: dryRunPostgresDSN}), &gorm.Config{DryRun: true, DisableAutomaticPing: true})
 	if err != nil {
 		t.Fatal(err)
 	}

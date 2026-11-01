@@ -3,6 +3,7 @@ package taxapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -66,9 +67,9 @@ func decisionKeyKind(key string) string {
 	case key == DecisionKeySpamPolicy:
 		return "policy"
 	case strings.HasPrefix(key, DecisionKeyDenomPrefix):
-		return "denom"
+		return apiDenom
 	default:
-		return "record"
+		return apiRecord
 	}
 }
 
@@ -107,17 +108,17 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 		valueDecoder := json.NewDecoder(bytes.NewReader(value))
 		valueDecoder.DisallowUnknownFields()
 		if err := valueDecoder.Decode(&decision); err != nil {
-			return nil, fmt.Errorf("asset decision %q: %w", recordID, err)
+			return nil, fmt.Errorf(apiAssetDecisionErrorFormat, recordID, err)
 		}
 		if err := requireJSONEOF(valueDecoder); err != nil {
-			return nil, fmt.Errorf("asset decision %q: %w", recordID, err)
+			return nil, fmt.Errorf(apiAssetDecisionErrorFormat, recordID, err)
 		}
 		if decision.AppliedFrom != "" {
 			return nil, fmt.Errorf("asset decision %q: applied_from is set by the server", recordID)
 		}
 		normalized, err := NormalizeKeyedDecision(recordID, decision)
 		if err != nil {
-			return nil, fmt.Errorf("asset decision %q: %w", recordID, err)
+			return nil, fmt.Errorf(apiAssetDecisionErrorFormat, recordID, err)
 		}
 		out[recordID] = normalized
 	}
@@ -134,7 +135,7 @@ func NormalizeKeyedDecision(key string, decision AssetDecision) (AssetDecision, 
 			return AssetDecision{}, fmt.Errorf("policy:spam can only exclude (mode %q)", AssetDecisionExclude)
 		}
 		return NormalizeAssetDecision(decision)
-	case "denom":
+	case apiDenom:
 		if len(key) <= len(DecisionKeyDenomPrefix) {
 			return AssetDecision{}, fmt.Errorf("denom key needs a raw denomination after %q", DecisionKeyDenomPrefix)
 		}
@@ -210,7 +211,7 @@ func ValidateAssetDecisions(decisions AssetDecisions) error {
 			return err
 		}
 		if _, err := NormalizeKeyedDecision(recordID, decision); err != nil {
-			return fmt.Errorf("asset decision %q: %w", recordID, err)
+			return fmt.Errorf(apiAssetDecisionErrorFormat, recordID, err)
 		}
 	}
 	return nil
@@ -313,11 +314,11 @@ func validateToken(token string) error {
 	if token == "" || len(token) > MaxAssetDecisionToken {
 		return fmt.Errorf("token must be 1 through %d bytes", MaxAssetDecisionToken)
 	}
-	if !(token[0] >= 'A' && token[0] <= 'Z' || token[0] >= '0' && token[0] <= '9') {
+	if (token[0] < 'A' || token[0] > 'Z') && (token[0] < '0' || token[0] > '9') {
 		return fmt.Errorf("token must start with a letter or digit")
 	}
 	for _, r := range token {
-		if !(r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '_' && r != '-' {
 			return fmt.Errorf("token contains unsafe ticker characters")
 		}
 	}
@@ -365,19 +366,19 @@ func validateDecimal(value string, positive bool) error {
 }
 
 func validateDate(value string) error {
-	if len(value) != len("2006-01-02") {
-		return fmt.Errorf("must use YYYY-MM-DD")
+	if len(value) != len(apiDateLayout) {
+		return errors.New(apiMustUseYYYYMMDD)
 	}
 	for i, r := range value {
 		if i == 4 || i == 7 {
 			if r != '-' {
-				return fmt.Errorf("must use YYYY-MM-DD")
+				return errors.New(apiMustUseYYYYMMDD)
 			}
 		} else if r < '0' || r > '9' {
-			return fmt.Errorf("must use YYYY-MM-DD")
+			return errors.New(apiMustUseYYYYMMDD)
 		}
 	}
-	if _, err := time.Parse("2006-01-02", value); err != nil {
+	if _, err := time.Parse(apiDateLayout, value); err != nil {
 		return fmt.Errorf("must be a valid calendar date")
 	}
 	return nil

@@ -17,10 +17,10 @@ import (
 func rewardRow() Row {
 	return Row{
 		Time:      time.Date(2026, 3, 15, 10, 30, 0, 0, time.UTC),
-		Category:  "reward",
+		Category:  apiReward,
 		Direction: "in",
-		Symbol:    "ATOM",
-		Denom:     "uatom",
+		Symbol:    apiSymbolATOM,
+		Denom:     apiUatom,
 		Amount:    decimal.NewFromFloat(1.5),
 		PriceUSD:  decimal.NewFromFloat(8),
 		ValueUSD:  decimal.NewFromFloat(12),
@@ -55,43 +55,43 @@ func TestWriteCSVImportContractsAndEscaping(t *testing.T) {
 	other := row
 	other.ValidatorAddress = "cosmosvaloper1validatortwo"
 	other.ValidatorMoniker = "Second validator"
-	other.RewardTrigger = "redelegate"
+	other.RewardTrigger = apiRedelegate
 
 	formats := map[string]struct {
 		header []string
 		width  int
 		desc   int // -1 means this fixed schema has no description field
 	}{
-		"koinly": {
-			header: []string{"Date", "Sent Amount", "Sent Currency", "Received Amount", "Received Currency", "Fee Amount", "Fee Currency", "Net Worth Amount", "Net Worth Currency", "Label", "Description", "TxHash"},
+		apiKoinly: {
+			header: []string{apiHeaderDate, "Sent Amount", apiSentCurrency, "Received Amount", apiReceivedCurrency, apiFeeAmountHeader, apiFeeCurrencyHeader, "Net Worth Amount", "Net Worth Currency", "Label", apiDescription, apiHeaderTxHash},
 			width:  12, desc: 10,
 		},
-		"cointracker": {
-			header: []string{"Date", "Received Quantity", "Received Currency", "Sent Quantity", "Sent Currency", "Fee Amount", "Fee Currency", "Tag"},
+		apiCointracker: {
+			header: []string{apiHeaderDate, "Received Quantity", apiReceivedCurrency, "Sent Quantity", apiSentCurrency, apiFeeAmountHeader, apiFeeCurrencyHeader, "Tag"},
 			width:  8, desc: -1,
 		},
-		"coinledger": {
-			header: []string{"Date (UTC)", "Platform", "Asset Sent", "Amount Sent", "Asset Received", "Amount Received", "Fee Currency", "Fee Amount", "Type", "Description", "TxHash"},
+		apiCoinledger: {
+			header: []string{"Date (UTC)", "Platform", "Asset Sent", "Amount Sent", "Asset Received", "Amount Received", apiFeeCurrencyHeader, apiFeeAmountHeader, apiTypeHeader, apiDescription, apiHeaderTxHash},
 			width:  11, desc: 9,
 		},
-		"summ": {
-			header: []string{"Timestamp (UTC)", "Type", "Base Currency", "Base Amount", "Quote Currency (Optional)", "Quote Amount (Optional)", "Fee Currency (Optional)", "Fee Amount (Optional)", "From (Optional)", "To (Optional)", "Blockchain (Optional)", "ID (Optional)", "Description (Optional)", "Reference Price Per Unit (Optional)", "Reference Price Currency (Optional)"},
+		apiSumm: {
+			header: []string{apiTimestampUTC, apiTypeHeader, apiBaseCurrency, apiBaseAmount, apiQuoteCurrencyOptional, apiQuoteAmountOptional, apiFeeCurrencyOptional, apiFeeAmountOptional, apiFromOptional, apiToOptional, apiBlockchainOptional, apiIDOptional, apiDescriptionOptional, apiReferencePricePerUnitOptional, apiReferencePriceCurrencyOptional},
 			width:  15, desc: 12,
 		},
-		"cryptotaxcalculator": {
-			header: []string{"Timestamp (UTC)", "Type", "Base Currency", "Base Amount", "Quote Currency (Optional)", "Quote Amount (Optional)", "Fee Currency (Optional)", "Fee Amount (Optional)", "From (Optional)", "To (Optional)", "Blockchain (Optional)", "ID (Optional)", "Description (Optional)", "Reference Price Per Unit (Optional)", "Reference Price Currency (Optional)"},
+		apiCryptotaxcalculator: {
+			header: []string{apiTimestampUTC, apiTypeHeader, apiBaseCurrency, apiBaseAmount, apiQuoteCurrencyOptional, apiQuoteAmountOptional, apiFeeCurrencyOptional, apiFeeAmountOptional, apiFromOptional, apiToOptional, apiBlockchainOptional, apiIDOptional, apiDescriptionOptional, apiReferencePricePerUnitOptional, apiReferencePriceCurrencyOptional},
 			width:  15, desc: 12,
 		},
-		"cryptio": {
-			header: []string{"transactionDate", "orderType", "txhash", "incomingAsset", "incomingVolume", "incomingUnitRate", "incomingTransactionValue", "outgoingAsset", "outgoingVolume", "outgoingUnitRate", "outgoingTransactionValue", "feeAsset", "feeVolume", "feeUnitRate", "feeTransactionValue", "otherParties", "note"},
+		apiCryptio: {
+			header: []string{"transactionDate", "orderType", "txhash", "incomingAsset", "incomingVolume", "incomingUnitRate", "incomingTransactionValue", "outgoingAsset", "outgoingVolume", "outgoingUnitRate", "outgoingTransactionValue", "feeAsset", "feeVolume", "feeUnitRate", "feeTransactionValue", "otherParties", apiNote},
 			width:  17, desc: 16,
 		},
-		"bitwave": {
-			header: []string{"id", "date", "type", "amount", "amountTicker", "txHash", "contactAddress", "category"},
+		apiBitwave: {
+			header: []string{"id", apiDate, apiType, apiAmount, "amountTicker", "txHash", "contactAddress", apiCategory},
 			width:  8, desc: 7,
 		},
-		"generic": {
-			header: []string{"date_utc", "tx_hash", "category", "direction", "asset", "denom", "amount", "unit_price_usd", "value_usd", "from", "to", "nft_asset", "chain", "decimals_assumed", "price_missing", "validator_address", "validator_moniker", "reward_trigger", "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", "detail"},
+		apiGeneric: {
+			header: []string{apiDateUTC, apiTxHash, apiCategory, "direction", apiAsset, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, "from", "to", "nft_asset", apiChain, "decimals_assumed", apiPriceMissing, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", apiDetail},
 			width:  27, desc: -1,
 		},
 	}
@@ -111,16 +111,18 @@ func TestWriteCSVImportContractsAndEscaping(t *testing.T) {
 				}
 			}
 
-			if want.desc >= 0 {
+			switch {
+			case want.desc >= 0:
 				assertStakingDescription(t, records[1][want.desc], row)
 				assertStakingDescription(t, records[2][want.desc], other)
-			} else if format == "cointracker" {
+			case format == apiCointracker:
 				// This is intentionally the vendor's fixed eight-column schema.
 				// It has no note field in which metadata could be carried.
 				if strings.Contains(strings.Join(records[1], "|"), "staking_metadata") {
 					t.Fatal("CoinTracker must not gain a metadata field")
 				}
-			} else { // generic has explicit trailing attribution columns.
+			default:
+				// Generic has explicit trailing attribution columns.
 				if records[1][15] != row.ValidatorAddress || records[2][15] != other.ValidatorAddress {
 					t.Fatalf("generic validator addresses = %q, %q", records[1][15], records[2][15])
 				}
@@ -138,7 +140,7 @@ func TestGenericCSVProtectsValidatorMonikerFormula(t *testing.T) {
 			row := rewardRow()
 			row.ValidatorAddress = "cosmosvaloper1validator"
 			row.ValidatorMoniker = moniker
-			records := readExport(t, "generic", []Row{row})
+			records := readExport(t, apiGeneric, []Row{row})
 			if got, want := records[1][16], "'"+moniker; got != want {
 				t.Fatalf("validator moniker = %q, want %q", got, want)
 			}
@@ -149,10 +151,10 @@ func TestGenericCSVProtectsValidatorMonikerFormula(t *testing.T) {
 func TestGenericCSVExcludedIdentityDisplay(t *testing.T) {
 	const rawDenom = "factory/juno1issuer/uatom"
 	identity := func(name string) *AssetIdentity {
-		return &AssetIdentity{RecordID: "review-id", ReportedLabel: "ATOM", TokenName: name, RawDenom: rawDenom}
+		return &AssetIdentity{RecordID: "review-id", ReportedLabel: apiSymbolATOM, TokenName: name, RawDenom: rawDenom}
 	}
 	excluded := func(name string) Row {
-		return Row{Symbol: "ATOM", Denom: rawDenom, AssetIdentity: identity(name), AssetDecision: &AssetDecision{Mode: AssetDecisionExclude}, Excluded: true}
+		return Row{Symbol: apiSymbolATOM, Denom: rawDenom, AssetIdentity: identity(name), AssetDecision: &AssetDecision{Mode: AssetDecisionExclude}, Excluded: true}
 	}
 
 	for _, tc := range []struct {
@@ -160,39 +162,39 @@ func TestGenericCSVExcludedIdentityDisplay(t *testing.T) {
 		row  Row
 		want string
 	}{
-		{"named mismatch", excluded(" ATOMREWARDS "), "ATOMREWARDS"},
+		{"named mismatch", excluded(" ATOMREWARDS "), junoFactoryUatomSymbol},
 		{"other named mismatch", excluded("AIRDROP67"), "AIRDROP67"},
-		{"empty issuer name", excluded(""), "UNVERIFIED (denom: " + rawDenom + ")"},
-		{"issuer calls it ATOM", excluded("aToM"), "UNVERIFIED (denom: " + rawDenom + ")"},
-		{"issuer calls it uatom", excluded("uatom"), "UNVERIFIED (denom: " + rawDenom + ")"},
-		{"official atom match", func() Row { r := excluded("ATOM"); r.AssetIdentity.OfficialAtomMatch = true; return r }(), "ATOM"},
+		{"empty issuer name", excluded(""), apiUnverifiedDenomPrefix + rawDenom + ")"},
+		{"issuer calls it ATOM", excluded("aToM"), apiUnverifiedDenomPrefix + rawDenom + ")"},
+		{"issuer calls it uatom", excluded(apiUatom), apiUnverifiedDenomPrefix + rawDenom + ")"},
+		{"official atom match", func() Row { r := excluded(apiSymbolATOM); r.AssetIdentity.OfficialAtomMatch = true; return r }(), apiSymbolATOM},
 		{"formula-prefixed issuer name", excluded("=AIRDROP"), "'=AIRDROP"},
-		{"native atom", Row{Symbol: "ATOM", Denom: "uatom"}, "ATOM"},
-		{"genuine ibc atom", Row{Symbol: "ATOM", Denom: "ibc/GENUINE", IsIBC: true}, "ATOM"},
+		{"native atom", Row{Symbol: apiSymbolATOM, Denom: apiUatom}, apiSymbolATOM},
+		{"genuine ibc atom", Row{Symbol: apiSymbolATOM, Denom: "ibc/GENUINE", IsIBC: true}, apiSymbolATOM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			records := readExport(t, "generic", []Row{tc.row})
+			records := readExport(t, apiGeneric, []Row{tc.row})
 			if got := records[1][4]; got != tc.want {
 				t.Fatalf("asset = %q, want %q", got, tc.want)
 			}
 		})
 	}
 
-	row := excluded("ATOMREWARDS")
-	records := readExport(t, "generic", []Row{row})
+	row := excluded(junoFactoryUatomSymbol)
+	records := readExport(t, apiGeneric, []Row{row})
 	var metadata AssetIdentity
 	if err := json.Unmarshal([]byte(records[1][18]), &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.ReportedLabel != "ATOM" || metadata.TokenName != "ATOMREWARDS" || metadata.RawDenom != rawDenom {
+	if metadata.ReportedLabel != apiSymbolATOM || metadata.TokenName != junoFactoryUatomSymbol || metadata.RawDenom != rawDenom {
 		t.Fatalf("generic display changed identity evidence: %+v", metadata)
 	}
-	if row.Symbol != "ATOM" || row.AssetIdentity.ReportedLabel != "ATOM" {
+	if row.Symbol != apiSymbolATOM || row.AssetIdentity.ReportedLabel != apiSymbolATOM {
 		t.Fatal("generic display mutated original row evidence")
 	}
 
-	override := Row{Symbol: "ATOM", Denom: rawDenom, AssetIdentity: identity("ATOMREWARDS"), AssetDecision: &AssetDecision{Mode: AssetDecisionOverride}}
-	if got := readExport(t, "generic", []Row{override})[1][4]; got != "ATOM" {
+	override := Row{Symbol: apiSymbolATOM, Denom: rawDenom, AssetIdentity: identity(junoFactoryUatomSymbol), AssetDecision: &AssetDecision{Mode: AssetDecisionOverride}}
+	if got := readExport(t, apiGeneric, []Row{override})[1][4]; got != apiSymbolATOM {
 		t.Fatalf("user override asset = %q, want ATOM", got)
 	}
 }
@@ -202,12 +204,12 @@ func TestWriteCSVGenericRetainsSameTransactionValidatorRows(t *testing.T) {
 	first.TxHash = "same-transaction"
 	first.ValidatorAddress = "cosmosvaloper1first"
 	first.ValidatorMoniker = "First"
-	first.RewardTrigger = "redelegate"
+	first.RewardTrigger = apiRedelegate
 	second := first
 	second.ValidatorAddress = "cosmosvaloper1second"
 	second.ValidatorMoniker = "Second"
 
-	records := readExport(t, "generic", []Row{first, second})
+	records := readExport(t, apiGeneric, []Row{first, second})
 	if len(records) != 3 || records[1][1] != records[2][1] {
 		t.Fatalf("same transaction rows were not retained: %#v", records)
 	}
@@ -223,11 +225,11 @@ func assertStakingDescription(t *testing.T, description string, row Row) {
 	if !strings.HasSuffix(description, decimalsWarning+priceWarning) {
 		t.Fatalf("warning suffixes lost or reordered: %q", description)
 	}
-	metadataStart := strings.Index(description, " | staking_metadata=")
+	metadataStart := strings.Index(description, apiStakingMetadata)
 	if metadataStart < 0 {
 		t.Fatalf("staking metadata missing: %q", description)
 	}
-	raw := strings.TrimSuffix(description[metadataStart+len(" | staking_metadata="):], decimalsWarning+priceWarning)
+	raw := strings.TrimSuffix(description[metadataStart+len(apiStakingMetadata):], decimalsWarning+priceWarning)
 	var metadata struct {
 		ValidatorAddress string `json:"validator_address"`
 		ValidatorMoniker string `json:"validator_moniker"`

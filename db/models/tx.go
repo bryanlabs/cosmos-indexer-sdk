@@ -38,7 +38,7 @@ type Fee struct {
 func (b *Fee) BeforeCreate(tx *gorm.DB) (err error) {
 	tx.Statement.AddClause(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "denomination_id"}},
-		DoUpdates: clause.AssignmentColumns([]string{"amount"}),
+		DoUpdates: clause.AssignmentColumns([]string{"amount", "payer_address_id"}),
 	})
 	return nil
 }
@@ -56,6 +56,9 @@ type Message struct {
 	MessageType   MessageType
 	MessageIndex  int `gorm:"uniqueIndex:messageIndex,priority:2"`
 	MessageBytes  []byte
+	// Opaque marks retained payloads the SDK could not decode. Older rows need
+	// replay before absence of this marker can establish decoding completeness.
+	Opaque bool `gorm:"not null;default:false;index:idx_message_opaque,where:opaque = true,option:CONCURRENTLY"`
 }
 
 type FailedMessage struct {

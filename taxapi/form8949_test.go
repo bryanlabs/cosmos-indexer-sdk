@@ -16,8 +16,8 @@ func TestBuild8949FIFOGain(t *testing.T) {
 	rows := []Row{
 		// Acquired via reward: a known on-chain acquisition, so basis is trusted
 		// (see TestBuild8949TransferInHasUnknownBasis for the opposite case).
-		{Time: day1, Direction: "in", Category: "reward", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
-		{Time: day10, Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(4), PriceUSD: d(3)},
+		{Time: day1, Direction: "in", Category: apiReward, Symbol: apiSymbolATOM, Amount: d(10), PriceUSD: d(2)},
+		{Time: day10, Direction: apiOut, Category: apiTransfer, Symbol: apiSymbolATOM, Amount: d(4), PriceUSD: d(3)},
 	}
 	got := Build8949(rows)
 	if len(got) != 1 {
@@ -34,8 +34,8 @@ func TestBuild8949NFTSale(t *testing.T) {
 	sell := buy.AddDate(0, 0, 10)
 	rows := []Row{
 		// Bought NFT for ~$2, sold for ~$3 → short-term gain $1 on the NFT itself.
-		{Time: buy, Direction: "in", Category: "nft_sale", Asset: "coll/42", ValueUSD: d(2)},
-		{Time: sell, Direction: "out", Category: "nft_sale", Asset: "coll/42", ValueUSD: d(3)},
+		{Time: buy, Direction: "in", Category: apiNFTSale, Asset: "coll/42", ValueUSD: d(2)},
+		{Time: sell, Direction: apiOut, Category: apiNFTSale, Asset: "coll/42", ValueUSD: d(3)},
 	}
 	got := Build8949(rows)
 	if len(got) != 1 {
@@ -51,9 +51,9 @@ func TestBuild8949NFTSale(t *testing.T) {
 // An NFT sold without a recorded prior buy has unknown ("Various") basis.
 func TestBuild8949NFTUnknownBasis(t *testing.T) {
 	sell := time.Date(2026, 6, 25, 0, 0, 0, 0, time.UTC)
-	rows := []Row{{Time: sell, Direction: "out", Category: "nft_sale", Asset: "coll/7", ValueUSD: d(5)}}
+	rows := []Row{{Time: sell, Direction: apiOut, Category: apiNFTSale, Asset: "coll/7", ValueUSD: d(5)}}
 	got := Build8949(rows)
-	if len(got) != 1 || got[0].DateAcquired != "Various" || !got[0].CostBasis.IsZero() || !got[0].Proceeds.Equal(d(5)) {
+	if len(got) != 1 || got[0].DateAcquired != apiVariousDates || !got[0].CostBasis.IsZero() || !got[0].Proceeds.Equal(d(5)) {
 		t.Fatalf("nft unknown-basis wrong: %+v", got)
 	}
 }
@@ -62,8 +62,8 @@ func TestBuild8949LongTermAndUnknownBasis(t *testing.T) {
 	buy := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	sell := buy.AddDate(1, 0, 1) // >365d → long term
 	rows := []Row{
-		{Time: buy, Direction: "in", Category: "reward", Symbol: "ATOM", Amount: d(5), PriceUSD: d(2)},
-		{Time: sell, Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(8), PriceUSD: d(4)},
+		{Time: buy, Direction: "in", Category: apiReward, Symbol: apiSymbolATOM, Amount: d(5), PriceUSD: d(2)},
+		{Time: sell, Direction: apiOut, Category: apiTransfer, Symbol: apiSymbolATOM, Amount: d(8), PriceUSD: d(4)},
 	}
 	got := Build8949(rows)
 	// 5 from the lot (long-term) + 3 with unknown basis
@@ -73,7 +73,7 @@ func TestBuild8949LongTermAndUnknownBasis(t *testing.T) {
 	if !got[0].LongTerm || !got[0].CostBasis.Equal(d(10)) || !got[0].Proceeds.Equal(d(20)) {
 		t.Fatalf("lot line wrong: %+v", got[0])
 	}
-	if got[1].DateAcquired != "Various" || !got[1].CostBasis.IsZero() || !got[1].Proceeds.Equal(d(12)) {
+	if got[1].DateAcquired != apiVariousDates || !got[1].CostBasis.IsZero() || !got[1].Proceeds.Equal(d(12)) {
 		t.Fatalf("unknown-basis line wrong: %+v", got[1])
 	}
 	if got[0].BasisUnknown {
@@ -94,8 +94,8 @@ func TestBuild8949TransferInHasUnknownBasis(t *testing.T) {
 	in := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	out := in.AddDate(0, 0, 5)
 	rows := []Row{
-		{Time: in, Direction: "in", Category: "transfer", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
-		{Time: out, Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(10), PriceUSD: d(3)},
+		{Time: in, Direction: "in", Category: apiTransfer, Symbol: apiSymbolATOM, Amount: d(10), PriceUSD: d(2)},
+		{Time: out, Direction: apiOut, Category: apiTransfer, Symbol: apiSymbolATOM, Amount: d(10), PriceUSD: d(3)},
 	}
 	got := Build8949(rows)
 	if len(got) != 1 || !got[0].BasisUnknown {
@@ -121,16 +121,16 @@ func TestBuild8949KnownVsUnknownBasisCategories(t *testing.T) {
 		category string
 		unknown  bool
 	}{
-		{"reward", false},
-		{"commission", false},
-		{"swap", false},
-		{"transfer", true},
+		{apiReward, false},
+		{apiCommission, false},
+		{apiSwap, false},
+		{apiTransfer, true},
 		{"ibc_in", true},
 	}
 	for _, c := range cases {
 		rows := []Row{
 			{Time: base, Direction: "in", Category: c.category, Symbol: "XYZ", Amount: d(1), PriceUSD: d(5)},
-			{Time: base.AddDate(0, 0, 1), Direction: "out", Category: "transfer", Symbol: "XYZ", Amount: d(1), PriceUSD: d(6)},
+			{Time: base.AddDate(0, 0, 1), Direction: apiOut, Category: apiTransfer, Symbol: "XYZ", Amount: d(1), PriceUSD: d(6)},
 		}
 		got := Build8949(rows)
 		if len(got) != 1 || got[0].BasisUnknown != c.unknown {
@@ -145,9 +145,9 @@ func TestBuild8949KnownVsUnknownBasisCategories(t *testing.T) {
 func TestPureOnChainWalletHasNoUnknownBasis(t *testing.T) {
 	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	rows := []Row{
-		{Time: base, Direction: "in", Category: "reward", Symbol: "ATOM", Amount: d(10), PriceUSD: d(2)},
-		{Time: base.AddDate(0, 0, 5), Direction: "in", Category: "commission", Symbol: "ATOM", Amount: d(5), PriceUSD: d(2)},
-		{Time: base.AddDate(0, 0, 10), Direction: "out", Category: "transfer", Symbol: "ATOM", Amount: d(3), PriceUSD: d(4)},
+		{Time: base, Direction: "in", Category: apiReward, Symbol: apiSymbolATOM, Amount: d(10), PriceUSD: d(2)},
+		{Time: base.AddDate(0, 0, 5), Direction: "in", Category: apiCommission, Symbol: apiSymbolATOM, Amount: d(5), PriceUSD: d(2)},
+		{Time: base.AddDate(0, 0, 10), Direction: apiOut, Category: apiTransfer, Symbol: apiSymbolATOM, Amount: d(3), PriceUSD: d(4)},
 	}
 	got := Build8949(rows)
 	if CountUnknownBasis(got) != 0 {
@@ -160,7 +160,7 @@ func TestPureOnChainWalletHasNoUnknownBasis(t *testing.T) {
 // pooled basis (Rev. Proc. 2024-28, see INF-204).
 func TestWrite8949CSVIncludesAddress(t *testing.T) {
 	rows := []Form8949Row{
-		{Address: "cosmos1abc", Description: "1 ATOM", DateAcquired: "01/01/2026", DateSold: "02/01/2026", Proceeds: d(3), CostBasis: d(2), GainLoss: d(1)},
+		{Address: apiTestWallet, Description: "1 ATOM", DateAcquired: "01/01/2026", DateSold: "02/01/2026", Proceeds: d(3), CostBasis: d(2), GainLoss: d(1)},
 	}
 	var buf strings.Builder
 	if err := Write8949CSV(&buf, rows); err != nil {

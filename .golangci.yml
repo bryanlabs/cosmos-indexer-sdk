@@ -1,58 +1,64 @@
+version: "2"
 run:
   tests: true
-  # timeout for analysis, e.g. 30s, 5m, default is 1m
-  timeout: 5m
-
+  timeout: 10m
 linters:
-  disable-all: true
+  default: none
   enable:
     - dogsled
-    - exportloopref
     - errcheck
     - goconst
     - gocritic
-    - gofumpt
     - gosec
-    - gosimple
     - govet
     - ineffassign
     - misspell
     - nakedret
-    - staticcheck
-    - stylecheck
     - revive
-    - typecheck
+    - staticcheck
     - unconvert
     - unused
-    - misspell
-
+  settings:
+    dogsled:
+      max-blank-identifiers: 3
+    nolintlint:
+      require-explanation: false
+      require-specific: false
+      allow-unused: false
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - revive
+        text: unused-parameter
+      - linters:
+          - gosec
+        text: Use of weak random number generator
+      - linters:
+          - staticcheck
+        text: 'ST1003:'
+      # Retain the existing stylecheck receiver-name exception.
+      - linters:
+          - staticcheck
+        text: 'ST1016:'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
-  exclude-rules:
-    - text: "unused-parameter"
-      linters:
-        - revive
-    - text: "Use of weak random number generator"
-      linters:
-        - gosec
-    - text: "ST1003:"
-      linters:
-        - stylecheck
-    # FIXME: Disabled until golangci-lint updates stylecheck with this fix:
-    # https://github.com/dominikh/go-tools/issues/389
-    - text: "ST1016:"
-      linters:
-        - stylecheck
   max-issues-per-linter: 10000
   max-same-issues: 10000
-
-linters-settings:
-  dogsled:
-    max-blank-identifiers: 3
-  maligned:
-    # print struct with more effective memory layout or not, false by default
-    suggest-new: true
-  nolintlint:
-    allow-unused: false
-    allow-leading-space: true
-    require-explanation: false
-    require-specific: false
+formatters:
+  enable:
+    - gofumpt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

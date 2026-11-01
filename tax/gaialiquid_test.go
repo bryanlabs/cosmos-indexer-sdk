@@ -13,6 +13,9 @@ type sdkMsg = sdk.Msg
 
 // field builds one length-delimited protobuf field.
 func fieldBytes(num int, val string) []byte {
+	if num < 1 || num > (1<<29)-1 {
+		panic("invalid protobuf field number")
+	}
 	out := binary.AppendUvarint(nil, uint64(num)<<3|2)
 	out = binary.AppendUvarint(out, uint64(len(val)))
 	return append(out, val...)
@@ -20,12 +23,15 @@ func fieldBytes(num int, val string) []byte {
 
 // fieldVarint builds one varint protobuf field.
 func fieldVarint(num int, val uint64) []byte {
-	out := binary.AppendUvarint(nil, uint64(num)<<3|0)
+	if num < 1 || num > (1<<29)-1 {
+		panic("invalid protobuf field number")
+	}
+	out := binary.AppendUvarint(nil, uint64(num)<<3)
 	return binary.AppendUvarint(out, val)
 }
 
 func TestWithdrawAllTokenizeShareRecordRewardUnmarshal(t *testing.T) {
-	owner := "cosmos1z835cjxfz73595wunqtn3flx6tglrsy05y673w"
+	owner := fixtureLSMOwner
 	var m MsgWithdrawAllTokenizeShareRecordReward
 	if err := m.Unmarshal(fieldBytes(1, owner)); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -39,22 +45,22 @@ func TestWithdrawAllTokenizeShareRecordRewardUnmarshal(t *testing.T) {
 }
 
 func TestWithdrawTokenizeShareRecordRewardUnmarshal(t *testing.T) {
-	owner := "cosmos1z835cjxfz73595wunqtn3flx6tglrsy05y673w"
+	owner := fixtureLSMOwner
 	b := append(fieldBytes(1, owner), fieldVarint(2, 4213)...)
 	var m MsgWithdrawTokenizeShareRecordReward
 	if err := m.Unmarshal(b); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if m.OwnerAddress != owner || m.RecordId != 4213 {
-		t.Fatalf("got %q / %d", m.OwnerAddress, m.RecordId)
+	if m.OwnerAddress != owner || m.RecordID != 4213 {
+		t.Fatalf("got %q / %d", m.OwnerAddress, m.RecordID)
 	}
 }
 
 func TestTokenizeSharesUnmarshalKeepsCoinBytes(t *testing.T) {
-	del := "cosmos1z835cjxfz73595wunqtn3flx6tglrsy05y673w"
+	del := fixtureLSMOwner
 	val := "cosmosvaloper1z835cjxfz73595wunqtn3flx6tglrsy05y673w"
 	// nested Coin{denom:"uatom", amount:"100"} as its own length-delimited field
-	coin := append(fieldBytes(1, "uatom"), fieldBytes(2, "100")...)
+	coin := append(fieldBytes(1, fixtureNativeDenom), fieldBytes(2, "100")...)
 	b := append(fieldBytes(1, del), fieldBytes(2, val)...)
 	b = append(b, fieldBytes(3, string(coin))...)
 	b = append(b, fieldBytes(4, del)...)
@@ -73,7 +79,7 @@ func TestTokenizeSharesUnmarshalKeepsCoinBytes(t *testing.T) {
 
 // An unknown field must not break decoding: the chain can add one without us.
 func TestUnmarshalSkipsUnknownFields(t *testing.T) {
-	owner := "cosmos1z835cjxfz73595wunqtn3flx6tglrsy05y673w"
+	owner := fixtureLSMOwner
 	b := append(fieldBytes(1, owner), fieldVarint(9, 12345)...)
 	b = append(b, fieldBytes(7, "something new")...)
 	var m MsgWithdrawAllTokenizeShareRecordReward
@@ -116,12 +122,12 @@ func TestClassifyTokenizeShareRewardMainnetFixture(t *testing.T) {
 	recordAcct := "cosmos1zpqu48nw2h8s08eplmscz3uv6ujpc3awj2p9v3j7c8h2stg8gqqqf8f0ue"
 	msg := &MsgWithdrawAllTokenizeShareRecordReward{OwnerAddress: owner}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", "cosmos13pxn9n3qw79e03844rdadagmg0nshmwf7qvuye"}, [2]string{"amount", "3639uatom"}),
-		ev("coin_received", [2]string{"receiver", recordAcct}, [2]string{"amount", "2342510uatom"}),
-		ev("withdraw_rewards", [2]string{"amount", "2342510uatom"}, [2]string{"delegator", recordAcct}),
-		ev("coin_received", [2]string{"receiver", owner}, [2]string{"amount", "2342510uatom"}),
-		ev("withdraw_tokenize_share_reward", [2]string{"withdraw_address", owner}, [2]string{"amount", "2342510uatom"}),
-		ev("coin_received", [2]string{"receiver", "cosmos126e0q5adzdny95lujzv0ktwsz32089k4ljaaau"}, [2]string{"amount", "1492uatom"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, "cosmos13pxn9n3qw79e03844rdadagmg0nshmwf7qvuye"}, [2]string{attributeAmount, "3639uatom"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, recordAcct}, [2]string{attributeAmount, fixtureTokenizedReward}),
+		ev("withdraw_rewards", [2]string{attributeAmount, fixtureTokenizedReward}, [2]string{attributeDelegator, recordAcct}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, owner}, [2]string{attributeAmount, fixtureTokenizedReward}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, owner}, [2]string{attributeAmount, fixtureTokenizedReward}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, "cosmos126e0q5adzdny95lujzv0ktwsz32089k4ljaaau"}, [2]string{attributeAmount, "1492uatom"}),
 	}}
 
 	out := classify(msg, log)
@@ -131,7 +137,7 @@ func TestClassifyTokenizeShareRewardMainnetFixture(t *testing.T) {
 	if out[0].Category != string(CategoryReward) {
 		t.Fatalf("category = %q", out[0].Category)
 	}
-	if out[0].Amount != "2342510" || out[0].Denom != "uatom" {
+	if out[0].Amount != "2342510" || out[0].Denom != fixtureNativeDenom {
 		t.Fatalf("amount = %s%s, want 2342510uatom (double counting would give 4685020)", out[0].Amount, out[0].Denom)
 	}
 	if out[0].ToAddr != owner {
@@ -144,8 +150,8 @@ func TestClassifyTokenizeShareRewardSumsMultipleRecords(t *testing.T) {
 	owner := "cosmos1356y7gg98xgl4mn5f2dt0yr2ysc6gs4gfpfdsy"
 	msg := &MsgWithdrawAllTokenizeShareRecordReward{OwnerAddress: owner}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("withdraw_tokenize_share_reward", [2]string{"withdraw_address", owner}, [2]string{"amount", "100uatom"}),
-		ev("withdraw_tokenize_share_reward", [2]string{"withdraw_address", owner}, [2]string{"amount", "250uatom"}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, owner}, [2]string{attributeAmount, fixtureTenthMilliAtom}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, owner}, [2]string{attributeAmount, fixtureQuarterMilliAtom}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Amount != "350" {
@@ -157,15 +163,14 @@ func TestClassifyTokenizeShareRewardSumsMultipleRecords(t *testing.T) {
 // without producing a taxable event.
 func TestTokenizeAndRedeemProduceNoTaxableEvent(t *testing.T) {
 	for _, msg := range []interface{ String() string }{
-		&MsgTokenizeShares{DelegatorAddress: "cosmos1abc"},
-		&MsgRedeemTokensForShares{DelegatorAddress: "cosmos1abc"},
-		&MsgDisableTokenizeShares{DelegatorAddress: "cosmos1abc"},
-		&MsgEnableTokenizeShares{DelegatorAddress: "cosmos1abc"},
+		&MsgTokenizeShares{DelegatorAddress: fixtureCosmosAddress},
+		&MsgRedeemTokensForShares{DelegatorAddress: fixtureCosmosAddress},
+		&MsgDisableTokenizeShares{DelegatorAddress: fixtureCosmosAddress},
+		&MsgEnableTokenizeShares{DelegatorAddress: fixtureCosmosAddress},
 	} {
-		m, _ := msg.(interface{ String() string })
 		out := classify(msg.(sdkMsg), &indexerTxTypes.LogMessage{})
 		if len(out) != 0 {
-			t.Fatalf("%T produced %d taxable events, expected none", m, len(out))
+			t.Fatalf("%T produced %d taxable events, expected none", msg, len(out))
 		}
 	}
 }

@@ -18,6 +18,7 @@ func attributes(e txlog.LogMessageEvent) map[string]string {
 	}
 	return out
 }
+
 func parse(msg sdk.Msg, log *txlog.LogMessage) ([]tax.TaxableEvent, error) {
 	data, err := (&tax.Parser{ID: "taxrepair"}).ParseMessage(msg, log, config.IndexConfig{})
 	if err != nil {
@@ -47,8 +48,7 @@ func fromStoredLog(typ string, log *txlog.LogMessage, old []tax.TaxableEvent) ([
 	if typ == "/cosmos.authz.v1beta1.MsgExec" {
 		return authzFromStoredLog(log, old)
 	}
-	switch typ {
-	case "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission":
+	if typ == "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission" {
 		if sender == "" {
 			return nil, fmt.Errorf("stored message has no action/sender event")
 		}
@@ -99,18 +99,18 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 		a := attributes(e)
 		key := a["authz_msg_index"]
 		switch e.Type {
-		case "delegate":
-			triggers[key] = "delegate"
+		case triggerDelegate:
+			triggers[key] = triggerDelegate
 		case "unbond":
 			triggers[key] = "undelegate"
-		case "redelegate":
-			triggers[key] = "redelegate"
+		case triggerRedelegate:
+			triggers[key] = triggerRedelegate
 		}
 	}
 	// Rows this function recomputes (rewards and staking principal records)
 	// are dropped from the old set so a second replay is a no-op; anything
 	// else the original indexing produced is preserved verbatim.
-	recomputed := map[string]bool{"reward": true, string(tax.CategoryDelegate): true, string(tax.CategoryUndelegate): true, string(tax.CategoryRedelegate): true, string(tax.CategoryCancelUnbonding): true}
+	recomputed := map[string]bool{categoryReward: true, string(tax.CategoryDelegate): true, string(tax.CategoryUndelegate): true, string(tax.CategoryRedelegate): true, string(tax.CategoryCancelUnbonding): true}
 	out := []tax.TaxableEvent{}
 	for _, e := range old {
 		if !recomputed[e.Category] {
@@ -132,7 +132,7 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 	var principal []tax.TaxableEvent
 	for _, event := range log.Events {
 		switch event.Type {
-		case "delegate", "unbond", "redelegate", "cancel_unbonding_delegation":
+		case triggerDelegate, "unbond", triggerRedelegate, "cancel_unbonding_delegation":
 		default:
 			continue
 		}

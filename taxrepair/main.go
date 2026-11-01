@@ -74,7 +74,7 @@ func newBackup(path string) (*backupWriter, error) {
 	if path == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +114,7 @@ func (b *backupWriter) persist(plans []backup) error {
 	b.lines += len(plans)
 	return nil
 }
+
 func (b *backupWriter) verify() (string, error) {
 	if b == nil {
 		return "", nil
@@ -131,7 +132,9 @@ func (b *backupWriter) verify() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() int {
 	apply := flag.Bool("apply", false, "write repaired rows (requires --backup)")
 	path := flag.String("backup", "", "new JSONL backup file, never overwritten")
 	addresses := flag.String("addresses", "", "optional comma-separated wallets")
@@ -167,13 +170,13 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	max := *to
-	if max == 0 {
-		if err := db.Table("messages").Select("COALESCE(max(id),0)").Scan(&max).Error; err != nil {
+	maxID := *to
+	if maxID == 0 {
+		if err := db.Table("messages").Select("COALESCE(max(id),0)").Scan(&maxID).Error; err != nil {
 			fatal(err.Error())
 		}
 	}
-	if max < *from {
+	if maxID < *from {
 		fatal("upper message ID precedes lower ID")
 	}
 	var wallets []string
@@ -199,9 +202,9 @@ func main() {
 	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
-	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d\n", max, *apply, len(candidates))
+	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d\n", maxID, *apply, len(candidates))
 	for len(wallets) == 0 || len(candidates) > 0 {
-		rows, err := load(db, last, max, *batch, candidates)
+		rows, err := load(db, last, maxID, *batch, candidates)
 		if err != nil {
 			fatal(err.Error())
 		}
@@ -243,12 +246,13 @@ func main() {
 	if b != nil {
 		fmt.Printf("backup=%s sha256=%s records=%d\n", *path, sum, b.lines)
 	}
-	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", max, scanned, changed, zeroed, skipped, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
+	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", maxID, scanned, changed, zeroed, skipped, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
 	if skipped > 0 {
 		// Every skipped message is printed above; the run is incomplete until
 		// each one is explained or replayed from an archive node.
-		os.Exit(3)
+		return 3
 	}
+	return 0
 }
 
 // skip records a message the replay could not classify from its stored
@@ -280,8 +284,9 @@ func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
  JOIN addresses a ON a.id=tsa.address_id WHERE a.address IN ? ORDER BY 1`, addresses, addresses, addresses).Scan(&ids).Error
 	return ids, err
 }
-func load(db *gorm.DB, last, max uint, n int, candidates []uint) ([]row, error) {
-	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, max, urls).Order("m.id").Limit(n)
+
+func load(db *gorm.DB, last, maxID uint, n int, candidates []uint) ([]row, error) {
+	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, maxID, urls).Order("m.id").Limit(n)
 	if candidates != nil {
 		q = q.Where("m.id IN ?", candidates)
 	}
@@ -289,6 +294,7 @@ func load(db *gorm.DB, last, max uint, n int, candidates []uint) ([]row, error) 
 	err := q.Scan(&rows).Error
 	return rows, err
 }
+
 func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 	var rows []tax.TaxableEvent
 	if err := db.Where("message_id IN ?", ids).Order("message_id,sub_index").Find(&rows).Error; err != nil {
@@ -300,6 +306,7 @@ func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 	}
 	return out, nil
 }
+
 func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup, []skip, error) {
 	if len(rows) == 0 {
 		return nil, nil, nil
@@ -372,6 +379,7 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	}
 	return plans, skips, nil
 }
+
 func applyPlans(db *gorm.DB, plans []backup) error {
 	if len(plans) == 0 {
 		return nil
@@ -426,6 +434,7 @@ func applyPlans(db *gorm.DB, plans []backup) error {
 		return nil
 	})
 }
+
 func repairCodec() (codectypes.AnyUnpacker, error) {
 	m := tax.GaiaLiquidMsgTypes()
 	for k, v := range tax.IBCChannelV2MsgTypes() {
@@ -440,11 +449,12 @@ func repairCodec() (codectypes.AnyUnpacker, error) {
 	}
 	return c.Codec.InterfaceRegistry, nil
 }
+
 func same(a, b []tax.TaxableEvent) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
+	for i := 0; i < len(a) && i < len(b); i++ {
 		x, y := a[i], b[i]
 		if x.MessageID != y.MessageID || x.SubIndex != y.SubIndex || x.Category != y.Category || x.Amount != y.Amount || x.Denom != y.Denom || x.Asset != y.Asset || x.FromAddr != y.FromAddr || x.ToAddr != y.ToAddr || x.BlockHeight != y.BlockHeight || !x.Timestamp.Equal(y.Timestamp) || x.TxHash != y.TxHash || x.ValidatorAddress != y.ValidatorAddress || x.RewardTrigger != y.RewardTrigger || x.Detail != y.Detail {
 			return false
@@ -452,6 +462,7 @@ func same(a, b []tax.TaxableEvent) bool {
 	}
 	return true
 }
+
 func add(t totals, events []tax.TaxableEvent) {
 	for _, e := range events {
 		denom := e.Denom
@@ -481,6 +492,7 @@ func env(k string) string {
 	}
 	return v
 }
+
 func envDefault(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

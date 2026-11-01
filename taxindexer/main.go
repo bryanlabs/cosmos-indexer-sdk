@@ -26,6 +26,10 @@ func main() {
 		log.Fatalf("tax-indexer: registering x/liquid message types: %v", err)
 	}
 
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.LegacyLSMMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering legacy LSM message types: %v", err)
+	}
+
 	// IBC channel v2 (ibc-go v10) likewise post-dates this build's ibc-go v7.
 	// A v2 receive is an inbound transfer, so it has to decode. See tax/ibcv2.go.
 	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.IBCChannelV2MsgTypes()); err != nil {

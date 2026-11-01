@@ -49,12 +49,12 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			if err := dbTransaction.Clauses(
 				clause.Returning{
 					Columns: []clause.Column{
-						{Name: "id"}, {Name: "type"},
+						{Name: "id"}, {Name: columnType},
 					},
 				},
 				clause.OnConflict{
-					Columns:   []clause.Column{{Name: "type"}},
-					DoUpdates: clause.AssignmentColumns([]string{"type"}),
+					Columns:   []clause.Column{{Name: columnType}},
+					DoUpdates: clause.AssignmentColumns([]string{columnType}),
 				},
 			).Create(&uniqueBlockEventTypes).Error; err != nil {
 				config.Log.Error("Error creating begin block event types.", err)
@@ -76,12 +76,12 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			if err := dbTransaction.Clauses(
 				clause.Returning{
 					Columns: []clause.Column{
-						{Name: "id"}, {Name: "key"},
+						{Name: "id"}, {Name: columnKey},
 					},
 				},
 				clause.OnConflict{
-					Columns:   []clause.Column{{Name: "key"}},
-					DoUpdates: clause.AssignmentColumns([]string{"key"}),
+					Columns:   []clause.Column{{Name: columnKey}},
+					DoUpdates: clause.AssignmentColumns([]string{columnKey}),
 				},
 			).Create(&uniqueBlockEventAttributeKeys).Error; err != nil {
 				config.Log.Error("Error creating begin block event attribute keys.", err)
@@ -122,7 +122,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			// We need this so that we can then create the proper associations with the attributes below
 			if err := dbTransaction.Clauses(
 				clause.OnConflict{
-					Columns: []clause.Column{{Name: "index"}, {Name: "lifecycle_position"}, {Name: "block_id"}},
+					Columns: []clause.Column{{Name: columnIndex}, {Name: "lifecycle_position"}, {Name: "block_id"}},
 					// Force update of block event type ID
 					DoUpdates: clause.AssignmentColumns([]string{"block_event_type_id"}),
 				},
@@ -158,7 +158,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 
 			if len(allAttributes) != 0 {
 				if err := dbTransaction.Clauses(clause.OnConflict{
-					Columns: []clause.Column{{Name: "block_event_id"}, {Name: "index"}},
+					Columns: []clause.Column{{Name: "block_event_id"}, {Name: columnIndex}},
 					// Force update of value
 					DoUpdates: clause.AssignmentColumns([]string{"value"}),
 				}).Create(&allAttributes).Error; err != nil {

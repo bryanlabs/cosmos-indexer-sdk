@@ -51,7 +51,7 @@ func detailJSON(kv map[string]string) string {
 func contractDetail(addr string, extra map[string]string) string {
 	kv := map[string]string{"contract": addr}
 	if c, ok := LookupContract(addr); ok {
-		kv["protocol"] = c.Protocol
+		kv[detailProtocol] = c.Protocol
 		kv["name"] = c.Name
 	}
 	for k, v := range extra {
@@ -70,24 +70,14 @@ type coinTransfer struct {
 func transfersIn(log *indexerTxTypes.LogMessage) []coinTransfer {
 	var out []coinTransfer
 	for _, ev := range log.Events {
-		if ev.Type != "transfer" {
+		if ev.Type != string(CategoryTransfer) {
 			continue
 		}
-		cur := coinTransfer{}
-		for _, a := range ev.Attributes {
-			switch a.Key {
-			case "sender":
-				cur.from = a.Value
-			case "recipient":
-				cur.to = a.Value
-			case "amount":
-				if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
-					cur.coins = coins
-				}
+		for _, a := range ibcAttributeGroups(ev, attributeSender, attributeRecipient, attributeAmount) {
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
+			if err == nil && a[attributeRecipient] != "" && !coins.Empty() {
+				out = append(out, coinTransfer{from: a[attributeSender], to: a[attributeRecipient], coins: coins})
 			}
-		}
-		if cur.to != "" && !cur.coins.Empty() {
-			out = append(out, cur)
 		}
 	}
 	return out
@@ -122,8 +112,8 @@ func messageSender(log *indexerTxTypes.LogMessage) string {
 			continue
 		}
 		a := attrMap(ev)
-		if a["action"] != "" && a["sender"] != "" {
-			return a["sender"]
+		if a[attributeAction] != "" && a[attributeSender] != "" {
+			return a[attributeSender]
 		}
 	}
 	return ""
@@ -155,7 +145,7 @@ func auctionSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	for _, ev := range log.Events {
 		a := attrMap(ev)
 		switch ev.Type {
-		case "wasm-settle-auction":
+		case eventSettleAuction:
 			// Stargaze reserve auction: bid_amount is a bare integer, bid_denom
 			// the denom. wasm-buy-now in the same message carries the same sale.
 			if a["collection"] == "" || a["bid_amount"] == "" {
@@ -166,20 +156,20 @@ func auctionSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 				FromAddr: a["seller"], ToAddr: a["bidder"],
 				Amount: a["bid_amount"], Denom: a["bid_denom"],
 				Asset:  a["collection"] + "/" + a["token_id"],
-				Detail: contractDetail(a["_contract_address"], map[string]string{"sale": "auction"}),
+				Detail: contractDetail(a[attributeContractAddress], map[string]string{detailSale: contractRoleAuction}),
 			})
 		case "wasm-auction_settled":
 			// Inscriptions auction: the asset is an inscription id on the
 			// contract itself; amount is the winning bid in `denomination`.
-			if a["inscription_id"] == "" || a["amount"] == "" {
+			if a["inscription_id"] == "" || a[attributeAmount] == "" {
 				continue
 			}
 			out = append(out, TaxableEvent{
 				Category: string(CategoryNFTSale),
 				FromAddr: a["seller"], ToAddr: a["winner"],
-				Amount: a["amount"], Denom: a["denomination"],
-				Asset:  a["_contract_address"] + "/" + a["inscription_id"],
-				Detail: contractDetail(a["_contract_address"], map[string]string{"sale": "auction", "platform_fee": a["platform_fee_amount"]}),
+				Amount: a[attributeAmount], Denom: a["denomination"],
+				Asset:  a[attributeContractAddress] + "/" + a["inscription_id"],
+				Detail: contractDetail(a[attributeContractAddress], map[string]string{detailSale: contractRoleAuction, "platform_fee": a["platform_fee_amount"]}),
 			})
 		case "wasm-funded_offer_completed":
 			// Inscriptions funded offer: gross is what the buyer paid.
@@ -189,9 +179,9 @@ func auctionSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 			out = append(out, TaxableEvent{
 				Category: string(CategoryNFTSale),
 				FromAddr: a["seller"], ToAddr: a["buyer"],
-				Amount: a["gross"], Denom: a["denom"],
-				Asset:  a["_contract_address"] + "/" + a["inscription_id"],
-				Detail: contractDetail(a["_contract_address"], map[string]string{"sale": "offer", "platform_fee": a["fee"]}),
+				Amount: a["gross"], Denom: a[attributeDenom],
+				Asset:  a[attributeContractAddress] + "/" + a["inscription_id"],
+				Detail: contractDetail(a[attributeContractAddress], map[string]string{detailSale: "offer", "platform_fee": a["fee"]}),
 			})
 		}
 	}
@@ -205,11 +195,11 @@ func auctionSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 func auctionEscrowEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var out []TaxableEvent
 	for _, ev := range log.Events {
-		if ev.Type != "wasm-place-bid" && ev.Type != "wasm-buy-now" && ev.Type != "wasm-settle-auction" && ev.Type != "wasm-cancel-auction" {
+		if ev.Type != "wasm-place-bid" && ev.Type != "wasm-buy-now" && ev.Type != eventSettleAuction && ev.Type != "wasm-cancel-auction" {
 			continue
 		}
 		a := attrMap(ev)
-		contract := a["_contract_address"]
+		contract := a[attributeContractAddress]
 		if contract == "" {
 			continue
 		}
@@ -227,7 +217,7 @@ func auctionEscrowEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 			if to == a["seller"] || to == winner || to == a["bidder"] {
 				continue
 			}
-			if ev.Type == "wasm-settle-auction" || ev.Type == "wasm-buy-now" {
+			if ev.Type == eventSettleAuction || ev.Type == "wasm-buy-now" {
 				// Settlement pays the seller, royalties and the platform fee;
 				// only the previous bidder's refund is a withdrawal of own funds.
 				if to != a["previous_bidder"] {
@@ -252,7 +242,7 @@ func nftTransferEvents(log *indexerTxTypes.LogMessage, sold map[string]bool, min
 	bridgeReceiver := ""
 	bridgeContract := ""
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
@@ -261,29 +251,29 @@ func nftTransferEvents(log *indexerTxTypes.LogMessage, sold map[string]bool, min
 		if a["nft_owner"] != "" {
 			owner = a["nft_owner"]
 		}
-		if a["receiver"] != "" && a["channel_id"] != "" {
-			bridgeReceiver = a["receiver"]
+		if a[attributeReceiver] != "" && a["channel_id"] != "" {
+			bridgeReceiver = a[attributeReceiver]
 		}
 		if a["method"] == "execute_receive_nft" {
-			bridgeContract = a["_contract_address"]
+			bridgeContract = a[attributeContractAddress]
 		}
 	}
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
-		action := a["action"]
-		if a["token_id"] == "" || a["_contract_address"] == "" {
+		action := a[attributeAction]
+		if a["token_id"] == "" || a[attributeContractAddress] == "" {
 			continue
 		}
-		asset := a["_contract_address"] + "/" + a["token_id"]
+		asset := a[attributeContractAddress] + "/" + a["token_id"]
 		switch action {
 		case "transfer_nft", "send_nft":
 			if sold[asset] || minted[asset] {
 				continue
 			}
-			from, to := a["sender"], a["recipient"]
+			from, to := a[attributeSender], a[attributeRecipient]
 			if owner != "" && contractKind(from) == "bridge_helper" {
 				from = owner
 			}
@@ -302,27 +292,27 @@ func nftTransferEvents(log *indexerTxTypes.LogMessage, sold map[string]bool, min
 				t = "ics721_out"
 				extra["destination_receiver"] = bridgeReceiver
 			}
-			if k := contractKind(to); k == "marketplace" || k == "auction" || k == "raffle" {
+			if k := contractKind(to); k == contractRoleMarketplace || k == contractRoleAuction || k == contractRoleRaffle {
 				extra["escrow"] = k
 			}
-			if t == "prize" {
-				extra["source"] = "prize"
+			if t == protocolPrize {
+				extra["source"] = protocolPrize
 			}
 			out = append(out, TaxableEvent{
 				Category: string(CategoryNFTTransfer),
 				FromAddr: from, ToAddr: to, Asset: asset,
 				RewardTrigger: t,
-				Detail:        contractDetail(a["_contract_address"], extra),
+				Detail:        contractDetail(a[attributeContractAddress], extra),
 			})
 		case "burn":
 			from := a["owner"]
 			if from == "" {
-				from = a["sender"]
+				from = a[attributeSender]
 			}
 			out = append(out, TaxableEvent{
 				Category: string(CategoryNFTBurn),
 				FromAddr: from, Asset: asset,
-				Detail: contractDetail(a["_contract_address"], nil),
+				Detail: contractDetail(a[attributeContractAddress], nil),
 			})
 		}
 	}
@@ -336,82 +326,95 @@ func nftTransferEvents(log *indexerTxTypes.LogMessage, sold map[string]bool, min
 func protocolActionEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var out []TaxableEvent
 	sender := messageSender(log)
+	unknownClaims := map[string]bool{}
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
-		contract := a["_contract_address"]
+		contract := a[attributeContractAddress]
 		if contract == "" {
 			continue
 		}
 		kind := contractKind(contract)
-		switch a["action"] {
+		switch a[attributeAction] {
 		// Hydro: ATOM (as LSM shares) locked for voting power. Still the
 		// user's asset, so a deposit, not a disposal.
 		case "lock_tokens":
-			if coins, err := sdk.ParseCoinsNormalized(a["locked_tokens"]); err == nil && a["sender"] != "" {
+			if coins, err := sdk.ParseCoinsNormalized(a["locked_tokens"]); err == nil && a[attributeSender] != "" {
 				detail := contractDetail(contract, map[string]string{"lock_id": a["lock_id"]})
-				out = append(out, coinRows(CategoryProtocolDeposit, coins, a["sender"], contract, "hydro_lock", detail)...)
+				out = append(out, coinRows(CategoryProtocolDeposit, coins, a[attributeSender], contract, "hydro_lock", detail)...)
 			}
 		case "unlock_tokens":
-			if coins, err := sdk.ParseCoinsNormalized(a["unlocked_tokens"]); err == nil && a["sender"] != "" {
+			if coins, err := sdk.ParseCoinsNormalized(a["unlocked_tokens"]); err == nil && a[attributeSender] != "" {
 				detail := contractDetail(contract, map[string]string{"lock_ids": a["unlocked_lock_ids"], "slashed_tokens": a["slashed_tokens"]})
-				out = append(out, coinRows(CategoryProtocolWithdrawal, coins, contract, a["sender"], "hydro_unlock", detail)...)
+				out = append(out, coinRows(CategoryProtocolWithdrawal, coins, contract, a[attributeSender], "hydro_unlock", detail)...)
 			}
 		// Hydro tribute: a project pays voters; the voter's claim is income,
 		// the project's deposit is an expense.
 		case "claim_tribute":
 			if coins, err := sdk.ParseCoinsNormalized(a["tribute_amount"]); err == nil && a["tribute_receiver"] != "" {
-				detail := contractDetail(contract, map[string]string{"round_id": a["round_id"], "tranche_id": a["tranche_id"], "proposal_id": a["proposal_id"], "tribute_id": a["tribute_id"]})
-				out = append(out, coinRows(CategoryIncome, coins, contract, a["tribute_receiver"], "tribute", detail)...)
+				detail := contractDetail(contract, map[string]string{"round_id": a["round_id"], "tranche_id": a["tranche_id"], attributeProposalID: a[attributeProposalID], "tribute_id": a["tribute_id"]})
+				out = append(out, coinRows(CategoryIncome, coins, contract, a["tribute_receiver"], protocolTribute, detail)...)
 			}
 		case "add_tribute":
 			if coins, err := sdk.ParseCoinsNormalized(a["funds"]); err == nil && a["depositor"] != "" {
-				detail := contractDetail(contract, map[string]string{"round_id": a["round_id"], "tranche_id": a["tranche_id"], "proposal_id": a["proposal_id"], "tribute_id": a["tribute_id"]})
+				detail := contractDetail(contract, map[string]string{"round_id": a["round_id"], "tranche_id": a["tranche_id"], attributeProposalID: a[attributeProposalID], "tribute_id": a["tribute_id"]})
 				out = append(out, coinRows(CategoryExpense, coins, a["depositor"], contract, "tribute_paid", detail)...)
 			}
 		// Inflow vault: ATOM in, vault shares out (and back). A conversion
 		// between two assets, so two swap legs, the same as a DEX trade.
 		case "deposit":
 			if a["vault_shares_minted"] != "" && a["deposit_amount"] != "" {
-				out = append(out, vaultLegs(log, contract, a["sender"], a["recipient"], a["deposit_amount"], a["vault_shares_minted"], true)...)
+				out = append(out, vaultLegs(log, contract, a[attributeSender], a[attributeRecipient], a["deposit_amount"], a["vault_shares_minted"], true)...)
 			}
 		case "withdraw":
 			if a["vault_shares_sent"] != "" && a["paid_out_amount"] != "" {
 				payee := a["withdrawer"]
 				if payee == "" {
-					payee = a["sender"]
+					payee = a[attributeSender]
 				}
-				out = append(out, vaultLegs(log, contract, a["sender"], payee, a["paid_out_amount"], a["vault_shares_sent"], false)...)
+				out = append(out, vaultLegs(log, contract, a[attributeSender], payee, a["paid_out_amount"], a["vault_shares_sent"], false)...)
 			}
 		// DAO token staking: stake and the later claim move the user's own
 		// tokens; the distributor's claim pays rewards.
 		case "stake":
-			if kind == "dao_staking" && a["from"] != "" {
+			if kind == contractRoleDAOStaking && a["from"] != "" {
 				coins := coinsBetween(log, a["from"], contract)
 				out = append(out, coinRows(CategoryProtocolDeposit, coins, a["from"], contract, "dao_stake", contractDetail(contract, nil))...)
 			}
-		case "claim":
+		case actionClaim:
 			switch {
-			case kind == "dao_staking" && a["from"] != "":
+			case kind == contractRoleDAOStaking && a["from"] != "":
 				coins := coinsBetween(log, contract, a["from"])
 				out = append(out, coinRows(CategoryProtocolWithdrawal, coins, contract, a["from"], "dao_unstake", contractDetail(contract, nil))...)
-			default:
+			case kind == attributeRewards:
 				trigger := "dao_rewards"
 				extra := map[string]string{"distribution_id": a["id"]}
-				if kind == "rewards" && a["user"] != "" {
+				if a["user"] != "" {
 					trigger = "governance_score"
-				}
-				if kind == "" {
-					extra["unknown_contract"] = "true"
-					trigger = "claim"
 				}
 				for to, coins := range coinsFrom(log, contract) {
 					if a["user"] != "" && to != a["user"] {
 						continue
 					}
 					out = append(out, coinRows(CategoryIncome, coins, contract, to, trigger, contractDetail(contract, extra))...)
+				}
+			default:
+				// A claim can return principal, pay rewards, settle vesting or
+				// do something else. Its name is not evidence of taxable income.
+				// Keep actual bank legs, with unresolved semantics made explicit.
+				if unknownClaims[contract] {
+					continue
+				}
+				unknownClaims[contract] = true
+				detail := contractDetail(contract, map[string]string{
+					attributeAction: actionClaim, "review_required": attributeTrue, "review_reason": "unknown_claim_semantics",
+				})
+				for _, transfer := range transfersIn(log) {
+					if transfer.from == contract || transfer.to == contract {
+						out = append(out, coinRows(CategoryTransfer, transfer.coins, transfer.from, transfer.to, "unknown_claim", detail)...)
+					}
 				}
 			}
 		// Raffles and packs: coins paid to the winner are prize income. NFT
@@ -420,11 +423,11 @@ func protocolActionEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 			if a["winner"] != "" {
 				coins := coinsBetween(log, contract, a["winner"])
 				detail := contractDetail(contract, map[string]string{"week": a["week"], "pool_id": a["pool_id"]})
-				out = append(out, coinRows(CategoryIncome, coins, contract, a["winner"], "prize", detail)...)
+				out = append(out, coinRows(CategoryIncome, coins, contract, a["winner"], protocolPrize, detail)...)
 			}
 		// Name registration and renewal are a service purchase.
 		case "register_subdomain", "register", "renew", "register_name", "renew_name":
-			if kind == "names" && sender != "" {
+			if kind == protocolNames && sender != "" {
 				coins := coinsSpentBy(log, sender)
 				detail := contractDetail(contract, map[string]string{"name": a["name"]})
 				out = append(out, coinRows(CategoryExpense, coins, sender, contract, "name_registration", detail)...)
@@ -457,7 +460,7 @@ func vaultLegs(log *indexerTxTypes.LogMessage, contract, sender, payee, atomAmou
 		payee = sender
 	}
 	shareDenom := ""
-	baseDenom := "uatom"
+	baseDenom := fixtureNativeDenom
 	if deposit {
 		for _, c := range coinsBetween(log, sender, contract) {
 			if !strings.HasPrefix(c.Denom, "factory/") {
@@ -497,13 +500,13 @@ func vaultLegs(log *indexerTxTypes.LogMessage, contract, sender, payee, atomAmou
 	detail := contractDetail(contract, map[string]string{"vault_shares": shareDenom})
 	if deposit {
 		return []TaxableEvent{
-			{Category: string(CategorySwap), FromAddr: sender, Amount: atomAmount, Denom: baseDenom, RewardTrigger: "vault_deposit", Detail: detail},
-			{Category: string(CategorySwap), ToAddr: payee, Amount: shareAmount, Denom: shareDenom, RewardTrigger: "vault_deposit", Detail: detail},
+			{Category: string(CategorySwap), FromAddr: sender, Amount: atomAmount, Denom: baseDenom, RewardTrigger: actionVaultDeposit, Detail: detail},
+			{Category: string(CategorySwap), ToAddr: payee, Amount: shareAmount, Denom: shareDenom, RewardTrigger: actionVaultDeposit, Detail: detail},
 		}
 	}
 	return []TaxableEvent{
-		{Category: string(CategorySwap), FromAddr: sender, Amount: shareAmount, Denom: shareDenom, RewardTrigger: "vault_withdraw", Detail: detail},
-		{Category: string(CategorySwap), ToAddr: payee, Amount: atomAmount, Denom: baseDenom, RewardTrigger: "vault_withdraw", Detail: detail},
+		{Category: string(CategorySwap), FromAddr: sender, Amount: shareAmount, Denom: shareDenom, RewardTrigger: actionVaultWithdraw, Detail: detail},
+		{Category: string(CategorySwap), ToAddr: payee, Amount: atomAmount, Denom: baseDenom, RewardTrigger: actionVaultWithdraw, Detail: detail},
 	}
 }
 
@@ -529,16 +532,16 @@ func wasmExecuteEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	out = append(out, actions...)
 	trigger := ""
 	for _, e := range actions {
-		if e.RewardTrigger == "prize" {
-			trigger = "prize"
+		if e.RewardTrigger == protocolPrize {
+			trigger = protocolPrize
 		}
 	}
 	if trigger == "" {
 		for _, ev := range log.Events {
-			if ev.Type == "wasm" {
+			if ev.Type == eventWasm {
 				a := attrMap(ev)
-				if (a["action"] == "claim_prize" || a["action"] == "claim_pack") && a["winner"] != "" {
-					trigger = "prize"
+				if (a[attributeAction] == "claim_prize" || a[attributeAction] == "claim_pack") && a["winner"] != "" {
+					trigger = protocolPrize
 				}
 			}
 		}
@@ -560,29 +563,29 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 	}
 	for _, ev := range log.Events {
 		a := attrMap(ev)
-		who := a["delegator"]
+		who := a[attributeDelegator]
 		if who == "" {
 			who = delegator
 		}
 		switch ev.Type {
 		case "delegate":
-			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 			if err != nil || who == "" {
 				continue
 			}
 			for _, c := range coins {
-				out = append(out, TaxableEvent{Category: string(CategoryDelegate), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["validator"]})
+				out = append(out, TaxableEvent{Category: string(CategoryDelegate), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator]})
 			}
 		case "unbond":
-			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 			if err != nil || who == "" {
 				continue
 			}
 			for _, c := range coins {
-				out = append(out, TaxableEvent{Category: string(CategoryUndelegate), ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["validator"], Detail: detailJSON(map[string]string{"completion_time": a["completion_time"]})})
+				out = append(out, TaxableEvent{Category: string(CategoryUndelegate), ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator], Detail: detailJSON(map[string]string{"completion_time": a["completion_time"]})})
 			}
 		case "redelegate":
-			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 			if err != nil || who == "" {
 				continue
 			}
@@ -590,12 +593,12 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 				out = append(out, TaxableEvent{Category: string(CategoryRedelegate), FromAddr: who, ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["destination_validator"], Detail: detailJSON(map[string]string{"source_validator": a["source_validator"], "destination_validator": a["destination_validator"], "completion_time": a["completion_time"]})})
 			}
 		case "cancel_unbonding_delegation":
-			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 			if err != nil || who == "" {
 				continue
 			}
 			for _, c := range coins {
-				out = append(out, TaxableEvent{Category: string(CategoryCancelUnbonding), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["validator"], Detail: detailJSON(map[string]string{"creation_height": a["creation_height"]})})
+				out = append(out, TaxableEvent{Category: string(CategoryCancelUnbonding), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator], Detail: detailJSON(map[string]string{"creation_height": a["creation_height"]})})
 			}
 		}
 	}
@@ -614,13 +617,13 @@ func lsmRecordEvents(log *indexerTxTypes.LogMessage, delegator string) []Taxable
 		a := attrMap(ev)
 		switch ev.Type {
 		case "tokenize_shares":
-			who := a["delegator"]
+			who := a[attributeDelegator]
 			if who == "" {
 				who = delegator
 			}
 			coins, err := sdk.ParseCoinsNormalized(a["tokenized_shares"])
 			if err != nil {
-				coins, err = sdk.ParseCoinsNormalized(a["amount"])
+				coins, err = sdk.ParseCoinsNormalized(a[attributeAmount])
 			}
 			if err != nil || who == "" {
 				continue
@@ -630,25 +633,25 @@ func lsmRecordEvents(log *indexerTxTypes.LogMessage, delegator string) []Taxable
 				owner = who
 			}
 			for _, c := range coins {
-				out = append(out, TaxableEvent{Category: string(CategoryTokenizeShares), FromAddr: who, ToAddr: owner, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["validator"], Detail: detailJSON(map[string]string{"share_record_id": a["share_record_id"], "bonded_amount": a["amount"]})})
+				out = append(out, TaxableEvent{Category: string(CategoryTokenizeShares), FromAddr: who, ToAddr: owner, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator], Detail: detailJSON(map[string]string{"share_record_id": a["share_record_id"], "bonded_amount": a[attributeAmount]})})
 			}
 		case "redeem_shares":
-			who := a["delegator"]
+			who := a[attributeDelegator]
 			if who == "" {
 				who = delegator
 			}
-			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 			if err != nil || who == "" {
 				continue
 			}
 			for _, c := range coins {
-				out = append(out, TaxableEvent{Category: string(CategoryRedeemShares), FromAddr: who, ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["validator"]})
+				out = append(out, TaxableEvent{Category: string(CategoryRedeemShares), FromAddr: who, ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator]})
 			}
 		case "transfer_tokenize_share_record":
-			if a["sender"] == "" || a["share_owner"] == "" {
+			if a[attributeSender] == "" || a["share_owner"] == "" {
 				continue
 			}
-			out = append(out, TaxableEvent{Category: string(CategoryShareRecord), FromAddr: a["sender"], ToAddr: a["share_owner"], Detail: detailJSON(map[string]string{"share_record_id": a["share_record_id"]})})
+			out = append(out, TaxableEvent{Category: string(CategoryShareRecord), FromAddr: a[attributeSender], ToAddr: a["share_owner"], Detail: detailJSON(map[string]string{"share_record_id": a["share_record_id"]})})
 		}
 	}
 	return out
@@ -671,12 +674,12 @@ func govDepositEvents(log *indexerTxTypes.LogMessage, depositor string) []Taxabl
 		if who == "" {
 			who = depositor
 		}
-		coins, err := sdk.ParseCoinsNormalized(a["amount"])
+		coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 		if err != nil || who == "" {
 			continue
 		}
 		for _, c := range coins {
-			out = append(out, TaxableEvent{Category: string(CategoryGovDeposit), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, Detail: detailJSON(map[string]string{"proposal_id": a["proposal_id"]})})
+			out = append(out, TaxableEvent{Category: string(CategoryGovDeposit), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, Detail: detailJSON(map[string]string{attributeProposalID: a[attributeProposalID]})})
 		}
 	}
 	return out
@@ -705,12 +708,12 @@ func ibcMemoIntent(memo string) (trigger string, detail map[string]string) {
 			Port     string `json:"port"`
 		}
 		_ = json.Unmarshal(fwd, &f)
-		return "pfm_forward", map[string]string{"protocol": "packet-forward-middleware", "forward_receiver": f.Receiver, "forward_channel": f.Channel}
+		return "pfm_forward", map[string]string{detailProtocol: "packet-forward-middleware", "forward_receiver": f.Receiver, "forward_channel": f.Channel}
 	}
-	wasm, ok := m["wasm"]
+	wasm, ok := m[eventWasm]
 	if !ok {
 		if _, ok := m["dest_callback"]; ok {
-			return "ibc_callback", map[string]string{"protocol": "ibc-callbacks"}
+			return "ibc_callback", map[string]string{detailProtocol: "ibc-callbacks"}
 		}
 		return "", nil
 	}
@@ -721,13 +724,13 @@ func ibcMemoIntent(memo string) (trigger string, detail map[string]string) {
 	if err := json.Unmarshal(wasm, &w); err != nil {
 		return "", nil
 	}
-	detail = map[string]string{"protocol": "ibc-hooks", "hook_contract": w.Contract}
+	detail = map[string]string{detailProtocol: "ibc-hooks", "hook_contract": w.Contract}
 	for _, key := range []string{"swap_and_action", "swap_and_action_with_recover"} {
 		raw, ok := w.Msg[key]
 		if !ok {
 			continue
 		}
-		detail["protocol"] = "skip-go"
+		detail[detailProtocol] = contractNameSkipGo
 		var sa struct {
 			UserSwap map[string]json.RawMessage `json:"user_swap"`
 			MinAsset struct {
@@ -786,8 +789,8 @@ func ibcMemoIntent(memo string) (trigger string, detail map[string]string) {
 		}
 		return "skip_swap", detail
 	}
-	if _, ok := w.Msg["action"]; ok {
-		detail["protocol"] = "skip-go"
+	if _, ok := w.Msg[attributeAction]; ok {
+		detail[detailProtocol] = contractNameSkipGo
 		return "skip_action", detail
 	}
 	return "ibc_hook", detail
@@ -802,11 +805,11 @@ func skipForwardEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var out []TaxableEvent
 	routed := false
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
-		if contractKind(a["_contract_address"]) == "router" && (a["action"] == "dispatch_action_ibc_transfer" || a["action"] == "execute_ibc_transfer" || a["action"] == "dispatch_action_ibc_eureka_transfer") {
+		if contractKind(a[attributeContractAddress]) == contractRoleRouter && (a[attributeAction] == "dispatch_action_ibc_transfer" || a[attributeAction] == "execute_ibc_transfer" || a[attributeAction] == "dispatch_action_ibc_eureka_transfer") {
 			routed = true
 		}
 	}
@@ -818,15 +821,15 @@ func skipForwardEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 			continue
 		}
 		a := attrMap(ev)
-		if a["amount"] == "" || a["receiver"] == "" {
+		if a[attributeAmount] == "" || a[attributeReceiver] == "" {
 			continue
 		}
 		out = append(out, TaxableEvent{
 			Category: string(CategoryIBCOut),
-			FromAddr: a["sender"], ToAddr: a["receiver"],
-			Amount: a["amount"], Denom: a["denom"],
-			RewardTrigger: "skip_forward",
-			Detail:        detailJSON(map[string]string{"protocol": "skip-go", "routed_from_hub": "true"}),
+			FromAddr: a[attributeSender], ToAddr: a[attributeReceiver],
+			Amount: a[attributeAmount], Denom: a[attributeDenom],
+			RewardTrigger: triggerSkipForward,
+			Detail:        detailJSON(map[string]string{detailProtocol: contractNameSkipGo, detailRoutedFromHub: attributeTrue}),
 		})
 	}
 	return out
@@ -835,7 +838,7 @@ func skipForwardEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 // isSkipRouterHop reports whether an inbound packet was received by a Skip Go
 // adapter contract rather than an end user.
 func isSkipRouterHop(log *indexerTxTypes.LogMessage, receiver string) bool {
-	if contractKind(receiver) != "router" {
+	if contractKind(receiver) != contractRoleRouter {
 		return false
 	}
 	return len(skipForwardEvents(log)) > 0
@@ -862,23 +865,23 @@ func ics721ReceiveEvents(log *indexerTxTypes.LogMessage, data nftPacketData) []T
 	bridge := ""
 	for _, ev := range log.Events {
 		if ev.Type == "wasm-ics721_receive_create_vouchers" || ev.Type == "wasm-ics721_receive_redeem_vouchers" {
-			bridge = attrMap(ev)["_contract_address"]
+			bridge = attrMap(ev)[attributeContractAddress]
 		}
 	}
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
-		if a["token_id"] == "" || a["_contract_address"] == "" {
+		if a["token_id"] == "" || a[attributeContractAddress] == "" {
 			continue
 		}
 		var to string
-		switch a["action"] {
+		switch a[attributeAction] {
 		case "mint":
 			to = a["owner"]
 		case "transfer_nft":
-			to = a["recipient"]
+			to = a[attributeRecipient]
 		default:
 			continue
 		}
@@ -888,7 +891,7 @@ func ics721ReceiveEvents(log *indexerTxTypes.LogMessage, data nftPacketData) []T
 		out = append(out, TaxableEvent{
 			Category: string(CategoryNFTTransfer),
 			FromAddr: data.Sender, ToAddr: to,
-			Asset:         a["_contract_address"] + "/" + a["token_id"],
+			Asset:         a[attributeContractAddress] + "/" + a["token_id"],
 			RewardTrigger: "ics721_in",
 			Detail:        contractDetail(bridge, map[string]string{"class_id": data.ClassID}),
 		})

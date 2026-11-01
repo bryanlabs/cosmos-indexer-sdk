@@ -22,9 +22,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 // pricing a busy wallet's whole history can still take a few seconds even
 // parallelized. Rather than make every visit pay that cost, a computed report
 // is cached durably (the underlying CSV, not just prices) and served instantly
-// on repeat views, invalidated only when newer on-chain activity exists for
-// these addresses than what was last computed, a max age backstop, or an
-// explicit resync request.
+// on repeat views. Exact persisted event/fee fingerprints invalidate historical
+// corrections and deletions too, alongside the max-age backstop and resync.
 type ReportJob struct {
 	ID                uint   `gorm:"primaryKey"`
 	Key               string `gorm:"uniqueIndex"`
@@ -34,10 +33,10 @@ type ReportJob struct {
 	Status            string // pending | ready | failed
 	CSV               string `gorm:"type:text"`
 	RowCount          int
+	ReadinessJSON     string `gorm:"type:text"`
 	ReviewFingerprint string
-	// ComputedThrough is when this computation started (not the data's own
-	// timestamps): a report is stale once any of its addresses has a
-	// taxable_event newer than this.
+	// ComputedThrough is the computation start, used only for the age backstop.
+	// ReviewFingerprint covers the full persisted financial history.
 	ComputedThrough time.Time
 	Error           string
 	CreatedAt       time.Time
@@ -51,7 +50,7 @@ const (
 )
 
 // reportMaxAge is a backstop: even a dormant wallet's report gets recomputed
-// at least this often, independent of the new-activity check.
+// at least this often, independent of the financial fingerprint check.
 const reportMaxAge = 24 * time.Hour
 
 // inFlight dedupes concurrent requests for the identical key within this
@@ -77,60 +76,51 @@ func canonicalReportKey(chain string, addresses []string, start, end, format str
 	return strings.Join([]string{MethodologyVersion, chain, strings.Join(norm, ","), start, end, format}, "|")
 }
 
-// reportIsStale reports whether a cached job's computation is out of date:
-// past the max-age backstop, or newer on-chain activity exists than what was
-// last computed.
-func (s *Server) reportIsStale(job *ReportJob, addresses []string) bool {
-	if time.Since(job.ComputedThrough) > reportMaxAge {
-		return true
-	}
-	newer, err := s.hasNewerActivity(addresses, job.ComputedThrough)
-	if err != nil {
-		// Can't confirm freshness; treat as stale rather than silently serve
-		// a report we're not sure is still current.
-		return true
-	}
-	return newer
-}
-
-// hasNewerActivity checks for any taxable_event touching these addresses
-// timestamped after `since`.
-func (s *Server) hasNewerActivity(addresses []string, since time.Time) (bool, error) {
-	var count int64
-	err := s.db.Table("taxable_events").
-		Where("(from_addr IN ? OR to_addr IN ?) AND timestamp > ?", addresses, addresses, since).
-		Limit(1).
-		Count(&count).Error
-	return count > 0, err
+// reportIsStale checks the age backstop. Financial freshness is checked using
+// the full persisted event/fee fingerprint before accepting a ready cache.
+func (s *Server) reportIsStale(job *ReportJob, _ []string) bool {
+	return time.Since(job.ComputedThrough) > reportMaxAge
 }
 
 // getOrStartReportJob returns the current status for this key, kicking off a
-// fresh computation if there's no usable cached one (missing, stale, failed,
-// or resync=true). It never blocks on the computation itself.
+// fresh computation if the cache is missing, stale or resync=true. Failed jobs
+// remain failed until explicit resync. It never blocks on computation itself.
 func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions, tags UserTags) (*ReportJob, error) {
+	addresses = normalizedWalletScope(addresses)
 	canonical, err := CanonicalAssetDecisionsJSON(decisions)
 	if err != nil {
 		return nil, assetReviewInputError{err}
 	}
-	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|review:%x", sha256.Sum256([]byte(canonical)))
+	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|readiness:v2|reader-snapshot:v1|review:%x", sha256.Sum256([]byte(canonical)))
 	if len(tags) > 0 {
 		key += fmt.Sprintf("|tags:%x", sha256.Sum256([]byte(tags.Canonical())))
 	}
 
 	var job ReportJob
-	err = s.db.Where("key = ?", key).First(&job).Error
-	found := err == nil
-	if err != nil && err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	stale := found && job.Status == ReportJobReady && s.reportIsStale(&job, addresses)
-	if found && job.Status == ReportJobReady && !stale && !resync {
-		fingerprint, err := s.currentReviewFingerprint(chain, addresses, start, end)
-		if err != nil {
-			return nil, err
+	var found, stale bool
+	// Cache rows, gates and their complete evidence digest are accepted from a
+	// single snapshot, not a gate-before-fingerprint race on the live pool.
+	err = s.withReadSnapshot(func(reader *Server) error {
+		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
+			return err
 		}
-		stale = fingerprint != job.ReviewFingerprint
+		err := reader.db.Where(apiKey, key).First(&job).Error
+		found = err == nil
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return err
+		}
+		stale = found && job.Status == ReportJobReady && s.reportIsStale(&job, addresses)
+		if found && job.Status == ReportJobReady && !stale && !resync {
+			fingerprint, err := reader.reviewFingerprintInSnapshot(chain, addresses)
+			if err != nil {
+				return err
+			}
+			stale = fingerprint != job.ReviewFingerprint
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	needsCompute := !found || resync || stale
 	// A job already pending (someone else's request, or ours from a moment
@@ -153,7 +143,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 	job.Status, job.Error = ReportJobPending, ""
 	if err := s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "key"}},
-		DoUpdates: clause.AssignmentColumns([]string{"status", "error", "chain", "addresses", "format", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{apiStatus, apiError, apiChain, apiAddresses, apiFormat, "updated_at"}),
 	}).Create(&job).Error; err != nil {
 		inFlight.Delete(key)
 		return nil, err
@@ -170,46 +160,74 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string, decisions AssetDecisions, tags UserTags) {
 	defer inFlight.Delete(key)
 	computedThrough := nowUTC()
-
-	all, err := s.reviewedRows(chain, addresses, start, end, decisions, true)
+	input, err := s.readReportInput(chain, addresses, start, end, true)
 	if err != nil {
-		s.db.Model(&ReportJob{}).Where("key = ?", key).Updates(map[string]any{"status": ReportJobFailed, "error": err.Error()})
+		s.failReportJob(key, err)
+		return
+	}
+
+	all, err := s.reviewedInputRows(chain, addresses, input, decisions, true)
+	if err != nil {
+		s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{apiStatus: ReportJobFailed, apiError: err.Error()})
 		return
 	}
 	all = ApplyTags(all, tags)
 	var buf strings.Builder
 	if err := WritePreviewCSV(&buf, format, all); err != nil {
-		s.db.Model(&ReportJob{}).Where("key = ?", key).
-			Updates(map[string]any{"status": ReportJobFailed, "error": err.Error()})
+		s.db.Model(&ReportJob{}).Where(apiKey, key).
+			Updates(map[string]any{apiStatus: ReportJobFailed, apiError: err.Error()})
 		return
 	}
 
-	s.db.Model(&ReportJob{}).Where("key = ?", key).Updates(map[string]any{
-		"status":             ReportJobReady,
-		"csv":                buf.String(),
+	var after string
+	err = s.withReadSnapshot(func(reader *Server) error {
+		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
+			return err
+		}
+		var err error
+		after, err = reader.reviewFingerprintInSnapshot(chain, addresses)
+		return err
+	})
+	if err != nil {
+		s.failReportJob(key, err)
+		return
+	}
+	if after != input.Fingerprint {
+		s.failReportJob(key, fmt.Errorf("financial history changed while computing report; retry with resync=true"))
+		return
+	}
+	readinessJSON, _ := json.Marshal(readinessForRows(all))
+	s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{
+		"readiness_json":     string(readinessJSON),
+		apiStatus:            ReportJobReady,
+		apiCSV:               buf.String(),
 		"row_count":          len(all),
 		"computed_through":   computedThrough,
-		"review_fingerprint": reviewFingerprint(all),
-		"error":              "",
+		"review_fingerprint": input.Fingerprint,
+		apiError:             "",
 	})
+}
+
+func (s *Server) failReportJob(key string, err error) {
+	s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{apiStatus: ReportJobFailed, apiError: err.Error(), apiCSV: ""})
 }
 
 // handleReportJob is a single idempotent endpoint that both kicks off and
 // polls a report: GET /report-job?chain=&addresses=a,b,c&start=&end=&format=&resync=
 func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addrParam := q.Get("addresses")
+	addrParam := q.Get(apiAddresses)
 	if addrParam == "" {
-		addrParam = q.Get("address")
+		addrParam = q.Get(apiAddress)
 	}
 	addresses := splitNonEmpty(addrParam, ",")
 	if len(addresses) == 0 {
 		http.Error(w, "addresses required", http.StatusBadRequest)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	format := def(q.Get("format"), "summ")
-	if format != "summ" && format != "cryptotaxcalculator" {
+	chain := chainParam(q.Get(apiChain))
+	format := def(q.Get(apiFormat), apiSumm)
+	if format != apiSumm && format != apiCryptotaxcalculator {
 		http.Error(w, "report-job is preview only; use /events for tax exports", 400)
 		return
 	}
@@ -223,10 +241,10 @@ func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
-	startStr, endStr := q.Get("start"), q.Get("end")
+	startStr, endStr := q.Get(apiStart), q.Get(apiEnd)
 	start := dateParam(startStr, time.Time{})
 	end := dateParam(endStr, nowUTC().AddDate(0, 0, 1))
-	resync := q.Get("resync") == "true"
+	resync := q.Get("resync") == apiTrue
 
 	job, err := s.getOrStartReportJob(chain, addresses, start, end, startStr, endStr, format, resync, decisions, tags)
 	if err != nil {
@@ -234,19 +252,26 @@ func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	switch job.Status {
 	case ReportJobReady:
+		var readiness ReportReadiness
+		if err := json.Unmarshal([]byte(job.ReadinessJSON), &readiness); err != nil {
+			writeTaxError(w, fmt.Errorf("cached report readiness unavailable: %w", err))
+			return
+		}
 		writeJSON(w, map[string]any{
-			"status":     "ready",
-			"csv":        job.CSV,
-			"rowCount":   job.RowCount,
-			"computedAt": job.ComputedThrough,
+			"preview_only": true,
+			apiReadiness:   readiness,
+			apiStatus:      ReportJobReady,
+			apiCSV:         job.CSV,
+			"rowCount":     job.RowCount,
+			"computedAt":   job.ComputedThrough,
 		})
 	case ReportJobFailed:
-		writeJSON(w, map[string]any{"status": "failed", "error": job.Error})
+		writeJSON(w, map[string]any{apiStatus: ReportJobFailed, apiError: job.Error})
 	default:
-		writeJSON(w, map[string]any{"status": "pending"})
+		writeJSON(w, map[string]any{apiStatus: ReportJobPending})
 	}
 }
 

@@ -29,22 +29,22 @@ const (
 // TagVocabulary lists every tag with the treatment it produces.
 func TagVocabulary() []map[string]string {
 	return []map[string]string{
-		{"tag": TagInternalTransfer, "label": "Internal transfer", "treatment": "Not a disposal or acquisition. Sent to tax software as a transfer so it matches the other wallet. Left out of Form 8949."},
-		{"tag": TagPayment, "label": "Payment", "treatment": "Sent coins are a disposal at fair market value. Received coins are income at receipt and that value is their cost basis."},
-		{"tag": TagIncome, "label": "Income", "treatment": "Ordinary income at the USD value on receipt; that value is the cost basis."},
-		{"tag": TagGift, "label": "Gift", "treatment": "A gift sent is not a sale. A gift received carries the giver's basis, which we cannot see, so a later disposal shows basis unknown."},
-		{"tag": TagAirdrop, "label": "Airdrop", "treatment": "Ordinary income at the USD value on receipt."},
-		{"tag": TagProtocolDeposit, "label": "Protocol deposit", "treatment": "Still owned. Kept out of tax-software imports and Form 8949, shown in the Generic CSV and journal."},
-		{"tag": TagExpense, "label": "Expense", "treatment": "A disposal at fair market value, labelled as a cost or expense for tax software."},
-		{"tag": TagSpam, "label": "Spam", "treatment": "Excluded from tax-software imports and Form 8949. Kept in the Generic CSV for the audit trail."},
-		{"tag": TagLost, "label": "Lost or stolen", "treatment": "Labelled lost for tax software. Whether a loss is deductible depends on jurisdiction."},
+		{apiTag: TagInternalTransfer, apiLabel: "Internal transfer", apiTreatment: "Not a disposal or acquisition. Sent to tax software as a transfer so it matches the other wallet. Left out of Form 8949."},
+		{apiTag: TagPayment, apiLabel: "Payment", apiTreatment: "Sent coins are a disposal at fair market value. Received coins are income at receipt and that value is their cost basis."},
+		{apiTag: TagIncome, apiLabel: apiIncomeLabel, apiTreatment: "Ordinary income at the USD value on receipt; that value is the cost basis."},
+		{apiTag: TagGift, apiLabel: "Gift", apiTreatment: "A gift sent is not a sale. A gift received carries the giver's basis, which we cannot see, so a later disposal shows basis unknown."},
+		{apiTag: TagAirdrop, apiLabel: "Airdrop", apiTreatment: "Ordinary income at the USD value on receipt."},
+		{apiTag: TagProtocolDeposit, apiLabel: "Protocol deposit", apiTreatment: "Still owned. Kept out of tax-software imports and Form 8949, shown in the Generic CSV and journal."},
+		{apiTag: TagExpense, apiLabel: "Expense", apiTreatment: "A disposal at fair market value, labelled as a cost or expense for tax software."},
+		{apiTag: TagSpam, apiLabel: "Spam", apiTreatment: "Excluded from tax-software imports and Form 8949. Kept in the Generic CSV for the audit trail."},
+		{apiTag: TagLost, apiLabel: "Lost or stolen", apiTreatment: "Labelled lost for tax software. Whether a loss is deductible depends on jurisdiction."},
 	}
 }
 
 var validTags = func() map[string]bool {
 	m := map[string]bool{}
 	for _, t := range TagVocabulary() {
-		m[t["tag"]] = true
+		m[t[apiTag]] = true
 	}
 	return m
 }()
@@ -114,10 +114,10 @@ func (t UserTags) Canonical() string {
 }
 
 func tagsFromRequest(r *http.Request) (UserTags, error) {
-	if len(r.URL.Query()["tags"]) > 1 {
+	if len(r.URL.Query()[apiTags]) > 1 {
 		return nil, assetReviewInputError{fmt.Errorf("tags must be supplied once")}
 	}
-	t, err := ParseUserTags(r.URL.Query().Get("tags"))
+	t, err := ParseUserTags(r.URL.Query().Get(apiTags))
 	if err != nil {
 		return nil, assetReviewInputError{err}
 	}
@@ -131,7 +131,7 @@ func ApplyTags(rows []Row, tags UserTags) []Row {
 		return rows
 	}
 	for i := range rows {
-		if rows[i].Category == "fee" {
+		if rows[i].Category == apiFee {
 			continue
 		}
 		hash := strings.ToUpper(rows[i].TxHash)
@@ -145,7 +145,7 @@ func ApplyTags(rows []Row, tags UserTags) []Row {
 }
 
 func handleTagVocabulary(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{"tags": TagVocabulary(), "key_forms": []string{"<tx_hash>", "<tx_hash>:<denom>"}})
+	writeJSON(w, map[string]any{apiTags: TagVocabulary(), "key_forms": []string{"<tx_hash>", "<tx_hash>:<denom>"}})
 }
 
 // koinlyTagLabel maps a user tag to Koinly's label vocabulary.
@@ -155,22 +155,22 @@ func koinlyTagLabel(r Row) (string, bool) {
 		return "", true
 	case TagIncome, TagAirdrop:
 		if r.Direction == "in" {
-			return map[string]string{TagIncome: "income", TagAirdrop: "airdrop"}[r.UserTag], true
+			return map[string]string{TagIncome: TagIncome, TagAirdrop: TagAirdrop}[r.UserTag], true
 		}
 	case TagPayment:
 		if r.Direction == "in" {
-			return "income", true
+			return TagIncome, true
 		}
 		return "", true
 	case TagGift:
-		if r.Direction == "out" {
-			return "gift", true
+		if r.Direction == apiOut {
+			return TagGift, true
 		}
 		return "", true
 	case TagExpense:
-		return "cost", true
+		return apiCost, true
 	case TagLost:
-		return "lost", true
+		return TagLost, true
 	}
 	return "", false
 }
@@ -186,26 +186,26 @@ func ctcTagType(r Row) (string, bool) {
 		return "transfer-out", true
 	case TagIncome:
 		if in {
-			return "income", true
+			return TagIncome, true
 		}
 	case TagAirdrop:
 		if in {
-			return "airdrop", true
+			return TagAirdrop, true
 		}
 	case TagPayment:
 		if in {
-			return "income", true
+			return TagIncome, true
 		}
-		return "send", true
+		return apiSend, true
 	case TagGift:
 		if in {
 			return "incoming-gift", true
 		}
 		return "outgoing-gift", true
 	case TagExpense:
-		return "expense", true
+		return TagExpense, true
 	case TagLost:
-		return "lost", true
+		return TagLost, true
 	}
 	return "", false
 }
@@ -215,7 +215,7 @@ func coinLedgerType(r Row) string {
 	switch r.UserTag {
 	case TagIncome, TagPayment:
 		if r.Direction == "in" {
-			return "Income"
+			return apiIncomeLabel
 		}
 	case TagAirdrop:
 		if r.Direction == "in" {
@@ -227,12 +227,12 @@ func coinLedgerType(r Row) string {
 		return "Lost"
 	}
 	switch r.Category {
-	case "reward", "commission":
+	case apiReward, apiCommission:
 		return "Staking"
-	case "income":
-		return "Income"
+	case TagIncome:
+		return apiIncomeLabel
 	}
-	if r.Direction == "out" {
+	if r.Direction == apiOut {
 		return "Withdrawal"
 	}
 	return "Deposit"
@@ -242,21 +242,21 @@ func coinLedgerType(r Row) string {
 func coinTrackerTag(r Row) string {
 	switch r.UserTag {
 	case TagIncome, TagPayment, TagExpense:
-		return "payment"
+		return TagPayment
 	case TagAirdrop:
-		return "airdrop"
+		return TagAirdrop
 	case TagGift:
-		return "gift"
+		return TagGift
 	case TagLost:
-		return "lost"
+		return TagLost
 	}
 	switch r.Category {
-	case "reward", "commission":
-		return "staked"
-	case "income":
-		return "payment"
-	case "expense":
-		return "payment"
+	case apiReward, apiCommission:
+		return apiStaked
+	case TagIncome:
+		return TagPayment
+	case TagExpense:
+		return TagPayment
 	}
 	return ""
 }
@@ -269,7 +269,7 @@ func isIncomeRow(r Row) bool {
 		return false
 	}
 	switch r.Category {
-	case "reward", "commission", "income":
+	case apiReward, apiCommission, TagIncome:
 		return true
 	}
 	if r.Direction == "in" {
@@ -282,7 +282,7 @@ func isIncomeRow(r Row) bool {
 }
 
 func incomeType(r Row) string {
-	if r.Category == "income" {
+	if r.Category == TagIncome {
 		return "income:" + r.RewardTrigger
 	}
 	if r.UserTag != "" {
@@ -292,10 +292,10 @@ func incomeType(r Row) string {
 }
 
 func incomeSource(r Row) string {
-	if r.Category == "reward" || r.Category == "commission" {
-		return "staking"
+	if r.Category == apiReward || r.Category == apiCommission {
+		return apiStaking
 	}
-	if r.Category == "income" {
+	if r.Category == TagIncome {
 		return protocolName(r.Detail)
 	}
 	return r.UserTag
@@ -323,7 +323,7 @@ func protocolName(detail string) string {
 func implySwapPrices(rows []Row) {
 	byTx := map[string][]int{}
 	for i, r := range rows {
-		if r.Category == "swap" {
+		if r.Category == apiSwap {
 			byTx[r.TxHash] = append(byTx[r.TxHash], i)
 		}
 	}
