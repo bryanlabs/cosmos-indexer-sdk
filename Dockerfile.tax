@@ -8,12 +8,14 @@
 # never invoked, so no muslc/wasmvm static-lib dance is needed.
 FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
 WORKDIR /src
-ENV GOTOOLCHAIN=local
+ENV GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS="-p=1"
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod go mod download
 COPY . .
 ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxindexer ./taxindexer && \
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxindexer ./taxindexer && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxapid ./taxapid && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxrepair ./taxrepair && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxwatch ./taxwatch
@@ -21,9 +23,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-
 FROM build AS test
 # Pure decoder/classification and bounded-enqueue tests only; no live DB or RPC.
 # The selected core/db tests exclude Docker-backed integration suites.
-RUN CGO_ENABLED=0 go test -p 4 ./tax && \
-    CGO_ENABLED=0 go test -p 4 ./rpc ./config ./cmd && \
-    CGO_ENABLED=0 go test -p 4 ./core ./db -run '^(TestIndexedBlockWindow|TestBlockIndex|TestOpaque|TestFeePayer|TestMessageEvidence|TestTxResults|TestKnownTransferOriginalWireBytes)' -count=1
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
+    CGO_ENABLED=0 go test -p 1 ./tax && \
+    CGO_ENABLED=0 go test -p 1 ./rpc ./config ./cmd && \
+    CGO_ENABLED=0 go test -p 1 ./core ./db -run '^(TestIndexedBlockWindow|TestBlockIndex|TestOpaque|TestFeePayer|TestFeeUpsert|TestMessageEvidence|TestMessageParserFailureDryRun|TestTxResults|TestKnownTransferOriginalWireBytes|TestKnownAuthzEnvelope)' -count=1
 
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk add --no-cache ca-certificates && adduser -D -u 1137 tax
