@@ -266,7 +266,25 @@ func UpsertFailedEventBlock(db *gorm.DB, blockHeight int64, chainID string, chai
 	})
 }
 
+// IndexNewBlock persists raw evidence only. Indexers with custom parsers must use
+// IndexBlockData so raw evidence and classification outcomes share one commit.
 func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig) (models.Block, []TxDBWrapper, error) {
+	return indexBlockData(db, block, txs, indexerConfig, nil, false)
+}
+
+// IndexBlockData atomically publishes raw evidence, parser outcomes, failed-block
+// removal and tx_indexed completion. A parser's incomplete result is persisted
+// by IndexCustomMessages; only persistence failures roll back the block.
+func IndexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig, trackers map[string]models.MessageParser) (models.Block, []TxDBWrapper, error) {
+	return indexBlockData(db, block, txs, indexerConfig, trackers, true)
+}
+
+func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig, trackers map[string]models.MessageParser, classify bool) (models.Block, []TxDBWrapper, error) {
+	originalBlock, originalTxs := block, txs
+	txs = cloneBlockTransactions(txs)
+	messageTypes := newPendingIDCache(messageTypeIDs)
+	eventTypes := newPendingIDCache(messageEventTypeIDs)
+	attributeKeys := newPendingIDCache(attributeKeyIDs)
 	// Evidence for unknown messages is mandatory. Enable event persistence for
 	// this block without changing the caller's configuration.
 	for _, tx := range txs {
@@ -404,14 +422,14 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 		}
 
 		// Create unique message types and post-process them into the messages
-		fullUniqueBlockMessageTypes, err := indexMessageTypes(dbTransaction, txs)
+		fullUniqueBlockMessageTypes, err := indexMessageTypes(dbTransaction, txs, messageTypes)
 		if err != nil {
 			return err
 		}
 
 		fullUniqueBlockMessageEventTypes := make(map[string]models.MessageEventType)
 		if indexerConfig.Flags.IndexMessageEvents {
-			fullUniqueBlockMessageEventTypes, err = indexMessageEventTypes(dbTransaction, txs)
+			fullUniqueBlockMessageEventTypes, err = indexMessageEventTypes(dbTransaction, txs, eventTypes)
 			if err != nil {
 				return err
 			}
@@ -419,7 +437,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 
 		fullUniqueBlockMessageEventAttributeKeys := make(map[string]models.MessageEventAttributeKey)
 		if indexerConfig.Flags.IndexMessageEvents {
-			fullUniqueBlockMessageEventAttributeKeys, err = indexMessageEventAttributeKeys(dbTransaction, txs)
+			fullUniqueBlockMessageEventAttributeKeys, err = indexMessageEventAttributeKeys(dbTransaction, txs, attributeKeys)
 			if err != nil {
 				return err
 			}
@@ -512,11 +530,24 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 			}
 		}
 
+		if classify {
+			return IndexCustomMessages(indexerConfig, dbTransaction, false, txs, trackers)
+		}
 		return nil
 	})
+	if err != nil {
+		return originalBlock, originalTxs, err
+	}
+	// A savepoint release is not a commit. Callers supplying an outer transaction
+	// cannot promote new IDs, because their later rollback would invalidate them.
+	if _, nested := db.Statement.ConnPool.(gorm.TxCommitter); !nested {
+		messageTypes.publish()
+		eventTypes.publish()
+		attributeKeys.publish()
+	}
 
 	// Contract: ensure that block and txs have been loaded with the indexed data before returning
-	return block, txs, err
+	return block, txs, nil
 }
 
 // The lookup tables (message types, event types, attribute keys) hold a small
@@ -558,7 +589,7 @@ var (
 	attributeKeyIDs     = newIDCache()
 )
 
-func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageType, error) {
+func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageType, error) {
 	fullUniqueBlockMessageTypes := make(map[string]models.MessageType)
 	for _, tx := range txs {
 		for messageTypeKey, messageType := range tx.UniqueMessageTypes {
@@ -568,7 +599,7 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 
 	var messageTypesSlice []models.MessageType
 	for key, messageType := range fullUniqueBlockMessageTypes {
-		if id, ok := messageTypeIDs.get(messageType.MessageType); ok {
+		if id, ok := ids.get(messageType.MessageType); ok {
 			messageType.ID = id
 			fullUniqueBlockMessageTypes[key] = messageType
 			continue
@@ -590,13 +621,13 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 
 	for _, messageType := range messageTypesSlice {
 		fullUniqueBlockMessageTypes[messageType.MessageType] = messageType
-		messageTypeIDs.put(messageType.MessageType, messageType.ID)
+		ids.put(messageType.MessageType, messageType.ID)
 	}
 
 	return fullUniqueBlockMessageTypes, nil
 }
 
-func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageEventType, error) {
+func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageEventType, error) {
 	fullUniqueBlockMessageEventTypes := make(map[string]models.MessageEventType)
 
 	for _, tx := range txs {
@@ -607,7 +638,7 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 
 	var messageTypesSlice []models.MessageEventType
 	for key, messageType := range fullUniqueBlockMessageEventTypes {
-		if id, ok := messageEventTypeIDs.get(messageType.Type); ok {
+		if id, ok := ids.get(messageType.Type); ok {
 			messageType.ID = id
 			fullUniqueBlockMessageEventTypes[key] = messageType
 			continue
@@ -629,13 +660,13 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 
 	for _, messageType := range messageTypesSlice {
 		fullUniqueBlockMessageEventTypes[messageType.Type] = messageType
-		messageEventTypeIDs.put(messageType.Type, messageType.ID)
+		ids.put(messageType.Type, messageType.ID)
 	}
 
 	return fullUniqueBlockMessageEventTypes, nil
 }
 
-func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageEventAttributeKey, error) {
+func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageEventAttributeKey, error) {
 	fullUniqueMessageEventAttributeKeys := make(map[string]models.MessageEventAttributeKey)
 
 	for _, tx := range txs {
@@ -646,7 +677,7 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 
 	var messageEventAttributeKeysSlice []models.MessageEventAttributeKey
 	for key, messageEventAttributeKey := range fullUniqueMessageEventAttributeKeys {
-		if id, ok := attributeKeyIDs.get(messageEventAttributeKey.Key); ok {
+		if id, ok := ids.get(messageEventAttributeKey.Key); ok {
 			messageEventAttributeKey.ID = id
 			fullUniqueMessageEventAttributeKeys[key] = messageEventAttributeKey
 			continue
@@ -670,7 +701,7 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 
 	for _, messageEventAttributeKey := range messageEventAttributeKeysSlice {
 		fullUniqueMessageEventAttributeKeys[messageEventAttributeKey.Key] = messageEventAttributeKey
-		attributeKeyIDs.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
+		ids.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
 	}
 
 	return fullUniqueMessageEventAttributeKeys, nil
