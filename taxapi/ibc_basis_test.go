@@ -35,7 +35,7 @@ func TestNativeRefundBasisGateAcrossYearsAndLaterSpend(t *testing.T) {
 			events[2].Detail = strings.Replace(basisPacket, `"23"`, `"24"`, 1)
 			require.True(t, ibcBasisReadiness(events, dec.Add(6*time.Hour)).ExportReady)
 			events[2].Detail = basisPacket
-			events[2].ToAddr = "other-wallet"
+			events[2].ToAddr = testOtherWallet
 			require.True(t, ibcBasisReadiness(events, dec.Add(6*time.Hour)).ExportReady)
 		})
 	}

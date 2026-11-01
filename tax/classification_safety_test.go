@@ -18,6 +18,8 @@ import (
 )
 
 const (
+	testRefundReceiver  = "refund_receiver"
+	testRefundTokens    = "refund_tokens"
 	safetyVoucher       = "ibc/14F9BC3E44B8A9C1BE1FB08980FAB87034C9905EF17CF2F5008FC085218811CC"
 	safetyV2Voucher     = "ibc/3401BA755A65AADE5A4B1CCD440C819ABB8FC4732DF81C0A0AF85AB00EDF41DE"
 	safetyV2Client      = "08-wasm-1369"
@@ -145,7 +147,9 @@ func TestSafetyV1RefundsArePacketLinkedPrincipal(t *testing.T) {
 			bankDenom = safetyVoucher
 		}
 		packet := safetyPacket(t, denom)
-		log := &txlog.LogMessage{Events: safetyCredit(other, bankDenom)}
+		log := &txlog.LogMessage{Events: append(safetyCredit(other, bankDenom),
+			ev("timeout", [2]string{testRefundReceiver, other}, [2]string{"refund_denom", denom}, [2]string{"refund_amount", "100"}),
+			ev(eventFungibleTokenPacket, [2]string{attributeSender, other}, [2]string{attributeDenom, denom}, [2]string{attributeAmount, "100"}))}
 		for _, tc := range []struct {
 			name    string
 			msg     sdk.Msg
@@ -202,7 +206,7 @@ func TestSafetyV2RefundsFromEventsAndSentinelAck(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			log := &txlog.LogMessage{Events: safetyCredit(other, tc.denom)}
-			log.Events = append(log.Events, ev("timeout", [2]string{attributeReceiver, other}, [2]string{"refund_tokens", tc.token}))
+			log.Events = append(log.Events, ev("timeout", [2]string{attributeReceiver, other}, [2]string{testRefundTokens, tc.token}))
 			out := classify(&MsgTimeoutV2{Packet: packet}, log)
 			if len(out) != 1 {
 				t.Fatalf("timeout: %+v", out)

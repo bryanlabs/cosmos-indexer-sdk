@@ -288,18 +288,28 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, skipForwardEvents(log)...)
 
 	case *chantypes.MsgTimeout:
-		return ibcV1RefundEvents(log, m.Packet, true, nil)
+		refunded, issues := ibcV1RefundEvents(log, m.Packet, true, nil)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
 	case *chantypes.MsgTimeoutOnClose:
-		return ibcV1RefundEvents(log, m.Packet, true, nil)
+		refunded, issues := ibcV1RefundEvents(log, m.Packet, true, nil)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
 	case *chantypes.MsgAcknowledgement:
-		return ibcV1RefundEvents(log, m.Packet, false, m.Acknowledgement)
+		refunded, issues := ibcV1RefundEvents(log, m.Packet, false, m.Acknowledgement)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
 	case *MsgTimeoutV2:
-		return ibcV2RefundEvents(log, m.Packet, true)
+		refunded, issues := ibcV2RefundEvents(log, m.Packet, true)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
 	case *MsgAcknowledgementV2:
 		if !isV2ErrorAcknowledgement(m.AcknowledgementRaw) {
 			break
 		}
-		return ibcV2RefundEvents(log, m.Packet, false)
+		refunded, issues := ibcV2RefundEvents(log, m.Packet, false)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
 
 	case *chantypes.MsgRecvPacket:
 		// An NFT bridge packet lands on a wasm.<ics721> port and carries

@@ -30,7 +30,7 @@ func TestReportReadinessSemanticAndParserGates(t *testing.T) {
 	}
 	preview = waitPreview(t, s, wallet, decisions)
 	checkReady(preview, false)
-	for _, path := range []string{apiAssetReviewPath, apiEvents, apiIncome, api8949Path, apiScheduleD, api990TPath, "/journal", "/positions"} {
+	for _, path := range []string{apiAssetReviewPath, apiEvents, apiIncome, api8949Path, apiScheduleD, api990TPath, apiJournalPath, apiPositionsPath} {
 		rr := callAsset(t, s, path, wallet, decisions)
 		if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "semantic") {
 			t.Fatalf("semantic gate %s: %d %s", path, rr.Code, rr.Body.String())

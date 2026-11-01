@@ -35,12 +35,12 @@ func OutboundPacketDetail(log *txlog.LogMessage, m *transfertypes.MsgTransfer) m
 			continue
 		}
 		d := map[string]string{attributeIBCPacketSequence: strconv.FormatUint(seq, 10)}
-		if a["packet_source_client"] != "" && a["packet_destination_client"] != "" {
+		if a["packet_source_client"] != "" && a["packet_dest_client"] != "" {
 			if m.SourceChannel != "" && m.SourceChannel != a["packet_source_client"] {
 				continue
 			}
 			d["ibc_generation"] = "v2"
-			d["packet_source_client"], d["packet_destination_client"] = a["packet_source_client"], a["packet_destination_client"]
+			d["packet_source_client"], d["packet_destination_client"] = a["packet_source_client"], a["packet_dest_client"]
 		} else {
 			if a[attributeIBCSrcPort] == "" || a[attributeIBCSrcChannel] == "" ||
 				(m.SourcePort != "" && m.SourcePort != a[attributeIBCSrcPort]) ||

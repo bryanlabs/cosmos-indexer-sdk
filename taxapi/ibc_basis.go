@@ -42,6 +42,7 @@ func isIBCRefund(trigger string) bool {
 func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness {
 	refunds := map[string]bool{}
 	refundOwners := map[string]bool{}
+	unknownRefundOwners := map[string]bool{}
 	blocked := map[string]bool{}
 	reasons := map[string]bool{}
 	for _, e := range events {
@@ -52,6 +53,8 @@ func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness
 		key := tax.IBCPacketKey(e.Detail)
 		if key != "" {
 			refunds[e.ToAddr+":"+key] = true
+		} else {
+			unknownRefundOwners[e.ToAddr] = true
 		}
 		if e.Timestamp.Before(end) {
 			blocked[e.ToAddr+":"+key+":"+e.TxHash] = true
@@ -63,10 +66,14 @@ func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness
 			continue
 		}
 		key := tax.IBCPacketKey(e.Detail)
-		if key != "" && refunds[e.FromAddr+":"+key] {
+		switch {
+		case unknownRefundOwners[e.FromAddr]:
+			blocked[e.FromAddr+":unknown-refund:"+e.TxHash] = true
+			reasons[ibcPacketIdentityRequired] = true
+		case key != "" && refunds[e.FromAddr+":"+key]:
 			blocked[e.FromAddr+":"+key] = true
 			reasons[ibcRefundBasisRequired] = true
-		} else if key == "" && refundOwners[e.FromAddr] {
+		case key == "" && refundOwners[e.FromAddr]:
 			// Legacy rows need retained packet evidence or replay. Do not guess
 			// a match from identical coin quantities, memos or nearby timestamps.
 			blocked[e.FromAddr+":missing:"+e.TxHash] = true
@@ -95,6 +102,11 @@ func (s *Server) requireIBCBasisReady(chain string, addresses []string, end time
 	if err := s.retainLegacyOutboundIdentities(events); err != nil {
 		return err
 	}
+	incomplete, err := s.incompleteIBCRefunds(chain, addresses)
+	if err != nil {
+		return err
+	}
+	events = append(events, incomplete...)
 	if readiness := ibcBasisReadiness(events, end); !readiness.ExportReady {
 		return reportReadinessRequired{readiness}
 	}

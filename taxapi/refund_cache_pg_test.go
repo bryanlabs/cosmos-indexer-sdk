@@ -41,6 +41,7 @@ func refundCachePGFixture(t *testing.T) *Server {
 		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, time_stamp timestamptz)",
 		"CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint, memo text)",
 		"CREATE TEMP TABLE messages (id bigint, tx_id bigint, opaque boolean)",
+		"CREATE TEMP TABLE message_types (id bigint, message_type text)",
 		"CREATE TEMP TABLE message_parser_errors (message_id bigint)",
 		"CREATE TEMP TABLE failed_messages (tx_id bigint)",
 		"CREATE TEMP TABLE failed_txes (block_id bigint, hash text)",
@@ -61,6 +62,8 @@ func refundCachePGFixture(t *testing.T) *Server {
 		"INSERT INTO pg_temp.addresses VALUES (1,'wallet'),(2,'other-wallet')",
 		"INSERT INTO pg_temp.tx_signer_addresses VALUES (1,1),(2,1),(3,1),(4,1)",
 		"INSERT INTO pg_temp.denoms VALUES (1,'uatom')",
+		"ALTER TABLE pg_temp.messages ADD COLUMN message_type_id bigint, ADD COLUMN message_bytes bytea",
+		"ALTER TABLE pg_temp.message_events ADD COLUMN index bigint DEFAULT 0",
 	} {
 		require.NoError(t, db.Exec(sql).Error)
 	}
@@ -119,12 +122,12 @@ func TestHistoricalNativeCacheCorrectionsPostgres(t *testing.T) {
 	// Exact persisted fee ownership participates, even if its amount is equal.
 	require.NoError(t, s.db.Exec("INSERT INTO pg_temp.fees VALUES (1,1,1,1,1000000)").Error)
 	payerA := nativePreview(t, s, apiWallet, start, end)
-	payerB := nativePreview(t, s, "other-wallet", start, end)
+	payerB := nativePreview(t, s, testOtherWallet, start, end)
 	require.Equal(t, 2, payerA.RowCount)
 	require.Zero(t, payerB.RowCount)
 	require.NoError(t, s.db.Exec("UPDATE pg_temp.fees SET payer_address_id=2 WHERE id=1").Error)
 	correctA := nativePreview(t, s, apiWallet, start, end)
-	correctB := nativePreview(t, s, "other-wallet", start, end)
+	correctB := nativePreview(t, s, testOtherWallet, start, end)
 	require.Equal(t, 1, correctA.RowCount)
 	require.Equal(t, 1, correctB.RowCount)
 	require.NotEqual(t, payerA.ReviewFingerprint, correctA.ReviewFingerprint)
@@ -132,10 +135,10 @@ func TestHistoricalNativeCacheCorrectionsPostgres(t *testing.T) {
 	require.NotEqual(t, payerA.CSV, correctA.CSV)
 	require.NotEqual(t, payerB.CSV, correctB.CSV)
 	require.NoError(t, s.db.Exec("UPDATE pg_temp.fees SET amount=2000000 WHERE id=1").Error)
-	amountEdit := nativePreview(t, s, "other-wallet", start, end)
+	amountEdit := nativePreview(t, s, testOtherWallet, start, end)
 	require.NotEqual(t, correctB.CSV, amountEdit.CSV)
 	require.NoError(t, s.db.Exec("DELETE FROM pg_temp.fees WHERE id=1").Error)
-	require.Zero(t, nativePreview(t, s, "other-wallet", start, end).RowCount)
+	require.Zero(t, nativePreview(t, s, testOtherWallet, start, end).RowCount)
 }
 
 func TestNativeRefundBlocksHistoricalCachedDisposalAndLaterSpendPostgres(t *testing.T) {
@@ -152,7 +155,7 @@ func TestNativeRefundBlocksHistoricalCachedDisposalAndLaterSpendPostgres(t *test
 			require.Equal(t, 2, nativePreview(t, s, apiWallet, start, end).RowCount)
 			insertNativeFinancialEvent(t, s, 3, "protocol_withdrawal", "", apiWallet, trigger, basisPacket, jan)
 			insertNativeFinancialEvent(t, s, 4, apiTransfer, apiWallet, "merchant", "", "", jan.Add(24*time.Hour))
-			for _, path := range []string{"/8949", "/positions", "/journal", "/events", "/report-job"} {
+			for _, path := range []string{"/8949", apiPositionsPath, apiJournalPath, "/events", "/report-job"} {
 				for _, period := range []string{"start=2025-01-01&end=2026-01-01", "start=2026-01-03&end=2027-01-01"} {
 					rr := httptest.NewRecorder()
 					s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path+"?address=wallet&chain=mainnet&"+period, nil))
@@ -166,7 +169,7 @@ func TestNativeRefundBlocksHistoricalCachedDisposalAndLaterSpendPostgres(t *test
 			// A different packet must not retroactively block the original send.
 			require.NoError(t, s.db.Exec("UPDATE pg_temp.taxable_events SET detail=? WHERE id=3", strings.Replace(basisPacket, `"23"`, `"24"`, 1)).Error)
 			require.NoError(t, s.requireIBCBasisReady(apiMainnet, []string{apiWallet}, end))
-			require.NoError(t, s.requireIBCBasisReady(apiMainnet, []string{"other-wallet"}, end.AddDate(1, 0, 0)))
+			require.NoError(t, s.requireIBCBasisReady(apiMainnet, []string{testOtherWallet}, end.AddDate(1, 0, 0)))
 			require.NoError(t, s.requireIBCBasisReady(apiTestnet, []string{apiWallet}, end.AddDate(1, 0, 0)))
 		})
 	}
@@ -179,8 +182,8 @@ func TestLegacyOutboundPacketEvidencePostgres(t *testing.T) {
 	insertNativeFinancialEvent(t, s, 2, "ibc_out", apiWallet, "destination", "", "", dec)
 	insertNativeFinancialEvent(t, s, 3, "protocol_withdrawal", "", apiWallet, ibcTimeoutRefund, basisPacket, end.AddDate(0, 0, 1))
 	for _, sql := range []string{
-		"INSERT INTO pg_temp.message_event_types VALUES (1,'send_packet')",
-		"INSERT INTO pg_temp.message_events VALUES (1,2,1)",
+		testInsertSendPacketEventType,
+		"INSERT INTO pg_temp.message_events (id,message_id,message_event_type_id) VALUES (1,2,1)",
 		"INSERT INTO pg_temp.message_event_attribute_keys VALUES (1,'packet_sequence'),(2,'packet_src_port'),(3,'packet_src_channel')",
 		"INSERT INTO pg_temp.message_event_attributes VALUES (1,1,0,'23'),(1,2,1,'transfer'),(1,3,2,'channel-7')",
 	} {
@@ -207,12 +210,12 @@ func TestFullHistoryFinancialFingerprintScopePostgres(t *testing.T) {
 		return value
 	}
 	base := fingerprint(apiWallet)
-	other := fingerprint("other-wallet")
+	other := fingerprint(testOtherWallet)
 	// Out-of-period native evidence participates without pricing or rounding.
 	insertNativeFinancialEvent(t, s, 3, apiReward, "", apiWallet, "claim", "", end.Add(24*time.Hour))
 	before := fingerprint(apiWallet)
 	require.NotEqual(t, base, before)
-	require.Equal(t, other, fingerprint("other-wallet"))
+	require.Equal(t, other, fingerprint(testOtherWallet))
 	for _, sql := range []string{
 		"UPDATE pg_temp.txes SET memo='corrected historical memo' WHERE id=3",
 		"UPDATE pg_temp.taxable_events SET detail='{\"corrected\":\"true\"}' WHERE id=3",

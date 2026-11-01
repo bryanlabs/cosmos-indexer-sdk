@@ -335,15 +335,23 @@ var replayedMessageTypes = []string{
 }
 
 func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error) {
-	meta := s.oracle.Denoms(chain)
+	input, err := s.readReportInput(chain, []string{addr}, start, end, false)
+	if err != nil {
+		return nil, err
+	}
+	return s.priceWalletRows(chain, addr, input.Wallets[0]), nil
+}
 
+// loadWalletRows performs database work only. Pricing and shared Server caches
+// are deliberately used only after the read snapshot has been released.
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time) (walletRows, error) {
 	var events []tax.TaxableEvent
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
 		Where("timestamp >= ? AND timestamp < ?", start, end).
 		Order("timestamp asc").
 		Find(&events).Error; err != nil {
-		return nil, err
+		return walletRows{}, err
 	}
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
@@ -358,10 +366,10 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		var legacyCount int64
 		if err := s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
 			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, replayedMessageTypes).Count(&legacyCount).Error; err != nil {
-			return nil, err
+			return walletRows{}, err
 		}
 		if legacyCount > 0 {
-			return nil, errAwaitingCorrection
+			return walletRows{}, errAwaitingCorrection
 		}
 	}
 
@@ -377,9 +385,18 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		Where("chains.chain_id IN ?", chainIDs(chain)).
 		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
 		Scan(&fees).Error; err != nil {
-		return nil, err
+		return walletRows{}, err
 	}
+	memos, err := s.eventMemos(events)
+	if err != nil {
+		return walletRows{}, err
+	}
+	return walletRows{Events: events, Fees: fees, Memos: memos}, nil
+}
 
+func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
+	events, fees, memos := input.Events, input.Fees, input.Memos
+	meta := s.oracle.Denoms(chain)
 	// A busy wallet can have thousands of rows, almost all on distinct dates, and
 	// buildRow's price lookup is a network call to the oracle on a cache miss —
 	// done one row at a time this made a large report take tens of seconds.
@@ -388,10 +405,6 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	// in-memory cache hits.
 	s.prewarmPrices(chain, events, fees)
 
-	memos, err := s.eventMemos(events)
-	if err != nil {
-		return nil, err
-	}
 	var validatorNames map[string]string
 	for _, event := range events {
 		if event.ValidatorAddress != "" {
@@ -416,7 +429,7 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, ""))
 	}
 
-	return out, nil
+	return out
 }
 
 const priceWarmConcurrency = 16

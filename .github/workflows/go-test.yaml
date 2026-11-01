@@ -16,6 +16,7 @@ jobs:
     env:
       GOMAXPROCS: "2"
       GOFLAGS: -p=1
+      COSMOS_TAX_SNAPSHOT_DOCKER: "1"
       COSMOS_TAX_TEST_DSN: host=127.0.0.1 port=5432 user=test password=test dbname=test sslmode=disable
     services:
       postgres:

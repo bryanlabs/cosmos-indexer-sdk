@@ -18,7 +18,7 @@ func TestOutboundPacketIdentityPreservesMemoAndGeneration(t *testing.T) {
 		attrs         [][2]string
 	}{
 		{"v1", outboundFixtureChannel, [][2]string{{attributeIBCPacketSequence, "23"}, {attributeIBCSrcPort, string(CategoryTransfer)}, {attributeIBCSrcChannel, outboundFixtureChannel}, {attributeIBCDstPort, string(CategoryTransfer)}, {attributeIBCDstChannel, "channel-141"}}},
-		{"v2", "08-wasm-1", [][2]string{{attributeIBCPacketSequence, "23"}, {"packet_source_client", "08-wasm-1"}, {"packet_destination_client", "08-wasm-2"}}},
+		{"v2", "08-wasm-1", [][2]string{{attributeIBCPacketSequence, "23"}, {"packet_source_client", "08-wasm-1"}, {"packet_dest_client", "08-wasm-2"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &transfertypes.MsgTransfer{SourcePort: string(CategoryTransfer), SourceChannel: tc.channel, Sender: del, Receiver: other, Token: sdk.NewInt64Coin("uatom", 100), Memo: `{"forward":{"receiver":"next","port":"transfer","channel":"channel-2"}}`}
@@ -43,6 +43,20 @@ func TestOutboundPacketIdentityPreservesMemoAndGeneration(t *testing.T) {
 			require.Empty(t, OutboundPacketDetail(log, m), "coalesced packet attributes must not silently choose the last packet")
 		})
 	}
+}
+
+func TestOutboundV2IdentityUsesRetainedRealEvent(t *testing.T) {
+	_, log := protocolFixture(t, "skip-recv-forward")
+	detail := OutboundPacketDetail(log, &transfertypes.MsgTransfer{})
+	require.Equal(t, "v2", detail["ibc_generation"])
+	require.NotEmpty(t, detail["packet_destination_client"])
+	original, err := json.Marshal(detail)
+	require.NoError(t, err)
+	require.NotEmpty(t, IBCPacketKey(string(original)))
+	detail[attributeIBCPacketSequence] = "999999999"
+	unrelated, err := json.Marshal(detail)
+	require.NoError(t, err)
+	require.NotEqual(t, IBCPacketKey(string(original)), IBCPacketKey(string(unrelated)))
 }
 
 func TestPacketKeyRequiresCompleteSourceIdentity(t *testing.T) {

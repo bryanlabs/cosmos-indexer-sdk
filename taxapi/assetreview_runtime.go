@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -179,26 +178,14 @@ func PendingAssetReviews(rows []Row) int {
 
 func (s *Server) reviewedRows(chain string, addresses []string, start, end time.Time, decisions AssetDecisions, allowPending bool) ([]Row, error) {
 	addresses = normalizedWalletScope(addresses)
-	if err := s.requireClassificationReady(chain, addresses, start, end); err != nil {
+	input, err := s.readReportInput(chain, addresses, start, end, false)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.requireIBCBasisReady(chain, addresses, end); err != nil {
-		return nil, err
-	}
-	var rows []Row
-	seen := map[string]bool{}
-	for _, addr := range addresses {
-		addr = strings.TrimSpace(addr)
-		if addr == "" || seen[addr] {
-			continue
-		}
-		seen[addr] = true
-		next, err := s.rowsFor(chain, addr, start, end)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, next...)
-	}
+	return s.reviewedInputRows(chain, addresses, input, decisions, allowPending)
+}
+
+func applyReviewedRows(rows []Row, decisions AssetDecisions, allowPending bool) ([]Row, error) {
 	out, err := ApplyAssetDecisions(rows, decisions)
 	if err != nil {
 		return nil, assetReviewInputError{err}

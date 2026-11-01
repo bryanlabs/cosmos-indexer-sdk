@@ -17,12 +17,20 @@ import (
 )
 
 const (
-	attributeIBCPacketSequence = "packet_sequence"
-	attributeIBCSrcChannel     = "packet_src_channel"
-	attributeIBCDstChannel     = "packet_dst_channel"
-	attributeIBCSrcPort        = "packet_src_port"
-	attributeIBCDstPort        = "packet_dst_port"
-	attributeIBCEncodedAckHex  = "encoded_acknowledgement_hex"
+	attributeIBCPacketSequence       = "packet_sequence"
+	attributeIBCSrcChannel           = "packet_src_channel"
+	attributeIBCDstChannel           = "packet_dst_channel"
+	attributeIBCSrcPort              = "packet_src_port"
+	attributeIBCDstPort              = "packet_dst_port"
+	attributeIBCEncodedAckHex        = "encoded_acknowledgement_hex"
+	attributeIBCGeneration           = "ibc_generation"
+	attributePacketSourceClient      = "packet_source_client"
+	attributePacketDestinationClient = "packet_destination_client"
+	attributeRefundReceiver          = "refund_receiver"
+	attributeRefundTokens            = "refund_tokens"
+	eventTimeout                     = "timeout"
+	ibcGenerationV1                  = "v1"
+	ibcGenerationV2                  = "v2"
 )
 
 // ICS20 emits packet paths, while bank emits the actual local denomination.
@@ -382,27 +390,53 @@ func isV2ErrorAcknowledgement(raw []byte) bool {
 	return bytes.Equal(acks[0], sentinel[:])
 }
 
-func ibcV1RefundEvents(log *txlog.LogMessage, packet chantypes.Packet, timeout bool, ack []byte) []TaxableEvent {
-	if !timeout && !isErrorAcknowledgement(ack) {
-		return nil
+func ibcV1RefundEvents(log *txlog.LogMessage, packet chantypes.Packet, timeout bool, ack []byte) ([]TaxableEvent, []string) {
+	if (!timeout && !isErrorAcknowledgement(ack)) || packet.SourcePort != string(CategoryTransfer) {
+		return nil, nil
 	}
-	if packet.SourcePort != string(CategoryTransfer) {
-		return nil
-	}
+	application := ibcRefundApplication(log, timeout)
 	var data transfertypes.FungibleTokenPacketData
 	if json.Unmarshal(packet.Data, &data) != nil {
-		return nil
+		if application {
+			return nil, []string{"committed refund application has malformed packet data"}
+		}
+		return nil, nil
 	}
-	coin, ok := takeIBCCredit(ibcCredits(log), data.Sender, data.Amount, ibcLocalCandidates(data.Denom)...)
+	coin, ok := takeIBCCredit(ibcCredits(log), data.Sender, data.Amount, ibcRefundCandidates(data.Denom)...)
 	if !ok {
-		return nil
+		if application {
+			return nil, []string{"committed refund application has no reconciled committed bank credit"}
+		}
+		return nil, nil
+	}
+	if !application {
+		return nil, []string{"refund bank credit lacks committed application evidence"}
 	}
 	detail := map[string]string{
 		attributeIBCPacketSequence: strconv.FormatUint(packet.Sequence, 10), attributeIBCSrcPort: packet.SourcePort,
 		attributeIBCSrcChannel: packet.SourceChannel, attributeIBCDstPort: packet.DestinationPort,
-		attributeIBCDstChannel: packet.DestinationChannel, "ibc_generation": "v1", "principal_return": attributeTrue,
+		attributeIBCDstChannel: packet.DestinationChannel, attributeIBCGeneration: ibcGenerationV1, "principal_return": attributeTrue,
 	}
-	return ibcRefundRow(data.Sender, coin, timeout, detail)
+	return ibcRefundRow(data.Sender, coin, timeout, detail), nil
+}
+
+func ibcRefundApplication(log *txlog.LogMessage, timeout bool) bool {
+	if log == nil {
+		return false
+	}
+	for _, event := range log.Events {
+		if ibcCommittedEvent(event) && ((timeout && event.Type == eventTimeout) || (!timeout && event.Type == eventFungibleTokenPacket)) {
+			return true
+		}
+	}
+	return false
+}
+
+func ibcRefundCandidates(denom string) []string {
+	if !strings.Contains(denom, "/") {
+		return []string{denom}
+	}
+	return ibcLocalCandidates(denom)
 }
 
 // Select against bank evidence rather than parsing channel IDs using the old
@@ -420,14 +454,21 @@ func ibcRefundRow(receiver string, coin sdk.Coin, timeout bool, detail map[strin
 	return []TaxableEvent{{Category: string(CategoryProtocolWithdrawal), ToAddr: receiver, Amount: coin.Amount.String(), Denom: coin.Denom, RewardTrigger: trigger, Detail: detailJSON(detail)}}
 }
 
-func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) []TaxableEvent {
+func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) ([]TaxableEvent, []string) {
 	var out []TaxableEvent
+	var issues []string
+	if log == nil {
+		return nil, nil
+	}
 	credits := ibcCredits(log)
 	for _, ev := range log.Events {
+		if !ibcCommittedEvent(ev) {
+			continue
+		}
 		a := ibcAttrs(ev)
 		var receiver, amount, path string
 		switch {
-		case timeout && ibcEventType(ev) == "timeout":
+		case timeout && ibcEventType(ev) == eventTimeout:
 			// v10 timeout changed from refund_receiver/denom/amount to
 			// receiver + refund_tokens (a JSON Token with a structured Denom).
 			var token struct {
@@ -440,7 +481,8 @@ func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) []T
 					} `json:"trace"`
 				} `json:"denom"`
 			}
-			if json.Unmarshal([]byte(a["refund_tokens"]), &token) != nil {
+			if json.Unmarshal([]byte(a[attributeRefundTokens]), &token) != nil {
+				issues = append(issues, "committed refund application has malformed refund token")
 				continue
 			}
 			receiver, amount, path = a[attributeReceiver], token.Amount, ""
@@ -452,23 +494,31 @@ func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) []T
 			// The full data event precedes a separate error-only event. The
 			// message acknowledgement has already proved the packet failure.
 			receiver, amount, path = a[attributeSender], a[attributeAmount], a[attributeDenom]
+			if receiver == "" && amount == "" && path == "" {
+				continue
+			}
 		default:
 			continue
 		}
-		if path == "" {
+		if path == "" || receiver == "" || amount == "" {
+			issues = append(issues, "committed refund application has incomplete token or owner")
 			continue
 		}
-		// Bank evidence chooses raw native denomination vs hashed trace.
-		// v7's trace parser cannot recognize v2 client IDs such as 08-wasm-1.
-		coin, ok := takeIBCCredit(credits, receiver, amount, ibcLocalCandidates(path)...)
+		// Bank evidence chooses native denomination vs hashed trace. An absent
+		// matching credit is unresolved evidence, never a certified empty refund.
+		coin, ok := takeIBCCredit(credits, receiver, amount, ibcRefundCandidates(path)...)
 		if !ok {
+			issues = append(issues, "committed refund application has no reconciled committed bank credit")
 			continue
 		}
 		detail := map[string]string{
 			attributeIBCPacketSequence: strconv.FormatUint(packet.Sequence, 10), "packet_source_client": packet.SourceClient,
-			"packet_destination_client": packet.DestinationClient, "ibc_generation": "v2", "principal_return": attributeTrue,
+			"packet_destination_client": packet.DestinationClient, attributeIBCGeneration: ibcGenerationV2, "principal_return": attributeTrue,
 		}
 		out = append(out, ibcRefundRow(receiver, coin, timeout, detail)...)
 	}
-	return out
+	if ibcRefundApplication(log, timeout) && len(out) == 0 && len(issues) == 0 {
+		issues = append(issues, "committed refund application has no attributable refund token")
+	}
+	return out, issues
 }

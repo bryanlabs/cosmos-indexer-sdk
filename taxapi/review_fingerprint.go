@@ -34,8 +34,20 @@ func reviewFingerprint(rows []Row) string {
 // digest, regardless of the original blockchain timestamp. JSON framing avoids
 // delimiter collisions and SQL text keeps decimal amounts lossless.
 func (s *Server) currentReviewFingerprint(chain string, addresses []string, _, _ time.Time) (string, error) {
+	var fingerprint string
+	err := s.withReadSnapshot(func(reader *Server) error {
+		var err error
+		fingerprint, err = reader.reviewFingerprintInSnapshot(chain, normalizedWalletScope(addresses))
+		return err
+	})
+	return fingerprint, err
+}
+
+// The caller owns a repeatable-read snapshot. Never call this on the live pool:
+// financial scans and retained classification/packet evidence must agree.
+func (s *Server) reviewFingerprintInSnapshot(chain string, addresses []string) (string, error) {
 	h := sha256.New()
-	writeFinancialFingerprintRow(h, "version", "financial-history:v1")
+	writeFinancialFingerprintRow(h, "version", "reader-snapshot:v1")
 	events, err := s.scopedTaxEvents(chain).
 		Select("jsonb_build_array(to_jsonb(taxable_events), scope_t.memo, scope_t.hash, scope_t.code, scope_b.time_stamp, scope_c.chain_id)::text").
 		Where("(from_addr IN ? OR to_addr IN ?)", addresses, addresses).
@@ -68,15 +80,20 @@ func (s *Server) currentReviewFingerprint(chain string, addresses []string, _, _
 	if err != nil {
 		return "", err
 	}
-	defer fees.Close()
 	for fees.Next() {
 		var exact string
 		if err := fees.Scan(&exact); err != nil {
+			_ = fees.Close()
 			return "", err
 		}
 		writeFinancialFingerprintRow(h, "fee", exact)
 	}
-	if err := fees.Err(); err != nil {
+	err = fees.Err()
+	_ = fees.Close()
+	if err != nil {
+		return "", err
+	}
+	if err := s.writeClassificationFingerprint(h, chain, addresses); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil

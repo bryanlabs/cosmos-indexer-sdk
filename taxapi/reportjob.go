@@ -87,37 +87,40 @@ func (s *Server) reportIsStale(job *ReportJob, _ []string) bool {
 // remain failed until explicit resync. It never blocks on computation itself.
 func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions, tags UserTags) (*ReportJob, error) {
 	addresses = normalizedWalletScope(addresses)
-	// Check before looking at the cache: a newly retained parse/decode error
-	// must immediately suppress stale prior CSV, even within its max age.
-	if err := s.requireClassificationReady(chain, addresses, start, end); err != nil {
-		return nil, err
-	}
-	if err := s.requireIBCBasisReady(chain, addresses, end); err != nil {
-		return nil, err
-	}
 	canonical, err := CanonicalAssetDecisionsJSON(decisions)
 	if err != nil {
 		return nil, assetReviewInputError{err}
 	}
-	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|readiness:v2|financial-history:v1|review:%x", sha256.Sum256([]byte(canonical)))
+	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|readiness:v2|reader-snapshot:v1|review:%x", sha256.Sum256([]byte(canonical)))
 	if len(tags) > 0 {
 		key += fmt.Sprintf("|tags:%x", sha256.Sum256([]byte(tags.Canonical())))
 	}
 
 	var job ReportJob
-	err = s.db.Where(apiKey, key).First(&job).Error
-	found := err == nil
-	if err != nil && err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	stale := found && job.Status == ReportJobReady && s.reportIsStale(&job, addresses)
-	if found && job.Status == ReportJobReady && !stale && !resync {
-		fingerprint, err := s.currentReviewFingerprint(chain, addresses, start, end)
-		if err != nil {
-			return nil, err
+	var found, stale bool
+	// Cache rows, gates and their complete evidence digest are accepted from a
+	// single snapshot, not a gate-before-fingerprint race on the live pool.
+	err = s.withReadSnapshot(func(reader *Server) error {
+		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
+			return err
 		}
-		stale = fingerprint != job.ReviewFingerprint
+		err := reader.db.Where(apiKey, key).First(&job).Error
+		found = err == nil
+		if err != nil && err != gorm.ErrRecordNotFound {
+			return err
+		}
+		stale = found && job.Status == ReportJobReady && s.reportIsStale(&job, addresses)
+		if found && job.Status == ReportJobReady && !stale && !resync {
+			fingerprint, err := reader.reviewFingerprintInSnapshot(chain, addresses)
+			if err != nil {
+				return err
+			}
+			stale = fingerprint != job.ReviewFingerprint
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	needsCompute := !found || resync || stale
 	// A job already pending (someone else's request, or ours from a moment
@@ -157,13 +160,13 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string, decisions AssetDecisions, tags UserTags) {
 	defer inFlight.Delete(key)
 	computedThrough := nowUTC()
-	fingerprint, err := s.currentReviewFingerprint(chain, addresses, start, end)
+	input, err := s.readReportInput(chain, addresses, start, end, true)
 	if err != nil {
 		s.failReportJob(key, err)
 		return
 	}
 
-	all, err := s.reviewedRows(chain, addresses, start, end, decisions, true)
+	all, err := s.reviewedInputRows(chain, addresses, input, decisions, true)
 	if err != nil {
 		s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{apiStatus: ReportJobFailed, apiError: err.Error()})
 		return
@@ -176,20 +179,20 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 		return
 	}
 
-	if err := s.requireClassificationReady(chain, addresses, start, end); err != nil {
-		s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{apiStatus: ReportJobFailed, apiError: err.Error(), apiCSV: ""})
-		return
-	}
-	if err := s.requireIBCBasisReady(chain, addresses, end); err != nil {
-		s.failReportJob(key, err)
-		return
-	}
-	after, err := s.currentReviewFingerprint(chain, addresses, start, end)
+	var after string
+	err = s.withReadSnapshot(func(reader *Server) error {
+		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
+			return err
+		}
+		var err error
+		after, err = reader.reviewFingerprintInSnapshot(chain, addresses)
+		return err
+	})
 	if err != nil {
 		s.failReportJob(key, err)
 		return
 	}
-	if after != fingerprint {
+	if after != input.Fingerprint {
 		s.failReportJob(key, fmt.Errorf("financial history changed while computing report; retry with resync=true"))
 		return
 	}
@@ -200,7 +203,7 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 		apiCSV:               buf.String(),
 		"row_count":          len(all),
 		"computed_through":   computedThrough,
-		"review_fingerprint": fingerprint,
+		"review_fingerprint": input.Fingerprint,
 		apiError:             "",
 	})
 }
