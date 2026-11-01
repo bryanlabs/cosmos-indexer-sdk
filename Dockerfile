@@ -1,5 +1,4 @@
-# The wasmvm v1.2.3 static library links against LFS64 symbols that newer musl
-# dropped, so the build stays on Alpine 3.18 with the Go 1.26 toolchain copied in.
+# Keep the wasmvm static build on Alpine 3.18 with the Go 1.26 toolchain copied in.
 FROM golang:1.26-alpine AS go
 
 FROM golang:1.22-alpine3.18 AS build-env
@@ -20,12 +19,12 @@ RUN apk add --update --no-cache curl make git libc-dev bash gcc linux-headers eu
 
 # Install build dependencies.
 RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ] ; then \
-      wget -P /lib https://github.com/CosmWasm/wasmvm/releases/download/v1.2.3/libwasmvm_muslc.x86_64.a ; \
+      wget -P /lib https://github.com/CosmWasm/wasmvm/releases/download/v1.5.8/libwasmvm_muslc.x86_64.a ; \
       cp /lib/libwasmvm_muslc.x86_64.a /lib/libwasmvm_muslc.a ; \
     fi
 
 RUN if  [ "${TARGETPLATFORM}" = "linux/arm64" ] ; then \
-      wget -P /lib https://github.com/CosmWasm/wasmvm/releases/download/v1.2.3/libwasmvm_muslc.aarch64.a ; \
+      wget -P /lib https://github.com/CosmWasm/wasmvm/releases/download/v1.5.8/libwasmvm_muslc.aarch64.a ; \
       cp /lib/libwasmvm_muslc.aarch64.a /lib/libwasmvm_muslc.a ; \
     fi
 
