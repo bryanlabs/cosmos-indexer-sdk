@@ -479,7 +479,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 				if err := dbTransaction.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "tx_id"}, {Name: "message_index"}},
 					DoUpdates: messageEvidenceUpdates(),
-				}).Create(messagesSlice).Error; err != nil {
+				}).CreateInBatches(messagesSlice, rowInsertBatchSize).Error; err != nil {
 					config.Log.Error("Error getting/creating messages.", err)
 					return err
 				}
@@ -500,7 +500,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 					if err := dbTransaction.Clauses(clause.OnConflict{
 						Columns:   []clause.Column{{Name: "message_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"message_event_type_id"}),
-					}).Create(messagesEventsSlice).Error; err != nil {
+					}).CreateInBatches(messagesEventsSlice, rowInsertBatchSize).Error; err != nil {
 						config.Log.Error("Error getting/creating message events.", err)
 						return err
 					}
@@ -522,7 +522,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 					if err := dbTransaction.Clauses(clause.OnConflict{
 						Columns:   []clause.Column{{Name: "message_event_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"value", "message_event_attribute_key_id"}),
-					}).Create(messagesEventsAttributesSlice).Error; err != nil {
+					}).CreateInBatches(messagesEventsAttributesSlice, rowInsertBatchSize).Error; err != nil {
 						config.Log.Error("Error getting/creating message event attributes.", err)
 						return err
 					}
@@ -706,6 +706,10 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pending
 
 	return fullUniqueMessageEventAttributeKeys, nil
 }
+
+// Postgres caps one statement at 65535 bind parameters. A single 2025 Hub
+// transaction can carry more message event attributes than that.
+const rowInsertBatchSize = 4000
 
 func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, blockDBWrapper []TxDBWrapper, messageParserTrackers map[string]models.MessageParser) error {
 	if dryRun {

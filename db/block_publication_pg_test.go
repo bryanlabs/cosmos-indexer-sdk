@@ -282,3 +282,34 @@ func TestIndexBlockDataCommitFailurePostgres(t *testing.T) {
 	_, _, err = IndexBlockData(database, block, txs, conf, trackers)
 	require.NoError(t, err, "a failed outer commit must not poison subsequent lookup IDs")
 }
+
+// Shape of cosmoshub-4 24152705: one transaction carries more message event
+// attributes than a single statement's 65535 bind parameters allow.
+func TestIndexBlockDataBatchesOversizedTransactionPostgres(t *testing.T) {
+	database := publicationDatabase(t)
+	key := fmt.Sprintf("oversized-%d", time.Now().UnixNano())
+	block, txs, conf, trackers := publicationInput(key, &publicationParser{})
+	template := txs[0].Messages[0]
+	txs[0].Messages = nil
+	for m := 0; m < 2; m++ {
+		message := MessageDBWrapper{Message: models.Message{MessageType: template.Message.MessageType, MessageIndex: m}}
+		for e := 0; e < 3; e++ {
+			event := MessageEventDBWrapper{MessageEvent: models.MessageEvent{MessageEventType: template.MessageEvents[0].MessageEvent.MessageEventType, Index: uint64(e)}}
+			for a := 0; a < 3000; a++ {
+				event.Attributes = append(event.Attributes, models.MessageEventAttribute{MessageEventAttributeKey: template.MessageEvents[0].Attributes[0].MessageEventAttributeKey, Index: uint64(a), Value: fmt.Sprintf("%d/%d/%d", m, e, a)})
+			}
+			message.MessageEvents = append(message.MessageEvents, event)
+		}
+		txs[0].Messages = append(txs[0].Messages, message)
+	}
+	for _, replay := range []bool{false, true} {
+		_, _, err := IndexBlockData(database, block, cloneBlockTransactions(txs), conf, trackers)
+		require.NoError(t, err, "replay=%v", replay)
+		require.Equal(t, int64(18000), publicationCount(t, database, "message_event_attributes"))
+		var misplaced int64
+		require.NoError(t, database.Raw(`SELECT count(*) FROM pg_temp.message_event_attributes a
+ JOIN pg_temp.message_events e ON e.id=a.message_event_id JOIN pg_temp.messages m ON m.id=e.message_id
+ WHERE a.value <> m.message_index || '/' || e."index" || '/' || a."index"`).Scan(&misplaced).Error)
+		require.Zero(t, misplaced, "every attribute must reference its own event and message")
+	}
+}
