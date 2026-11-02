@@ -14,6 +14,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	bank "github.com/cosmos/cosmos-sdk/x/bank/types"
 	dist "github.com/cosmos/cosmos-sdk/x/distribution/types"
+	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
@@ -377,5 +378,18 @@ func TestSafetyICSAllocationIsNotWalletReward(t *testing.T) {
 				t.Fatalf("provider allocation became income without withdrawal: %+v", out)
 			}
 		})
+	}
+}
+
+func TestSafetyAuthzVoteHasNoTaxEffectUnlessCoinsMove(t *testing.T) {
+	vote := safetyUncached(t, &govv1beta1.MsgVote{ProposalId: 1, Voter: del, Option: govv1beta1.OptionYes})
+	msg := &authz.MsgExec{Grantee: other, Msgs: []*codectypes.Any{vote}}
+	data, err := (&Parser{}).ParseMessage(msg, &txlog.LogMessage{}, cfgForTests())
+	if err != nil || len((*data).([]TaxableEvent)) != 0 {
+		t.Fatalf("delegated vote was not a clean no-op: %v / %v", data, err)
+	}
+	moved := &txlog.LogMessage{Events: []txlog.LogMessageEvent{ev(eventCoinReceived, [2]string{attributeReceiver, del}, [2]string{attributeAmount, "5" + fixtureNativeDenom}, [2]string{attributeAuthzMsgIndex, "0"})}}
+	if _, err := (&Parser{}).ParseMessage(msg, moved, cfgForTests()); err == nil || !strings.Contains(err.Error(), "unsupported inner /cosmos.gov.v1beta1.MsgVote") {
+		t.Fatalf("vote with coin movement must stay unresolved: %v", err)
 	}
 }

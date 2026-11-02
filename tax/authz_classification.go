@@ -61,14 +61,37 @@ func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificatio
 				break
 			}
 		}
+		sub := eventsForAuthzIndex(log, i)
+		if !supported && authzNoTaxEffect[a.TypeUrl] && !authzMovedCoins(sub) {
+			continue
+		}
 		if !supported {
 			state.issues = append(state.issues, fmt.Sprintf("authz %s: unsupported inner %s", innerPath, a.TypeUrl))
 			continue
 		}
-		sub := eventsForAuthzIndex(log, i)
 		out = append(out, classifyWithState(inner, sub, state, depth+1, innerPath)...)
 	}
 	return out
+}
+
+// Delegated governance votes and reward-address changes move no coins. They
+// are skipped only when the inner message's own events confirm that.
+var authzNoTaxEffect = map[string]bool{
+	"/cosmos.gov.v1beta1.MsgVote":                        true,
+	"/cosmos.gov.v1beta1.MsgVoteWeighted":                true,
+	"/cosmos.gov.v1.MsgVote":                             true,
+	"/cosmos.gov.v1.MsgVoteWeighted":                     true,
+	"/cosmos.distribution.v1beta1.MsgSetWithdrawAddress": true,
+}
+
+func authzMovedCoins(log *txlog.LogMessage) bool {
+	for _, ev := range log.Events {
+		switch ev.Type {
+		case eventCoinReceived, "coin_spent", string(CategoryTransfer), "burn", "coinbase":
+			return true
+		}
+	}
+	return false
 }
 
 // Decode each Any independently. InterfaceRegistry.UnpackAny recursively unpacks
