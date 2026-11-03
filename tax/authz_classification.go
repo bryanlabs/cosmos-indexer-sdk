@@ -74,14 +74,19 @@ func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificatio
 	return out
 }
 
-// Delegated governance votes and reward-address changes move no coins. They
-// are skipped only when the inner message's own events confirm that.
+// Delegated governance votes, reward-address changes and grant management move
+// no coins. They are skipped only when the inner message's own events confirm
+// that.
 var authzNoTaxEffect = map[string]bool{
 	"/cosmos.gov.v1beta1.MsgVote":                        true,
 	"/cosmos.gov.v1beta1.MsgVoteWeighted":                true,
 	"/cosmos.gov.v1.MsgVote":                             true,
 	"/cosmos.gov.v1.MsgVoteWeighted":                     true,
 	"/cosmos.distribution.v1beta1.MsgSetWithdrawAddress": true,
+	"/cosmos.authz.v1beta1.MsgGrant":                     true,
+	"/cosmos.authz.v1beta1.MsgRevoke":                    true,
+	"/cosmos.feegrant.v1beta1.MsgGrantAllowance":         true,
+	"/cosmos.feegrant.v1beta1.MsgRevokeAllowance":        true,
 }
 
 func authzMovedCoins(log *txlog.LogMessage) bool {

@@ -393,3 +393,12 @@ func TestSafetyAuthzVoteHasNoTaxEffectUnlessCoinsMove(t *testing.T) {
 		t.Fatalf("vote with coin movement must stay unresolved: %v", err)
 	}
 }
+
+func TestSafetyAuthzGrantHasNoTaxEffect(t *testing.T) {
+	grant := safetyUncached(t, &authz.MsgGrant{Granter: del, Grantee: other})
+	msg := &authz.MsgExec{Grantee: other, Msgs: []*codectypes.Any{grant}}
+	data, err := (&Parser{}).ParseMessage(msg, &txlog.LogMessage{}, cfgForTests())
+	if err != nil || len((*data).([]TaxableEvent)) != 0 {
+		t.Fatalf("delegated grant was not a clean no-op: %v / %v", data, err)
+	}
+}
