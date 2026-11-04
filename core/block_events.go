@@ -92,13 +92,13 @@ func ProcessRPCBlockEvents(block *models.Block, blockEvents []abci.Event, blockL
 
 		if customParsers != nil {
 			if customBlockEventParsers, ok := customParsers[event.Type]; ok {
-				for index, customParser := range customBlockEventParsers {
+				for parserIndex, customParser := range customBlockEventParsers {
 					// We deliberately ignore the error here, as we want to continue processing the block events even if a custom parser fails
 					parsedData, err := customParser.ParseBlockEvent(event, conf)
 					beginBlockEvents[index].BlockEventParsedDatasets = append(beginBlockEvents[index].BlockEventParsedDatasets, parsers.BlockEventParsedData{
 						Data:   parsedData,
 						Error:  err,
-						Parser: &customBlockEventParsers[index],
+						Parser: &customBlockEventParsers[parserIndex],
 					})
 				}
 			}
