@@ -64,3 +64,37 @@ func TestIndexAddressesPostgres(t *testing.T) {
 	require.Equal(t, byAddress["cosmos1a"], again[0].ID)
 	require.Equal(t, byAddress["cosmos1b"], again[1].ID)
 }
+
+func TestSplitKnownPostgres(t *testing.T) {
+	dsn := os.Getenv("COSMOS_TAX_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set COSMOS_TAX_TEST_DSN for native Postgres lookup verification")
+	}
+	database, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	connection, err := database.DB()
+	require.NoError(t, err)
+	connection.SetMaxOpenConns(1)
+	connection.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	database = database.WithContext(ctx)
+	require.NoError(t, database.Exec("SET search_path = pg_temp").Error)
+	require.NoError(t, database.Exec(`CREATE TEMP TABLE message_event_types (id bigserial PRIMARY KEY, type text UNIQUE)`).Error)
+	require.NoError(t, database.Exec(`INSERT INTO message_event_types (type) VALUES ('transfer'), ('message')`).Error)
+	var stored []models.MessageEventType
+	require.NoError(t, database.Order("type").Find(&stored).Error)
+
+	rows := []models.MessageEventType{{Type: "coin_spent"}, {Type: "message"}, {Type: "transfer"}}
+	known, missing, err := splitKnown(database, &models.MessageEventType{}, columnType, rows,
+		func(m models.MessageEventType) string { return m.Type },
+		func(m models.MessageEventType, id uint) models.MessageEventType { m.ID = id; return m })
+	require.NoError(t, err)
+	require.Equal(t, []models.MessageEventType{{Type: "coin_spent"}}, missing)
+	require.Equal(t, []models.MessageEventType{stored[0], stored[1]}, known)
+
+	var locks int64
+	require.NoError(t, database.Raw(`SELECT count(*) FROM pg_locks WHERE locktype = 'transactionid' AND pid = pg_backend_pid() AND granted`).Scan(&locks).Error)
+	require.Zero(t, locks, "a plain read must not take a transaction ID")
+}

@@ -61,6 +61,13 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			uniqueBlockEventTypes = append(uniqueBlockEventTypes, value)
 		}
 		sort.Slice(uniqueBlockEventTypes, func(i, j int) bool { return uniqueBlockEventTypes[i].Type < uniqueBlockEventTypes[j].Type })
+		knownEventTypes, uniqueBlockEventTypes, err := splitKnown(dbTransaction, &models.BlockEventType{}, columnType, uniqueBlockEventTypes,
+			func(m models.BlockEventType) string { return m.Type },
+			func(m models.BlockEventType, id uint) models.BlockEventType { m.ID = id; return m })
+		if err != nil {
+			config.Log.Error("Error creating begin block event types.", err)
+			return err
+		}
 
 		if len(uniqueBlockEventTypes) != 0 {
 			// Bulk find or create on unique event types
@@ -80,7 +87,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			}
 		}
 
-		for _, value := range uniqueBlockEventTypes {
+		for _, value := range append(knownEventTypes, uniqueBlockEventTypes...) {
 			blockDBWrapper.UniqueBlockEventTypes[value.Type] = value
 			eventTypeIDs.put(value.Type, value.ID)
 		}
@@ -98,6 +105,13 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 		sort.Slice(uniqueBlockEventAttributeKeys, func(i, j int) bool {
 			return uniqueBlockEventAttributeKeys[i].Key < uniqueBlockEventAttributeKeys[j].Key
 		})
+		knownAttributeKeys, uniqueBlockEventAttributeKeys, err := splitKnown(dbTransaction, &models.BlockEventAttributeKey{}, columnKey, uniqueBlockEventAttributeKeys,
+			func(m models.BlockEventAttributeKey) string { return m.Key },
+			func(m models.BlockEventAttributeKey, id uint) models.BlockEventAttributeKey { m.ID = id; return m })
+		if err != nil {
+			config.Log.Error("Error creating begin block event attribute keys.", err)
+			return err
+		}
 
 		if len(uniqueBlockEventAttributeKeys) != 0 {
 			if err := dbTransaction.Clauses(
@@ -116,7 +130,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			}
 		}
 
-		for _, value := range uniqueBlockEventAttributeKeys {
+		for _, value := range append(knownAttributeKeys, uniqueBlockEventAttributeKeys...) {
 			blockDBWrapper.UniqueBlockEventAttributeKeys[value.Key] = value
 			attributeKeyIDs.put(value.Key, value.ID)
 		}

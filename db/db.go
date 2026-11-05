@@ -598,6 +598,39 @@ var (
 	addressIDs          = newIDCache()
 )
 
+// splitKnown fills in the IDs of rows already in the table with a plain read,
+// which takes no row locks, and returns them apart from the rows still to be
+// inserted. An upsert of an existing row locks it until the block commits, and
+// with parallel indexers those locks deadlocked across the dimension tables.
+func splitKnown[T any](db *gorm.DB, model interface{}, column string, rows []T, key func(T) string, withID func(T, uint) T) (known, missing []T, err error) {
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	keys := make([]string, len(rows))
+	for i, row := range rows {
+		keys[i] = key(row)
+	}
+	var found []struct {
+		ID        uint
+		LookupKey string
+	}
+	if err := db.Model(model).Select("id, "+column+" AS lookup_key").Where(column+" IN ?", keys).Scan(&found).Error; err != nil {
+		return nil, nil, err
+	}
+	ids := make(map[string]uint, len(found))
+	for _, row := range found {
+		ids[row.LookupKey] = row.ID
+	}
+	for _, row := range rows {
+		if id, ok := ids[key(row)]; ok && id != 0 {
+			known = append(known, withID(row, id))
+		} else {
+			missing = append(missing, row)
+		}
+	}
+	return known, missing, nil
+}
+
 // indexAddresses sets the ID of each address, which must be sorted. The upsert
 // locks every row it touches until the block commits, so parallel indexers
 // sharing common addresses (fee payers, module accounts) waited on each other
@@ -669,6 +702,13 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
 	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].MessageType < messageTypesSlice[j].MessageType })
+	known, messageTypesSlice, err := splitKnown(db, &models.MessageType{}, "message_type", messageTypesSlice,
+		func(m models.MessageType) string { return m.MessageType },
+		func(m models.MessageType, id uint) models.MessageType { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message types.", err)
+		return nil, err
+	}
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -680,7 +720,7 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map
 		}
 	}
 
-	for _, messageType := range messageTypesSlice {
+	for _, messageType := range append(known, messageTypesSlice...) {
 		fullUniqueBlockMessageTypes[messageType.MessageType] = messageType
 		ids.put(messageType.MessageType, messageType.ID)
 	}
@@ -708,6 +748,13 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache)
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
 	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].Type < messageTypesSlice[j].Type })
+	known, messageTypesSlice, err := splitKnown(db, &models.MessageEventType{}, columnType, messageTypesSlice,
+		func(m models.MessageEventType) string { return m.Type },
+		func(m models.MessageEventType, id uint) models.MessageEventType { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message event types.", err)
+		return nil, err
+	}
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -719,7 +766,7 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache)
 		}
 	}
 
-	for _, messageType := range messageTypesSlice {
+	for _, messageType := range append(known, messageTypesSlice...) {
 		fullUniqueBlockMessageEventTypes[messageType.Type] = messageType
 		ids.put(messageType.Type, messageType.ID)
 	}
@@ -749,6 +796,13 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pending
 	sort.Slice(messageEventAttributeKeysSlice, func(i, j int) bool {
 		return messageEventAttributeKeysSlice[i].Key < messageEventAttributeKeysSlice[j].Key
 	})
+	known, messageEventAttributeKeysSlice, err := splitKnown(db, &models.MessageEventAttributeKey{}, columnKey, messageEventAttributeKeysSlice,
+		func(m models.MessageEventAttributeKey) string { return m.Key },
+		func(m models.MessageEventAttributeKey, id uint) models.MessageEventAttributeKey { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message event attribute keys.", err)
+		return nil, err
+	}
 
 	if len(messageEventAttributeKeysSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -760,7 +814,7 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pending
 		}
 	}
 
-	for _, messageEventAttributeKey := range messageEventAttributeKeysSlice {
+	for _, messageEventAttributeKey := range append(known, messageEventAttributeKeysSlice...) {
 		fullUniqueMessageEventAttributeKeys[messageEventAttributeKey.Key] = messageEventAttributeKey
 		ids.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
 	}
