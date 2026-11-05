@@ -74,6 +74,8 @@ var MessageTypeURLs = []string{
 	TypeURLV2Acknowledgement,
 	TypeURLTFMint,
 	TypeURLTFForceTransfer,
+	TypeURLTFBurn,
+	TypeURLTFCreateDenom,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -318,6 +320,30 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 				FromAddr: m.Sender, ToAddr: m.Recipient(),
 				Amount: m.Amount, Denom: m.Denom,
 			})
+		}
+
+	// A burn first moves the coins from the holder to the tokenfactory module,
+	// so the holder's disposal is that transfer. Read it from the events: the
+	// message does not say whose coins went when burnFromAddress is empty.
+	case *MsgTFBurn:
+		from := m.BurnFromAddress
+		if from == "" {
+			from = m.Sender
+		}
+		for to, coins := range transfersFromSender(log, from) {
+			events = append(events, coinTransfers(from, to, coins)...)
+		}
+
+	// Creating a denom charges a creation fee (10 ATOM on Cosmos Hub, paid to
+	// the community pool) with nothing coming back.
+	case *MsgTFCreateDenom:
+		for to, coins := range transfersFromSender(log, m.Sender) {
+			for _, c := range coins {
+				events = append(events, TaxableEvent{
+					Category: string(CategoryExpense), FromAddr: m.Sender, ToAddr: to,
+					Amount: c.Amount.String(), Denom: c.Denom, RewardTrigger: "denom_creation_fee",
+				})
+			}
 		}
 
 	// An admin moving someone else's coins is still a movement for both sides.

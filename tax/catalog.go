@@ -70,6 +70,7 @@ func Triggers() []TriggerInfo {
 		{"name_registration", string(CategoryExpense), "An atom.names registration or renewal fee."},
 		{"upload_fee", string(CategoryExpense), "A payment to the Hub upload payment contract."},
 		{"game_fee", string(CategoryExpense), "A Mad Gumball play fee."},
+		{"denom_creation_fee", string(CategoryExpense), "The fee for creating a tokenfactory denom."},
 		{"auction_bid", string(CategoryProtocolDeposit), "A bid placed into a reserve auction's escrow."},
 		{"auction_refund", string(CategoryProtocolWithdrawal), "An outbid bidder's escrow returned."},
 		{"hydro_lock", string(CategoryProtocolDeposit), "ATOM or liquid staking tokens locked in Hydro."},

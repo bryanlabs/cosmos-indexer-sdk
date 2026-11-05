@@ -57,7 +57,8 @@ func TestTFMintWithoutMintToAddressCreditsSender(t *testing.T) {
 	}
 }
 
-// Burn, create-denom and change-admin move nothing to a third party.
+// Without events, burn and create-denom have no movement to record, and
+// change-admin never moves anything.
 func TestTokenFactoryNonValueMessagesProduceNoEvent(t *testing.T) {
 	coin := append(fieldBytes(1, "factory/x/ufoo"), fieldBytes(2, "500")...)
 	burn := &MsgTFBurn{}
@@ -130,5 +131,33 @@ func TestForceTransferIsClassifiedAsAMovement(t *testing.T) {
 	}
 	if out[0].FromAddr != from || out[0].ToAddr != to || out[0].Amount != "4200" {
 		t.Fatalf("event = %+v", out[0])
+	}
+}
+
+// Real mainnet burn at height 30016526: the holder's coins go to the module
+// before they are burned, and only that transfer is the holder's disposal.
+func TestTFBurnRecordsTheTransferToTheModule(t *testing.T) {
+	holder := "cosmos1warp46ynf3f0z24pn4lqkpeumlcj5863f374zg"
+	module := "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+	denom := "factory/cosmos1warp46ynf3f0z24pn4lqkpeumlcj5863f374zg/cosmowarp"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		{Type: "transfer", Attributes: []indexerTxTypes.Attribute{{Key: "recipient", Value: module}, {Key: "sender", Value: holder}, {Key: "amount", Value: "1000000" + denom}}},
+		{Type: "burn", Attributes: []indexerTxTypes.Attribute{{Key: "burner", Value: module}, {Key: "amount", Value: "1000000" + denom}}},
+	}}
+	out := classify(&MsgTFBurn{Sender: holder, Denom: denom, Amount: "1000000"}, log)
+	if len(out) != 1 || out[0].FromAddr != holder || out[0].ToAddr != module || out[0].Amount != "1000000" || out[0].Denom != denom || out[0].Category != string(CategoryTransfer) {
+		t.Fatalf("events = %+v", out)
+	}
+}
+
+// Real mainnet create-denom at height 30172324 paid 10 ATOM to the community pool.
+func TestTFCreateDenomRecordsTheFeeAsExpense(t *testing.T) {
+	creator := "cosmos1fec7fxmxrz00m6vu80vcjf48ppjq35l0ktx4et"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		{Type: "transfer", Attributes: []indexerTxTypes.Attribute{{Key: "recipient", Value: distributionModuleAddress}, {Key: "sender", Value: creator}, {Key: "amount", Value: "10000000uatom"}}},
+	}}
+	out := classify(&MsgTFCreateDenom{Sender: creator, Subdenom: "fomog"}, log)
+	if len(out) != 1 || out[0].Category != string(CategoryExpense) || out[0].Amount != "10000000" || out[0].Denom != "uatom" || out[0].ToAddr != distributionModuleAddress || out[0].RewardTrigger != "denom_creation_fee" {
+		t.Fatalf("events = %+v", out)
 	}
 }
