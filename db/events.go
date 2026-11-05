@@ -1,13 +1,22 @@
 package db
 
 import (
+	"sort"
+
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
+var (
+	blockEventTypeIDs         = newIDCache()
+	blockEventAttributeKeyIDs = newIDCache()
+)
+
 func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, identifierLoggingString string) (*BlockDBWrapper, error) {
+	eventTypeIDs := newPendingIDCache(blockEventTypeIDs)
+	attributeKeyIDs := newPendingIDCache(blockEventAttributeKeyIDs)
 	err := db.Transaction(func(dbTransaction *gorm.DB) error {
 		if err := dbTransaction.
 			Exec("DELETE FROM failed_event_blocks WHERE height = ? AND blockchain_id = ?", blockDBWrapper.Block.Height, blockDBWrapper.Block.ChainID).
@@ -38,11 +47,20 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 			return err
 		}
 
+		// Upserting a known type locks its row until commit, so only unseen
+		// types reach the database, in a stable order so parallel indexers
+		// cannot deadlock.
 		var uniqueBlockEventTypes []models.BlockEventType
 
-		for _, value := range blockDBWrapper.UniqueBlockEventTypes {
+		for key, value := range blockDBWrapper.UniqueBlockEventTypes {
+			if id, ok := eventTypeIDs.get(value.Type); ok {
+				value.ID = id
+				blockDBWrapper.UniqueBlockEventTypes[key] = value
+				continue
+			}
 			uniqueBlockEventTypes = append(uniqueBlockEventTypes, value)
 		}
+		sort.Slice(uniqueBlockEventTypes, func(i, j int) bool { return uniqueBlockEventTypes[i].Type < uniqueBlockEventTypes[j].Type })
 
 		if len(uniqueBlockEventTypes) != 0 {
 			// Bulk find or create on unique event types
@@ -64,13 +82,22 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 
 		for _, value := range uniqueBlockEventTypes {
 			blockDBWrapper.UniqueBlockEventTypes[value.Type] = value
+			eventTypeIDs.put(value.Type, value.ID)
 		}
 
 		var uniqueBlockEventAttributeKeys []models.BlockEventAttributeKey
 
-		for _, value := range blockDBWrapper.UniqueBlockEventAttributeKeys {
+		for key, value := range blockDBWrapper.UniqueBlockEventAttributeKeys {
+			if id, ok := attributeKeyIDs.get(value.Key); ok {
+				value.ID = id
+				blockDBWrapper.UniqueBlockEventAttributeKeys[key] = value
+				continue
+			}
 			uniqueBlockEventAttributeKeys = append(uniqueBlockEventAttributeKeys, value)
 		}
+		sort.Slice(uniqueBlockEventAttributeKeys, func(i, j int) bool {
+			return uniqueBlockEventAttributeKeys[i].Key < uniqueBlockEventAttributeKeys[j].Key
+		})
 
 		if len(uniqueBlockEventAttributeKeys) != 0 {
 			if err := dbTransaction.Clauses(
@@ -91,6 +118,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 
 		for _, value := range uniqueBlockEventAttributeKeys {
 			blockDBWrapper.UniqueBlockEventAttributeKeys[value.Key] = value
+			attributeKeyIDs.put(value.Key, value.ID)
 		}
 
 		// Loop through begin and end block arrays and apply the block ID and event type ID
@@ -170,6 +198,10 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 
 		return nil
 	})
+	if err == nil {
+		eventTypeIDs.publish()
+		attributeKeyIDs.publish()
+	}
 
 	// Contract: ensure that wrapper has been loaded with all data before returning
 	return blockDBWrapper, err
