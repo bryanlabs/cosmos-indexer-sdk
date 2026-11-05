@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 )
 
 const unknownClaimSemantics = "unknown_claim_semantics"
@@ -21,6 +23,7 @@ type ReportReadiness struct {
 	ParserErrors           int64    `json:"parser_errors"`
 	DecodeErrors           int64    `json:"decode_errors"`
 	OpaqueMessages         int64    `json:"opaque_messages"`
+	UnreviewedMessages     int64    `json:"unreviewed_messages"`
 	Scope                  string   `json:"scope"`
 	ReviewRequired         []string `json:"review_required,omitempty"`
 }
@@ -87,7 +90,7 @@ func readinessForRows(rows []Row) ReportReadiness {
 type reportReadinessRequired struct{ Readiness ReportReadiness }
 
 func (e reportReadinessRequired) Error() string {
-	return fmt.Sprintf("report not ready: %d semantic review row(s), %d parser error(s), %d decode error(s), %d opaque message(s). Unknown claim semantics and IBC refund basis reconciliation require classification/basis review, not token identity, price, spam or tag decisions. Incomplete parsing/decoding requires successful reindexing; prior rows are not completeness evidence", e.Readiness.PendingSemanticReviews, e.Readiness.ParserErrors, e.Readiness.DecodeErrors, e.Readiness.OpaqueMessages)
+	return fmt.Sprintf("report not ready: %d semantic review row(s), %d parser error(s), %d decode error(s), %d opaque message(s), %d unreviewed message type(s). Unknown claim semantics and IBC refund basis reconciliation require classification/basis review, not token identity, price, spam or tag decisions. Incomplete parsing/decoding requires successful reindexing; prior rows are not completeness evidence", e.Readiness.PendingSemanticReviews, e.Readiness.ParserErrors, e.Readiness.DecodeErrors, e.Readiness.OpaqueMessages, e.Readiness.UnreviewedMessages)
 }
 
 // chainIDs uses the same aliases as chainParam, without conflating the Hub's
@@ -151,6 +154,18 @@ func (s *Server) classificationReadiness(chain string, addresses []string, start
 	if err := base().Joins("JOIN (SELECT tx_id FROM messages WHERE opaque = true) opaque_scope ON opaque_scope.tx_id=t.id").Count(&r.OpaqueMessages).Error; err != nil {
 		return r, err
 	}
+	// A decoded message of a type the tax layer has no decision for may have
+	// moved coins. Such types are rare, so find them first and only scan
+	// messages when one exists.
+	var unreviewed []int64
+	if err := s.db.Table("message_types").Where("message_type NOT IN ?", tax.ReviewedTypeURLs()).Pluck("id", &unreviewed).Error; err != nil {
+		return r, err
+	}
+	if len(unreviewed) > 0 {
+		if err := base().Joins("JOIN (SELECT DISTINCT tx_id FROM messages WHERE message_type_id IN ? AND opaque = false) unreviewed_scope ON unreviewed_scope.tx_id=t.id", unreviewed).Count(&r.UnreviewedMessages).Error; err != nil {
+			return r, err
+		}
+	}
 	if len(addresses) == 0 {
 		// Some transactions failed before txes/signers could be persisted. They
 		// are chain-wide coverage gaps, not attributable to an arbitrary wallet.
@@ -162,7 +177,7 @@ func (s *Server) classificationReadiness(chain string, addresses []string, start
 		}
 		r.DecodeErrors += unattributed
 	}
-	r.ParserDecodeComplete = r.ParserErrors == 0 && r.DecodeErrors == 0 && r.OpaqueMessages == 0
+	r.ParserDecodeComplete = r.ParserErrors == 0 && r.DecodeErrors == 0 && r.OpaqueMessages == 0 && r.UnreviewedMessages == 0
 	r.ExportReady = r.ParserDecodeComplete
 	return r, nil
 }

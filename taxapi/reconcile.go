@@ -43,6 +43,7 @@ type CoverageReport struct {
 	ParserErrors         int64         `json:"parser_errors"`
 	DecodeErrors         int64         `json:"decode_errors"`
 	OpaqueMessages       int64         `json:"opaque_messages"`
+	UnreviewedMessages   int64         `json:"unreviewed_messages"`
 	ParserDecodeComplete bool          `json:"parser_decode_complete"`
 }
 
@@ -78,6 +79,7 @@ func (s *Server) coverage(chain string, start, end time.Time) (*CoverageReport, 
 	report := summarizeCoverage(rows, start, end)
 	report.ParserErrors, report.DecodeErrors = readiness.ParserErrors, readiness.DecodeErrors
 	report.OpaqueMessages = readiness.OpaqueMessages
+	report.UnreviewedMessages = readiness.UnreviewedMessages
 	report.ParserDecodeComplete = readiness.ParserDecodeComplete
 	return report, nil
 }

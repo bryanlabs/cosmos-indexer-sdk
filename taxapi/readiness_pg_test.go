@@ -34,7 +34,8 @@ func TestReadinessRetainedEvidencePostgres(t *testing.T) {
 		"CREATE TEMP TABLE chains (id bigint, chain_id text)",
 		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, time_stamp timestamptz)",
 		"CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)",
-		"CREATE TEMP TABLE messages (id bigint, tx_id bigint, opaque boolean)",
+		"CREATE TEMP TABLE messages (id bigint, tx_id bigint, opaque boolean, message_type_id bigint)",
+		"CREATE TEMP TABLE message_types (id bigint, message_type text)",
 		"CREATE TEMP TABLE message_parser_errors (message_id bigint)",
 		"CREATE TEMP TABLE failed_messages (tx_id bigint)",
 		"CREATE TEMP TABLE failed_txes (block_id bigint, hash text)",
@@ -47,7 +48,8 @@ func TestReadinessRetainedEvidencePostgres(t *testing.T) {
 		"INSERT INTO pg_temp.chains VALUES (1,'cosmoshub-4')",
 		"INSERT INTO pg_temp.blocks VALUES (1,1,'2025-06-01T00:00:00Z')",
 		"INSERT INTO pg_temp.txes VALUES (1,1,'fixture-tx',0)",
-		"INSERT INTO pg_temp.messages VALUES (1,1,false)",
+		"INSERT INTO pg_temp.message_types VALUES (1,'/cosmos.bank.v1beta1.MsgSend'),(2,'/cosmos.gov.v1.MsgVote')",
+		"INSERT INTO pg_temp.messages VALUES (1,1,false,1)",
 		"INSERT INTO pg_temp.addresses VALUES (1,'cosmos1fixture-wallet')",
 		"INSERT INTO pg_temp.tx_signer_addresses VALUES (1,1)",
 	} {
@@ -85,5 +87,17 @@ func TestReadinessRetainedEvidencePostgres(t *testing.T) {
 	check(wallet, true, 0, 0, 0)
 	require.NoError(t, database.Exec("INSERT INTO pg_temp.failed_txes VALUES (1,'no-retained-transaction')").Error)
 	check(nil, false, 0, 1, 0)
+	check(wallet, true, 0, 0, 0)
+
+	// A type with no tax decision blocks only once a message of it exists.
+	require.NoError(t, database.Exec("DELETE FROM pg_temp.failed_txes").Error)
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.message_types VALUES (3,'/cosmos.gov.v1.MsgCancelProposal')").Error)
+	check(wallet, true, 0, 0, 0)
+	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET message_type_id=3").Error)
+	r, err := server.classificationReadiness(apiMainnet, wallet, start, end)
+	require.NoError(t, err)
+	require.False(t, r.ParserDecodeComplete)
+	require.Equal(t, int64(1), r.UnreviewedMessages)
+	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET message_type_id=2").Error)
 	check(wallet, true, 0, 0, 0)
 }
