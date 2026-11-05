@@ -239,22 +239,11 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	}
 	sort.Strings(keys)
 	out := make([]ValidatorStatementMonth, 0, len(keys))
-	var totals ValidatorStatementMonth
-	totals.Month = apiTotalLabel
-	totals.Symbol = s.native.Symbol
 	for _, k := range keys {
 		months[k].PriceMissingDays = len(missingDays[k])
-		m := *months[k]
-		out = append(out, m)
-		totals.CommissionAmount = totals.CommissionAmount.Add(m.CommissionAmount)
-		totals.CommissionUSD = totals.CommissionUSD.Add(m.CommissionUSD)
-		totals.DelegatorRewards = totals.DelegatorRewards.Add(m.DelegatorRewards)
-		totals.DelegatorRewardsUSD = totals.DelegatorRewardsUSD.Add(m.DelegatorRewardsUSD)
-		totals.RewardEvents += m.RewardEvents
-		totals.PriceMissingDays += m.PriceMissingDays
-		totals.PriceMissingEvents += m.PriceMissingEvents
-		totals.Incomplete = totals.Incomplete || m.Incomplete
+		out = append(out, *months[k])
 	}
+	totals := statementTotals(out, period, s.native.Symbol)
 	var allDelegators int64
 	_ = s.db.Table(apiTaxableEvents).
 		Where("validator_address = ? AND category = 'reward' AND timestamp >= ? AND timestamp < ?", val, start, end).
@@ -287,4 +276,22 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		"months":              out,
 		apiTotal:              totals,
 	})
+}
+
+// statementTotals sums the month rows. A month entirely inside an index gap
+// has no rows to flag, so the total is also incomplete whenever the period
+// itself is not complete.
+func statementTotals(months []ValidatorStatementMonth, period PeriodCoverage, symbol string) ValidatorStatementMonth {
+	totals := ValidatorStatementMonth{Month: apiTotalLabel, Symbol: symbol, Incomplete: !period.Complete}
+	for _, m := range months {
+		totals.CommissionAmount = totals.CommissionAmount.Add(m.CommissionAmount)
+		totals.CommissionUSD = totals.CommissionUSD.Add(m.CommissionUSD)
+		totals.DelegatorRewards = totals.DelegatorRewards.Add(m.DelegatorRewards)
+		totals.DelegatorRewardsUSD = totals.DelegatorRewardsUSD.Add(m.DelegatorRewardsUSD)
+		totals.RewardEvents += m.RewardEvents
+		totals.PriceMissingDays += m.PriceMissingDays
+		totals.PriceMissingEvents += m.PriceMissingEvents
+		totals.Incomplete = totals.Incomplete || m.Incomplete
+	}
+	return totals
 }

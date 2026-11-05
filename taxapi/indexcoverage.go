@@ -21,9 +21,14 @@ import (
 // Counting tens of millions of block rows per request is not affordable, so
 // a background scanner walks the height range in fixed buckets, keeps each
 // bucket's runs of indexed heights in memory, and publishes one immutable
-// snapshot that requests read. A bucket is rescanned every refresh while it
-// is still filling and only on the slow recheck cadence once every height in
-// it is indexed (a repair can still flip a block back to tx_indexed=false).
+// snapshot that requests read. A bucket is settled for transactions once
+// every height in it is tx_indexed, and fully settled once every height also
+// has its block events. A fully settled bucket is never read again. A bucket
+// settled for transactions only has just its event runs reread: every
+// refresh when events are the coverage criterion, otherwise on a slower
+// cadence so the per-year block_events_indexed_blocks counts stay current.
+// The snapshot is published every few bucket reads during a pass, so a pass
+// that runs out of time still leaves a usable snapshot behind.
 
 // yearStart is the first block of a UTC calendar year.
 type yearStart struct {
@@ -57,6 +62,11 @@ const (
 	// Pause between bucket queries so a full pass never competes with the
 	// indexer's writes for long.
 	coverageBucketPause = 20 * time.Millisecond
+	// Bucket reads between snapshots published during a pass.
+	coveragePublishEvery = 25
+	// How often a bucket settled for transactions rereads its block events
+	// when events are not the coverage criterion.
+	coverageEventRecheck = time.Hour
 )
 
 // Coverage criteria. Reports read transactions only, so a block counts as
@@ -97,17 +107,21 @@ type coverageSource interface {
 }
 
 type coverageBucket struct {
-	Lo, Hi    int64
-	Tx, Ev    []heightRun
-	ScannedAt time.Time
+	Lo, Hi int64
+	Tx, Ev []heightRun
+	// EvReadAt is when Ev was last read.
+	EvReadAt time.Time
 }
 
-func (b coverageBucket) settled() bool {
-	full := func(runs []heightRun) bool {
-		return len(runs) == 1 && runs[0].Lo == b.Lo && runs[0].Hi == b.Hi
-	}
-	return full(b.Tx) && full(b.Ev)
+func (b *coverageBucket) full(runs []heightRun) bool {
+	return len(runs) == 1 && runs[0].Lo == b.Lo && runs[0].Hi == b.Hi
 }
+
+// txSettled: every height in the bucket is tx_indexed.
+func (b *coverageBucket) txSettled() bool { return b.full(b.Tx) }
+
+// settled: every height has both flags. Such a bucket is never read again.
+func (b *coverageBucket) settled() bool { return b.full(b.Tx) && b.full(b.Ev) }
 
 // CoverageGap is a run of heights not yet indexed. From and Through are the
 // UTC days the gap touches, taken from the indexed blocks on either side, so
@@ -190,6 +204,9 @@ type PeriodCoverage struct {
 	BeforeGenesis   bool                 `json:"before_genesis,omitempty"`
 	IncompleteYears []PeriodYearCoverage `json:"incomplete_years"`
 	Warning         string               `json:"warning,omitempty"`
+	// Note is information that does not make the period incomplete, such as
+	// the days before genesis.
+	Note string `json:"note,omitempty"`
 }
 
 // PeriodYearCoverage is one year the period touches that is not fully
@@ -205,6 +222,7 @@ type PeriodYearCoverage struct {
 
 const (
 	coverageStatusReady      = "ready"
+	coverageStatusScanning   = "scanning"
 	coverageStatusWarming    = "warming"
 	coverageStatusComplete   = "complete"
 	coverageStatusIncomplete = "incomplete"
@@ -216,6 +234,7 @@ const (
 	headerIndexCoverage        = "X-Index-Coverage"
 	headerIndexCoverageWarning = "X-Index-Coverage-Warning"
 	headerIndexCoverageYears   = "X-Index-Coverage-Incomplete-Years"
+	headerIndexCoverageNote    = "X-Index-Coverage-Note"
 )
 
 // indexCoverageScanner owns the bucket cache and the published snapshot.
@@ -226,7 +245,8 @@ type indexCoverageScanner struct {
 	genesis       int64
 	genesisDay    time.Time
 	requireEvents bool
-	recheck       time.Duration
+	eventRecheck  time.Duration
+	publishEvery  int
 	now           func() time.Time
 	pause         time.Duration
 
@@ -240,7 +260,7 @@ type indexCoverageScanner struct {
 func newIndexCoverageScanner(src coverageSource, chain string, requireEvents bool) *indexCoverageScanner {
 	sc := &indexCoverageScanner{
 		src: src, chain: chain, requireEvents: requireEvents,
-		recheck: 6 * time.Hour, now: nowUTC, pause: coverageBucketPause,
+		eventRecheck: coverageEventRecheck, publishEvery: coveragePublishEvery, now: nowUTC, pause: coverageBucketPause,
 		buckets: map[int64]*coverageBucket{}, found: map[int]int64{},
 	}
 	if chainParam(chain) == apiMainnet {
@@ -258,14 +278,17 @@ func (sc *indexCoverageScanner) criterion() string {
 	return coverageCriterionTx
 }
 
-// Snapshot is the last published coverage, nil until the first pass ends.
+// Snapshot is the last published coverage, nil until the first snapshot of
+// the first pass is published.
 func (sc *indexCoverageScanner) Snapshot() *IndexCoverage {
 	sc.snapMu.RLock()
 	defer sc.snapMu.RUnlock()
 	return sc.snapshot
 }
 
-// Refresh rescans the buckets that need it and publishes a new snapshot.
+// Refresh reads the buckets that can still change and publishes snapshots as
+// it goes. The bucket at the tip is read first, so a snapshot published
+// mid-pass never shows the newest blocks as a gap.
 func (sc *indexCoverageScanner) Refresh(ctx context.Context) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -286,19 +309,38 @@ func (sc *indexCoverageScanner) Refresh(ctx context.Context) error {
 			sc.genesisDay = utcDay(ts)
 		}
 	}
-	now := sc.now()
-	for lo := (sc.genesis / coverageBucketSize) * coverageBucketSize; lo <= tip; lo += coverageBucketSize {
-		bLo, bHi := max(lo, sc.genesis), min(lo+coverageBucketSize-1, tip)
-		b := sc.buckets[lo]
-		if b != nil && b.Hi == bHi && b.settled() && now.Sub(b.ScannedAt) < sc.recheck {
-			continue
+	for lo, b := range sc.buckets {
+		if b.Lo > tip {
+			delete(sc.buckets, lo)
 		}
-		next, err := sc.scanBucket(ctx, bLo, bHi)
+	}
+	now := sc.now()
+	keys := sc.bucketKeys(tip)
+	if n := len(keys); n > 1 {
+		keys = append(keys[n-1:], keys[:n-1]...)
+	}
+	reads := 0
+	for _, lo := range keys {
+		read, err := sc.refreshBucket(ctx, lo, tip, now)
 		if err != nil {
+			// Keep what this pass did read: publish it before giving up, on a
+			// context of its own since ctx may be the one that ran out.
+			pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if reads > 0 {
+				_ = sc.publish(pctx, tip, tipTime, now)
+			}
 			return err
 		}
-		next.ScannedAt = now
-		sc.buckets[lo] = next
+		if !read {
+			continue
+		}
+		reads++
+		if sc.publishEvery > 0 && reads%sc.publishEvery == 0 {
+			if err := sc.publish(ctx, tip, tipTime, now); err != nil {
+				return err
+			}
+		}
 		if sc.pause > 0 {
 			select {
 			case <-ctx.Done():
@@ -307,17 +349,65 @@ func (sc *indexCoverageScanner) Refresh(ctx context.Context) error {
 			}
 		}
 	}
-	for lo, b := range sc.buckets {
-		if b.Lo > tip {
-			delete(sc.buckets, lo)
-		}
+	return sc.publish(ctx, tip, tipTime, now)
+}
+
+// bucketKeys are the bucket keys from genesis to the tip, in height order.
+func (sc *indexCoverageScanner) bucketKeys(tip int64) []int64 {
+	var keys []int64
+	for lo := (sc.genesis / coverageBucketSize) * coverageBucketSize; lo <= tip; lo += coverageBucketSize {
+		keys = append(keys, lo)
 	}
+	return keys
+}
+
+// refreshBucket reads one bucket if it can still change and reports whether
+// it queried the database.
+func (sc *indexCoverageScanner) refreshBucket(ctx context.Context, lo, tip int64, now time.Time) (bool, error) {
+	bLo, bHi := max(lo, sc.genesis), min(lo+coverageBucketSize-1, tip)
+	b := sc.buckets[lo]
+	if b != nil && b.Hi == bHi && b.txSettled() {
+		if b.settled() {
+			return false, nil
+		}
+		if !sc.requireEvents && now.Sub(b.EvReadAt) < sc.eventRecheck {
+			return false, nil
+		}
+		ev, err := sc.src.EventRuns(ctx, bLo, bHi)
+		if err != nil {
+			return false, err
+		}
+		next := *b
+		next.Ev, next.EvReadAt = ev, now
+		sc.buckets[lo] = &next
+		return true, nil
+	}
+	next, err := sc.scanBucket(ctx, bLo, bHi)
+	if err != nil {
+		return false, err
+	}
+	next.EvReadAt = now
+	sc.buckets[lo] = next
+	return true, nil
+}
+
+// publish assembles a snapshot from the buckets read so far. While some
+// bucket has never been read, the snapshot is marked scanning and those
+// heights count as not indexed.
+func (sc *indexCoverageScanner) publish(ctx context.Context, tip int64, tipTime, now time.Time) error {
 	starts, err := sc.yearStarts(ctx, tip, tipTime)
 	if err != nil {
 		return err
 	}
 	txRuns, evRuns := sc.mergedRuns()
 	snap := assembleCoverage(sc.chain, sc.criterion(), sc.genesis, sc.genesisDay, tip, tipTime, now, starts, txRuns, evRuns)
+	for _, lo := range sc.bucketKeys(tip) {
+		if sc.buckets[lo] == nil {
+			snap.Status, snap.Complete = coverageStatusScanning, false
+			snap.Note = "Coverage scan in progress: heights not scanned yet count as not indexed. " + snap.Note
+			break
+		}
+	}
 	sc.snapMu.Lock()
 	sc.snapshot = snap
 	sc.snapMu.Unlock()
@@ -686,8 +776,9 @@ func (c *IndexCoverage) MonthCovered(month string) bool {
 
 // Period evaluates a request window [start, end) (end exclusive, as every
 // handler treats it). A zero start means all history, which begins at
-// genesis. An explicit start before genesis is flagged: that activity is on
-// an earlier chain and is never in this index.
+// genesis. Days before genesis count as covered: that activity is on an
+// earlier chain, which no backfill will add, so the period is judged from
+// genesis on and carries a note saying so instead of an incomplete flag.
 func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 	genesisDay, _ := time.Parse(apiDateLayout, c.GenesisDate)
 	tipDay := utcDay(c.TipTime)
@@ -707,15 +798,16 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 	p := PeriodCoverage{Start: dayString(from), End: dayString(through), BeforeGenesis: before, IncompleteYears: []PeriodYearCoverage{}}
 	if before {
 		p.Start = dayString(utcDay(start))
+		p.Note = genesisNote(c)
+	}
+	if before && utcDay(end.Add(-time.Nanosecond)).Before(genesisDay) {
+		p.Status, p.Complete = coverageStatusComplete, true
+		p.Note = fmt.Sprintf("This period is entirely before %s genesis (%s). Earlier Cosmos Hub chains are not indexed, so this report has no data for it.", c.Chain, c.GenesisDate)
+		return p
 	}
 	if through.Before(from) {
 		p.Status, p.Complete = coverageStatusIncomplete, false
-		switch {
-		case before:
-			p.Warning = fmt.Sprintf("This period is before %s genesis (%s). Earlier Cosmos Hub chains are not indexed, so this report has no data for it.", c.Chain, c.GenesisDate)
-		default:
-			p.Warning = fmt.Sprintf("This period starts after the latest indexed block (%s).", dayString(tipDay))
-		}
+		p.Warning = fmt.Sprintf("This period starts after the latest indexed block (%s).", dayString(tipDay))
 		return p
 	}
 	for _, y := range c.Years {
@@ -728,16 +820,27 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 			EarliestCoveredDate: y.EarliestCoveredDate, LatestCoveredDate: y.LatestCoveredDate,
 		})
 	}
-	p.Complete = !before && len(p.IncompleteYears) == 0 && c.covers(from, through)
+	p.Complete = len(p.IncompleteYears) == 0 && c.covers(from, through)
 	p.Status = coverageStatusComplete
-	if !p.Complete {
+	switch {
+	case p.Complete:
+	case c.Status == coverageStatusScanning:
+		// Heights the first pass has not read yet are not known to be gaps.
+		unknown := unknownPeriodCoverage()
+		p.Status, p.IncompleteYears, p.Warning = unknown.Status, unknown.IncompleteYears, unknown.Warning
+	default:
 		p.Status = coverageStatusIncomplete
-		p.Warning = periodWarning(c, p)
+		p.Warning = periodWarning(p)
 	}
 	return p
 }
 
-func periodWarning(c *IndexCoverage, p PeriodCoverage) string {
+// genesisNote explains a period that starts before genesis.
+func genesisNote(c *IndexCoverage) string {
+	return fmt.Sprintf("This period starts before %s genesis (%s). Cosmos Hub activity before that day is on earlier chains, which Cosmos Tax does not index, so this report starts at genesis.", c.Chain, c.GenesisDate)
+}
+
+func periodWarning(p PeriodCoverage) string {
 	var parts []string
 	for _, y := range p.IncompleteYears {
 		parts = append(parts, fmt.Sprintf("%d is %s%% indexed", y.Year, trimPercent(y.PercentIndexed)))
@@ -746,11 +849,7 @@ func periodWarning(c *IndexCoverage, p PeriodCoverage) string {
 	if len(parts) > 0 {
 		msg += ": " + strings.Join(parts, ", ")
 	}
-	msg += ". Activity in blocks the history backfill has not reached is missing from this report; regenerate it once the backfill finishes."
-	if p.BeforeGenesis {
-		msg += fmt.Sprintf(" Activity before %s genesis (%s) is on earlier Cosmos Hub chains and is not indexed.", c.Chain, c.GenesisDate)
-	}
-	return msg
+	return msg + ". Activity in blocks the history backfill has not reached is missing from this report; regenerate it once the backfill finishes."
 }
 
 // unknownPeriodCoverage is served while the first scan is still running.
@@ -863,7 +962,10 @@ func setPeriodCoverageHeaders(w http.ResponseWriter, p PeriodCoverage) {
 		}
 		w.Header().Set(headerIndexCoverageYears, strings.Join(years, ","))
 	}
-	exposed := headerIndexCoverage + ", " + headerIndexCoverageWarning + ", " + headerIndexCoverageYears
+	if p.Note != "" {
+		w.Header().Set(headerIndexCoverageNote, asciiHeader(p.Note))
+	}
+	exposed := headerIndexCoverage + ", " + headerIndexCoverageWarning + ", " + headerIndexCoverageYears + ", " + headerIndexCoverageNote
 	w.Header().Set("Access-Control-Expose-Headers", exposed)
 }
 
@@ -883,20 +985,35 @@ type gormCoverageSource struct {
 	db    *gorm.DB
 	chain string
 
-	once     sync.Once
+	idMu     sync.Mutex
 	chainIDs []int64
-	idErr    error
 }
 
+// ids looks the chain's row ids up once they exist. A failed lookup is not
+// cached, so a database blip at startup or a chain row added later is picked
+// up on the next refresh.
 func (g *gormCoverageSource) ids(ctx context.Context) ([]int64, error) {
-	g.once.Do(func() {
-		g.idErr = g.db.WithContext(ctx).Table("chains").Where("chain_id IN ?", chainIDs(g.chain)).Pluck("id", &g.chainIDs).Error
-		if g.idErr == nil && len(g.chainIDs) == 0 {
-			g.idErr = fmt.Errorf("chain %s is not in the chains table", g.chain)
-		}
-	})
-	return g.chainIDs, g.idErr
+	g.idMu.Lock()
+	defer g.idMu.Unlock()
+	if len(g.chainIDs) > 0 {
+		return g.chainIDs, nil
+	}
+	var ids []int64
+	if err := g.db.WithContext(ctx).Table("chains").Where("chain_id IN ?", chainIDs(g.chain)).Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("chain %s is not in the chains table", g.chain)
+	}
+	g.chainIDs = ids
+	return ids, nil
 }
+
+// zeroStamp is the placeholder the indexer writes before a block's time is
+// known (see db.GetHighestEventIndexedBlock); it is no timestamp at all.
+const zeroStamp = "0001-01-01T00:00:00Z"
+
+func realStamp(ts *time.Time) bool { return ts != nil && ts.Year() > 1 }
 
 func (g *gormCoverageSource) Tip(ctx context.Context) (int64, time.Time, bool, error) {
 	ids, err := g.ids(ctx)
@@ -912,13 +1029,14 @@ func (g *gormCoverageSource) Tip(ctx context.Context) (int64, time.Time, bool, e
 		return 0, time.Time{}, false, res.Error
 	}
 	ts := time.Time{}
-	if row.TimeStamp != nil {
+	if realStamp(row.TimeStamp) {
 		ts = *row.TimeStamp
 	} else {
-		// The newest row can still be mid-write; take the newest timestamp.
+		// The newest row can still be mid-write, with no time or the zero
+		// placeholder; take the newest real timestamp.
 		var latest struct{ TimeStamp *time.Time }
-		_ = g.db.WithContext(ctx).Raw("SELECT time_stamp FROM blocks WHERE chain_id IN ? AND height >= ? AND time_stamp IS NOT NULL ORDER BY height DESC LIMIT 1", ids, row.Height-1000).Scan(&latest).Error
-		if latest.TimeStamp != nil {
+		_ = g.db.WithContext(ctx).Raw("SELECT time_stamp FROM blocks WHERE chain_id IN ? AND height >= ? AND time_stamp IS NOT NULL AND time_stamp > ? ORDER BY height DESC LIMIT 1", ids, row.Height-1000, zeroStamp).Scan(&latest).Error
+		if realStamp(latest.TimeStamp) {
 			ts = *latest.TimeStamp
 		}
 	}
@@ -944,8 +1062,8 @@ func (g *gormCoverageSource) BlockAtOrAfter(ctx context.Context, height int64) (
 		Height    int64
 		TimeStamp *time.Time
 	}
-	res := g.db.WithContext(ctx).Raw("SELECT height, time_stamp FROM blocks WHERE chain_id IN ? AND height >= ? AND time_stamp IS NOT NULL ORDER BY height LIMIT 1", ids, height).Scan(&row)
-	if res.Error != nil || res.RowsAffected == 0 || row.TimeStamp == nil {
+	res := g.db.WithContext(ctx).Raw("SELECT height, time_stamp FROM blocks WHERE chain_id IN ? AND height >= ? AND time_stamp IS NOT NULL AND time_stamp > ? ORDER BY height LIMIT 1", ids, height, zeroStamp).Scan(&row)
+	if res.Error != nil || res.RowsAffected == 0 || !realStamp(row.TimeStamp) {
 		return 0, time.Time{}, false, res.Error
 	}
 	return row.Height, *row.TimeStamp, true, nil
@@ -953,7 +1071,8 @@ func (g *gormCoverageSource) BlockAtOrAfter(ctx context.Context, height int64) (
 
 // runsSQL groups consecutive heights by the classic islands trick: within a
 // run, height minus its row number is constant.
-const runsSQL = `SELECT MIN(height) AS lo, MAX(height) AS hi, MIN(time_stamp) AS t0, MAX(time_stamp) AS t1, SUM(ev) AS events
+// Zero placeholder timestamps are left out of a run's first and last time.
+const runsSQL = `SELECT MIN(height) AS lo, MAX(height) AS hi, MIN(NULLIF(time_stamp, '0001-01-01T00:00:00Z')) AS t0, MAX(time_stamp) AS t1, SUM(ev) AS events
 FROM (SELECT height, time_stamp, CASE WHEN block_events_indexed THEN 1 ELSE 0 END AS ev,
              height - ROW_NUMBER() OVER (ORDER BY height) AS grp
       FROM blocks WHERE chain_id IN ? AND height >= ? AND height <= ? AND %s) s
@@ -975,10 +1094,10 @@ func (g *gormCoverageSource) runs(ctx context.Context, lo, hi int64, filter stri
 	out := make([]heightRun, 0, len(rows))
 	for _, r := range rows {
 		run := heightRun{Lo: r.Lo, Hi: r.Hi, Events: r.Events}
-		if r.T0 != nil {
+		if realStamp(r.T0) {
 			run.T0 = *r.T0
 		}
-		if r.T1 != nil {
+		if realStamp(r.T1) {
 			run.T1 = *r.T1
 		}
 		out = append(out, run)

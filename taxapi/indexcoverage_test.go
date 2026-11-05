@@ -37,6 +37,10 @@ type fakeCoverageSource struct {
 	ev      []fakeRange
 	txCalls map[int64]int
 	evCalls int
+	evByLo  map[int64]int
+	// failAt makes the failAt-th TxRuns call fail (1-based); 0 never fails.
+	failAt  int
+	txTotal int
 }
 
 func (f *fakeCoverageSource) Tip(context.Context) (int64, time.Time, bool, error) {
@@ -72,6 +76,10 @@ func (f *fakeCoverageSource) TxRuns(_ context.Context, lo, hi int64) ([]heightRu
 	if f.txCalls == nil {
 		f.txCalls = map[int64]int{}
 	}
+	f.txTotal++
+	if f.failAt > 0 && f.txTotal == f.failAt {
+		return nil, context.DeadlineExceeded
+	}
 	f.txCalls[lo]++
 	runs := clipRuns(f.tx, lo, hi)
 	for i := range runs {
@@ -82,6 +90,10 @@ func (f *fakeCoverageSource) TxRuns(_ context.Context, lo, hi int64) ([]heightRu
 
 func (f *fakeCoverageSource) EventRuns(_ context.Context, lo, hi int64) ([]heightRun, error) {
 	f.evCalls++
+	if f.evByLo == nil {
+		f.evByLo = map[int64]int{}
+	}
+	f.evByLo[lo]++
 	return clipRuns(f.ev, lo, hi), nil
 }
 
@@ -167,11 +179,23 @@ func TestIndexCoveragePeriod(t *testing.T) {
 	p = snap.Period(day("2024-01-01"), day("2025-01-01"))
 	require.False(t, p.Complete)
 	require.True(t, p.BeforeGenesis)
+	require.Equal(t, "2024-01-01", p.Start)
 	require.Len(t, p.IncompleteYears, 1)
 	require.Equal(t, 2024, p.IncompleteYears[0].Year)
 	require.Equal(t, 83.7, p.IncompleteYears[0].PercentIndexed)
 	require.Contains(t, p.Warning, "2024 is 83.7% indexed")
-	require.Contains(t, p.Warning, "genesis (2024-06-01)")
+	require.NotContains(t, p.Warning, "genesis", "the days before genesis are not what makes it incomplete")
+	require.Contains(t, p.Note, "before fixture-1 genesis (2024-06-01)")
+
+	// Days before genesis count as covered: a period that starts before
+	// genesis and is otherwise indexed is complete, with a note, so the year
+	// badge and the period agree once the backfill is done.
+	p = snap.Period(day("2024-01-01"), day("2024-08-01"))
+	require.True(t, p.Complete)
+	require.Equal(t, coverageStatusComplete, p.Status)
+	require.True(t, p.BeforeGenesis)
+	require.Empty(t, p.Warning)
+	require.Contains(t, p.Note, "earlier chains")
 
 	p = snap.Period(day("2024-08-01"), day("2024-09-01"))
 	require.False(t, p.Complete)
@@ -183,8 +207,9 @@ func TestIndexCoveragePeriod(t *testing.T) {
 	require.Equal(t, "2024-07-31", p.End)
 
 	p = snap.Period(day("2023-01-01"), day("2024-01-01"))
-	require.False(t, p.Complete)
-	require.Contains(t, p.Warning, "before fixture-1 genesis")
+	require.True(t, p.Complete, "no backfill adds an earlier chain, so this never becomes more complete")
+	require.Empty(t, p.Warning)
+	require.Contains(t, p.Note, "entirely before fixture-1 genesis")
 
 	p = snap.Period(day("2025-06-01"), day("2025-07-01"))
 	require.False(t, p.Complete)
@@ -236,18 +261,141 @@ func TestIndexCoverageRescansOnlyUnsettledBuckets(t *testing.T) {
 	require.Equal(t, int64(1), snap.IndexedRange.FirstHeight)
 	require.Contains(t, snap.Note, "Every fixture-1 block from genesis (2024-06-01)")
 
-	// Settled buckets are rechecked once the recheck interval has passed.
-	sc.now = func() time.Time { return fixtureTime(fixtureTip).Add(7 * time.Hour) }
+	// Fully settled buckets are never read again, however long it has been.
+	sc.now = func() time.Time { return fixtureTime(fixtureTip).Add(30 * 24 * time.Hour) }
 	refreshed(t, sc)
-	require.Equal(t, 2, src.txCalls[1])
+	require.Equal(t, 1, src.txCalls[1])
+	require.Equal(t, 2, src.txCalls[100000])
+	require.Equal(t, 1, src.txCalls[200000])
+	require.Equal(t, 1, src.txCalls[300000])
+	require.Zero(t, src.evCalls)
 
 	// A new block at the tip rescans the tip bucket, which has grown.
 	src.tip++
 	src.tx = []fakeRange{{1, src.tip}}
 	src.ev = src.tx
 	refreshed(t, sc)
-	require.Equal(t, 3, src.txCalls[300000])
-	require.Equal(t, 2, src.txCalls[200000])
+	require.Equal(t, 2, src.txCalls[300000])
+	require.Equal(t, 1, src.txCalls[200000])
+}
+
+// Older blocks have transactions but no block events. With transactions as
+// the criterion those buckets are settled: a refresh never rereads their
+// transactions, and their events are reread only on the slow cadence.
+func TestIndexCoverageSettlesByCriterion(t *testing.T) {
+	src := &fakeCoverageSource{tip: fixtureTip, rows: []fakeRange{{1, fixtureTip}}, tx: []fakeRange{{1, fixtureTip}}}
+	sc := fixtureScanner(src, false)
+	at := fixtureTime(fixtureTip).Add(time.Minute)
+	sc.now = func() time.Time { return at }
+	snap := refreshed(t, sc)
+	require.True(t, snap.Complete)
+	require.Zero(t, snap.Years[0].BlockEventsIndexedBlocks)
+	require.Len(t, src.txCalls, 4)
+	require.Zero(t, src.evCalls)
+
+	at = at.Add(10 * time.Minute)
+	refreshed(t, sc)
+	for lo, n := range src.txCalls {
+		require.Equal(t, 1, n, "bucket %d is settled for transactions", lo)
+	}
+	require.Zero(t, src.evCalls, "events are not the criterion, so they wait for the event recheck")
+
+	// The block events backfill reaches 2024: after the recheck interval the
+	// event runs alone are reread and the counts are reported.
+	src.ev = []fakeRange{{1, fixture2025 - 1}}
+	at = at.Add(coverageEventRecheck)
+	snap = refreshed(t, sc)
+	for lo, n := range src.txCalls {
+		require.Equal(t, 1, n, "bucket %d transactions are not reread", lo)
+	}
+	require.Equal(t, 4, src.evCalls)
+	require.True(t, snap.Years[0].BlockEventsComplete)
+	require.Equal(t, snap.Years[0].ExpectedBlocks, snap.Years[0].BlockEventsIndexedBlocks)
+	require.False(t, snap.Years[1].BlockEventsComplete)
+
+	// Buckets 0-299999 are now fully settled and never read again; only the
+	// bucket still missing events is.
+	at = at.Add(coverageEventRecheck)
+	refreshed(t, sc)
+	require.Equal(t, 1, src.evByLo[1])
+	require.Equal(t, 1, src.evByLo[100000])
+	require.Equal(t, 1, src.evByLo[200000])
+	require.Equal(t, 2, src.evByLo[300000])
+}
+
+// When block events are the criterion, a bucket settled for transactions
+// rereads only its events, every refresh, until they are complete.
+func TestIndexCoverageRequireEventsRereadsOnlyEvents(t *testing.T) {
+	src := &fakeCoverageSource{tip: fixtureTip, rows: []fakeRange{{1, fixtureTip}}, tx: []fakeRange{{1, fixtureTip}}}
+	sc := fixtureScanner(src, true)
+	snap := refreshed(t, sc)
+	require.False(t, snap.Complete)
+	require.Equal(t, 0.0, snap.Years[0].PercentIndexed)
+	require.True(t, snap.Years[0].TxComplete)
+
+	refreshed(t, sc)
+	require.Len(t, src.txCalls, 4)
+	for lo, n := range src.txCalls {
+		require.Equal(t, 1, n, "bucket %d transactions are settled", lo)
+	}
+	require.Equal(t, 4, src.evCalls)
+
+	src.ev = src.tx
+	snap = refreshed(t, sc)
+	require.True(t, snap.Complete)
+	require.Equal(t, 8, src.evCalls)
+	refreshed(t, sc)
+	require.Equal(t, 8, src.evCalls, "fully settled buckets are not read again")
+}
+
+// A pass that stops early still publishes what it read, marked scanning, and
+// periods it cannot vouch for are unknown rather than incomplete.
+func TestIndexCoveragePublishesPartialPass(t *testing.T) {
+	src := gappedSource()
+	src.failAt = 3
+	sc := fixtureScanner(src, false)
+	sc.publishEvery = 1
+	require.Error(t, sc.Refresh(context.Background()))
+	snap := sc.Snapshot()
+	require.NotNil(t, snap, "the buckets read before the failure are published")
+	require.Equal(t, coverageStatusScanning, snap.Status)
+	require.False(t, snap.Complete)
+	require.Contains(t, snap.Note, "Coverage scan in progress")
+	require.Equal(t, 1, src.txCalls[300000], "the tip bucket is read first")
+	require.Equal(t, 1, src.txCalls[1])
+	require.Zero(t, src.txCalls[100000])
+
+	day := func(s string) time.Time { d, _ := time.Parse(apiDateLayout, s); return d }
+	require.Equal(t, coverageStatusComplete, snap.Period(day("2024-06-01"), day("2024-07-01")).Status)
+	require.Equal(t, coverageStatusComplete, snap.Period(day("2025-01-01"), day("2025-02-01")).Status)
+	p := snap.Period(day("2024-10-01"), day("2024-11-01"))
+	require.Equal(t, coverageStatusUnknown, p.Status)
+	require.False(t, p.Complete)
+	require.Empty(t, p.IncompleteYears)
+
+	// The next pass reads only what is missing and finishes the snapshot.
+	snap = refreshed(t, sc)
+	require.Equal(t, coverageStatusReady, snap.Status)
+	require.Equal(t, 1, src.txCalls[300000])
+	require.Equal(t, 1, src.txCalls[1])
+	require.Equal(t, 1, src.txCalls[100000])
+	require.Equal(t, 1, src.txCalls[200000])
+	require.Equal(t, coverageStatusComplete, snap.Period(day("2024-10-01"), day("2024-11-01")).Status)
+}
+
+func TestStatementTotalsFollowPeriod(t *testing.T) {
+	months := []ValidatorStatementMonth{{Month: "2024-06", RewardEvents: 2}, {Month: "2024-10", RewardEvents: 3}}
+	totals := statementTotals(months, PeriodCoverage{Status: coverageStatusComplete, Complete: true}, "ATOM")
+	require.False(t, totals.Incomplete)
+	require.Equal(t, int64(5), totals.RewardEvents)
+	require.Equal(t, apiTotalLabel, totals.Month)
+
+	// August is inside a gap and has no rows, so no month row is flagged; the
+	// total still is.
+	totals = statementTotals(months, PeriodCoverage{Status: coverageStatusIncomplete}, "ATOM")
+	require.True(t, totals.Incomplete)
+	totals = statementTotals(months, unknownPeriodCoverage(), "ATOM")
+	require.True(t, totals.Incomplete)
 }
 
 func TestIndexCoverageTipSlack(t *testing.T) {
@@ -351,7 +499,8 @@ func TestPeriodCoverageHeaders(t *testing.T) {
 func TestCoverageTextHasNoEmDash(t *testing.T) {
 	snap := refreshed(t, fixtureScanner(gappedSource(), false))
 	day := func(s string) time.Time { d, _ := time.Parse(apiDateLayout, s); return d }
-	for _, s := range []string{snap.Note, snap.Period(day("2023-01-01"), day("2025-01-01")).Warning, unknownPeriodCoverage().Warning} {
+	before := snap.Period(day("2023-01-01"), day("2025-01-01"))
+	for _, s := range []string{snap.Note, before.Warning, before.Note, snap.Period(day("2023-01-01"), day("2024-01-01")).Note, unknownPeriodCoverage().Warning} {
 		require.False(t, strings.ContainsAny(s, "—–"), s)
 	}
 }
@@ -376,7 +525,6 @@ func TestIndexCoverageSourcePostgres(t *testing.T) {
 		"SET search_path = pg_temp",
 		"CREATE TEMP TABLE chains (id bigint, chain_id text)",
 		"CREATE TEMP TABLE blocks (id bigserial, chain_id bigint, height bigint, time_stamp timestamptz, tx_indexed boolean, block_events_indexed boolean)",
-		"INSERT INTO pg_temp.chains VALUES (1,'cosmoshub-4'),(2,'other-1')",
 		// 2025-12-31 23:55 through 2026-01-01 00:20 at one block a minute,
 		// with heights 29114840-29114844 missing and events only on the first 3.
 		`INSERT INTO pg_temp.blocks (chain_id, height, time_stamp, tx_indexed, block_events_indexed)
@@ -384,14 +532,24 @@ func TestIndexCoverageSourcePostgres(t *testing.T) {
 		 FROM generate_series(29114831, 29114855) h WHERE h NOT BETWEEN 29114840 AND 29114844`,
 		"INSERT INTO pg_temp.blocks (chain_id, height, time_stamp, tx_indexed, block_events_indexed) VALUES (2, 29114845, now(), true, true)",
 		"UPDATE pg_temp.blocks SET tx_indexed = false WHERE height = 29114850",
+		// The indexer's zero placeholder: on the first block of a run and on
+		// the newest row, which is still being written.
+		"UPDATE pg_temp.blocks SET time_stamp = '0001-01-01T00:00:00Z' WHERE height = 29114851",
+		"INSERT INTO pg_temp.blocks (chain_id, height, time_stamp, tx_indexed, block_events_indexed) VALUES (1, 29114856, '0001-01-01T00:00:00Z', false, false)",
 	} {
 		require.NoError(t, database.Exec(sql).Error)
 	}
 	src := &gormCoverageSource{db: database, chain: apiMainnet}
-	tip, _, ok, err := src.Tip(ctx)
+	_, _, _, err = src.Tip(ctx)
+	require.ErrorContains(t, err, "not in the chains table")
+	// The failed lookup is not remembered: once the chain row exists the
+	// same source works.
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.chains VALUES (1,'cosmoshub-4'),(2,'other-1')").Error)
+	tip, tipTime, ok, err := src.Tip(ctx)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, int64(29114855), tip)
+	require.Equal(t, int64(29114856), tip)
+	require.Equal(t, time.Date(2026, 1, 1, 0, 19, 0, 0, time.UTC), tipTime.UTC(), "a zero placeholder at the tip falls back to the newest real time")
 
 	runs, err := src.TxRuns(ctx, 29114800, 29114899)
 	require.NoError(t, err)
@@ -403,6 +561,8 @@ func TestIndexCoverageSourcePostgres(t *testing.T) {
 	require.Equal(t, int64(29114845), runs[1].Lo)
 	require.Equal(t, int64(29114849), runs[1].Hi)
 	require.Equal(t, int64(29114851), runs[2].Lo)
+	require.Equal(t, int64(29114855), runs[2].Hi)
+	require.Equal(t, time.Date(2026, 1, 1, 0, 16, 0, 0, time.UTC), runs[2].T0.UTC(), "the zero placeholder is not a run's first time")
 
 	ev, err := src.EventRuns(ctx, 29114800, 29114899)
 	require.NoError(t, err)
@@ -414,6 +574,9 @@ func TestIndexCoverageSourcePostgres(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(29114845), h, "rows of another chain are ignored")
 	require.Equal(t, time.Date(2026, 1, 1, 0, 9, 0, 0, time.UTC), ts.UTC())
+	_, _, ok, err = src.BlockAtOrAfter(ctx, 29114856)
+	require.NoError(t, err)
+	require.False(t, ok, "a block whose only time is the zero placeholder has no time")
 
 	found, ok, err := findYearStart(ctx, src, 2026, 29114831, tip)
 	require.NoError(t, err)

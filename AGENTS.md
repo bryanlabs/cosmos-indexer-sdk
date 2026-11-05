@@ -50,15 +50,21 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `taxapi/indexcoverage.go` (`GET /index-coverage`: per UTC year block
   range, indexed and expected counts, fully covered dates, gaps; a
   background scanner reads `blocks` in 100k-height buckets with a
-  gaps-and-islands query, rescans only unsettled buckets, and serves a cached
-  snapshot, 503 while warming; never count `blocks` per request. Year start
+  gaps-and-islands query and serves a cached snapshot, 503 until the first
+  one; never count `blocks` per request. A bucket with both flags on every
+  height is never read again; one settled for `tx_indexed` only rereads its
+  event runs (every pass when events are the criterion, hourly otherwise).
+  Snapshots publish every 25 bucket reads, so a pass cut off by its timeout
+  still publishes; until every bucket has been read the status is `scanning`
+  and a period it cannot vouch for is `unknown`. Days before genesis count as
+  covered and add `note` / `X-Index-Coverage-Note` instead. Year start
   heights for cosmoshub-4 are hard-coded in `hubYearStarts`; later years are
   found by binary search on indexed blocks. A block counts when
   `tx_indexed`; `TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true` also requires
   `block_events_indexed`. Report and export routes are wrapped in
   `withPeriodCoverage`, which sets `X-Index-Coverage`
-  (`complete|incomplete|unknown`), `X-Index-Coverage-Warning` and
-  `X-Index-Coverage-Incomplete-Years`; `/report-job`, `/positions` and
+  (`complete|incomplete|unknown`), `X-Index-Coverage-Warning`,
+  `X-Index-Coverage-Incomplete-Years` and `X-Index-Coverage-Note`; `/report-job`, `/positions` and
   `/validator-statement` also return `index_coverage` in the body, evaluated
   per response so cached jobs pick up backfill progress. No route clamps
   dates to the index start). Every handler normalises `chain` through `chainParam` in
