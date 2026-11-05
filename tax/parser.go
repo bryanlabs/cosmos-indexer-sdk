@@ -12,6 +12,7 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
 	"github.com/DefiantLabs/cosmos-indexer/parsers"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -27,6 +28,14 @@ import (
 // MessageTypeURLs is every message type this parser classifies. main() registers
 // the same parser instance under each.
 var MessageTypeURLs = []string{
+	"/cosmos.staking.v1beta1.MsgCreateValidator",
+	"/cosmos.distribution.v1beta1.MsgFundCommunityPool",
+	"/cosmos.vesting.v1beta1.MsgCreateVestingAccount",
+	"/cosmos.vesting.v1beta1.MsgCreatePermanentLockedAccount",
+	"/cosmos.vesting.v1beta1.MsgCreatePeriodicVestingAccount",
+	"/cosmwasm.wasm.v1.MsgInstantiateContract",
+	"/cosmwasm.wasm.v1.MsgInstantiateContract2",
+	"/cosmwasm.wasm.v1.MsgMigrateContract",
 	"/cosmos.bank.v1beta1.MsgSend",
 	"/cosmos.bank.v1beta1.MsgMultiSend",
 	typeURLDelegate,
@@ -168,6 +177,52 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	case *stakingtypes.MsgCancelUnbondingDelegation:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding")...)
 		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+
+	// A new validator's self-bond is staking principal like any delegation. The
+	// SDK emits create_validator rather than delegate, so the amount comes from
+	// the message.
+	case *stakingtypes.MsgCreateValidator:
+		delegator := m.DelegatorAddress
+		if delegator == "" {
+			delegator = accountForValidator(m.ValidatorAddress)
+		}
+		if m.Value.IsPositive() && delegator != "" {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryDelegate), FromAddr: delegator,
+				Amount: m.Value.Amount.String(), Denom: m.Value.Denom, ValidatorAddress: m.ValidatorAddress,
+			})
+		}
+
+	// Funding the community pool gives coins away with nothing in return.
+	case *disttypes.MsgFundCommunityPool:
+		for _, c := range m.Amount {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryTransfer), FromAddr: m.Depositor, ToAddr: distributionModuleAddress,
+				Amount: c.Amount.String(), Denom: c.Denom, Detail: detailJSON(map[string]string{detailProtocol: "community_pool"}),
+			})
+		}
+
+	// Creating a vesting account moves the full grant to the new account up
+	// front; vesting only restricts when it can be spent.
+	case *vestingtypes.MsgCreateVestingAccount:
+		events = append(events, coinTransfers(m.FromAddress, m.ToAddress, m.Amount)...)
+	case *vestingtypes.MsgCreatePermanentLockedAccount:
+		events = append(events, coinTransfers(m.FromAddress, m.ToAddress, m.Amount)...)
+	case *vestingtypes.MsgCreatePeriodicVestingAccount:
+		total := sdk.NewCoins()
+		for _, period := range m.VestingPeriods {
+			total = total.Add(period.Amount...)
+		}
+		events = append(events, coinTransfers(m.FromAddress, m.ToAddress, total)...)
+
+	// Instantiating or migrating a contract runs contract code that can sell,
+	// mint or distribute just like an execute.
+	case *wasmtypes.MsgInstantiateContract:
+		events = append(events, wasmExecuteEvents(log)...)
+	case *wasmtypes.MsgInstantiateContract2:
+		events = append(events, wasmExecuteEvents(log)...)
+	case *wasmtypes.MsgMigrateContract:
+		events = append(events, wasmExecuteEvents(log)...)
 
 	// Governance deposits are refundable, so record-only.
 	case *govv1.MsgDeposit:
@@ -653,6 +708,27 @@ func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coin
 		}
 	}
 	return out
+}
+
+// coinTransfers records a message-declared movement of coins between accounts.
+func coinTransfers(from, to string, coins sdk.Coins) []TaxableEvent {
+	var out []TaxableEvent
+	for _, c := range coins {
+		if c.IsPositive() {
+			out = append(out, TaxableEvent{Category: string(CategoryTransfer), FromAddr: from, ToAddr: to, Amount: c.Amount.String(), Denom: c.Denom})
+		}
+	}
+	return out
+}
+
+// accountForValidator returns the account that operates a validator: the
+// same key under the account prefix.
+func accountForValidator(valoper string) string {
+	addr, err := sdk.ValAddressFromBech32(valoper)
+	if err != nil {
+		return ""
+	}
+	return sdk.AccAddress(addr).String()
 }
 
 // transfersFromSender groups transfer amounts paid by sender, by recipient.

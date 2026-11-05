@@ -5,6 +5,7 @@ import (
 
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -213,5 +214,28 @@ func TestClassifyCommissionFallsBackToDistributionTransferBeforeCoinReceived(t *
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryCommission) || out[0].Amount != "1500" || out[0].ToAddr != del {
 		t.Fatalf("pre-v6 commission should come from the distribution module transfer, got %+v", out)
+	}
+}
+
+func TestClassifyCreateValidatorSelfBondIsDelegatePrincipal(t *testing.T) {
+	operator := "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k"
+	msg := &stakingtypes.MsgCreateValidator{ValidatorAddress: operator, Value: sdk.NewInt64Coin(fixtureNativeDenom, 1000000)}
+	out := classify(msg, &indexerTxTypes.LogMessage{})
+	if len(out) != 1 || out[0].Category != string(CategoryDelegate) || out[0].Amount != "1000000" ||
+		out[0].FromAddr != "cosmos140kq2fts8ed9m73a6dch7sgdap6hnp2pqqasx9" || out[0].ValidatorAddress != operator {
+		t.Fatalf("self-bond should record delegate principal from the operator account, got %+v", out)
+	}
+}
+
+func TestClassifyFundCommunityPoolAndVestingGrantAreTransfers(t *testing.T) {
+	coins := sdk.NewCoins(sdk.NewInt64Coin(fixtureNativeDenom, 42))
+	pool := classify(&disttypes.MsgFundCommunityPool{Depositor: del, Amount: coins}, &indexerTxTypes.LogMessage{})
+	if len(pool) != 1 || pool[0].Category != string(CategoryTransfer) || pool[0].FromAddr != del || pool[0].ToAddr != distributionModuleAddress || pool[0].Amount != "42" {
+		t.Fatalf("community pool funding should be a transfer to the distribution module, got %+v", pool)
+	}
+	periodic := &vestingtypes.MsgCreatePeriodicVestingAccount{FromAddress: del, ToAddress: other, VestingPeriods: []vestingtypes.Period{{Amount: coins}, {Amount: coins}}}
+	grant := classify(periodic, &indexerTxTypes.LogMessage{})
+	if len(grant) != 1 || grant[0].FromAddr != del || grant[0].ToAddr != other || grant[0].Amount != "84" {
+		t.Fatalf("a periodic vesting grant should move the summed periods up front, got %+v", grant)
 	}
 }
