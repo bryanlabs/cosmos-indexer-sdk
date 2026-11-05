@@ -21,7 +21,8 @@ func TestTxResultsFailClosed(t *testing.T) {
 	require.Error(t, ValidateBlockTxResults(block, nil))
 	require.Error(t, ValidateBlockTxResults(block, &rpc.CustomBlockResults{}))
 	require.Error(t, ValidateBlockTxResults(block, &rpc.CustomBlockResults{TxsResults: []*abci.ResponseDeliverTx{nil}}))
-	results := &rpc.CustomBlockResults{TxsResults: []*abci.ResponseDeliverTx{{}}, FinalizeBlockEvents: []abci.Event{{Type: "upgrade"}}}
+	results := &rpc.CustomBlockResults{TxsResults: []*abci.ResponseDeliverTx{{}}, FinalizeBlockEvents: []abci.Event{
+		{Type: "upgrade", Attributes: []abci.EventAttribute{{Key: "mode", Value: "Commit"}}}}}
 	_, err := NormalizeCustomBlockResults(results)
 	require.Error(t, err)
 	require.NoError(t, ValidateBlockTxResults(block, results), "tx extraction must not depend on event modes")
@@ -59,4 +60,26 @@ func TestKnownTransferOriginalWireBytes(t *testing.T) {
 	require.Equal(t, original, wrappers[0].Messages[0].Message.MessageBytes)
 	require.Len(t, wrappers[0].Messages[0].MessageEvents, 1, "SDK 0.50 flat events must survive a valid but empty log array")
 	require.Equal(t, "transfer", wrappers[0].Messages[0].MessageEvents[0].MessageEvent.MessageEventType.Type)
+}
+
+func TestPreBlockEventsAreKeptAsBeginBlock(t *testing.T) {
+	mode := func(v string) abci.EventAttribute { return abci.EventAttribute{Key: "mode", Value: v} }
+	amount := abci.EventAttribute{Key: "amount", Value: "1uatom"}
+	results, err := NormalizeCustomBlockResults(&rpc.CustomBlockResults{FinalizeBlockEvents: []abci.Event{
+		{Type: "coin_spent", Attributes: []abci.EventAttribute{amount}},
+		{Type: "upgrade", Attributes: []abci.EventAttribute{mode("PreBlock")}},
+		{Type: "mint", Attributes: []abci.EventAttribute{amount, mode("BeginBlock")}},
+		{Type: "complete_unbonding", Attributes: []abci.EventAttribute{mode("EndBlock"), amount}},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, []abci.Event{
+		{Type: "coin_spent", Attributes: []abci.EventAttribute{amount}},
+		{Type: "upgrade", Attributes: []abci.EventAttribute{}},
+		{Type: "mint", Attributes: []abci.EventAttribute{amount}},
+	}, results.BeginBlockEvents)
+	require.Equal(t, []abci.Event{{Type: "complete_unbonding", Attributes: []abci.EventAttribute{amount}}}, results.EndBlockEvents)
+
+	_, err = NormalizeCustomBlockResults(&rpc.CustomBlockResults{FinalizeBlockEvents: []abci.Event{
+		{Type: "x", Attributes: []abci.EventAttribute{mode("BeginBlock"), mode("EndBlock")}}}})
+	require.Error(t, err)
 }
