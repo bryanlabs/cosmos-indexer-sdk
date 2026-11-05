@@ -152,8 +152,9 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		apiAddress: addr, apiChain: chain, "as_of": day, apiMethodologyVersion: MethodologyVersion,
-		apiNote:     "Open lots from acquisitions seen in the indexed history (Cosmos Hub from 2025-12-31 onward), FIFO, per wallet. Coins acquired before the index starts are not represented. Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
-		"positions": positions,
+		apiNote:          "Open lots from acquisitions seen in the indexed history, FIFO, per wallet. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before cosmoshub-4 genesis are not represented. Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
+		"positions":      positions,
+		"index_coverage": s.periodCoverage(time.Time{}, asOf.AddDate(0, 0, 1)),
 	})
 }
 

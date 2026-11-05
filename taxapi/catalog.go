@@ -41,6 +41,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
 			{apiPath: "/validator-statement", apiPurpose: "A validator operator's statement: commission earned, rewards paid to delegators, unique delegators, by month."},
 			{apiPath: "/balance", apiPurpose: "Reconstructed balances as of a date."},
 			{apiPath: "/delegator-report", apiPurpose: "Embeddable per-delegator summary for a validator's website."},
+			{apiPath: "/index-coverage", apiPurpose: "Which blocks are indexed, per calendar year: block range, indexed and expected counts, fully covered dates and gaps. Reports for a period that is not fully indexed carry an X-Index-Coverage warning."},
 		},
 		"gaia_releases":    tax.GaiaReleases,
 		"upcoming_changes": tax.UpcomingChainChanges,

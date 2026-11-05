@@ -37,6 +37,9 @@ type Server struct {
 
 	attestOnce sync.Once
 	attest     *attestationCache
+
+	indexCovMu      sync.RWMutex
+	coverageScanner *indexCoverageScanner
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -46,23 +49,24 @@ func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
-	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("GET /report-job", s.handleReportJob)
-	mux.HandleFunc("GET /asset-review", s.handleAssetReview)
-	mux.HandleFunc("GET /8949", s.handle8949)
-	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
-	mux.HandleFunc("GET /income", s.handleIncome)
-	mux.HandleFunc("GET /990t", s.handle990T)
+	mux.HandleFunc("GET /events", s.withPeriodCoverage(s.handleEvents))
+	mux.HandleFunc("GET /report-job", s.withPeriodCoverage(s.handleReportJob))
+	mux.HandleFunc("GET /asset-review", s.withPeriodCoverage(s.handleAssetReview))
+	mux.HandleFunc("GET /8949", s.withPeriodCoverage(s.handle8949))
+	mux.HandleFunc("GET /schedule-d", s.withPeriodCoverage(s.handleScheduleD))
+	mux.HandleFunc("GET /income", s.withPeriodCoverage(s.handleIncome))
+	mux.HandleFunc("GET /990t", s.withPeriodCoverage(s.handle990T))
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
+	mux.HandleFunc("GET /index-coverage", s.handleIndexCoverage)
 	mux.HandleFunc("GET /balance", s.handleBalance)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	mux.HandleFunc("GET /catalog", s.handleCatalog)
 	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
-	mux.HandleFunc("GET /journal", s.handleJournal)
-	mux.HandleFunc("GET /positions", s.handlePositions)
-	mux.HandleFunc("GET /validator-statement", s.handleValidatorStatement)
+	mux.HandleFunc("GET /journal", s.withPeriodCoverage(s.handleJournal))
+	mux.HandleFunc("GET /positions", s.withPeriodCoverage(s.handlePositions))
+	mux.HandleFunc("GET /validator-statement", s.withPeriodCoverage(s.handleValidatorStatement))
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
 	mux.HandleFunc("GET /validators/attest/check", s.handleAttestationCheck)
 	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
@@ -71,7 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /wasm/submissions", s.handleListWasmSubmissions)
 	mux.HandleFunc("GET /wasm/submissions/status", s.handleWasmSubmissionStatus)
 	mux.HandleFunc("PATCH /wasm/submissions/{id}", s.handleUpdateWasmSubmission)
-	mux.HandleFunc("GET /delegator-report", s.handleDelegatorReport)
+	mux.HandleFunc("GET /delegator-report", s.withPeriodCoverage(s.handleDelegatorReport))
 	mux.HandleFunc("POST /admin/validator-keys", s.handleCreateValidatorKey)
 	mux.HandleFunc("GET /admin/validator-keys", s.handleListValidatorKeys)
 	return withCORS(mux)
