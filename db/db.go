@@ -296,6 +296,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 	messageTypes := newPendingIDCache(messageTypeIDs)
 	eventTypes := newPendingIDCache(messageEventTypeIDs)
 	attributeKeys := newPendingIDCache(attributeKeyIDs)
+	addresses := newPendingIDCache(addressIDs)
 	// Evidence for unknown messages is mandatory. Enable event persistence for
 	// this block without changing the caller's configuration.
 	for _, tx := range txs {
@@ -384,14 +385,9 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 		// Lock rows in a stable order so concurrent indexers cannot deadlock.
 		sort.Slice(addressesSlice, func(i, j int) bool { return addressesSlice[i].Address < addressesSlice[j].Address })
 
-		if len(addressesSlice) != 0 {
-			if err := dbTransaction.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "address"}},
-				DoUpdates: clause.AssignmentColumns([]string{"address"}),
-			}).Create(addressesSlice).Error; err != nil {
-				config.Log.Error("Error getting/creating addresses.", err)
-				return err
-			}
+		if err := indexAddresses(dbTransaction, addressesSlice, addresses); err != nil {
+			config.Log.Error("Error getting/creating addresses.", err)
+			return err
 		}
 
 		for _, address := range addressesSlice {
@@ -555,6 +551,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 		messageTypes.publish()
 		eventTypes.publish()
 		attributeKeys.publish()
+		addresses.publish()
 	}
 
 	// Contract: ensure that block and txs have been loaded with the indexed data before returning
@@ -598,7 +595,60 @@ var (
 	messageTypeIDs      = newIDCache()
 	messageEventTypeIDs = newIDCache()
 	attributeKeyIDs     = newIDCache()
+	addressIDs          = newIDCache()
 )
+
+// indexAddresses sets the ID of each address, which must be sorted. The upsert
+// locks every row it touches until the block commits, so parallel indexers
+// sharing common addresses (fee payers, module accounts) waited on each other
+// block after block. Known IDs come from the cache, then from a plain read, and
+// only addresses not yet in the table are upserted.
+func indexAddresses(db *gorm.DB, addresses []models.Address, ids *pendingIDCache) error {
+	var missing []string
+	for i := range addresses {
+		if id, ok := ids.get(addresses[i].Address); ok {
+			addresses[i].ID = id
+		} else {
+			missing = append(missing, addresses[i].Address)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var found []models.Address
+	if err := db.Where("address IN ?", missing).Find(&found).Error; err != nil {
+		return err
+	}
+	for _, address := range found {
+		ids.put(address.Address, address.ID)
+	}
+	var create []models.Address
+	for i := range addresses {
+		if id, ok := ids.get(addresses[i].Address); ok {
+			addresses[i].ID = id
+		} else if addresses[i].ID == 0 {
+			create = append(create, addresses[i])
+		}
+	}
+	if len(create) == 0 {
+		return nil
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "address"}},
+		DoUpdates: clause.AssignmentColumns([]string{"address"}),
+	}).Create(&create).Error; err != nil {
+		return err
+	}
+	for _, address := range create {
+		ids.put(address.Address, address.ID)
+	}
+	for i := range addresses {
+		if addresses[i].ID == 0 {
+			addresses[i].ID, _ = ids.get(addresses[i].Address)
+		}
+	}
+	return nil
+}
 
 func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageType, error) {
 	fullUniqueBlockMessageTypes := make(map[string]models.MessageType)
