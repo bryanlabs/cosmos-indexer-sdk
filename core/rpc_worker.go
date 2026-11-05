@@ -153,17 +153,25 @@ func NormalizeCustomBlockResults(blockResults *rpc.CustomBlockResults) (*rpc.Cus
 		beginBlockEvents := []abci.Event{}
 		endBlockEvents := []abci.Event{}
 
+		// Upgrade handlers run in PreBlock, whose events carry no mode (or
+		// mode=PreBlock) and can move user funds, as at the v28.3.1 halt height
+		// 33086741. PreBlock runs before BeginBlock, so they are kept as
+		// BeginBlock events. Any other mode value fails closed.
 		for _, event := range blockResults.FinalizeBlockEvents {
 			eventAttrs := []abci.EventAttribute{}
 			isBeginBlock := false
 			isEndBlock := false
+			modes := 0
 			for _, attr := range event.Attributes {
 				if attr.Key == "mode" {
+					modes++
 					switch attr.Value {
-					case "BeginBlock":
+					case "BeginBlock", "PreBlock":
 						isBeginBlock = true
 					case "EndBlock":
 						isEndBlock = true
+					default:
+						return nil, fmt.Errorf("finalize block event has unknown mode %q", attr.Value)
 					}
 				} else {
 					eventAttrs = append(eventAttrs, attr)
@@ -173,8 +181,11 @@ func NormalizeCustomBlockResults(blockResults *rpc.CustomBlockResults) (*rpc.Cus
 			switch {
 			case isBeginBlock && isEndBlock:
 				return nil, fmt.Errorf("finalize block event has both BeginBlock and EndBlock mode")
-			case !isBeginBlock && !isEndBlock:
-				return nil, fmt.Errorf("finalize block event has neither BeginBlock nor EndBlock mode")
+			case modes == 0:
+				isBeginBlock = true
+			}
+
+			switch {
 			case isBeginBlock:
 				beginBlockEvents = append(beginBlockEvents, abci.Event{Type: event.Type, Attributes: eventAttrs})
 			case isEndBlock:
