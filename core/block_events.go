@@ -118,7 +118,7 @@ func FilterRPCBlockEvents(blockEvents []db.BlockEventDBWrapper, filterRegistry f
 	filterIndexes := make(map[int]bool)
 
 	// If filters are defined, we treat filters as a whitelist, and only include block events that match the filters and are allowed
-	// Filters are evaluated in order, and the first filter that matches is the one that is used. Single block event filters are preferred in ordering.
+	// Filters are evaluated in order and the last filter that matches decides, so an exclusive filter after an inclusive one carves out exceptions. Single block event filters are preferred in ordering.
 	for index, blockEvent := range blockEvents {
 		filterEvent := filter.EventData{
 			Event:      blockEvent.BlockEvent,
