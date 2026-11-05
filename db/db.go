@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -175,10 +176,11 @@ func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName
 		if failureErr != nil {
 			// Truncate: RPC/gRPC error strings can embed full response payloads.
 			const maxErrorLength = 2048
-			if len(failureErr.Error()) > maxErrorLength {
-				updates["last_error"] = failureErr.Error()[:maxErrorLength]
+			message := redactURLPaths(failureErr.Error())
+			if len(message) > maxErrorLength {
+				updates["last_error"] = message[:maxErrorLength]
 			} else {
-				updates["last_error"] = failureErr.Error()
+				updates["last_error"] = message
 			}
 		}
 
@@ -188,6 +190,15 @@ func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName
 		}
 		return nil
 	})
+}
+
+var urlPath = regexp.MustCompile(`(https?://[^/\s"']+)[^\s"']*`)
+
+// redactURLPaths keeps only the scheme and host of URLs in an error message.
+// Some archive RPC endpoints carry their access key in the URL path, and
+// failed_blocks is readable by anyone with database access.
+func redactURLPaths(message string) string {
+	return urlPath.ReplaceAllString(message, "$1")
 }
 
 // FailedBlockRetryHeights returns up to limit heights currently recorded in
