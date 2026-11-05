@@ -200,7 +200,11 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, actionClaim)...)
 
 	case *disttypes.MsgWithdrawValidatorCommission:
-		for recv, coins := range receivedCoinsByReceiver(log) {
+		credits := receivedCoinsByReceiver(log)
+		if len(credits) == 0 {
+			credits = transfersFromSender(log, distributionModuleAddress)
+		}
+		for recv, coins := range credits {
 			for _, c := range coins {
 				events = append(events, TaxableEvent{
 					Category: string(CategoryCommission),
@@ -645,6 +649,37 @@ func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coin
 						out[cur] = out[cur].Add(coins...)
 					}
 				}
+			}
+		}
+	}
+	return out
+}
+
+// transfersFromSender groups transfer amounts paid by sender, by recipient.
+// SDK 0.42 and earlier (Gaia v4 and v5) emit no coin_received, so commission
+// is only visible as the distribution module's transfer to the withdraw
+// address. Those logs merge repeated transfers into one event, so attributes
+// are read as recipient, sender, amount runs.
+func transfersFromSender(log *indexerTxTypes.LogMessage, sender string) map[string]sdk.Coins {
+	out := map[string]sdk.Coins{}
+	for _, ev := range log.Events {
+		if ev.Type != string(CategoryTransfer) {
+			continue
+		}
+		recipient, from := "", ""
+		for _, a := range ev.Attributes {
+			switch a.Key {
+			case attributeRecipient:
+				recipient, from = a.Value, ""
+			case attributeSender:
+				from = a.Value
+			case attributeAmount:
+				if recipient != "" && from == sender {
+					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
+						out[recipient] = out[recipient].Add(coins...)
+					}
+				}
+				recipient, from = "", ""
 			}
 		}
 	}

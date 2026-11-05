@@ -199,3 +199,19 @@ func TestClassifyNFTMint(t *testing.T) {
 		t.Fatalf("nft mint classification wrong: %+v", out)
 	}
 }
+
+// Gaia v4 and v5 (SDK 0.42) logs carry no coin_received, and merge the
+// commission payout and an unrelated transfer into one ordered transfer event.
+func TestClassifyCommissionFallsBackToDistributionTransferBeforeCoinReceived(t *testing.T) {
+	msg := &disttypes.MsgWithdrawValidatorCommission{ValidatorAddress: val}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("withdraw_commission", [2]string{attributeAmount, "1500uatom"}),
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, other}, [2]string{attributeSender, del}, [2]string{attributeAmount, "7uatom"},
+			[2]string{attributeRecipient, del}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "1500uatom"}),
+	}}
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Category != string(CategoryCommission) || out[0].Amount != "1500" || out[0].ToAddr != del {
+		t.Fatalf("pre-v6 commission should come from the distribution module transfer, got %+v", out)
+	}
+}
