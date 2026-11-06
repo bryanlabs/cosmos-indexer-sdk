@@ -35,6 +35,9 @@ const (
 	// registration, upload fees, game entry fees, tributes paid into Hydro.
 	// A disposal of the coins at fair market value for the payer.
 	CategoryExpense Category = "expense"
+	// A governance deposit the chain burned when its proposal ended (vetoed,
+	// or dropped with burning enabled). A disposal for no proceeds.
+	CategoryGovDepositBurn Category = "gov_deposit_burn"
 
 	// Record-only categories. These are not taxable events but a controller
 	// needs them to reconcile a wallet: coins the user still owns moved into or
@@ -49,6 +52,8 @@ const (
 	CategoryRedeemShares       Category = "redeem_shares"       // LSM: share tokens converted back into a delegation
 	CategoryShareRecord        Category = "share_record"        // LSM: ownership of a tokenize-share record transferred
 	CategoryGovDeposit         Category = "gov_deposit"         // refundable governance proposal deposit
+	CategoryGovDepositRefund   Category = "gov_deposit_refund"  // the same deposit returned when its proposal ended
+	CategoryUnbondingComplete  Category = "unbonding_complete"  // unbonding principal released back to the wallet
 	CategoryNFTTransfer        Category = "nft_transfer"        // NFT moved without payment (gift, escrow, bridge, prize)
 	CategoryNFTBurn            Category = "nft_burn"            // NFT destroyed
 )
@@ -59,7 +64,7 @@ const (
 func (c Category) Taxable() bool {
 	switch c {
 	case CategoryTransfer, CategoryReward, CategoryCommission, CategoryIBCOut, CategoryIBCIn,
-		CategoryNFTSale, CategoryNFTMint, CategorySwap, CategoryIncome, CategoryExpense:
+		CategoryNFTSale, CategoryNFTMint, CategorySwap, CategoryIncome, CategoryExpense, CategoryGovDepositBurn:
 		return true
 	}
 	return false
@@ -69,10 +74,11 @@ func (c Category) Taxable() bool {
 func AllCategories() []Category {
 	return []Category{
 		CategoryTransfer, CategoryReward, CategoryCommission, CategoryIBCOut, CategoryIBCIn,
-		CategoryNFTSale, CategoryNFTMint, CategorySwap, CategoryIncome, CategoryExpense,
+		CategoryNFTSale, CategoryNFTMint, CategorySwap, CategoryIncome, CategoryExpense, CategoryGovDepositBurn,
 		CategoryProtocolDeposit, CategoryProtocolWithdrawal, CategoryDelegate, CategoryUndelegate,
 		CategoryRedelegate, CategoryCancelUnbonding, CategoryTokenizeShares, CategoryRedeemShares,
-		CategoryShareRecord, CategoryGovDeposit, CategoryNFTTransfer, CategoryNFTBurn,
+		CategoryShareRecord, CategoryGovDeposit, CategoryGovDepositRefund, CategoryUnbondingComplete,
+		CategoryNFTTransfer, CategoryNFTBurn,
 	}
 }
 

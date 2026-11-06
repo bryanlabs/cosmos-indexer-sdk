@@ -13,6 +13,8 @@ import (
 
 const financialEventKind = "event"
 
+var blockFingerprintEnd = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
 func reviewFingerprint(rows []Row) string {
 	ids := []string{}
 	for _, row := range rows {
@@ -92,6 +94,17 @@ func (s *Server) reviewFingerprintInSnapshot(chain string, addresses []string) (
 	_ = fees.Close()
 	if err != nil {
 		return "", err
+	}
+	// Block event rows are derived at read time, so hash what they derive to.
+	for _, addr := range addresses {
+		rows, err := s.blockEventRows(chain, addr, time.Time{}, blockFingerprintEnd)
+		if err != nil {
+			return "", err
+		}
+		for _, row := range rows {
+			data, _ := json.Marshal(row)
+			writeFinancialFingerprintRow(h, "block_event", string(data))
+		}
 	}
 	if err := s.writeClassificationFingerprint(h, chain, addresses); err != nil {
 		return "", err

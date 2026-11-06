@@ -296,6 +296,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 	messageTypes := newPendingIDCache(messageTypeIDs)
 	eventTypes := newPendingIDCache(messageEventTypeIDs)
 	attributeKeys := newPendingIDCache(attributeKeyIDs)
+	addresses := newPendingIDCache(addressIDs)
 	// Evidence for unknown messages is mandatory. Enable event persistence for
 	// this block without changing the caller's configuration.
 	for _, tx := range txs {
@@ -384,14 +385,9 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 		// Lock rows in a stable order so concurrent indexers cannot deadlock.
 		sort.Slice(addressesSlice, func(i, j int) bool { return addressesSlice[i].Address < addressesSlice[j].Address })
 
-		if len(addressesSlice) != 0 {
-			if err := dbTransaction.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "address"}},
-				DoUpdates: clause.AssignmentColumns([]string{"address"}),
-			}).Create(addressesSlice).Error; err != nil {
-				config.Log.Error("Error getting/creating addresses.", err)
-				return err
-			}
+		if err := indexAddresses(dbTransaction, addressesSlice, addresses); err != nil {
+			config.Log.Error("Error getting/creating addresses.", err)
+			return err
 		}
 
 		for _, address := range addressesSlice {
@@ -555,6 +551,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 		messageTypes.publish()
 		eventTypes.publish()
 		attributeKeys.publish()
+		addresses.publish()
 	}
 
 	// Contract: ensure that block and txs have been loaded with the indexed data before returning
@@ -598,7 +595,93 @@ var (
 	messageTypeIDs      = newIDCache()
 	messageEventTypeIDs = newIDCache()
 	attributeKeyIDs     = newIDCache()
+	addressIDs          = newIDCache()
 )
+
+// splitKnown fills in the IDs of rows already in the table with a plain read,
+// which takes no row locks, and returns them apart from the rows still to be
+// inserted. An upsert of an existing row locks it until the block commits, and
+// with parallel indexers those locks deadlocked across the dimension tables.
+func splitKnown[T any](db *gorm.DB, model interface{}, column string, rows []T, key func(T) string, withID func(T, uint) T) (known, missing []T, err error) {
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	keys := make([]string, len(rows))
+	for i, row := range rows {
+		keys[i] = key(row)
+	}
+	var found []struct {
+		ID        uint
+		LookupKey string
+	}
+	if err := db.Model(model).Select("id, "+column+" AS lookup_key").Where(column+" IN ?", keys).Scan(&found).Error; err != nil {
+		return nil, nil, err
+	}
+	ids := make(map[string]uint, len(found))
+	for _, row := range found {
+		ids[row.LookupKey] = row.ID
+	}
+	for _, row := range rows {
+		if id, ok := ids[key(row)]; ok && id != 0 {
+			known = append(known, withID(row, id))
+		} else {
+			missing = append(missing, row)
+		}
+	}
+	return known, missing, nil
+}
+
+// indexAddresses sets the ID of each address, which must be sorted. The upsert
+// locks every row it touches until the block commits, so parallel indexers
+// sharing common addresses (fee payers, module accounts) waited on each other
+// block after block. Known IDs come from the cache, then from a plain read, and
+// only addresses not yet in the table are upserted.
+func indexAddresses(db *gorm.DB, addresses []models.Address, ids *pendingIDCache) error {
+	var missing []string
+	for i := range addresses {
+		if id, ok := ids.get(addresses[i].Address); ok {
+			addresses[i].ID = id
+		} else {
+			missing = append(missing, addresses[i].Address)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var found []models.Address
+	if err := db.Where("address IN ?", missing).Find(&found).Error; err != nil {
+		return err
+	}
+	for _, address := range found {
+		ids.put(address.Address, address.ID)
+	}
+	var create []models.Address
+	for i := range addresses {
+		if id, ok := ids.get(addresses[i].Address); ok {
+			addresses[i].ID = id
+		} else if addresses[i].ID == 0 {
+			create = append(create, addresses[i])
+		}
+	}
+	if len(create) == 0 {
+		return nil
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "address"}},
+		DoUpdates: clause.AssignmentColumns([]string{"address"}),
+	}).Create(&create).Error; err != nil {
+		return err
+	}
+	for _, address := range create {
+		ids.put(address.Address, address.ID)
+	}
+	for i := range addresses {
+		if addresses[i].ID == 0 {
+			addresses[i].ID, _ = ids.get(addresses[i].Address)
+		}
+	}
+	return nil
+}
 
 func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageType, error) {
 	fullUniqueBlockMessageTypes := make(map[string]models.MessageType)
@@ -619,6 +702,13 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
 	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].MessageType < messageTypesSlice[j].MessageType })
+	known, messageTypesSlice, err := splitKnown(db, &models.MessageType{}, "message_type", messageTypesSlice,
+		func(m models.MessageType) string { return m.MessageType },
+		func(m models.MessageType, id uint) models.MessageType { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message types.", err)
+		return nil, err
+	}
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -630,7 +720,7 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map
 		}
 	}
 
-	for _, messageType := range messageTypesSlice {
+	for _, messageType := range append(known, messageTypesSlice...) {
 		fullUniqueBlockMessageTypes[messageType.MessageType] = messageType
 		ids.put(messageType.MessageType, messageType.ID)
 	}
@@ -658,6 +748,13 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache)
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
 	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].Type < messageTypesSlice[j].Type })
+	known, messageTypesSlice, err := splitKnown(db, &models.MessageEventType{}, columnType, messageTypesSlice,
+		func(m models.MessageEventType) string { return m.Type },
+		func(m models.MessageEventType, id uint) models.MessageEventType { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message event types.", err)
+		return nil, err
+	}
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -669,7 +766,7 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache)
 		}
 	}
 
-	for _, messageType := range messageTypesSlice {
+	for _, messageType := range append(known, messageTypesSlice...) {
 		fullUniqueBlockMessageEventTypes[messageType.Type] = messageType
 		ids.put(messageType.Type, messageType.ID)
 	}
@@ -699,6 +796,13 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pending
 	sort.Slice(messageEventAttributeKeysSlice, func(i, j int) bool {
 		return messageEventAttributeKeysSlice[i].Key < messageEventAttributeKeysSlice[j].Key
 	})
+	known, messageEventAttributeKeysSlice, err := splitKnown(db, &models.MessageEventAttributeKey{}, columnKey, messageEventAttributeKeysSlice,
+		func(m models.MessageEventAttributeKey) string { return m.Key },
+		func(m models.MessageEventAttributeKey, id uint) models.MessageEventAttributeKey { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message event attribute keys.", err)
+		return nil, err
+	}
 
 	if len(messageEventAttributeKeysSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -710,7 +814,7 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pending
 		}
 	}
 
-	for _, messageEventAttributeKey := range messageEventAttributeKeysSlice {
+	for _, messageEventAttributeKey := range append(known, messageEventAttributeKeysSlice...) {
 		fullUniqueMessageEventAttributeKeys[messageEventAttributeKey.Key] = messageEventAttributeKey
 		ids.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
 	}

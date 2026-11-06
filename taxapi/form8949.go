@@ -179,6 +179,10 @@ func Build8949(rows []Row) []Form8949Row {
 			// disposal (incl. fee spends): consume FIFO
 			remaining := r.Amount
 			disposalPrice := r.PriceUSD
+			if r.Category == "gov_deposit_burn" {
+				// Burned by the chain: the coins are gone for nothing.
+				disposalPrice = decimal.Zero
+			}
 			for remaining.IsPositive() {
 				q := lots[asset]
 				if len(q) == 0 {

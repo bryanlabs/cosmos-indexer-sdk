@@ -86,6 +86,12 @@ func main() {
 		log.Printf("attestation table migrate: %v", err)
 	}
 
+	// Finds a wallet's block events. A no-op once built; the first build on a
+	// large database takes hours, so build it by hand before deploying there.
+	if err := taxapi.BlockEventsMigrate(db); err != nil {
+		log.Printf("block event index migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)

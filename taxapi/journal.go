@@ -67,6 +67,7 @@ const (
 	acctOtherExpense    = "Expense: Other"
 	acctGifts           = "Gifts"
 	acctLosses          = "Losses: Lost or Stolen"
+	acctGovDepositBurns = "Losses: Burned Governance Deposits"
 	acctSwapDifference  = "Swap Valuation Difference"
 	acctSpam            = "Spam Receipts (memo only)"
 )
@@ -211,6 +212,12 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			out = append(out, line(acctStakedAssets+": "+r.Symbol, true), line(acctLiquidShares+": "+r.Symbol, false))
 		case r.Category == "gov_deposit":
 			out = append(out, line(acctGovDeposits, true), line(asset, false))
+		case r.Category == "gov_deposit_refund":
+			out = append(out, line(asset, true), line(acctGovDeposits, false))
+		case r.Category == "gov_deposit_burn":
+			out = append(out, line(acctGovDepositBurns, true), line(acctGovDeposits, false))
+		case r.Category == "unbonding_complete":
+			out = append(out, line(asset, true), line(acctUnbondingAssets+": "+r.Symbol, false))
 		case r.Category == TagProtocolDeposit || r.UserTag == TagProtocolDeposit:
 			if in {
 				out = append(out, line(asset, true), line(acctInProtocol+": "+r.Symbol, false))

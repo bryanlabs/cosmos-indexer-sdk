@@ -421,6 +421,10 @@ func ctcType(r Row) string {
 		return "staking-deposit"
 	case "protocol_withdrawal", "undelegate", "redeem_shares":
 		return "staking-withdrawal"
+	case string(tax.CategoryGovDepositBurn):
+		return TagLost
+	case string(tax.CategoryGovDepositRefund), string(tax.CategoryUnbondingComplete):
+		return "transfer-in"
 	case "nft_transfer", "nft_burn", apiRedelegate, "cancel_unbonding", "share_record":
 		if r.Direction == "in" {
 			return "transfer-in"

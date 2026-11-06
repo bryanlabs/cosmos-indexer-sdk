@@ -395,6 +395,17 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time) (walle
 	if err != nil {
 		return walletRows{}, err
 	}
+	// Coins the chain moved at the start or end of a block, with no
+	// transaction: unbonding completions, deposit refunds and burns,
+	// community pool payouts.
+	blockRows, err := s.blockEventRows(chain, addr, start, end)
+	if err != nil {
+		return walletRows{}, err
+	}
+	if len(blockRows) > 0 {
+		events = append(events, blockRows...)
+		sort.SliceStable(events, func(i, j int) bool { return events[i].Timestamp.Before(events[j].Timestamp) })
+	}
 	return walletRows{Events: events, Fees: fees, Memos: memos}, nil
 }
 
