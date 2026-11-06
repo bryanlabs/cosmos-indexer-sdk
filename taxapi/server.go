@@ -348,7 +348,7 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 
 // loadWalletRows performs database work only. Pricing and shared Server caches
 // are deliberately used only after the read snapshot has been released.
-func (s *Server) loadWalletRows(chain, addr string, start, end time.Time) (walletRows, error) {
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (walletRows, error) {
 	var events []tax.TaxableEvent
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
@@ -357,6 +357,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time) (walle
 		Find(&events).Error; err != nil {
 		return walletRows{}, err
 	}
+	reconcileIBCRefunds(events, refundPairs)
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.

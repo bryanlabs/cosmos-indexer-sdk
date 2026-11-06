@@ -41,10 +41,17 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 }
 
 func (s *Server) requireReportReady(chain string, addresses []string, start, end time.Time) error {
+	_, err := s.reportReadiness(chain, addresses, start, end)
+	return err
+}
+
+// reportReadiness gates the report and returns the IBC refund pairs its rows
+// reconcile.
+func (s *Server) reportReadiness(chain string, addresses []string, start, end time.Time) (map[uint]string, error) {
 	if err := s.requireClassificationReady(chain, addresses, start, end); err != nil {
-		return err
+		return nil, err
 	}
-	return s.requireIBCBasisReady(chain, addresses, end)
+	return s.ibcBasisCheck(chain, addresses, end)
 }
 
 // Gates, full-history IBC dependencies, financial rows, fees, memos and optional
@@ -53,11 +60,12 @@ func (s *Server) requireReportReady(chain string, addresses []string, start, end
 func (s *Server) readReportInput(chain string, addresses []string, start, end time.Time, fingerprint bool) (reportInput, error) {
 	var input reportInput
 	err := s.withReadSnapshot(func(reader *Server) error {
-		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
+		refundPairs, err := reader.reportReadiness(chain, addresses, start, end)
+		if err != nil {
 			return err
 		}
 		for _, addr := range addresses {
-			rows, err := reader.loadWalletRows(chain, addr, start, end)
+			rows, err := reader.loadWalletRows(chain, addr, start, end, refundPairs)
 			if err != nil {
 				return err
 			}
