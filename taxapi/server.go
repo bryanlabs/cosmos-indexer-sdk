@@ -132,6 +132,7 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	// completeness. Exposed as a header (the body is a CSV) so the web UI can
 	// gate the confident-download path without re-parsing the CSV.
 	w.Header().Set("X-Basis-Unknown-Count", strconv.Itoa(CountUnknownBasis(form)))
+	w.Header().Set("X-Proceeds-Unknown-Count", strconv.Itoa(CountUnknownProceeds(form)))
 	w.Header().Set(apiContentType, apiCSVContentType)
 	w.Header().Set(apiContentDisposition, "attachment; filename=form-8949.csv")
 	_ = Write8949CSV(w, form)
@@ -155,6 +156,7 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 	sched.Address = addr
 	sched.WalletByWallet = true
 	sched.UnknownBasisLines = CountUnknownBasis(form)
+	sched.UnknownProceedsLines = CountUnknownProceeds(form)
 	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(sched)
 }

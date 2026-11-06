@@ -23,7 +23,7 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v11"
+	MethodologyVersion = "v12"
 	MethodologyDate    = "2026-11-06"
 )
 
@@ -40,8 +40,10 @@ func currentMethodology() Methodology {
 		EffectiveDate:              MethodologyDate,
 		Sources: []string{
 			"wasm-indexer oracle /price endpoint (chain-registry + scraped IBC/CosmWasm-token price feeds)",
+			"CoinGecko daily USD price (00:00 UTC), the oracle's primary source; it reaches back to 2025-06-26",
+			"Coinbase Exchange daily candle open (00:00 UTC) for ATOM (ATOM-USD, from 2021-01-01) and USDT (USDT-USD, from 2021-05-04) on days CoinGecko cannot serve; over 289 overlapping ATOM days the median difference from CoinGecko was 0.08%. Other assets have no direct USD market there and stay unpriced before CoinGecko's first day",
 		},
-		TimestampGranularity: "daily (UTC calendar day); every event on a given day for a given denom uses that day's single reference price, not an intraday price",
+		TimestampGranularity: "daily (UTC calendar day); every event on a given day for a given denom uses that day's single reference price, not an intraday price. The price is for that exact day: a missing day is never filled from an earlier one, except today before the oracle's first refresh of the day, which uses yesterday's price",
 		AggregationRule:      "one reference USD price per (denom, UTC day), read once from the oracle and cached; every row for that denom/day reuses the same value",
 		FallbackOrder: []string{
 			"asset review first: suspected-spam receipts remain unreviewed until the user explicitly excludes them or supplies token identity, quantity, value and basis; no default exclusion or override",
@@ -50,6 +52,6 @@ func currentMethodology() Methodology {
 			"documented $1 USD peg for exact allowlisted USDC denominations when the oracle has no price",
 			"no synthetic fallback for any other asset: the row is flagged price_missing rather than valued at $0",
 		},
-		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated",
+		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated. A Form 8949 line whose sale date has no price says so in its description and in the Proceeds unknown column (X-Proceeds-Unknown-Count, Schedule D unknown_proceeds_lines) instead of showing a confirmed 0.00, and an acquisition with no price at receipt is basis unknown",
 	}
 }
