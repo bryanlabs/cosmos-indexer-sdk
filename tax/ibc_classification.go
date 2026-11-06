@@ -187,7 +187,10 @@ func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data tra
 		}
 		return nil, []string{issue + " (packet/application event mismatch)"}
 	}
-	if packet.SourcePort != string(CategoryTransfer) || packet.DestinationPort != string(CategoryTransfer) || packet.SourceChannel == "" || packet.DestinationChannel == "" || data.Denom == "" {
+	// The counterparty port is whatever app the channel was opened against:
+	// transfer, or a CW20-ICS20 contract's wasm.<contract> port. Only the
+	// local end has to be the transfer app.
+	if packet.SourcePort == "" || packet.DestinationPort != string(CategoryTransfer) || packet.SourceChannel == "" || packet.DestinationChannel == "" || data.Denom == "" {
 		return nil, []string{issue + " (missing transfer packet context)"}
 	}
 	coin, ok := takeIBCCredit(ibcCredits(log), data.Receiver, data.Amount, ibcV1ReceiveCandidates(data.Denom, packet)...)
@@ -204,7 +207,8 @@ func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data tra
 // app's success for the exact coins to that intermediate, and a committed
 // outbound transfer from it; anything else stays incomplete.
 func ibcV1ForwardPassThrough(log *txlog.LogMessage, data transfertypes.FungibleTokenPacketData) bool {
-	if trigger, _ := ibcMemoIntent(data.Memo); trigger != "pfm_forward" {
+	trigger, detail := ibcMemoIntent(data.Memo)
+	if trigger != "pfm_forward" {
 		return false
 	}
 	intermediates := map[string]bool{}
@@ -226,7 +230,15 @@ func ibcV1ForwardPassThrough(log *txlog.LogMessage, data transfertypes.FungibleT
 			continue
 		}
 		for _, a := range ibcAttributeGroups(ev, attributeSender, attributeReceiver, attributeAmount, attributeDenom) {
-			if intermediates[a[attributeSender]] && a[attributeAmount] == data.Amount {
+			if !intermediates[a[attributeSender]] {
+				continue
+			}
+			if a[attributeAmount] == data.Amount {
+				return true
+			}
+			// ibc-go before v8 emits ibc_transfer without an amount; the
+			// forward is then identified by the memo's next-hop receiver.
+			if _, hasAmount := a[attributeAmount]; !hasAmount && a[attributeReceiver] != "" && a[attributeReceiver] == detail["forward_receiver"] {
 				return true
 			}
 		}
