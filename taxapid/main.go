@@ -92,7 +92,9 @@ func main() {
 		log.Printf("block event index migrate: %v", err)
 	}
 
-	// Finds messages of unreviewed types for the report readiness gate.
+	// Finds messages of unreviewed types and a wallet's transactions for the
+	// report gates. The attribute value index also takes hours on a large
+	// database, and startup waits on a build in progress.
 	if err := taxapi.ReadinessMigrate(db); err != nil {
 		log.Printf("readiness index migrate: %v", err)
 	}
