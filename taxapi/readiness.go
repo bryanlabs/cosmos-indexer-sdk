@@ -127,8 +127,21 @@ func walletTxScope(q *gorm.DB, addresses []string) *gorm.DB {
  SELECT tsa.tx_id FROM tx_signer_addresses tsa JOIN addresses a ON a.id=tsa.address_id WHERE a.address IN ?
  UNION SELECT f.tx_id FROM fees f JOIN addresses a ON a.id=f.payer_address_id WHERE a.address IN ?
  UNION SELECT wm.tx_id FROM taxable_events te JOIN messages wm ON wm.id=te.message_id WHERE te.from_addr IN ? OR te.to_addr IN ? OR te.validator_address IN ?
- UNION SELECT wm.tx_id FROM message_event_attributes mea JOIN message_events me ON me.id=mea.message_event_id JOIN messages wm ON wm.id=me.message_id WHERE mea.value IN ?
- )`, addresses, addresses, addresses, addresses, addresses, addresses)
+ UNION SELECT wm.tx_id FROM message_event_attributes mea JOIN message_events me ON me.id=mea.message_event_id JOIN messages wm ON wm.id=me.message_id WHERE left(mea.value, 100) IN ? AND mea.value IN ?
+ )`, addresses, addresses, addresses, addresses, addresses, valuePrefixes(addresses), addresses)
+}
+
+// valuePrefixes matches the attribute value index, which is on a prefix
+// because values can be long (wasm payloads).
+func valuePrefixes(values []string) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		if r := []rune(v); len(r) > 100 {
+			v = string(r[:100])
+		}
+		out[i] = v
+	}
+	return out
 }
 
 // walletFewTxScope applies the same attribution to a handful of candidate
@@ -154,7 +167,7 @@ func ReadinessMigrate(db *gorm.DB) error {
 	for _, sql := range []string{
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_message_type_id ON messages (message_type_id)`,
 		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tx_signer_addresses_address_id ON tx_signer_addresses (address_id)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_message_event_attr_value_hash ON message_event_attributes USING hash (value)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_message_event_attr_value ON message_event_attributes (left(value, 100))`,
 	} {
 		if err := db.Exec(sql).Error; err != nil {
 			return err
