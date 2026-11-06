@@ -23,6 +23,7 @@ func Catalog() []CategoryInfo {
 		CategorySwap:               {"defi", "One leg of a swap or vault movement: the coin given up is a disposal, the coin received is an acquisition. Vault deposits and withdrawals on Inflow are recorded as swaps between ATOM and vault shares."},
 		CategoryIncome:             {string(CategoryIncome), "Protocol income that is not a staking reward: Hydro tributes, DAO reward distributions, governance-score rewards, raffle and game prizes paid in coins. Ordinary income at the USD price that day; the source is named on the row."},
 		CategoryExpense:            {string(CategoryIncome), "A payment to a protocol for a service with nothing coming back: a name registration, an upload fee, a game entry fee, a tribute paid into Hydro. A disposal of the coins paid."},
+		CategoryGovDepositBurn:     {catalogGroupRecords, "A governance deposit the chain burned when its proposal ended, for example a vetoed proposal. A disposal of the deposited coins for no proceeds, so the loss is their cost basis."},
 		CategoryProtocolDeposit:    {catalogGroupRecords, "Coins you still own moved into a contract: a Hydro lock, DAO staking, an auction bid held in escrow. Not a disposal. Kept out of tax-software imports so it is never read as a sale."},
 		CategoryProtocolWithdrawal: {catalogGroupRecords, "The same coins coming back out of a contract: an unlock, an unstake, a refunded bid. Not income."},
 		CategoryDelegate:           {catalogGroupRecords, "Staking principal bonded to a validator. Not a disposal; the wallet still owns the ATOM."},
@@ -33,6 +34,8 @@ func Catalog() []CategoryInfo {
 		CategoryRedeemShares:       {catalogGroupRecords, "Liquid staking share tokens converted back into a native delegation."},
 		CategoryShareRecord:        {catalogGroupRecords, "Ownership of a tokenize-share record transferred to another address."},
 		CategoryGovDeposit:         {catalogGroupRecords, "A refundable governance proposal deposit. Not a disposal while the deposit can still be returned."},
+		CategoryGovDepositRefund:   {catalogGroupRecords, "A governance deposit returned to you when its proposal ended. Not income; the coins were yours throughout."},
+		CategoryUnbondingComplete:  {catalogGroupRecords, "Unbonding principal released back to your wallet when the 21-day unbonding period ended, after any slashing. Not income."},
 		CategoryNFTTransfer:        {catalogGroupNFTs, "An NFT moved without a payment: a gift, a listing moved into marketplace escrow, a raffle entry or prize, a bridge transfer over ICS721. Review and tag if it was actually a sale off chain."},
 		CategoryNFTBurn:            {catalogGroupNFTs, "An NFT destroyed by its owner."},
 	}
@@ -87,5 +90,7 @@ func Triggers() []TriggerInfo {
 		{"ibc_callback", string(CategoryIBCOut), "An IBC transfer with a callback contract."},
 		{"ics721_out", "nft_transfer", "An NFT sent to another chain over the ICS721 bridge."},
 		{"ics721_in", "nft_transfer", "An NFT received from another chain over the ICS721 bridge."},
+		{TriggerCommunityPoolSpend, string(CategoryIncome), "A community pool payout made by a passed governance proposal at the end of a block."},
+		{TriggerBlockWithdrawal, string(CategoryReward), "A staking reward the chain withdrew for the delegator at the start or end of a block, outside any transaction."},
 	}
 }
