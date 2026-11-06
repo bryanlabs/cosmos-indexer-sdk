@@ -92,6 +92,11 @@ func main() {
 		log.Printf("block event index migrate: %v", err)
 	}
 
+	// Finds messages of unreviewed types for the report readiness gate.
+	if err := taxapi.ReadinessMigrate(db); err != nil {
+		log.Printf("readiness index migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)

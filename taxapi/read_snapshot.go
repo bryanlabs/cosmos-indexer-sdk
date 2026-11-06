@@ -30,6 +30,12 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 	ctx, cancel := context.WithTimeout(s.db.Statement.Context, readSnapshotTimeout)
 	defer cancel()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The driver caches prepared statements, and after five runs Postgres
+		// may switch to a generic plan that cannot see the period or the type
+		// ids; the readiness counts then went from 1s to over 20s.
+		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
+			return err
+		}
 		return fn(&Server{db: tx})
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 }
