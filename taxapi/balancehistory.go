@@ -116,7 +116,7 @@ func (ValidatorRateSample) TableName() string { return "tax_validator_rates" }
 // The index scan and the hole sweeper read a block's transactions, which the
 // indexer's schema does not index.
 func BalanceHistoryMigrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}); err != nil {
+	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}, &BalanceDay{}, &BalanceBuild{}); err != nil {
 		return err
 	}
 	return db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_txes_block_id ON txes (block_id)").Error
@@ -1163,6 +1163,11 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	if err != nil {
 		return nil, err
 	}
+	build, err := s.balanceBuild(chain)
+	if err != nil {
+		return nil, err
+	}
+	meta := s.oracle.Denoms(chain)
 	var idx []int
 	var targets []heightTime
 	for i, d := range days {
@@ -1174,6 +1179,23 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 			}
 			continue
 		}
+		// A day the stored build rebuilt is served from it; any other day,
+		// or one the build could not rebuild, is walked back live.
+		row, ok, err := s.storedBalanceDay(build, addr, d)
+		if err != nil {
+			return nil, err
+		}
+		if ok && row.Status == "" {
+			h, err := decodeHoldings(ht.Height, row.Holdings)
+			if err != nil {
+				return nil, fmt.Errorf("stored balance of %s: %w", row.Day.Format(apiDateLayout), err)
+			}
+			hb := &out[i]
+			bt := ht.TimeStamp.UTC()
+			hb.Height, hb.BlockTime, hb.AnchorHeight = ht.Height, &bt, row.AnchorHeight
+			s.fillBalanceLines(chain, meta, hb, h, d)
+			continue
+		}
 		idx, targets = append(idx, i), append(targets, ht)
 	}
 	if len(targets) == 0 {
@@ -1183,7 +1205,6 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	if err != nil {
 		return nil, err
 	}
-	meta := s.oracle.Denoms(chain)
 	for j, r := range rebuilt {
 		hb := &out[idx[j]]
 		if r.Status != "" {
