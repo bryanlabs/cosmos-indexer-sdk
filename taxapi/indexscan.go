@@ -1,11 +1,15 @@
 package taxapi
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -21,36 +25,73 @@ type nodeTx struct {
 	Hash     string
 	Code     uint32
 	Accounts []string
+	// Charged is the coins a failed transaction's fee deduction moved.
+	Charged string
+	// Granter is the account whose fee grant paid the fee, if any.
+	Granter string
+}
+
+// rpcResult reads one RPC response at height, from the block cache when the
+// node has one. The cache keeps each response whole, gzipped, under the
+// height's ten-thousand-block folder.
+func (n *ledgerNode) rpcResult(method string, height int64, out any) error {
+	if n.cache == "" {
+		return n.rpc.GetJSON("/"+method, url.Values{"height": {strconv.FormatInt(height, 10)}}, out)
+	}
+	f, err := os.Open(filepath.Join(n.cache, strconv.FormatInt(height/10000, 10), fmt.Sprintf("%d-%s.raw.gz", height, method)))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("%s %d: %w", method, height, err)
+	}
+	if err := json.NewDecoder(gz).Decode(out); err != nil {
+		return fmt.Errorf("%s %d: %w", method, height, err)
+	}
+	return nil
 }
 
 // blockTxs reads a block's transactions from the node with every account
-// each one names in its bytes or any of its events.
+// each one names in its bytes or any of its events, the fee a failed one was
+// charged and the granter of a fee grant that paid.
 func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
-	q := url.Values{"height": {strconv.FormatInt(height, 10)}}
 	var blk struct {
 		Result struct {
 			Block struct {
+				Header struct {
+					Height string `json:"height"`
+				} `json:"header"`
 				Data struct {
 					Txs []string `json:"txs"`
 				} `json:"data"`
 			} `json:"block"`
 		} `json:"result"`
 	}
-	if err := n.rpc.GetJSON("/block", q, &blk); err != nil {
+	if err := n.rpcResult("block", height, &blk); err != nil {
 		return nil, err
+	}
+	if h := blk.Result.Block.Header.Height; h != strconv.FormatInt(height, 10) {
+		return nil, fmt.Errorf("block %d: response is for height %q", height, h)
 	}
 	var res struct {
 		Result struct {
+			Height     string `json:"height"`
 			TxsResults []struct {
 				Code   uint32 `json:"code"`
 				Events []struct {
+					Type       string    `json:"type"`
 					Attributes []rpcAttr `json:"attributes"`
 				} `json:"events"`
 			} `json:"txs_results"`
 		} `json:"result"`
 	}
-	if err := n.rpc.GetJSON("/block_results", q, &res); err != nil {
+	if err := n.rpcResult("block_results", height, &res); err != nil {
 		return nil, err
+	}
+	if h := res.Result.Height; h != strconv.FormatInt(height, 10) {
+		return nil, fmt.Errorf("block results %d: response is for height %q", height, h)
 	}
 	txs, results := blk.Result.Block.Data.Txs, res.Result.TxsResults
 	if len(txs) != len(results) {
@@ -68,6 +109,8 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 		for _, m := range pat.FindAll(raw, -1) {
 			found[string(m)] = true
 		}
+		var spent []string
+		granter := ""
 		for _, e := range t.Events {
 			for _, a := range e.Attributes {
 				vals := []string{a.Value}
@@ -79,9 +122,18 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 						found[m] = true
 					}
 				}
+				switch k, v := a.decoded(); {
+				case e.Type == "coin_spent" && k == "amount":
+					spent = append(spent, v)
+				case e.Type == "use_feegrant" && k == "granter":
+					granter = v
+				}
 			}
 		}
-		tx := nodeTx{Hash: strings.ToUpper(hex.EncodeToString(sum[:])), Code: t.Code}
+		tx := nodeTx{Hash: strings.ToUpper(hex.EncodeToString(sum[:])), Code: t.Code, Granter: granter}
+		if t.Code != 0 {
+			tx.Charged = strings.Join(spent, ",")
+		}
 		for a := range found {
 			tx.Accounts = append(tx.Accounts, a)
 		}

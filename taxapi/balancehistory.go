@@ -3,7 +3,6 @@ package taxapi
 import (
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -130,6 +129,9 @@ const heightHeader = "x-cosmos-block-height"
 type ledgerNode struct {
 	rest *servicehttp.Endpoint
 	rpc  *servicehttp.Endpoint
+	// cache, when set, is a block cache directory that RPC reads come from
+	// instead of the node.
+	cache string
 }
 
 func newLedgerNode() (*ledgerNode, error) {
@@ -387,12 +389,12 @@ type rpcAttr struct {
 
 // decoded undoes the base64 attribute encoding of older CometBFT releases.
 func (a rpcAttr) decoded() (string, string) {
-	if a.Key == "amount" || a.Key == "spender" || a.Key == "fee" || a.Key == "msg_index" {
+	if a.Key == "amount" || a.Key == "spender" || a.Key == "granter" || a.Key == "fee" || a.Key == "msg_index" {
 		return a.Key, a.Value
 	}
 	k, err1 := base64.StdEncoding.DecodeString(a.Key)
 	v, err2 := base64.StdEncoding.DecodeString(a.Value)
-	if err1 == nil && err2 == nil && (string(k) == "amount" || string(k) == "spender") {
+	if err1 == nil && err2 == nil && (string(k) == "amount" || string(k) == "spender" || string(k) == "granter") {
 		return string(k), string(v)
 	}
 	return a.Key, a.Value
@@ -401,59 +403,15 @@ func (a rpcAttr) decoded() (string, string) {
 // failedTxCharges reads one block's failed transactions from the node and
 // returns, by hash, the coins each one's fee deduction moved.
 func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
-	q := url.Values{"height": {strconv.FormatInt(height, 10)}}
-	var blk struct {
-		Result struct {
-			Block struct {
-				Data struct {
-					Txs []string `json:"txs"`
-				} `json:"data"`
-			} `json:"block"`
-		} `json:"result"`
-	}
-	if err := n.rpc.GetJSON("/block", q, &blk); err != nil {
+	txs, err := n.blockTxs(height)
+	if err != nil {
 		return nil, err
-	}
-	var res struct {
-		Result struct {
-			TxsResults []struct {
-				Code   uint32 `json:"code"`
-				Events []struct {
-					Type       string    `json:"type"`
-					Attributes []rpcAttr `json:"attributes"`
-				} `json:"events"`
-			} `json:"txs_results"`
-		} `json:"result"`
-	}
-	if err := n.rpc.GetJSON("/block_results", q, &res); err != nil {
-		return nil, err
-	}
-	txs, results := blk.Result.Block.Data.Txs, res.Result.TxsResults
-	if len(txs) != len(results) {
-		return nil, fmt.Errorf("block %d has %d txs and %d results", height, len(txs), len(results))
 	}
 	out := map[string]string{}
-	for i, t := range results {
-		if t.Code == 0 {
-			continue
+	for _, t := range txs {
+		if t.Code != 0 {
+			out[t.Hash] = t.Charged
 		}
-		raw, err := base64.StdEncoding.DecodeString(txs[i])
-		if err != nil {
-			return nil, err
-		}
-		sum := sha256.Sum256(raw)
-		var spent []string
-		for _, e := range t.Events {
-			if e.Type != "coin_spent" {
-				continue
-			}
-			for _, a := range e.Attributes {
-				if k, v := a.decoded(); k == "amount" {
-					spent = append(spent, v)
-				}
-			}
-		}
-		out[strings.ToUpper(hex.EncodeToString(sum[:]))] = strings.Join(spent, ",")
 	}
 	return out, nil
 }
