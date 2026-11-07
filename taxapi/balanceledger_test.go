@@ -118,8 +118,8 @@ func TestWalkBackStaking(t *testing.T) {
 	intsEqual(t, "h35", got[35].Delegations, map[string]int64{ledgerTestVal: 700, ledgerTestVal2: 50})
 	intsEqual(t, "h25", got[25].Delegations, map[string]int64{ledgerTestVal: 300, ledgerTestVal2: 50})
 	intsEqual(t, "h10", got[10].Delegations, map[string]int64{ledgerTestVal: 200, ledgerTestVal2: 50})
-	if len(got[10].Approximate) > 0 {
-		t.Fatalf("validators at one token per share rebuild exactly, got approximate %v", got[10].Approximate)
+	if len(got[10].DelegationError) > 0 {
+		t.Fatalf("validators at one token per share rebuild exactly, got bounds %v", got[10].DelegationError)
 	}
 }
 
@@ -127,8 +127,11 @@ func unitRate(n int64) validatorRate {
 	return validatorRate{Tokens: bi(n), Shares: decimal.NewFromInt(n)}
 }
 
-func TestWalkBackRoundingIsApproximate(t *testing.T) {
-	slashed := validatorRate{Tokens: bi(999), Shares: decimal.NewFromInt(1000)}
+func rate(tokens, shares int64) validatorRate {
+	return validatorRate{Tokens: bi(tokens), Shares: decimal.NewFromInt(shares)}
+}
+
+func TestWalkBackSharesAtRecordedRates(t *testing.T) {
 	in := ledgerInput{
 		Address:   ledgerTestAddr,
 		BondDenom: "uatom",
@@ -136,33 +139,54 @@ func TestWalkBackRoundingIsApproximate(t *testing.T) {
 			Height:      100,
 			Bank:        map[string]*big.Int{},
 			Delegations: map[string]*big.Int{ledgerTestVal: bi(99), ledgerTestVal2: bi(10)},
-			Rates:       map[string]validatorRate{ledgerTestVal: slashed, ledgerTestVal2: unitRate(500)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal: decimal.NewFromInt(100), ledgerTestVal2: decimal.NewFromInt(10)},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(999, 1000), ledgerTestVal2: unitRate(500)},
 		},
-		// The delegation of 100 shows as 99 at the anchor: shares hold their
-		// value and the shown tokens round down.
-		Events: []ledgerEvent{
-			ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "100uatom"),
-			ev(2, 20, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal2, "amount", "10uatom"),
-		},
+		// Other delegators' rounding raised the rate from 0.985 to 0.999.
+		Samples: map[string][]rateSample{ledgerTestVal: {{10, rate(985, 1000)}, {25, rate(990, 1000)}, {50, rate(998, 1000)}}},
 	}
-	got, err := walkBack(in, []int64{25, 10})
+	got, err := walkBack(in, []int64{50, 25})
 	if err != nil {
 		t.Fatal(err)
 	}
-	intsEqual(t, "h25", got[25].Delegations, map[string]int64{ledgerTestVal2: 10})
-	if !got[25].Approximate[ledgerTestVal] {
-		t.Fatal("a delegation on a validator below one token per share must be approximate")
+	intsEqual(t, "h50", got[50].Delegations, map[string]int64{ledgerTestVal: 99, ledgerTestVal2: 10})
+	intsEqual(t, "h25", got[25].Delegations, map[string]int64{ledgerTestVal: 99, ledgerTestVal2: 10})
+	if len(got[25].DelegationError) > 0 {
+		t.Fatalf("a delegation with no movement is shown exactly at the recorded rate, got bounds %v", got[25].DelegationError)
 	}
-	if got[10].Approximate[ledgerTestVal2] {
-		t.Fatal("rounding on one validator must not mark another approximate")
+
+	// A delegation names its shares; an undelegation names only the tokens
+	// paid out, rounded down.
+	in.Events = []ledgerEvent{
+		ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "50uatom", "new_shares", "50.505050505050505050"),
+		ev(2, 20, phaseTx, "unbond", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "1000uatom"),
+		ev(3, 15, phaseTx, "unbond", "delegator", ledgerTestAddr, "validator", ledgerTestVal2, "amount", "5uatom"),
 	}
-	in.Events = nil
-	got, err = walkBack(in, []int64{50})
+	in.Anchor.Shares[ledgerTestVal] = decimal.RequireFromString("150.505050505050505050")
+	in.Anchor.Delegations[ledgerTestVal] = bi(150)
+	got, err = walkBack(in, []int64{25, 12})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got[50].Approximate[ledgerTestVal] || got[50].Approximate[ledgerTestVal2] {
-		t.Fatalf("a delegation below one token per share drifts with no event of the wallet's, got %v", got[50].Approximate)
+	intsEqual(t, "h25", got[25].Delegations, map[string]int64{ledgerTestVal: 99, ledgerTestVal2: 10})
+	if len(got[25].DelegationError) > 0 {
+		t.Fatalf("a delegation's own shares undo exactly, got bounds %v", got[25].DelegationError)
+	}
+	if got[12].Delegations[ledgerTestVal2].Int64() != 15 || got[12].DelegationError[ledgerTestVal2] != nil {
+		t.Fatalf("an undelegation at one token per share undoes exactly, got %v %v", got[12].Delegations, got[12].DelegationError)
+	}
+	// 1000 tokens paid out at a rate in [0.985, 0.990] are 1010.1 to 1016.3
+	// shares, 994 to 1001 tokens at 0.985 with the 99 still held.
+	d, bound := got[12].Delegations[ledgerTestVal], got[12].DelegationError[ledgerTestVal]
+	if bound == nil || bound.Int64() < 1 || bound.Int64() > 8 || d.Int64() < 1093 || d.Int64() > 1100 {
+		t.Fatalf("an undelegation on a validator below one token per share is bounded, got %v ± %v", d, bound)
+	}
+
+	in.Samples = nil
+	_, err = walkBack(in, []int64{25})
+	var unk ledgerUnknown
+	if !errors.As(err, &unk) {
+		t.Fatalf("a delegation below one token per share without recorded rates must be unknown, got %v", err)
 	}
 }
 
@@ -173,25 +197,40 @@ func TestWalkBackRedeemShares(t *testing.T) {
 		Anchor: ledgerAnchor{
 			Height:      100,
 			Bank:        map[string]*big.Int{},
-			Delegations: map[string]*big.Int{ledgerTestVal: bi(700)},
-			Rates:       map[string]validatorRate{ledgerTestVal: {Tokens: bi(1000), Shares: decimal.NewFromInt(2000)}},
+			Delegations: map[string]*big.Int{ledgerTestVal: bi(630)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal: decimal.NewFromInt(1400)},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(900, 2000)},
 		},
-		// LSM names the redeemed shares in the record's share denom.
-		Events: []ledgerEvent{ev(1, 50, phaseTx, "redeem_shares", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "401"+ledgerTestVal+"/7")},
+		// LSM names the redeemed shares in the record's share denom. They are
+		// paid out at the rate of the redemption, before a later slash.
+		Events:  []ledgerEvent{ev(1, 50, phaseTx, "redeem_shares", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "400"+ledgerTestVal+"/7")},
+		Slashes: []ledgerSlash{{Height: 60, Validator: ledgerTestVal, Fraction: decimal.RequireFromString("0.1")}},
+		Samples: map[string][]rateSample{ledgerTestVal: {{40, rate(1000, 2000)}}},
 	}
 	got, err := walkBack(in, []int64{40})
 	if err != nil {
 		t.Fatal(err)
 	}
 	intsEqual(t, "h40", got[40].Delegations, map[string]int64{ledgerTestVal: 500})
-	if !got[40].Approximate[ledgerTestVal] {
-		t.Fatal("redeemed shares valued at a rate other than one must be approximate")
+	if len(got[40].DelegationError) > 0 {
+		t.Fatalf("redeemed shares between recorded rates rebuild exactly, got bounds %v", got[40].DelegationError)
 	}
-	in.Anchor.Rates = nil
+	// When the wallet's own spend in the message names the tokens delegated
+	// back, they decide the shares, not the share tokens times the rate.
+	in.Events[0].Msg = 9
+	in.Events = append(in.Events, ledgerEvent{ID: 2, Msg: 9, Height: 50, Phase: phaseTx, Type: "coin_spent", Attrs: []ledgerAttr{{"spender", ledgerTestAddr}, {"amount", "201uatom"}}},
+		ledgerEvent{ID: 3, Msg: 9, Height: 50, Phase: phaseTx, Type: "coin_received", Attrs: []ledgerAttr{{"receiver", ledgerTestAddr}, {"amount", "201uatom"}}})
+	in.Anchor.Shares[ledgerTestVal] = decimal.NewFromInt(1402)
+	got, err = walkBack(in, []int64{40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intsEqual(t, "h40 spent", got[40].Delegations, map[string]int64{ledgerTestVal: 500})
+	in.Samples = nil
 	_, err = walkBack(in, []int64{40})
 	var unk ledgerUnknown
 	if !errors.As(err, &unk) {
-		t.Fatalf("redeemed shares of a validator without a rate must be unknown, got %v", err)
+		t.Fatalf("redeemed shares of a validator without recorded rates must be unknown, got %v", err)
 	}
 }
 
@@ -215,25 +254,50 @@ func TestScanHole(t *testing.T) {
 	}
 }
 
-func TestWalkBackSlashIsApproximate(t *testing.T) {
+func TestWalkBackSlashBetweenRates(t *testing.T) {
 	in := ledgerInput{
 		Address:   ledgerTestAddr,
 		BondDenom: "uatom",
-		Anchor:    ledgerAnchor{Height: 100, Bank: map[string]*big.Int{}, Delegations: map[string]*big.Int{ledgerTestVal: bi(10990)}, Rates: map[string]validatorRate{ledgerTestVal: unitRate(20000)}},
+		Anchor: ledgerAnchor{
+			Height:      100,
+			Bank:        map[string]*big.Int{},
+			Delegations: map[string]*big.Int{ledgerTestVal: bi(10990)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal: decimal.RequireFromString("11001.001001001001001001")},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(19980, 20000)},
+		},
 		// The delegation made in the slash block's transactions was not slashed.
-		Events:  []ledgerEvent{ev(1, 60, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "1000uatom")},
+		Events:  []ledgerEvent{ev(1, 60, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "1000uatom", "new_shares", "1001.001001001001001001")},
 		Slashes: []ledgerSlash{{Height: 60, Validator: ledgerTestVal, Fraction: decimal.RequireFromString("0.001")}},
+		Samples: map[string][]rateSample{ledgerTestVal: {{50, unitRate(20000)}}},
 	}
 	got, err := walkBack(in, []int64{70, 59})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[70].Approximate[ledgerTestVal] {
-		t.Fatal("a slash after the target must not mark it approximate")
-	}
+	// The new shares were truncated, but the chain rounds their value to 18
+	// places before rounding down, so the truncation does not show.
+	intsEqual(t, "h70", got[70].Delegations, map[string]int64{ledgerTestVal: 10990})
 	intsEqual(t, "h59", got[59].Delegations, map[string]int64{ledgerTestVal: 10000})
-	if !got[59].Approximate[ledgerTestVal] {
-		t.Fatal("a delegation carried back across a slash must be approximate")
+	if len(got[70].DelegationError)+len(got[59].DelegationError) > 0 {
+		t.Fatalf("a slash that explains the recorded rates exactly leaves no error, got %v %v", got[70].DelegationError, got[59].DelegationError)
+	}
+
+	// Rounding by other delegators also raised the rate after the slash, so
+	// between the records the slash's exact share of the change is unknown.
+	in.Anchor.Rates[ledgerTestVal] = rate(999050, 1000000)
+	in.Anchor.Shares[ledgerTestVal] = decimal.NewFromInt(100000)
+	in.Anchor.Delegations[ledgerTestVal] = bi(99905)
+	in.Events = nil
+	got, err = walkBack(in, []int64{100, 55})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[100].Delegations[ledgerTestVal].Int64() != 99905 || got[100].DelegationError[ledgerTestVal] != nil {
+		t.Fatalf("the anchor is exact, got %v %v", got[100].Delegations, got[100].DelegationError)
+	}
+	d, bound := got[55].Delegations[ledgerTestVal], got[55].DelegationError[ledgerTestVal]
+	if bound == nil || bound.Int64() < 1 || bound.Int64() > 5 || d.Int64() < 100000 || d.Int64() > 100005 {
+		t.Fatalf("between records across a slash the delegation is bounded, got %v ± %v", d, bound)
 	}
 }
 
@@ -262,14 +326,14 @@ func TestUnbondingAt(t *testing.T) {
 			ev(5, 80, phaseTx, "unbond", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "40uatom", "completion_time", anchorTime.Add(time.Hour).Format(time.RFC3339Nano)),
 		},
 	}
-	got, approx := unbondingAt(in, 50)
+	got, bounds := unbondingAt(in, 50)
 	intsEqual(t, "unbonding", pruneZero(got), map[string]int64{ledgerTestVal: 100, ledgerTestVal2: 25})
-	if len(approx) != 0 {
-		t.Fatalf("approx = %v", approx)
+	if len(bounds) != 0 {
+		t.Fatalf("bounds = %v", bounds)
 	}
-	in.Slashes = []ledgerSlash{{Height: 75, Validator: ledgerTestVal, DoubleSign: true}}
-	if _, approx = unbondingAt(in, 50); !approx[ledgerTestVal] {
-		t.Fatal("an entry open across a double sign slash must be approximate")
+	in.Slashes = []ledgerSlash{{Height: 75, Validator: ledgerTestVal, DoubleSign: true, Fraction: decimal.RequireFromString("0.05")}}
+	if _, bounds = unbondingAt(in, 50); bounds[ledgerTestVal] == nil || bounds[ledgerTestVal].Int64() != 7 {
+		t.Fatalf("an entry open across a double sign slash is bounded by the slashed share, got %v", bounds)
 	}
 }
 
@@ -352,5 +416,58 @@ func TestAttributeRedelegations(t *testing.T) {
 	events, unattributed = attributeRedelegations(ambiguous, ledgerTestAddr)
 	if len(events) != 0 || unattributed != 130 {
 		t.Fatalf("events = %+v, unattributed = %d", events, unattributed)
+	}
+}
+
+func TestApproximateLinesCarryTheirBound(t *testing.T) {
+	s := &Server{native: DefaultNativeAsset, oracle: NewOracle(apiTestUnusedOrigin, "")}
+	h := ledgerHoldings{
+		Delegations:     map[string]*big.Int{ledgerTestVal: bi(500), ledgerTestVal2: bi(10)},
+		DelegationError: map[string]*big.Int{ledgerTestVal: bi(3)},
+		Unbonding:       map[string]*big.Int{ledgerTestVal2: bi(7)},
+		UnbondingError:  map[string]*big.Int{ledgerTestVal2: bi(1)},
+	}
+	var hb HistoricalBalance
+	s.fillBalanceLines("cosmoshub", nil, &hb, h, time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC))
+	if hb.Status != balanceApproximate {
+		t.Fatalf("status = %s", hb.Status)
+	}
+	for _, l := range hb.Lines {
+		if l.Approximate != (l.MaxErrorBase != "") {
+			t.Fatalf("an approximate line must give its bound and only then: %+v", l)
+		}
+	}
+	h.DelegationError[ledgerTestVal] = new(big.Int).Add(balanceMaxError, bi(1))
+	hb = HistoricalBalance{}
+	s.fillBalanceLines("cosmoshub", nil, &hb, h, time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC))
+	if hb.Status != balanceIncompleteS || len(hb.Lines) != 0 || !strings.Contains(hb.Reason, ledgerTestVal) {
+		t.Fatalf("a bound over the limit must refuse the date, got %s %q %d lines", hb.Status, hb.Reason, len(hb.Lines))
+	}
+}
+
+func TestRateBookToleratesPayoutRounding(t *testing.T) {
+	in := ledgerInput{
+		Anchor:  ledgerAnchor{Height: 100, Rates: map[string]validatorRate{ledgerTestVal: {Tokens: bi(44099567617), Shares: decimal.RequireFromString("44112799918.151163393115632111")}}},
+		Samples: map[string][]rateSample{ledgerTestVal: {{50, validatorRate{Tokens: bi(44488811520), Shares: decimal.RequireFromString("44502160615.778051406490846151")}}}},
+	}
+	lo, hi, err := newRateBook(in).at(ledgerTestVal, 60, 60, 60)
+	if err != nil || lo.GreaterThan(hi) {
+		t.Fatalf("a fall of 1e-29 between records is payout rounding, got %s %s %v", lo, hi, err)
+	}
+	in.Samples[ledgerTestVal][0].Rate.Tokens = bi(44488811520 + 10)
+	if _, _, err := newRateBook(in).at(ledgerTestVal, 60, 60, 60); err == nil {
+		t.Fatal("a fall larger than rounding with no slash must be unknown")
+	}
+}
+
+func TestChainTokensRoundsTo18PlacesFirst(t *testing.T) {
+	for in, want := range map[string]int64{
+		"51782136.9999999999999999996": 51782137,
+		"51782136.999999999999999999":  51782136,
+		"7.5":                          7,
+	} {
+		if got := chainTokens(decimal.RequireFromString(in)); got.IntPart() != want {
+			t.Fatalf("chainTokens(%s) = %s, want %d", in, got, want)
+		}
 	}
 }

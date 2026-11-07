@@ -99,11 +99,25 @@ type IndexHoleAddress struct {
 
 func (IndexHoleAddress) TableName() string { return "tax_index_hole_addresses" }
 
+// ValidatorRateSample is a validator's bonded tokens and delegator shares at
+// the last block of a UTC day, read from chain state. A past delegation is
+// shown at the rate of its date, and the samples around a movement bound the
+// rate it was made at.
+type ValidatorRateSample struct {
+	Chain    string `gorm:"primaryKey"`
+	Operator string `gorm:"primaryKey"`
+	Height   int64  `gorm:"primaryKey;autoIncrement:false"`
+	Tokens   string `gorm:"type:numeric;not null"`
+	Shares   string `gorm:"type:numeric;not null"`
+}
+
+func (ValidatorRateSample) TableName() string { return "tax_validator_rates" }
+
 // BalanceHistoryMigrate creates the tables the balance ledger reads.
 // The index scan and the hole sweeper read a block's transactions, which the
 // indexer's schema does not index.
 func BalanceHistoryMigrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}); err != nil {
+	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}); err != nil {
 		return err
 	}
 	return db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_txes_block_id ON txes (block_id)").Error
@@ -197,7 +211,7 @@ func parseInt(v string) (*big.Int, error) {
 // anchor reads the wallet's bank balances, delegations and unbonding entries
 // at height.
 func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
-	a := ledgerAnchor{Height: height, Bank: map[string]*big.Int{}, Delegations: map[string]*big.Int{}}
+	a := ledgerAnchor{Height: height, Bank: map[string]*big.Int{}, Delegations: map[string]*big.Int{}, Shares: map[string]decimal.Decimal{}}
 	err := n.paged("/cosmos/bank/v1beta1/balances/"+addr, height, func(get func(any) error) (pageResp, error) {
 		var body struct {
 			Balances   []balCoin `json:"balances"`
@@ -223,6 +237,7 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 			DelegationResponses []struct {
 				Delegation struct {
 					ValidatorAddress string `json:"validator_address"`
+					Shares           string `json:"shares"`
 				} `json:"delegation"`
 				Balance balCoin `json:"balance"`
 			} `json:"delegation_responses"`
@@ -236,7 +251,12 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 			if err != nil {
 				return pageResp{}, err
 			}
+			sh, err := decimal.NewFromString(d.Delegation.Shares)
+			if err != nil {
+				return pageResp{}, fmt.Errorf("delegation shares %q: %w", d.Delegation.Shares, err)
+			}
 			addInt(a.Delegations, d.Delegation.ValidatorAddress, v)
+			a.Shares[d.Delegation.ValidatorAddress] = a.Shares[d.Delegation.ValidatorAddress].Add(sh)
 		}
 		return body.Pagination, nil
 	})
@@ -652,7 +672,7 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 	var out []ledgerEvent
 	for _, r := range rows {
 		if len(out) == 0 || out[len(out)-1].ID != r.EventID || out[len(out)-1].Phase != r.Phase {
-			out = append(out, ledgerEvent{ID: r.EventID, Height: r.Height, Time: r.TimeStamp, Phase: r.Phase, Type: r.Type})
+			out = append(out, ledgerEvent{ID: r.EventID, Msg: r.MessageID, Height: r.Height, Time: r.TimeStamp, Phase: r.Phase, Type: r.Type})
 		}
 		e := &out[len(out)-1]
 		e.Attrs = append(e.Attrs, ledgerAttr{Key: r.Key, Value: r.Value})
@@ -667,7 +687,7 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
 	var msgRows []ledgerAttrRow
 	if err := s.db.Raw(`
-SELECT me.id AS event_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
+SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
 FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
 JOIN messages m ON m.id = me.message_id
@@ -824,7 +844,7 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 					attrs = append(attrs, ledgerAttr{Key: "delegator", Value: addr})
 				}
 				if len(attrs) > 0 {
-					out = append(out, ledgerEvent{ID: ev.ID, Height: ev.Height, Time: ev.Time, Phase: ev.Phase, Type: ev.Type, Attrs: attrs})
+					out = append(out, ledgerEvent{ID: ev.ID, Msg: ev.Msg, Height: ev.Height, Time: ev.Time, Phase: ev.Phase, Type: ev.Type, Attrs: attrs})
 				}
 			}
 		}
@@ -987,6 +1007,9 @@ func (s *Server) StartBalanceLedgerSweeper(chain string, every time.Duration, lo
 			s.SweepFailedTxFees(chain, 50000, logf)
 			if ids, err := s.chainRowIDs(chain); err == nil {
 				s.SweepIndexScan(chain, ids, 2000, logf)
+				if node, err := newLedgerNode(); err == nil {
+					s.SweepValidatorRates(chain, ids, node, 3, logf)
+				}
 				if n, err := s.clearIndexHoles(chain, ids); err != nil {
 					logf("index hole sweep: %v", err)
 				} else if n > 0 {
@@ -1117,6 +1140,9 @@ type BalanceLine struct {
 	PriceMissing    bool             `json:"price_missing"`
 	DecimalsAssumed bool             `json:"decimals_assumed,omitempty"`
 	Approximate     bool             `json:"approximate,omitempty"`
+	// MaxErrorBase bounds, in base units, how far an approximate amount can
+	// be from the chain's.
+	MaxErrorBase string `json:"max_error_base,omitempty"`
 }
 
 // HistoricalBalance is a wallet's holdings at the end of one UTC day.
@@ -1124,7 +1150,8 @@ type HistoricalBalance struct {
 	Address string `json:"address"`
 	Date    string `json:"date"`
 	Label   string `json:"label,omitempty"`
-	// Status is exact, approximate (a staked figure crossed a slash),
+	// Status is exact, approximate (a staked figure is known only to within
+	// a few base units, given per line as max_error_base),
 	// incomplete (the index cannot rebuild this date) or not_reached.
 	Status       string        `json:"status"`
 	Reason       string        `json:"reason,omitempty"`
@@ -1148,6 +1175,10 @@ const (
 	balanceIncompleteS = "incomplete"
 	balanceNotReached  = "not_reached"
 )
+
+// balanceMaxError is the most an approximate line may be off by, in base
+// units. A wider bound refuses the date rather than show the figure.
+var balanceMaxError = big.NewInt(100)
 
 // rewardsNote explains why unclaimed rewards are not in a rebuilt balance.
 const rewardsNote = "Unclaimed staking rewards are not included in a past-date balance. The chain does not emit an event when rewards accrue, only when they are withdrawn, so the amount owed on a past date cannot be rebuilt exactly from indexed events; it is omitted rather than estimated. Rewards count once withdrawn, in liquid."
@@ -1286,11 +1317,15 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 			return nil, err
 		}
 	}
+	samples, err := s.rateSamples(chain, sampledValidators(anchor, events, slashes), lowest, tip.Height)
+	if err != nil {
+		return nil, err
+	}
 	heights := make([]int64, 0, len(usable))
 	for _, t := range usable {
 		heights = append(heights, t.ht.Height)
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes}, heights)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {
@@ -1338,6 +1373,150 @@ func touchedValidators(anchor ledgerAnchor, events []ledgerEvent) map[string]boo
 	return out
 }
 
+// sampledValidators is every validator the wallet touched whose rate is not
+// known to be one throughout the window.
+func sampledValidators(anchor ledgerAnchor, events []ledgerEvent, slashes []ledgerSlash) []string {
+	if anchor.Rates == nil {
+		return nil
+	}
+	slashed := map[string]bool{}
+	for _, sl := range slashes {
+		slashed[sl.Validator] = true
+	}
+	var out []string
+	for v := range touchedValidators(anchor, events) {
+		if r, ok := anchor.Rates[v]; !ok || !r.unit() || slashed[v] {
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// rateSamples loads the recorded rates of validators from each one's last
+// record at or before lo up to the anchor hi.
+func (s *Server) rateSamples(chain string, validators []string, lo, hi int64) (map[string][]rateSample, error) {
+	if len(validators) == 0 {
+		return nil, nil
+	}
+	var rows []ValidatorRateSample
+	if err := s.db.Raw(`
+SELECT r.chain, r.operator, r.height, r.tokens::text AS tokens, r.shares::text AS shares
+FROM tax_validator_rates r
+WHERE r.chain = @chain AND r.operator IN @ops AND r.height < @hi
+AND r.height >= COALESCE((SELECT max(p.height) FROM tax_validator_rates p
+  WHERE p.chain = @chain AND p.operator = r.operator AND p.height <= @lo), @lo)
+ORDER BY r.operator, r.height`, map[string]any{"chain": chain, "ops": validators, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("validator rates: %w", err)
+	}
+	out := map[string][]rateSample{}
+	for _, r := range rows {
+		tokens, err := parseInt(r.Tokens)
+		if err != nil {
+			return nil, fmt.Errorf("validator rate tokens %q: %w", r.Tokens, err)
+		}
+		shares, err := decimal.NewFromString(r.Shares)
+		if err != nil {
+			return nil, fmt.Errorf("validator rate shares %q: %w", r.Shares, err)
+		}
+		out[r.Operator] = append(out[r.Operator], rateSample{Height: r.Height, Rate: validatorRate{Tokens: tokens, Shares: shares}})
+	}
+	return out, nil
+}
+
+// SweepValidatorRates records every validator's tokens and shares at the end
+// of each finished UTC day after the newest recorded one, from the first day
+// the ledger scan covers, while the node still holds that state. A day the
+// node can no longer serve is skipped once it is a week old.
+func (s *Server) SweepValidatorRates(chain string, ids []int64, node *ledgerNode, maxDays int, logf func(string, ...any)) {
+	var last struct{ Height int64 }
+	if err := s.db.Raw(`SELECT COALESCE(max(height), 0) AS height FROM tax_validator_rates WHERE chain = ?`, chain).Scan(&last).Error; err != nil {
+		logf("validator rates: %v", err)
+		return
+	}
+	from := last.Height
+	if from == 0 {
+		scan, err := s.ledgerScan(chain)
+		if err != nil || scan.FeeGrantsFrom == 0 {
+			return
+		}
+		from = scan.FeeGrantsFrom
+	}
+	var b heightTime
+	if err := s.db.Table("blocks").Select("height, time_stamp").Where("chain_id IN ? AND height >= ?", ids, from).Order("height").Limit(1).Scan(&b).Error; err != nil || b.Height == 0 {
+		return
+	}
+	day := b.TimeStamp.UTC().Truncate(24 * time.Hour)
+	if last.Height != 0 {
+		day = day.AddDate(0, 0, 1)
+	}
+	for n := 0; n < maxDays; n, day = n+1, day.AddDate(0, 0, 1) {
+		ht, err := s.dayEndBlock(ids, day)
+		if errors.Is(err, errBalanceNotReached) {
+			return
+		}
+		if err != nil {
+			logf("validator rates for %s: %v", day.Format(apiDateLayout), err)
+			continue
+		}
+		heights, err := s.slashBlocksOn(ids, day, ht.Height)
+		if err != nil {
+			logf("validator rates for %s: %v", day.Format(apiDateLayout), err)
+			return
+		}
+		for _, h := range append(heights, ht.Height) {
+			if err := s.recordValidatorRates(chain, node, h); err != nil {
+				if nowUTC().Sub(day) > 7*24*time.Hour {
+					logf("validator rates at height %d skipped: %v", h, err)
+					continue
+				}
+				logf("validator rates at height %d: %v", h, err)
+				return
+			}
+		}
+	}
+}
+
+// slashBlocksOn lists, for each block of day that slashed a validator, the
+// block before it and the block itself, so the rate on either side of every
+// slash is recorded. A slash burns a share of the validator's power at the
+// infraction, rounded to whole tokens of power and net of entries it also
+// slashed, so its effect on the rate is known only from these records.
+func (s *Server) slashBlocksOn(ids []int64, day time.Time, end int64) ([]int64, error) {
+	lo := end - 20000
+	if prev, err := s.dayEndBlock(ids, day.AddDate(0, 0, -1)); err == nil {
+		lo = prev.Height
+	}
+	var slashed []int64
+	if err := s.db.Raw(`
+SELECT DISTINCT b.height FROM block_events be
+JOIN block_event_types t ON t.id = be.block_event_type_id
+JOIN blocks b ON b.id = be.block_id
+WHERE t.type = 'slash' AND b.chain_id IN ? AND b.height > ? AND b.height <= ?
+ORDER BY b.height`, ids, lo, end).Scan(&slashed).Error; err != nil {
+		return nil, err
+	}
+	var out []int64
+	for _, h := range slashed {
+		out = append(out, h-1, h)
+	}
+	return out, nil
+}
+
+// recordValidatorRates stores every validator's tokens and shares at the end
+// of block h.
+func (s *Server) recordValidatorRates(chain string, node *ledgerNode, h int64) error {
+	rates, err := node.validatorRates(h)
+	if err != nil {
+		return err
+	}
+	rows := make([]ValidatorRateSample, 0, len(rates))
+	for op, r := range rates {
+		rows = append(rows, ValidatorRateSample{Chain: chain, Operator: op, Height: h, Tokens: r.Tokens.String(), Shares: r.Shares.String()})
+	}
+	return s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, 500).Error
+}
+
 func needsSlashes(anchor ledgerAnchor, events []ledgerEvent) bool {
 	if len(anchor.Delegations) > 0 || len(anchor.Unbonding) > 0 {
 		return true
@@ -1366,13 +1545,26 @@ func balanceStatusFor(err error) (string, string) {
 
 // fillBalanceLines prices each holding at the day's close and totals them.
 func (s *Server) fillBalanceLines(chain string, meta map[string]DenomMeta, hb *HistoricalBalance, h ledgerHoldings, day time.Time) {
+	for _, m := range []map[string]*big.Int{h.DelegationError, h.UnbondingError} {
+		for _, v := range sortedKeys(m) {
+			if m[v].Cmp(balanceMaxError) > 0 {
+				hb.Status = balanceIncompleteS
+				hb.Reason = fmt.Sprintf("the stake with %s can be rebuilt only to within %s base units, more than the %s a balance may be off by", v, m[v], balanceMaxError)
+				return
+			}
+		}
+	}
 	hb.Status = balanceExact
-	add := func(bucket, validator, denom string, amt *big.Int, approx bool) {
+	add := func(bucket, validator, denom string, amt, bound *big.Int) {
 		row := s.buildRow(chain, meta, day, "", "balance", "", denom, amt.String(), "", "")
+		approx := bound != nil && bound.Sign() > 0
 		line := BalanceLine{
 			Bucket: bucket, Validator: validator, Denom: denom, Symbol: row.Symbol,
 			AmountBase: amt.String(), Quantity: row.Amount, PriceMissing: row.PriceMissing,
 			DecimalsAssumed: row.DecimalsAssumed, Approximate: approx,
+		}
+		if approx {
+			line.MaxErrorBase = bound.String()
 		}
 		if !row.PriceMissing {
 			p, v := row.PriceUSD, row.ValueUSD.Round(2)
@@ -1398,13 +1590,13 @@ func (s *Server) fillBalanceLines(chain string, meta map[string]DenomMeta, hb *H
 		hb.Lines = append(hb.Lines, line)
 	}
 	for _, d := range sortedKeys(h.Liquid) {
-		add("liquid", "", d, h.Liquid[d], false)
+		add("liquid", "", d, h.Liquid[d], nil)
 	}
 	for _, v := range sortedKeys(h.Delegations) {
-		add("staked", v, s.native.Denom, h.Delegations[v], h.Approximate[v])
+		add("staked", v, s.native.Denom, h.Delegations[v], h.DelegationError[v])
 	}
 	for _, v := range sortedKeys(h.Unbonding) {
-		add("unbonding", v, s.native.Denom, h.Unbonding[v], h.Approximate[v])
+		add("unbonding", v, s.native.Denom, h.Unbonding[v], h.UnbondingError[v])
 	}
 }
 

@@ -159,11 +159,11 @@ func (s *Server) handleBalanceStatement(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-const balanceStatementNote = "Each balance is the wallet's holdings at the end of the UTC day, rebuilt from the indexed chain events between that day and a recent block whose state the node reports. exact means every movement was replayed; approximate means a delegation crossed a validator slash, whose effect on one delegation the chain records only as a fraction (within a few base units). A date marked incomplete or not_reached has no amounts and says why. " + rewardsNote
+const balanceStatementNote = "Each balance is the wallet's holdings at the end of the UTC day, rebuilt from the indexed chain events between that day and a recent block whose state the node reports. exact means every movement was replayed; approximate means a staked amount depends on a validator's tokens per share between the recorded points (each day's last block and either side of each slash), or on chain rounding of an undelegation or redelegation, and each such line gives max_error_base, the most it can be off by in base units (a date whose bound would exceed 100 base units is marked incomplete instead). A date marked incomplete or not_reached has no amounts and says why. " + rewardsNote
 
 func writeBalanceStatementCSV(w http.ResponseWriter, out []HistoricalBalance) {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{apiAddress, apiDate, apiLabel, "status", "height", "bucket", apiValidator, "denom", apiSymbol, "quantity", "price_usd", "value_usd", "price_missing", "approximate", "reason"})
+	_ = cw.Write([]string{apiAddress, apiDate, apiLabel, "status", "height", "bucket", apiValidator, "denom", apiSymbol, "quantity", "price_usd", "value_usd", "price_missing", "approximate", "max_error_base", "reason"})
 	usd := func(d *decimal.Decimal) string {
 		if d == nil {
 			return ""
@@ -176,7 +176,7 @@ func writeBalanceStatementCSV(w http.ResponseWriter, out []HistoricalBalance) {
 			h = strconv.FormatInt(b.Height, 10)
 		}
 		if b.Status != balanceExact && b.Status != balanceApproximate {
-			_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, "", "", "", "", "", "", "", "", "", spreadsheetLabel(b.Reason)})
+			_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, "", "", "", "", "", "", "", "", "", "", spreadsheetLabel(b.Reason)})
 			continue
 		}
 		for _, l := range b.Lines {
@@ -184,10 +184,10 @@ func writeBalanceStatementCSV(w http.ResponseWriter, out []HistoricalBalance) {
 			if l.PriceUSD != nil {
 				price = l.PriceUSD.String()
 			}
-			_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, l.Bucket, l.Validator, l.Denom, spreadsheetLabel(l.Symbol), l.Quantity.String(), price, usd(l.ValueUSD), strconv.FormatBool(l.PriceMissing), strconv.FormatBool(l.Approximate), ""})
+			_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, l.Bucket, l.Validator, l.Denom, spreadsheetLabel(l.Symbol), l.Quantity.String(), price, usd(l.ValueUSD), strconv.FormatBool(l.PriceMissing), strconv.FormatBool(l.Approximate), l.MaxErrorBase, ""})
 		}
 		total := b.TotalUSD
-		_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, apiTotal, "", "", "USD", "", "", usd(&total), "", "", fmt.Sprintf("%d unpriced holdings not in the total", b.UnpricedLines)})
+		_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, apiTotal, "", "", "USD", "", "", usd(&total), "", "", "", fmt.Sprintf("%d unpriced holdings not in the total", b.UnpricedLines)})
 	}
 	cw.Flush()
 }
