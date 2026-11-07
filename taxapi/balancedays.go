@@ -11,6 +11,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // BalanceDay is a wallet's holdings at the end of one UTC day, stored only
@@ -41,7 +42,9 @@ type BalanceBuild struct {
 	BuildingFrom *time.Time `gorm:"type:date"`
 	BuildingTo   *time.Time `gorm:"type:date"`
 	Cursor       string
-	UpdatedAt    time.Time
+	// AppendingTo is set while the days after ToDay up to it are appended.
+	AppendingTo *time.Time `gorm:"type:date"`
+	UpdatedAt   time.Time
 }
 
 func (BalanceBuild) TableName() string { return "tax_balance_builds" }
@@ -249,20 +252,55 @@ func (s *Server) BuildBalanceDays(chain, prefix string, node *ledgerNode, from, 
 		days, ends = append(days, d), append(ends, ht)
 	}
 	var build BalanceBuild
-	if err := s.db.Where("chain = ?", chain).Limit(1).Find(&build).Error; err != nil {
+	cursor := ""
+	err = s.lockBalanceBuild(chain, func(tx *gorm.DB, b *BalanceBuild) error {
+		if b.AppendingTo != nil {
+			return fmt.Errorf("an append through %s is unfinished; finish it with -days-append first", b.AppendingTo.Format(apiDateLayout))
+		}
+		if b.FromDay != nil && (from.After(b.ToDay.AddDate(0, 0, 1)) || to.Before(b.FromDay.AddDate(0, 0, -1))) {
+			return fmt.Errorf("the span %s to %s does not touch the built span %s to %s", from.Format(apiDateLayout), to.Format(apiDateLayout), b.FromDay.Format(apiDateLayout), b.ToDay.Format(apiDateLayout))
+		}
+		if b.BuildingFrom != nil && b.BuildingFrom.Equal(from) && b.BuildingTo.Equal(to) {
+			cursor = b.Cursor
+		} else if b.BuildingFrom != nil {
+			return fmt.Errorf("a build of %s to %s is unfinished", b.BuildingFrom.Format(apiDateLayout), b.BuildingTo.Format(apiDateLayout))
+		}
+		b.BuildingFrom, b.BuildingTo, b.Cursor = &from, &to, cursor
+		build = *b
+		return tx.Save(b).Error
+	})
+	if err != nil {
 		return err
 	}
-	if build.FromDay != nil && (from.After(build.ToDay.AddDate(0, 0, 1)) || to.Before(build.FromDay.AddDate(0, 0, -1))) {
-		return fmt.Errorf("the span %s to %s does not touch the built span %s to %s", from.Format(apiDateLayout), to.Format(apiDateLayout), build.FromDay.Format(apiDateLayout), build.ToDay.Format(apiDateLayout))
-	}
-	cursor := ""
-	if build.BuildingFrom != nil && build.BuildingFrom.Equal(from) && build.BuildingTo.Equal(to) {
-		cursor = build.Cursor
+	if cursor != "" {
 		logf("balance days: resuming %s to %s after %s", from.Format(apiDateLayout), to.Format(apiDateLayout), cursor)
 	}
-	build.Chain, build.BuildingFrom, build.BuildingTo, build.Cursor = chain, &from, &to, cursor
-	if err := s.db.Save(&build).Error; err != nil {
-		return err
+	// A wallet first built here, before the built span, has no row on the
+	// span's first day, so its rows here would wrongly stay in force through
+	// the span. It is built through the whole span instead.
+	var fillDays []time.Time
+	var fillEnds []heightTime
+	if build.FromDay != nil && to.Before(*build.FromDay) {
+		for d := *build.FromDay; !d.After(*build.ToDay); d = d.AddDate(0, 0, 1) {
+			ht, err := s.dayEndBlock(ids, d)
+			if err != nil {
+				return fmt.Errorf("end of %s: %w", d.Format(apiDateLayout), err)
+			}
+			fillDays, fillEnds = append(fillDays, d), append(fillEnds, ht)
+		}
+	}
+	walletDays := func(addr string) ([]time.Time, []heightTime, error) {
+		if fillDays == nil {
+			return days, ends, nil
+		}
+		var n int64
+		if err := s.db.Model(&BalanceDay{}).Where("chain = ? AND address = ? AND day = ?", chain, addr, build.FromDay.Format(apiDateLayout)).Count(&n).Error; err != nil {
+			return nil, nil, err
+		}
+		if n > 0 {
+			return days, ends, nil
+		}
+		return append(append([]time.Time(nil), days...), fillDays...), append(append([]heightTime(nil), ends...), fillEnds...), nil
 	}
 	var built, stored int
 	for {
@@ -279,7 +317,11 @@ func (s *Server) BuildBalanceDays(chain, prefix string, node *ledgerNode, from, 
 			go func() {
 				defer wg.Done()
 				for a := range work {
-					n, err := s.buildWalletDays(chain, ids, node, a, days, ends)
+					wd, we, err := walletDays(a)
+					n := 0
+					if err == nil {
+						n, err = s.buildWalletDays(chain, ids, node, a, wd, we)
+					}
 					mu.Lock()
 					if err != nil && firstErr == nil {
 						firstErr = fmt.Errorf("%s: %w", a, err)
@@ -307,18 +349,37 @@ func (s *Server) BuildBalanceDays(chain, prefix string, node *ledgerNode, from, 
 		}
 		logf("balance days: %d addresses built, %d rows stored", built, stored)
 	}
-	if build.FromDay == nil || from.Before(*build.FromDay) {
-		build.FromDay = &from
-	}
-	if build.ToDay == nil || to.After(*build.ToDay) {
-		build.ToDay = &to
-	}
-	build.BuildingFrom, build.BuildingTo, build.Cursor = nil, nil, ""
-	if err := s.db.Save(&build).Error; err != nil {
+	err = s.lockBalanceBuild(chain, func(tx *gorm.DB, b *BalanceBuild) error {
+		if b.FromDay == nil || from.Before(*b.FromDay) {
+			b.FromDay = &from
+		}
+		if b.ToDay == nil || to.After(*b.ToDay) {
+			b.ToDay = &to
+		}
+		b.BuildingFrom, b.BuildingTo, b.Cursor = nil, nil, ""
+		build = *b
+		return tx.Save(b).Error
+	})
+	if err != nil {
 		return err
 	}
 	logf("balance days: built %s to %s for %d addresses, %d rows stored; built span %s to %s", from.Format(apiDateLayout), to.Format(apiDateLayout), built, stored, build.FromDay.Format(apiDateLayout), build.ToDay.Format(apiDateLayout))
 	return nil
+}
+
+// lockBalanceBuild runs change on the chain's build row, created when
+// missing, holding the row's lock, so a build and an append never both start.
+func (s *Server) lockBalanceBuild(chain string, change func(tx *gorm.DB, b *BalanceBuild) error) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&BalanceBuild{Chain: chain}).Error; err != nil {
+			return err
+		}
+		var b BalanceBuild
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("chain = ?", chain).First(&b).Error; err != nil {
+			return err
+		}
+		return change(tx, &b)
+	})
 }
 
 // balanceBuild is the chain's stored build state, or nil before any build.

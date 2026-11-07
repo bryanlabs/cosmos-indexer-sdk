@@ -8,7 +8,12 @@
 // (NODE_REST_API) the way the API does. It resumes an interrupted build of
 // the same span.
 //
-// Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, and NODE_REST_API for -days-from.
+// With -days-append it extends a finished build with the days after it that
+// the index, the ledger scan and the validator rates cover, up to yesterday,
+// rebuilding only the wallets those days can have changed.
+//
+// Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, and NODE_REST_API for
+// -days-from and -days-append.
 package main
 
 import (
@@ -42,6 +47,7 @@ func main() {
 	daysTo := flag.String("days-to", "", "last day of the build, default yesterday (UTC)")
 	daysBatch := flag.Int("days-batch", 2000, "addresses read per batch of the build")
 	daysWorkers := flag.Int("days-workers", 8, "addresses built in parallel")
+	daysAppend := flag.Bool("days-append", false, "append the finished days after the stored balance build")
 	flag.Parse()
 
 	db, err := indexerDB.PostgresDbConnect(
@@ -54,6 +60,10 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
+	}
+	if *daysAppend {
+		appendDays(db, *chain, *daysWorkers)
+		return
 	}
 	if *daysFrom != "" {
 		buildDays(db, *chain, *daysFrom, *daysTo, *daysBatch, *daysWorkers)
@@ -101,6 +111,21 @@ func buildDays(db *gorm.DB, chain, fromText, toText string, batch, workers int) 
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
 	if err := srv.BuildBalanceDays(chain, "cosmos", node, from, to, batch, workers, log.Printf); err != nil {
+		log.Fatalf("balance days: %v", err)
+	}
+}
+
+func appendDays(db *gorm.DB, chain string, workers int) {
+	if err := taxapi.BalanceHistoryMigrate(db); err != nil {
+		log.Fatalf("migrate: %v", err)
+	}
+	node, err := taxapi.NewLedgerNode()
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	through := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
+	if err := srv.AppendBalanceDays(chain, "cosmos", node, through, workers, log.Printf); err != nil {
 		log.Fatalf("balance days: %v", err)
 	}
 }

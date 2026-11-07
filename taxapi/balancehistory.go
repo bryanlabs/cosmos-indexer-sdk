@@ -119,7 +119,12 @@ func BalanceHistoryMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}, &BalanceDay{}, &BalanceBuild{}); err != nil {
 		return err
 	}
-	return db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_txes_block_id ON txes (block_id)").Error
+	if err := db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_txes_block_id ON txes (block_id)").Error; err != nil {
+		return err
+	}
+	// The daily append rebuilds every wallet whose last stored day could not
+	// be rebuilt.
+	return db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tax_balance_days_status ON tax_balance_days (chain, day) WHERE status <> ''").Error
 }
 
 const heightHeader = "x-cosmos-block-height"
@@ -1071,7 +1076,11 @@ ORDER BY b.height, be.id, a.index`,
 			if !ok {
 				// Consensus addresses map one to one onto operators, so an
 				// unknown one cannot be a validator this wallet touched when
-				// every validator it touched is mapped.
+				// every validator it touched is mapped. A nil touched stands
+				// for every validator.
+				if touched == nil {
+					return nil, balanceIncomplete{fmt.Sprintf("slashed validator %s at height %d cannot be matched to an operator", rec["address"], ev.Height)}
+				}
 				for v := range touched {
 					if !mapped[v] {
 						return nil, balanceIncomplete{fmt.Sprintf("slashed validator %s at height %d cannot be matched to an operator", rec["address"], ev.Height)}

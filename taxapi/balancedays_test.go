@@ -90,12 +90,12 @@ func balanceDaysTestDB(t *testing.T) *gorm.DB {
 		"SET search_path = pg_temp",
 		// A session zone west of UTC would shift a date written from a UTC midnight.
 		"SET TIME ZONE 'America/New_York'",
-		"CREATE TEMP TABLE message_event_attributes (value text)",
-		"CREATE TEMP TABLE block_event_attributes (value text)",
+		"CREATE TEMP TABLE message_event_attributes (message_event_id bigint, value text)",
+		"CREATE TEMP TABLE block_event_attributes (block_event_id bigint, block_event_attribute_key_id bigint, value text)",
 		"CREATE INDEX ON message_event_attributes (left(value, 100))",
 		"CREATE INDEX ON block_event_attributes (left(value, 100))",
 		"CREATE TEMP TABLE tax_balance_days (chain text, address text, day date, height bigint, anchor_height bigint, status text, reason text, holdings jsonb, PRIMARY KEY (chain, address, day))",
-		"CREATE TEMP TABLE tax_balance_builds (chain text PRIMARY KEY, from_day date, to_day date, building_from date, building_to date, cursor text, updated_at timestamptz)",
+		"CREATE TEMP TABLE tax_balance_builds (chain text PRIMARY KEY, from_day date, to_day date, building_from date, building_to date, cursor text, appending_to date, updated_at timestamptz)",
 	} {
 		require.NoError(t, database.Exec(sql).Error, sql)
 	}
@@ -118,11 +118,11 @@ func TestLedgerAddressesPostgres(t *testing.T) {
 		if i%2 == 1 {
 			table = "block_event_attributes"
 		}
-		require.NoError(t, database.Exec("INSERT INTO "+table+" VALUES (?), (?)", a, a).Error)
+		require.NoError(t, database.Exec("INSERT INTO "+table+" (value) VALUES (?), (?)", a, a).Error)
 	}
-	require.NoError(t, database.Exec("INSERT INTO block_event_attributes VALUES (?)", want[0]).Error)
+	require.NoError(t, database.Exec("INSERT INTO block_event_attributes (value) VALUES (?)", want[0]).Error)
 	for _, junk := range []string{"cosmos1notbech32", "cosmos1zzzz", "cosmosvaloper1abc", "1000uatom", want[2] + ",x"} {
-		require.NoError(t, database.Exec("INSERT INTO message_event_attributes VALUES (?)", junk).Error)
+		require.NoError(t, database.Exec("INSERT INTO message_event_attributes (value) VALUES (?)", junk).Error)
 	}
 
 	for _, limit := range []int{1, 2, 3, 50} {
