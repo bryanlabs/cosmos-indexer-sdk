@@ -90,3 +90,65 @@ func TestFinancialFingerprintFramingAndDeletion(t *testing.T) {
 	require.NotEqual(t, digest(base, fee), digest(base, [2]string{"fee", `{"amount":"1","payer_address_id":2}`}))
 	require.NotEqual(t, digest([2]string{financialEventKind, "ab"}, [2]string{financialEventKind, "c"}), digest([2]string{financialEventKind, "a"}, [2]string{financialEventKind, "bc"}))
 }
+
+func TestMatchedRefundRestoresOriginalLots(t *testing.T) {
+	dec := time.Date(2025, 12, 31, 12, 0, 0, 0, time.UTC)
+	jan := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	pair := func() []tax.TaxableEvent {
+		return []tax.TaxableEvent{
+			{ID: 1, Category: apiReward, ToAddr: apiWallet, Amount: "100000000", Denom: apiUatom, Timestamp: dec.AddDate(0, -6, 0)},
+			{ID: 2, Category: "ibc_out", FromAddr: apiWallet, Amount: "100000000", Denom: apiUatom, Detail: basisPacket, Timestamp: dec},
+			{ID: 3, Category: string(tax.CategoryProtocolWithdrawal), ToAddr: apiWallet, Amount: "100000000", Denom: apiUatom, Detail: basisPacket, RewardTrigger: ibcTimeoutRefund, Timestamp: jan},
+		}
+	}
+	for _, end := range []time.Time{dec.Add(6 * time.Hour), jan.AddDate(1, 0, 0)} {
+		require.True(t, ibcBasisReadiness(pair(), end).ExportReady)
+	}
+	events := pair()
+	reconcileIBCRefunds(events, matchIBCRefunds(events))
+	require.Equal(t, string(tax.CategoryProtocolDeposit), events[1].Category)
+	require.Equal(t, ibcRefundedSend, events[1].RewardTrigger)
+	require.Equal(t, ibcRefundReconciled, events[2].RewardTrigger)
+	require.Equal(t, apiReward, events[0].Category)
+
+	// The returned coins keep the reward lot's date and cost: a later sale is
+	// long term against the reward basis, and nothing is disposed of at the send.
+	rows := []Row{
+		{Time: events[0].Timestamp, Category: apiReward, Direction: "in", Symbol: "ATOM", Amount: decimal.NewFromInt(100), PriceUSD: decimal.NewFromInt(5)},
+		{Time: events[1].Timestamp, Category: events[1].Category, Direction: apiOut, Symbol: "ATOM", Amount: decimal.NewFromInt(100), PriceUSD: decimal.NewFromInt(9)},
+		{Time: events[2].Timestamp, Category: events[2].Category, Direction: "in", Symbol: "ATOM", Amount: decimal.NewFromInt(100), PriceUSD: decimal.NewFromInt(9)},
+		{Time: jan.AddDate(0, 6, 0), Category: apiTransfer, Direction: apiOut, Symbol: "ATOM", Amount: decimal.NewFromInt(100), PriceUSD: decimal.NewFromInt(8)},
+	}
+	lines := Build8949(rows)
+	require.Len(t, lines, 1)
+	require.True(t, lines[0].CostBasis.Equal(decimal.NewFromInt(500)))
+	require.True(t, lines[0].LongTerm)
+
+	for name, change := range map[string]func([]tax.TaxableEvent) []tax.TaxableEvent{
+		"different amount": func(e []tax.TaxableEvent) []tax.TaxableEvent { e[2].Amount = "99000000"; return e },
+		"different denom":  func(e []tax.TaxableEvent) []tax.TaxableEvent { e[2].Denom = "ibc/ABC"; return e },
+		"refund before send": func(e []tax.TaxableEvent) []tax.TaxableEvent {
+			e[2].Timestamp = dec.Add(-time.Hour)
+			return e
+		},
+		"second send for the packet": func(e []tax.TaxableEvent) []tax.TaxableEvent {
+			extra := e[1]
+			extra.ID = 4
+			return append(e, extra)
+		},
+		"second refund for the packet": func(e []tax.TaxableEvent) []tax.TaxableEvent {
+			extra := e[2]
+			extra.ID = 5
+			return append(e, extra)
+		},
+		"refund without a row id": func(e []tax.TaxableEvent) []tax.TaxableEvent { e[2].ID = 0; return e },
+	} {
+		t.Run(name, func(t *testing.T) {
+			events := change(pair())
+			require.Empty(t, matchIBCRefunds(events))
+			r := ibcBasisReadiness(events, jan.AddDate(1, 0, 0))
+			require.False(t, r.ExportReady)
+			require.Contains(t, r.ReviewRequired, ibcRefundBasisRequired)
+		})
+	}
+}

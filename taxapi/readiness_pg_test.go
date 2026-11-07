@@ -101,3 +101,29 @@ func TestReadinessRetainedEvidencePostgres(t *testing.T) {
 	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET message_type_id=2").Error)
 	check(wallet, true, 0, 0, 0)
 }
+
+// walletTxScope finds the set from the addresses. The per-transaction EXISTS
+// form is the definition it must match, with one transaction per kind of
+// evidence and one that names only another wallet.
+func TestWalletTxScopeMatchesPerTransactionAttributionPostgres(t *testing.T) {
+	s := refundCachePGFixture(t)
+	for _, sql := range []string{
+		"DELETE FROM pg_temp.tx_signer_addresses",
+		"INSERT INTO pg_temp.txes VALUES (5,4,'unrelated',0,''),(6,4,'validator',0,''),(7,4,'sender',0,'')",
+		"INSERT INTO pg_temp.messages (id,tx_id,opaque) VALUES (5,5,false),(6,6,false),(7,7,false)",
+		"INSERT INTO pg_temp.tx_signer_addresses VALUES (1,1),(5,2)",
+		"INSERT INTO pg_temp.fees VALUES (1,2,1,1,10),(2,5,2,1,10)",
+		"INSERT INTO pg_temp.taxable_events (id,message_id,sub_index,category,from_addr,to_addr,validator_address) VALUES (1,3,0,'transfer','other-wallet','wallet',''),(2,5,0,'transfer','other-wallet','other-wallet',''),(3,6,0,'reward','','other-wallet','wallet'),(4,7,0,'transfer','wallet','other-wallet','')",
+		"INSERT INTO pg_temp.message_events (id,message_id,message_event_type_id) VALUES (1,4,1),(2,5,1)",
+		"INSERT INTO pg_temp.message_event_attributes VALUES (1,1,0,'wallet'),(2,1,0,'other-wallet')",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error)
+	}
+	ids := func(scope func(*gorm.DB, []string) *gorm.DB) []int64 {
+		var out []int64
+		require.NoError(t, scope(s.db.Table("txes t"), []string{"wallet"}).Order("t.id").Pluck("t.id", &out).Error)
+		return out
+	}
+	require.Equal(t, []int64{1, 2, 3, 4, 6, 7}, ids(walletTxScope))
+	require.Equal(t, ids(walletFewTxScope), ids(walletTxScope))
+}

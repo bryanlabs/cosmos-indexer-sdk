@@ -18,19 +18,26 @@ func (s *Server) incompleteIBCRefunds(chain string, addresses []string) ([]tax.T
 		Timestamp time.Time
 		Hash      string
 	}
-	query := s.db.Table("messages m").
-		Select("m.id, mt.message_type AS type, m.message_bytes AS raw, b.time_stamp AS timestamp, t.hash").
+	// Incomplete means opaque, a parser error, or a failed message or failed
+	// transaction record in the same transaction. Starting from those sparse
+	// sets avoids testing every acknowledgement on the chain, and the OFFSET 0
+	// fence runs the wallet checks only on the few candidates left.
+	candidates := s.db.Table("messages m").
+		Select("m.id AS message_id, mt.message_type AS type, m.message_bytes AS raw, b.time_stamp AS timestamp, t.hash, t.id").
 		Joins("JOIN message_types mt ON mt.id=m.message_type_id").
 		Joins("JOIN txes t ON t.id=m.tx_id").
 		Joins("JOIN blocks b ON b.id=t.block_id").
 		Joins("JOIN chains c ON c.id=b.chain_id").
 		Where("c.chain_id IN ? AND t.code=0 AND mt.message_type IN ?", chainIDs(chain), tax.RefundLifecycleTypes()).
-		Where(`m.opaque = true
- OR EXISTS (SELECT 1 FROM message_parser_errors e WHERE e.message_id=m.id)
- OR EXISTS (SELECT 1 FROM failed_messages fm WHERE fm.tx_id=t.id)
- OR EXISTS (SELECT 1 FROM failed_txes ft WHERE ft.hash=t.hash AND ft.block_id=t.block_id)`)
+		Where(`m.id IN (
+ SELECT id FROM messages WHERE opaque = true
+ UNION SELECT message_id FROM message_parser_errors
+ UNION SELECT fm_m.id FROM failed_messages fm JOIN messages fm_m ON fm_m.tx_id=fm.tx_id
+ UNION SELECT ft_m.id FROM failed_txes ft JOIN txes ft_t ON ft_t.hash=ft.hash AND ft_t.block_id=ft.block_id JOIN messages ft_m ON ft_m.tx_id=ft_t.id
+ )`)
+	query := s.db.Table("(? OFFSET 0) t", candidates).Select("t.message_id AS id, t.type, t.raw, t.timestamp, t.hash")
 	if len(addresses) > 0 {
-		query = walletTxScope(query, addresses)
+		query = walletFewTxScope(query, addresses)
 	}
 	if err := query.Find(&messages).Error; err != nil {
 		return nil, err

@@ -38,7 +38,7 @@ func refundCachePGFixture(t *testing.T) *Server {
 	for _, sql := range []string{
 		"SET search_path = pg_temp",
 		"CREATE TEMP TABLE chains (id bigint, chain_id text)",
-		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, time_stamp timestamptz)",
+		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, time_stamp timestamptz, height bigint)",
 		"CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint, memo text)",
 		"CREATE TEMP TABLE messages (id bigint, tx_id bigint, opaque boolean)",
 		"CREATE TEMP TABLE message_types (id bigint, message_type text)",
@@ -54,6 +54,10 @@ func refundCachePGFixture(t *testing.T) *Server {
 		"CREATE TEMP TABLE message_event_types (id bigint, type text)",
 		"CREATE TEMP TABLE message_event_attributes (message_event_id bigint, message_event_attribute_key_id bigint, index bigint, value text)",
 		"CREATE TEMP TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TEMP TABLE block_events (id bigint, block_id bigint, lifecycle_position bigint, index bigint, block_event_type_id bigint)",
+		"CREATE TEMP TABLE block_event_types (id bigint, type text)",
+		"CREATE TEMP TABLE block_event_attributes (block_event_id bigint, block_event_attribute_key_id bigint, index bigint, value text)",
+		"CREATE TEMP TABLE block_event_attribute_keys (id bigint, key text)",
 		"CREATE TEMP TABLE report_jobs (id bigserial PRIMARY KEY, key text UNIQUE, chain text, addresses text, format text, status text, csv text, row_count bigint, readiness_json text, review_fingerprint text, computed_through timestamptz, error text, created_at timestamptz, updated_at timestamptz)",
 		"INSERT INTO pg_temp.chains VALUES (1,'cosmoshub-4'),(2,'provider-1')",
 		"INSERT INTO pg_temp.blocks VALUES (1,1,'2025-12-30T12:00:00Z'),(2,1,'2025-12-31T12:00:00Z'),(3,1,'2026-01-02T12:00:00Z'),(4,1,'2026-01-03T12:00:00Z')",
@@ -141,7 +145,7 @@ func TestHistoricalNativeCacheCorrectionsPostgres(t *testing.T) {
 	require.Zero(t, nativePreview(t, s, testOtherWallet, start, end).RowCount)
 }
 
-func TestNativeRefundBlocksHistoricalCachedDisposalAndLaterSpendPostgres(t *testing.T) {
+func TestNativeRefundReconcilesSendAndKeepsLotsPostgres(t *testing.T) {
 	for _, trigger := range []string{ibcTimeoutRefund, ibcErrorAckRefund} {
 		t.Run(trigger, func(t *testing.T) {
 			s := refundCachePGFixture(t)
@@ -155,16 +159,37 @@ func TestNativeRefundBlocksHistoricalCachedDisposalAndLaterSpendPostgres(t *test
 			require.Equal(t, 2, nativePreview(t, s, apiWallet, start, end).RowCount)
 			insertNativeFinancialEvent(t, s, 3, "protocol_withdrawal", "", apiWallet, trigger, basisPacket, jan)
 			insertNativeFinancialEvent(t, s, 4, apiTransfer, apiWallet, "merchant", "", "", jan.Add(24*time.Hour))
+			get := func(path, period string) *httptest.ResponseRecorder {
+				rr := httptest.NewRecorder()
+				s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path+"?address=wallet&chain=mainnet&"+period, nil))
+				return rr
+			}
 			for _, path := range []string{"/8949", apiPositionsPath, apiJournalPath, "/events", "/report-job"} {
 				for _, period := range []string{"start=2025-01-01&end=2026-01-01", "start=2026-01-03&end=2027-01-01"} {
-					rr := httptest.NewRecorder()
-					s.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path+"?address=wallet&chain=mainnet&"+period, nil))
-					require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
-					require.Contains(t, rr.Body.String(), ibcRefundBasisRequired)
-					var body map[string]any
-					require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
-					require.Nil(t, body[apiCSV], "no phantom gain, unknown replacement basis or missing-position CSV may leak")
+					rr := get(path, period)
+					require.Less(t, rr.Code, 300, rr.Body.String())
+					require.NotContains(t, rr.Body.String(), ibcRefundBasisRequired)
 				}
+			}
+			// The send that came back is not a disposal; the cached 2025 report
+			// that sold it is not served again.
+			lines := strings.Split(strings.TrimSpace(get("/8949", "start=2025-01-01&end=2026-01-01").Body.String()), "\n")
+			require.Len(t, lines, 1, "header only: %v", lines)
+			// The later spend draws on the reward lot, with its date and basis.
+			lines = strings.Split(strings.TrimSpace(get("/8949", "start=2025-01-01&end=2027-01-01").Body.String()), "\n")
+			require.Len(t, lines, 2, "%v", lines)
+			require.Contains(t, lines[1], "12/30/2025")
+			require.NotContains(t, lines[1], strings.TrimSpace(basisUnknownNote))
+
+			// A refund whose coin differs from the send is not reconciled.
+			require.NoError(t, s.db.Exec("UPDATE pg_temp.taxable_events SET amount='99000000' WHERE id=3").Error)
+			for _, period := range []string{"start=2025-01-01&end=2026-01-01", "start=2026-01-03&end=2027-01-01"} {
+				rr := get("/8949", period)
+				require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+				require.Contains(t, rr.Body.String(), ibcRefundBasisRequired)
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+				require.Nil(t, body[apiCSV], "no phantom gain, unknown replacement basis or missing-position CSV may leak")
 			}
 			// A different packet must not retroactively block the original send.
 			require.NoError(t, s.db.Exec("UPDATE pg_temp.taxable_events SET detail=? WHERE id=3", strings.Replace(basisPacket, `"23"`, `"24"`, 1)).Error)
@@ -189,6 +214,12 @@ func TestLegacyOutboundPacketEvidencePostgres(t *testing.T) {
 	} {
 		require.NoError(t, s.db.Exec(sql).Error)
 	}
+	// The retained send_packet gives the legacy row its identity, so the refund
+	// is matched to it and reconciled.
+	pairs, err := s.ibcBasisCheck(apiMainnet, []string{apiWallet}, end)
+	require.NoError(t, err)
+	require.Equal(t, map[uint]string{2: ibcRefundRoleSend, 3: ibcRefundRoleReturned}, pairs)
+	require.NoError(t, s.db.Exec("UPDATE pg_temp.taxable_events SET amount='99000000' WHERE id=3").Error)
 	var blocked reportReadinessRequired
 	require.ErrorAs(t, s.requireIBCBasisReady(apiMainnet, []string{apiWallet}, end), &blocked)
 	require.Contains(t, blocked.Readiness.ReviewRequired, ibcRefundBasisRequired)
