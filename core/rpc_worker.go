@@ -33,6 +33,11 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 	rpcClient := rpc.URIClient{
 		Address: chainClient.Config.RPCAddr,
 		Client:  &http.Client{},
+		JSONRPC: cfg.Base.BlockResultsJSONRPC,
+	}
+
+	if cfg.Base.ArchiveHTTPClient != nil {
+		rpcClient.Client = cfg.Base.ArchiveHTTPClient
 	}
 
 	for {
@@ -81,6 +86,7 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 				bresults, err = NormalizeCustomBlockResults(bresults)
 				if err != nil {
 					config.Log.Errorf("Error normalizing block results for block %v from RPC. Err: %v", block, err)
+					currentHeightIndexerData.BlockEventRequestsFailed = true
 					err := dbTypes.UpsertFailedEventBlock(db, block.Height, chainStringID, cfg.Probe.ChainName)
 					if err != nil {
 						config.Log.Fatal("Failed to insert failed block event", err)
@@ -115,9 +121,11 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 						// Only set failed when we can't get the block results either.
 						currentHeightIndexerData.TxRequestsFailed = true
 					} else {
-						bresults, err = NormalizeCustomBlockResults(bresults)
+						// Transaction execution results do not require begin/end event normalization.
+						err = ValidateBlockTxResults(blockData, bresults)
 						if err != nil {
-							config.Log.Errorf("Error normalizing block results for block %v from RPC. Err: %v", block, err)
+							config.Log.Errorf("Invalid transaction results for block %v from RPC. Err: %v", block, err)
+							currentHeightIndexerData.TxRequestsFailed = true
 							normalizeErr := err
 							if upsertErr := dbTypes.UpsertFailedBlock(db, block.Height, chainStringID, cfg.Probe.ChainName, normalizeErr); upsertErr != nil {
 								config.Log.Fatal("Failed to insert failed block", upsertErr)
@@ -138,20 +146,32 @@ func BlockRPCWorker(wg *sync.WaitGroup, blockEnqueueChan chan *EnqueueData, chai
 }
 
 func NormalizeCustomBlockResults(blockResults *rpc.CustomBlockResults) (*rpc.CustomBlockResults, error) {
+	if blockResults == nil {
+		return nil, fmt.Errorf("missing block results")
+	}
 	if len(blockResults.FinalizeBlockEvents) != 0 {
 		beginBlockEvents := []abci.Event{}
 		endBlockEvents := []abci.Event{}
 
+		// Upgrade handlers run in PreBlock, whose events carry no mode (or
+		// mode=PreBlock) and can move user funds, as at the v28.3.1 halt height
+		// 33086741. PreBlock runs before BeginBlock, so they are kept as
+		// BeginBlock events. Any other mode value fails closed.
 		for _, event := range blockResults.FinalizeBlockEvents {
 			eventAttrs := []abci.EventAttribute{}
 			isBeginBlock := false
 			isEndBlock := false
+			modes := 0
 			for _, attr := range event.Attributes {
 				if attr.Key == "mode" {
-					if attr.Value == "BeginBlock" {
+					modes++
+					switch attr.Value {
+					case "BeginBlock", "PreBlock":
 						isBeginBlock = true
-					} else if attr.Value == "EndBlock" {
+					case "EndBlock":
 						isEndBlock = true
+					default:
+						return nil, fmt.Errorf("finalize block event has unknown mode %q", attr.Value)
 					}
 				} else {
 					eventAttrs = append(eventAttrs, attr)
@@ -161,8 +181,11 @@ func NormalizeCustomBlockResults(blockResults *rpc.CustomBlockResults) (*rpc.Cus
 			switch {
 			case isBeginBlock && isEndBlock:
 				return nil, fmt.Errorf("finalize block event has both BeginBlock and EndBlock mode")
-			case !isBeginBlock && !isEndBlock:
-				return nil, fmt.Errorf("finalize block event has neither BeginBlock nor EndBlock mode")
+			case modes == 0:
+				isBeginBlock = true
+			}
+
+			switch {
 			case isBeginBlock:
 				beginBlockEvents = append(beginBlockEvents, abci.Event{Type: event.Type, Attributes: eventAttrs})
 			case isEndBlock:

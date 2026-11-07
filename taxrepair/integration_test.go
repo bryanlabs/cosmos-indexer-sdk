@@ -56,6 +56,7 @@ func scratch(t *testing.T) *gorm.DB {
 	}
 	return db
 }
+
 func seedMessage(t *testing.T, db *gorm.DB, id uint, typ string, wire []byte, fixture string) {
 	t.Helper()
 	stamp := time.Date(2026, 4, 15, 9, 40, 52, 0, time.UTC)
@@ -111,6 +112,7 @@ func seedMessage(t *testing.T, db *gorm.DB, id uint, typ string, wire []byte, fi
 		}
 	}
 }
+
 func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	db := scratch(t)
 	delegate := &staking.MsgDelegate{DelegatorAddress: "cosmos1ts4vwmfccwjv0vehlzd4x5rw5xzljjnhgm7gnz", ValidatorAddress: "val", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
@@ -234,7 +236,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 
 func TestRepairRejectsConcurrentChanges(t *testing.T) {
 	db := scratch(t)
-	msg := &staking.MsgDelegate{DelegatorAddress: "wallet", ValidatorAddress: "val", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
+	msg := &staking.MsgDelegate{DelegatorAddress: fixtureWallet, ValidatorAddress: "val", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
 	wire, _ := msg.Marshal()
 	seedMessage(t, db, 1, urls[0], wire, "delegate-principal")
 	codec, _ := repairCodec()

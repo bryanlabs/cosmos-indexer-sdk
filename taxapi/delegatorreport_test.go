@@ -10,12 +10,12 @@ func TestOriginAllowed(t *testing.T) {
 		want    bool
 	}{
 		{"no restriction configured", "https://evil.example", "", true},
-		{"no origin header sent", "", "https://myvalidator.example", true},
-		{"exact match", "https://myvalidator.example", "https://myvalidator.example", true},
-		{"trailing slash on origin ignored", "https://myvalidator.example/", "https://myvalidator.example", true},
-		{"case-insensitive", "https://MyValidator.example", "https://myvalidator.example", true},
-		{"mismatch rejected", "https://evil.example", "https://myvalidator.example", false},
-		{"subdomain mismatch rejected", "https://sub.myvalidator.example", "https://myvalidator.example", false},
+		{"no origin header sent", "", apiTestValidatorOrigin, true},
+		{"exact match", apiTestValidatorOrigin, apiTestValidatorOrigin, true},
+		{"trailing slash on origin ignored", "https://myvalidator.example/", apiTestValidatorOrigin, true},
+		{"case-insensitive", "https://MyValidator.example", apiTestValidatorOrigin, true},
+		{"mismatch rejected", "https://evil.example", apiTestValidatorOrigin, false},
+		{"subdomain mismatch rejected", "https://sub.myvalidator.example", apiTestValidatorOrigin, false},
 	}
 	for _, c := range cases {
 		if got := originAllowed(c.origin, c.allowed); got != c.want {

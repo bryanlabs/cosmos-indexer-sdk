@@ -19,7 +19,7 @@ import (
 type ValidatorKey struct {
 	ID            uint      `json:"id" gorm:"primaryKey"`
 	ValidatorName string    `json:"validator_name"`
-	APIKey        string    `json:"api_key" gorm:"uniqueIndex"`
+	APIKey        string    `json:"-" gorm:"uniqueIndex"`
 	AllowedOrigin string    `json:"allowed_origin"` // e.g. "https://myvalidator.example"; "" = no origin check
 	CreatedAt     time.Time `json:"created_at"`
 }
@@ -50,7 +50,7 @@ func (s *Server) handleCreateValidatorKey(w http.ResponseWriter, r *http.Request
 		AllowedOrigin string `json:"allowed_origin"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, apiInvalidJSONBody, http.StatusBadRequest)
 		return
 	}
 	body.ValidatorName = strings.TrimSpace(body.ValidatorName)
@@ -68,16 +68,17 @@ func (s *Server) handleCreateValidatorKey(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(vk)
+	// Reveal a newly provisioned credential once, never in routine key lists.
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": vk.ID, "validator_name": vk.ValidatorName, "api_key": key, "allowed_origin": vk.AllowedOrigin, "created_at": vk.CreatedAt})
 }
 
 // GET /admin/validator-keys — list, with a per-key usage count (INF-210
 // attribution).
 func (s *Server) handleListValidatorKeys(w http.ResponseWriter, r *http.Request) {
 	var keys []ValidatorKey
-	if err := s.db.Order("created_at desc").Find(&keys).Error; err != nil {
+	if err := s.db.Order(apiCreatedAtDesc).Find(&keys).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -91,7 +92,7 @@ func (s *Server) handleListValidatorKeys(w http.ResponseWriter, r *http.Request)
 		s.db.Model(&ValidatorReportUsage{}).Where("validator_key_id = ?", k.ID).Count(&count)
 		out = append(out, keyWithUsage{ValidatorKey: k, RequestCount: count})
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(map[string]any{"keys": out})
 }
 
@@ -140,7 +141,7 @@ type DelegatorReport struct {
 // (INF-210).
 func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := strings.TrimSpace(q.Get("address"))
+	addr := strings.TrimSpace(q.Get(apiAddress))
 	if addr == "" {
 		http.Error(w, "address is required", http.StatusBadRequest)
 		return
@@ -165,9 +166,9 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chain := chainParam(q.Get("chain"))
-	start := dateParam(q.Get("start"), time.Time{})
-	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
+	chain := chainParam(q.Get(apiChain))
+	start := dateParam(q.Get(apiStart), time.Time{})
+	end := dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
 	rows, err := s.rowsForRequest(r, chain, []string{addr}, start, end)
 	if err != nil {
 		writeTaxError(w, err)
@@ -182,7 +183,7 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 		if row.Excluded {
 			continue
 		}
-		if row.Category != "reward" && row.Category != "commission" {
+		if row.Category != apiReward && row.Category != apiCommission {
 			continue
 		}
 		rewards = rewards.Add(row.Amount)
@@ -209,13 +210,13 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 		MethodologyVersion: MethodologyVersion,
 		PoweredBy:          "BryanLabs (tax.bryanlabs.net)",
 	}
-	if q.Get("start") != "" {
-		report.PeriodStart = q.Get("start")
+	if q.Get(apiStart) != "" {
+		report.PeriodStart = q.Get(apiStart)
 	}
-	if q.Get("end") != "" {
-		report.PeriodEnd = q.Get("end")
+	if q.Get(apiEnd) != "" {
+		report.PeriodEnd = q.Get(apiEnd)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(report)
 }

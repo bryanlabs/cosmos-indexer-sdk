@@ -29,11 +29,11 @@ func ReconstructMsg(typeURL string, log *indexerTxTypes.LogMessage) (sdk.Msg, er
 	sender := ""
 	for _, e := range log.Events {
 		a := attrMap(e)
-		if e.Type == "message" && a["action"] == typeURL && a["sender"] != "" {
-			if sender != "" && sender != a["sender"] {
+		if e.Type == "message" && a[attributeAction] == typeURL && a[attributeSender] != "" {
+			if sender != "" && sender != a[attributeSender] {
 				return nil, fmt.Errorf("ambiguous message sender")
 			}
-			sender = a["sender"]
+			sender = a[attributeSender]
 		}
 	}
 	needSender := func() error {
@@ -43,23 +43,23 @@ func ReconstructMsg(typeURL string, log *indexerTxTypes.LogMessage) (sdk.Msg, er
 		return nil
 	}
 	switch typeURL {
-	case "/cosmos.staking.v1beta1.MsgDelegate":
+	case typeURLDelegate:
 		return &stakingtypes.MsgDelegate{DelegatorAddress: sender}, needSender()
-	case "/cosmos.staking.v1beta1.MsgUndelegate":
+	case typeURLUndelegate:
 		return &stakingtypes.MsgUndelegate{DelegatorAddress: sender}, needSender()
-	case "/cosmos.staking.v1beta1.MsgBeginRedelegate":
+	case typeURLBeginRedelegate:
 		return &stakingtypes.MsgBeginRedelegate{DelegatorAddress: sender}, needSender()
-	case "/cosmos.staking.v1beta1.MsgCancelUnbondingDelegation":
+	case typeURLCancelUnbondingDelegation:
 		return &stakingtypes.MsgCancelUnbondingDelegation{DelegatorAddress: sender}, needSender()
-	case "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward":
+	case typeURLWithdrawDelegatorReward:
 		return &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: sender}, needSender()
-	case "/cosmos.gov.v1.MsgDeposit":
+	case typeURLGovDeposit:
 		return &govv1.MsgDeposit{Depositor: sender}, needSender()
-	case "/cosmos.gov.v1.MsgSubmitProposal":
+	case typeURLGovSubmitProposal:
 		return &govv1.MsgSubmitProposal{Proposer: sender}, needSender()
-	case "/cosmos.gov.v1beta1.MsgDeposit":
+	case typeURLLegacyGovDeposit:
 		return &govv1beta1.MsgDeposit{Depositor: sender}, needSender()
-	case "/cosmos.gov.v1beta1.MsgSubmitProposal":
+	case typeURLLegacyGovSubmitProposal:
 		return &govv1beta1.MsgSubmitProposal{Proposer: sender}, needSender()
 	case TypeURLTokenizeShares:
 		return &MsgTokenizeShares{DelegatorAddress: sender}, needSender()
@@ -71,26 +71,26 @@ func ReconstructMsg(typeURL string, log *indexerTxTypes.LogMessage) (sdk.Msg, er
 		return &MsgWithdrawTokenizeShareRecordReward{OwnerAddress: sender}, needSender()
 	case TypeURLWithdrawAllTokenizeShareReward:
 		return &MsgWithdrawAllTokenizeShareRecordReward{OwnerAddress: sender}, needSender()
-	case "/cosmwasm.wasm.v1.MsgExecuteContract":
+	case typeURLExecuteContract:
 		// Every wasm rule reads events; the contract and funds are on them.
 		return &wasmtypes.MsgExecuteContract{Sender: sender}, nil
-	case "/ibc.applications.transfer.v1.MsgTransfer":
+	case typeURLIBCTransfer:
 		for _, e := range log.Events {
 			if e.Type != "ibc_transfer" {
 				continue
 			}
 			a := attrMap(e)
-			amt, ok := sdk.NewIntFromString(a["amount"])
-			if !ok || a["denom"] == "" {
+			amt, ok := sdk.NewIntFromString(a[attributeAmount])
+			if !ok || a[attributeDenom] == "" {
 				return nil, fmt.Errorf("ibc_transfer event has no usable amount")
 			}
 			return &transfertypes.MsgTransfer{
-				Sender: a["sender"], Receiver: a["receiver"], Memo: a["memo"],
-				Token: sdk.Coin{Denom: a["denom"], Amount: amt},
+				Sender: a[attributeSender], Receiver: a[attributeReceiver], Memo: a["memo"],
+				Token: sdk.Coin{Denom: a[attributeDenom], Amount: amt},
 			}, nil
 		}
 		return nil, fmt.Errorf("stored MsgTransfer has no ibc_transfer event")
-	case "/ibc.core.channel.v1.MsgRecvPacket":
+	case typeURLIBCRecvPacket:
 		for _, e := range log.Events {
 			if e.Type != "recv_packet" {
 				continue
@@ -121,23 +121,23 @@ func ReconstructMsg(typeURL string, log *indexerTxTypes.LogMessage) (sdk.Msg, er
 // ReplayableTypeURLs lists the message types ReconstructMsg can rebuild from
 // events alone, so a repair can replay them without an archive node.
 var ReplayableTypeURLs = []string{
-	"/cosmos.staking.v1beta1.MsgDelegate",
-	"/cosmos.staking.v1beta1.MsgUndelegate",
-	"/cosmos.staking.v1beta1.MsgBeginRedelegate",
-	"/cosmos.staking.v1beta1.MsgCancelUnbondingDelegation",
-	"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
-	"/cosmos.gov.v1.MsgDeposit",
-	"/cosmos.gov.v1.MsgSubmitProposal",
-	"/cosmos.gov.v1beta1.MsgDeposit",
-	"/cosmos.gov.v1beta1.MsgSubmitProposal",
+	typeURLDelegate,
+	typeURLUndelegate,
+	typeURLBeginRedelegate,
+	typeURLCancelUnbondingDelegation,
+	typeURLWithdrawDelegatorReward,
+	typeURLGovDeposit,
+	typeURLGovSubmitProposal,
+	typeURLLegacyGovDeposit,
+	typeURLLegacyGovSubmitProposal,
 	TypeURLTokenizeShares,
 	TypeURLRedeemTokensForShares,
 	TypeURLTransferTokenizeShareRecord,
 	TypeURLWithdrawTokenizeShareReward,
 	TypeURLWithdrawAllTokenizeShareReward,
-	"/cosmwasm.wasm.v1.MsgExecuteContract",
-	"/ibc.applications.transfer.v1.MsgTransfer",
-	"/ibc.core.channel.v1.MsgRecvPacket",
+	typeURLExecuteContract,
+	typeURLIBCTransfer,
+	typeURLIBCRecvPacket,
 	TypeURLV2RecvPacket,
 }
 

@@ -39,7 +39,7 @@ func nativeAssetFromEnv() taxapi.NativeAsset {
 		if n, err := strconv.Atoi(dec); err == nil {
 			native.Decimals = n
 		} else {
-			log.Printf("NATIVE_DECIMALS=%q is not an integer, keeping default %d", dec, native.Decimals)
+			log.Printf("NATIVE_DECIMALS is not an integer, keeping default %d", native.Decimals)
 		}
 	}
 	return native
@@ -86,13 +86,25 @@ func main() {
 		log.Printf("attestation table migrate: %v", err)
 	}
 
+	// Finds a wallet's block events. A no-op once built; the first build on a
+	// large database takes hours, so build it by hand before deploying there.
+	if err := taxapi.BlockEventsMigrate(db); err != nil {
+		log.Printf("block event index migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)
-	if err := http.ListenAndServe(listen, srv.Handler()); err != nil {
+	httpServer := &http.Server{
+		Addr:              listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("serve: %v", err)
 	}
 }

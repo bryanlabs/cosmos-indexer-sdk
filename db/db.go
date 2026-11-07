@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -175,10 +176,11 @@ func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName
 		if failureErr != nil {
 			// Truncate: RPC/gRPC error strings can embed full response payloads.
 			const maxErrorLength = 2048
-			if len(failureErr.Error()) > maxErrorLength {
-				updates["last_error"] = failureErr.Error()[:maxErrorLength]
+			message := redactURLPaths(failureErr.Error())
+			if len(message) > maxErrorLength {
+				updates["last_error"] = message[:maxErrorLength]
 			} else {
-				updates["last_error"] = failureErr.Error()
+				updates["last_error"] = message
 			}
 		}
 
@@ -188,6 +190,15 @@ func UpsertFailedBlock(db *gorm.DB, blockHeight int64, chainID string, chainName
 		}
 		return nil
 	})
+}
+
+var urlPath = regexp.MustCompile(`(https?://[^/\s"']+)[^\s"']*`)
+
+// redactURLPaths keeps only the scheme and host of URLs in an error message.
+// Some archive RPC endpoints carry their access key in the URL path, and
+// failed_blocks is readable by anyone with database access.
+func redactURLPaths(message string) string {
+	return urlPath.ReplaceAllString(message, "$1")
 }
 
 // FailedBlockRetryHeights returns up to limit heights currently recorded in
@@ -266,7 +277,35 @@ func UpsertFailedEventBlock(db *gorm.DB, blockHeight int64, chainID string, chai
 	})
 }
 
+// IndexNewBlock persists raw evidence only. Indexers with custom parsers must use
+// IndexBlockData so raw evidence and classification outcomes share one commit.
 func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig) (models.Block, []TxDBWrapper, error) {
+	return indexBlockData(db, block, txs, indexerConfig, nil, false)
+}
+
+// IndexBlockData atomically publishes raw evidence, parser outcomes, failed-block
+// removal and tx_indexed completion. A parser's incomplete result is persisted
+// by IndexCustomMessages; only persistence failures roll back the block.
+func IndexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig, trackers map[string]models.MessageParser) (models.Block, []TxDBWrapper, error) {
+	return indexBlockData(db, block, txs, indexerConfig, trackers, true)
+}
+
+func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerConfig config.IndexConfig, trackers map[string]models.MessageParser, classify bool) (models.Block, []TxDBWrapper, error) {
+	originalBlock, originalTxs := block, txs
+	txs = cloneBlockTransactions(txs)
+	messageTypes := newPendingIDCache(messageTypeIDs)
+	eventTypes := newPendingIDCache(messageEventTypeIDs)
+	attributeKeys := newPendingIDCache(attributeKeyIDs)
+	addresses := newPendingIDCache(addressIDs)
+	// Evidence for unknown messages is mandatory. Enable event persistence for
+	// this block without changing the caller's configuration.
+	for _, tx := range txs {
+		for _, message := range tx.Messages {
+			if message.PreserveOpaqueEvidence {
+				indexerConfig.Flags.IndexMessageEvents = true
+			}
+		}
+	}
 	// consider optimizing the transaction, but how? Ordering matters due to foreign key constraints
 	// Order required: Block -> (For each Tx: Signer Address -> Tx -> (For each Message: Message -> Taxable Events))
 	// Also, foreign key relations are struct value based so create needs to be called first to get right foreign key ID
@@ -346,14 +385,9 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 		// Lock rows in a stable order so concurrent indexers cannot deadlock.
 		sort.Slice(addressesSlice, func(i, j int) bool { return addressesSlice[i].Address < addressesSlice[j].Address })
 
-		if len(addressesSlice) != 0 {
-			if err := dbTransaction.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "address"}},
-				DoUpdates: clause.AssignmentColumns([]string{"address"}),
-			}).Create(addressesSlice).Error; err != nil {
-				config.Log.Error("Error getting/creating addresses.", err)
-				return err
-			}
+		if err := indexAddresses(dbTransaction, addressesSlice, addresses); err != nil {
+			config.Log.Error("Error getting/creating addresses.", err)
+			return err
 		}
 
 		for _, address := range addressesSlice {
@@ -395,14 +429,14 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 		}
 
 		// Create unique message types and post-process them into the messages
-		fullUniqueBlockMessageTypes, err := indexMessageTypes(dbTransaction, txs)
+		fullUniqueBlockMessageTypes, err := indexMessageTypes(dbTransaction, txs, messageTypes)
 		if err != nil {
 			return err
 		}
 
 		fullUniqueBlockMessageEventTypes := make(map[string]models.MessageEventType)
 		if indexerConfig.Flags.IndexMessageEvents {
-			fullUniqueBlockMessageEventTypes, err = indexMessageEventTypes(dbTransaction, txs)
+			fullUniqueBlockMessageEventTypes, err = indexMessageEventTypes(dbTransaction, txs, eventTypes)
 			if err != nil {
 				return err
 			}
@@ -410,7 +444,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 
 		fullUniqueBlockMessageEventAttributeKeys := make(map[string]models.MessageEventAttributeKey)
 		if indexerConfig.Flags.IndexMessageEvents {
-			fullUniqueBlockMessageEventAttributeKeys, err = indexMessageEventAttributeKeys(dbTransaction, txs)
+			fullUniqueBlockMessageEventAttributeKeys, err = indexMessageEventAttributeKeys(dbTransaction, txs, attributeKeys)
 			if err != nil {
 				return err
 			}
@@ -441,7 +475,7 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 					}
 				}
 
-				if !indexerConfig.Flags.IndexTxMessageRaw {
+				if !indexerConfig.Flags.IndexTxMessageRaw && !tx.Messages[messageIndex].PreserveOpaqueEvidence {
 					tx.Messages[messageIndex].Message.MessageBytes = nil
 				}
 
@@ -451,8 +485,8 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 			if len(messagesSlice) != 0 {
 				if err := dbTransaction.Clauses(clause.OnConflict{
 					Columns:   []clause.Column{{Name: "tx_id"}, {Name: "message_index"}},
-					DoUpdates: clause.AssignmentColumns([]string{"message_type_id", "message_bytes"}),
-				}).Create(messagesSlice).Error; err != nil {
+					DoUpdates: messageEvidenceUpdates(),
+				}).CreateInBatches(messagesSlice, rowInsertBatchSize).Error; err != nil {
 					config.Log.Error("Error getting/creating messages.", err)
 					return err
 				}
@@ -471,9 +505,9 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 
 				if len(messagesEventsSlice) != 0 {
 					if err := dbTransaction.Clauses(clause.OnConflict{
-						Columns:   []clause.Column{{Name: "message_id"}, {Name: "index"}},
+						Columns:   []clause.Column{{Name: "message_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"message_event_type_id"}),
-					}).Create(messagesEventsSlice).Error; err != nil {
+					}).CreateInBatches(messagesEventsSlice, rowInsertBatchSize).Error; err != nil {
 						config.Log.Error("Error getting/creating message events.", err)
 						return err
 					}
@@ -493,9 +527,9 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 
 				if len(messagesEventsAttributesSlice) != 0 {
 					if err := dbTransaction.Clauses(clause.OnConflict{
-						Columns:   []clause.Column{{Name: "message_event_id"}, {Name: "index"}},
+						Columns:   []clause.Column{{Name: "message_event_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"value", "message_event_attribute_key_id"}),
-					}).Create(messagesEventsAttributesSlice).Error; err != nil {
+					}).CreateInBatches(messagesEventsAttributesSlice, rowInsertBatchSize).Error; err != nil {
 						config.Log.Error("Error getting/creating message event attributes.", err)
 						return err
 					}
@@ -503,11 +537,25 @@ func IndexNewBlock(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerCo
 			}
 		}
 
+		if classify {
+			return IndexCustomMessages(indexerConfig, dbTransaction, false, txs, trackers)
+		}
 		return nil
 	})
+	if err != nil {
+		return originalBlock, originalTxs, err
+	}
+	// A savepoint release is not a commit. Callers supplying an outer transaction
+	// cannot promote new IDs, because their later rollback would invalidate them.
+	if _, nested := db.Statement.ConnPool.(gorm.TxCommitter); !nested {
+		messageTypes.publish()
+		eventTypes.publish()
+		attributeKeys.publish()
+		addresses.publish()
+	}
 
 	// Contract: ensure that block and txs have been loaded with the indexed data before returning
-	return block, txs, err
+	return block, txs, nil
 }
 
 // The lookup tables (message types, event types, attribute keys) hold a small
@@ -547,9 +595,95 @@ var (
 	messageTypeIDs      = newIDCache()
 	messageEventTypeIDs = newIDCache()
 	attributeKeyIDs     = newIDCache()
+	addressIDs          = newIDCache()
 )
 
-func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageType, error) {
+// splitKnown fills in the IDs of rows already in the table with a plain read,
+// which takes no row locks, and returns them apart from the rows still to be
+// inserted. An upsert of an existing row locks it until the block commits, and
+// with parallel indexers those locks deadlocked across the dimension tables.
+func splitKnown[T any](db *gorm.DB, model interface{}, column string, rows []T, key func(T) string, withID func(T, uint) T) (known, missing []T, err error) {
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	keys := make([]string, len(rows))
+	for i, row := range rows {
+		keys[i] = key(row)
+	}
+	var found []struct {
+		ID        uint
+		LookupKey string
+	}
+	if err := db.Model(model).Select("id, "+column+" AS lookup_key").Where(column+" IN ?", keys).Scan(&found).Error; err != nil {
+		return nil, nil, err
+	}
+	ids := make(map[string]uint, len(found))
+	for _, row := range found {
+		ids[row.LookupKey] = row.ID
+	}
+	for _, row := range rows {
+		if id, ok := ids[key(row)]; ok && id != 0 {
+			known = append(known, withID(row, id))
+		} else {
+			missing = append(missing, row)
+		}
+	}
+	return known, missing, nil
+}
+
+// indexAddresses sets the ID of each address, which must be sorted. The upsert
+// locks every row it touches until the block commits, so parallel indexers
+// sharing common addresses (fee payers, module accounts) waited on each other
+// block after block. Known IDs come from the cache, then from a plain read, and
+// only addresses not yet in the table are upserted.
+func indexAddresses(db *gorm.DB, addresses []models.Address, ids *pendingIDCache) error {
+	var missing []string
+	for i := range addresses {
+		if id, ok := ids.get(addresses[i].Address); ok {
+			addresses[i].ID = id
+		} else {
+			missing = append(missing, addresses[i].Address)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var found []models.Address
+	if err := db.Where("address IN ?", missing).Find(&found).Error; err != nil {
+		return err
+	}
+	for _, address := range found {
+		ids.put(address.Address, address.ID)
+	}
+	var create []models.Address
+	for i := range addresses {
+		if id, ok := ids.get(addresses[i].Address); ok {
+			addresses[i].ID = id
+		} else if addresses[i].ID == 0 {
+			create = append(create, addresses[i])
+		}
+	}
+	if len(create) == 0 {
+		return nil
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "address"}},
+		DoUpdates: clause.AssignmentColumns([]string{"address"}),
+	}).Create(&create).Error; err != nil {
+		return err
+	}
+	for _, address := range create {
+		ids.put(address.Address, address.ID)
+	}
+	for i := range addresses {
+		if addresses[i].ID == 0 {
+			addresses[i].ID, _ = ids.get(addresses[i].Address)
+		}
+	}
+	return nil
+}
+
+func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageType, error) {
 	fullUniqueBlockMessageTypes := make(map[string]models.MessageType)
 	for _, tx := range txs {
 		for messageTypeKey, messageType := range tx.UniqueMessageTypes {
@@ -559,7 +693,7 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 
 	var messageTypesSlice []models.MessageType
 	for key, messageType := range fullUniqueBlockMessageTypes {
-		if id, ok := messageTypeIDs.get(messageType.MessageType); ok {
+		if id, ok := ids.get(messageType.MessageType); ok {
 			messageType.ID = id
 			fullUniqueBlockMessageTypes[key] = messageType
 			continue
@@ -568,6 +702,13 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
 	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].MessageType < messageTypesSlice[j].MessageType })
+	known, messageTypesSlice, err := splitKnown(db, &models.MessageType{}, "message_type", messageTypesSlice,
+		func(m models.MessageType) string { return m.MessageType },
+		func(m models.MessageType, id uint) models.MessageType { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message types.", err)
+		return nil, err
+	}
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
@@ -579,15 +720,15 @@ func indexMessageTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.Messag
 		}
 	}
 
-	for _, messageType := range messageTypesSlice {
+	for _, messageType := range append(known, messageTypesSlice...) {
 		fullUniqueBlockMessageTypes[messageType.MessageType] = messageType
-		messageTypeIDs.put(messageType.MessageType, messageType.ID)
+		ids.put(messageType.MessageType, messageType.ID)
 	}
 
 	return fullUniqueBlockMessageTypes, nil
 }
 
-func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageEventType, error) {
+func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageEventType, error) {
 	fullUniqueBlockMessageEventTypes := make(map[string]models.MessageEventType)
 
 	for _, tx := range txs {
@@ -598,7 +739,7 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 
 	var messageTypesSlice []models.MessageEventType
 	for key, messageType := range fullUniqueBlockMessageEventTypes {
-		if id, ok := messageEventTypeIDs.get(messageType.Type); ok {
+		if id, ok := ids.get(messageType.Type); ok {
 			messageType.ID = id
 			fullUniqueBlockMessageEventTypes[key] = messageType
 			continue
@@ -607,26 +748,33 @@ func indexMessageEventTypes(db *gorm.DB, txs []TxDBWrapper) (map[string]models.M
 	}
 	// Lock rows in a stable order so concurrent indexers cannot deadlock.
 	sort.Slice(messageTypesSlice, func(i, j int) bool { return messageTypesSlice[i].Type < messageTypesSlice[j].Type })
+	known, messageTypesSlice, err := splitKnown(db, &models.MessageEventType{}, columnType, messageTypesSlice,
+		func(m models.MessageEventType) string { return m.Type },
+		func(m models.MessageEventType, id uint) models.MessageEventType { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message event types.", err)
+		return nil, err
+	}
 
 	if len(messageTypesSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "type"}},
-			DoUpdates: clause.AssignmentColumns([]string{"type"}),
+			Columns:   []clause.Column{{Name: columnType}},
+			DoUpdates: clause.AssignmentColumns([]string{columnType}),
 		}).Create(messageTypesSlice).Error; err != nil {
 			config.Log.Error("Error getting/creating message event types.", err)
 			return nil, err
 		}
 	}
 
-	for _, messageType := range messageTypesSlice {
+	for _, messageType := range append(known, messageTypesSlice...) {
 		fullUniqueBlockMessageEventTypes[messageType.Type] = messageType
-		messageEventTypeIDs.put(messageType.Type, messageType.ID)
+		ids.put(messageType.Type, messageType.ID)
 	}
 
 	return fullUniqueBlockMessageEventTypes, nil
 }
 
-func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]models.MessageEventAttributeKey, error) {
+func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper, ids *pendingIDCache) (map[string]models.MessageEventAttributeKey, error) {
 	fullUniqueMessageEventAttributeKeys := make(map[string]models.MessageEventAttributeKey)
 
 	for _, tx := range txs {
@@ -637,7 +785,7 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 
 	var messageEventAttributeKeysSlice []models.MessageEventAttributeKey
 	for key, messageEventAttributeKey := range fullUniqueMessageEventAttributeKeys {
-		if id, ok := attributeKeyIDs.get(messageEventAttributeKey.Key); ok {
+		if id, ok := ids.get(messageEventAttributeKey.Key); ok {
 			messageEventAttributeKey.ID = id
 			fullUniqueMessageEventAttributeKeys[key] = messageEventAttributeKey
 			continue
@@ -648,26 +796,40 @@ func indexMessageEventAttributeKeys(db *gorm.DB, txs []TxDBWrapper) (map[string]
 	sort.Slice(messageEventAttributeKeysSlice, func(i, j int) bool {
 		return messageEventAttributeKeysSlice[i].Key < messageEventAttributeKeysSlice[j].Key
 	})
+	known, messageEventAttributeKeysSlice, err := splitKnown(db, &models.MessageEventAttributeKey{}, columnKey, messageEventAttributeKeysSlice,
+		func(m models.MessageEventAttributeKey) string { return m.Key },
+		func(m models.MessageEventAttributeKey, id uint) models.MessageEventAttributeKey { m.ID = id; return m })
+	if err != nil {
+		config.Log.Error("Error getting/creating message event attribute keys.", err)
+		return nil, err
+	}
 
 	if len(messageEventAttributeKeysSlice) != 0 {
 		if err := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"key"}),
+			Columns:   []clause.Column{{Name: columnKey}},
+			DoUpdates: clause.AssignmentColumns([]string{columnKey}),
 		}).Create(messageEventAttributeKeysSlice).Error; err != nil {
 			config.Log.Error("Error getting/creating message event attribute keys.", err)
 			return nil, err
 		}
 	}
 
-	for _, messageEventAttributeKey := range messageEventAttributeKeysSlice {
+	for _, messageEventAttributeKey := range append(known, messageEventAttributeKeysSlice...) {
 		fullUniqueMessageEventAttributeKeys[messageEventAttributeKey.Key] = messageEventAttributeKey
-		attributeKeyIDs.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
+		ids.put(messageEventAttributeKey.Key, messageEventAttributeKey.ID)
 	}
 
 	return fullUniqueMessageEventAttributeKeys, nil
 }
 
+// Postgres caps one statement at 65535 bind parameters. A single 2025 Hub
+// transaction can carry more message event attributes than that.
+const rowInsertBatchSize = 4000
+
 func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, blockDBWrapper []TxDBWrapper, messageParserTrackers map[string]models.MessageParser) error {
+	if dryRun {
+		return nil
+	}
 	return db.Transaction(func(dbTransaction *gorm.DB) error {
 		for _, tx := range blockDBWrapper {
 			for _, message := range tx.Messages {
@@ -676,7 +838,7 @@ func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, bloc
 
 						// Pre clear old errors
 						if parsedData.Parser != nil {
-							err := DeleteCustomMessageParserError(db, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()])
+							err := DeleteCustomMessageParserError(dbTransaction, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()])
 							if err != nil {
 								config.Log.Error("Error clearing block event error.", err)
 								return err
@@ -696,8 +858,13 @@ func IndexCustomMessages(conf config.IndexConfig, db *gorm.DB, dryRun bool, bloc
 								config.Log.Error("Error indexing message.", err)
 								return err
 							}
-						} else if parsedData.Error != nil {
-							err := CreateMessageParserError(db, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()], parsedData.Error)
+						} else if parsedData.Error != nil && parsedData.Parser != nil {
+							if invalidator, ok := (*parsedData.Parser).(parsers.MessageParseFailureInvalidator); ok {
+								if err := invalidator.InvalidateMessage(dbTransaction, message.Message); err != nil {
+									return err
+								}
+							}
+							err := CreateMessageParserError(dbTransaction, message.Message, messageParserTrackers[(*parsedData.Parser).Identifier()], parsedData.Error)
 							if err != nil {
 								config.Log.Error("Error inserting message parser error.", err)
 								return err

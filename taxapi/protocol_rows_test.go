@@ -28,47 +28,47 @@ func protoRow(category, dir, symbol string, amt, price float64, hash string) Row
 
 func TestRecordRowsStayOutOfTaxImportsButInGeneric(t *testing.T) {
 	rows := []Row{
-		protoRow("delegate", "out", "ATOM", 100, 5, "H1"),
-		protoRow("protocol_deposit", "out", "ATOM", 10, 5, "H2"),
-		protoRow("reward", "in", "ATOM", 1, 5, "H3"),
-		protoRow("income", "in", "ATOM", 2, 5, "H4"),
-		protoRow("expense", "out", "ATOM", 3, 5, "H5"),
+		protoRow(apiDelegate, apiOut, apiSymbolATOM, 100, 5, "H1"),
+		protoRow(TagProtocolDeposit, apiOut, apiSymbolATOM, 10, 5, "H2"),
+		protoRow(apiReward, "in", apiSymbolATOM, 1, 5, "H3"),
+		protoRow(TagIncome, "in", apiSymbolATOM, 2, 5, "H4"),
+		protoRow(TagExpense, apiOut, apiSymbolATOM, 3, 5, "H5"),
 	}
 	rows[3].RewardTrigger = "tribute"
-	for _, format := range []string{"koinly", "cointracker", "coinledger", "cryptotaxcalculator", "cryptio", "bitwave"} {
+	for _, format := range []string{apiKoinly, apiCointracker, apiCoinledger, apiCryptotaxcalculator, apiCryptio, apiBitwave} {
 		records := readExport(t, format, rows)
 		if len(records) != 4 {
 			t.Fatalf("%s: got %d records, want header plus three taxable rows", format, len(records))
 		}
 	}
-	generic := readExport(t, "generic", rows)
+	generic := readExport(t, apiGeneric, rows)
 	if len(generic) != 6 {
 		t.Fatalf("generic should keep every row, got %d", len(generic))
 	}
-	if generic[1][23] != "false" || generic[3][23] != "true" {
+	if generic[1][23] != apiFalse || generic[3][23] != apiTrue {
 		t.Fatalf("taxable column wrong: %q %q", generic[1][23], generic[3][23])
 	}
-	koinly := readExport(t, "koinly", rows)
+	koinly := readExport(t, apiKoinly, rows)
 	labels := map[string]bool{}
 	for _, rec := range koinly[1:] {
 		labels[rec[9]] = true
 	}
-	if !labels["income"] || !labels["cost"] || !labels["staking"] {
+	if !labels[TagIncome] || !labels[apiCost] || !labels[apiStaking] {
 		t.Fatalf("koinly labels = %v", labels)
 	}
-	ctc := readExport(t, "cryptotaxcalculator", []Row{rows[0]})
+	ctc := readExport(t, apiCryptotaxcalculator, []Row{rows[0]})
 	if len(ctc) != 1 {
 		t.Fatalf("delegate record must not reach the CTC tax import, got %d rows", len(ctc))
 	}
 }
 
 func TestPreviewCSVCarriesCategoryTaxableAndDetail(t *testing.T) {
-	row := protoRow("hydro_lock_placeholder", "out", "ATOM", 1, 5, "H9")
-	row.Category = "protocol_deposit"
+	row := protoRow("hydro_lock_placeholder", apiOut, apiSymbolATOM, 1, 5, "H9")
+	row.Category = TagProtocolDeposit
 	row.RewardTrigger = "hydro_lock"
 	row.Detail = `{"lock_id":"3000","protocol":"Hydro"}`
 	var buf bytes.Buffer
-	if err := WritePreviewCSV(&buf, "summ", []Row{row}); err != nil {
+	if err := WritePreviewCSV(&buf, apiSumm, []Row{row}); err != nil {
 		t.Fatal(err)
 	}
 	records, err := csv.NewReader(&buf).ReadAll()
@@ -85,17 +85,17 @@ func TestPreviewCSVCarriesCategoryTaxableAndDetail(t *testing.T) {
 		t.Fatalf("missing column %s in %v", name, header)
 		return -1
 	}
-	if records[1][idx("Category")] != "protocol_deposit" || records[1][idx("Taxable")] != "false" || records[1][idx("Detail")] != row.Detail || records[1][idx("Source")] != "hydro_lock" {
+	if records[1][idx("Category")] != TagProtocolDeposit || records[1][idx(apiTaxable)] != apiFalse || records[1][idx(apiPreviewDetail)] != row.Detail || records[1][idx("Source")] != "hydro_lock" {
 		t.Fatalf("preview columns wrong: %v", records[1])
 	}
 }
 
 func TestImplySwapPricesValuesTheUnpricedLeg(t *testing.T) {
 	rows := []Row{
-		protoRow("swap", "out", "ATOM", 13.5, 4, "S1"),
-		protoRow("swap", "in", "INFLOW_SHARE", 11.485382, 0, "S1"),
-		protoRow("swap", "out", "ATOM", 1, 0, "S2"), // both legs unpriced: untouched
-		protoRow("swap", "in", "X", 1, 0, "S2"),
+		protoRow(apiSwap, apiOut, apiSymbolATOM, 13.5, 4, "S1"),
+		protoRow(apiSwap, "in", "INFLOW_SHARE", 11.485382, 0, "S1"),
+		protoRow(apiSwap, apiOut, apiSymbolATOM, 1, 0, "S2"), // both legs unpriced: untouched
+		protoRow(apiSwap, "in", "X", 1, 0, "S2"),
 	}
 	implySwapPrices(rows)
 	if rows[1].PriceMissing || !rows[1].PriceImplied {
@@ -111,10 +111,10 @@ func TestImplySwapPricesValuesTheUnpricedLeg(t *testing.T) {
 
 func TestUserTagsChangeLabelsAnd8949(t *testing.T) {
 	rows := []Row{
-		protoRow("reward", "in", "ATOM", 10, 5, "R1"),
-		protoRow("transfer", "out", "ATOM", 4, 6, "T1"),
-		protoRow("transfer", "out", "ATOM", 4, 6, "T2"),
-		protoRow("transfer", "in", "JUNK", 4, 0, "T3"),
+		protoRow(apiReward, "in", apiSymbolATOM, 10, 5, "R1"),
+		protoRow(apiTransfer, apiOut, apiSymbolATOM, 4, 6, "T1"),
+		protoRow(apiTransfer, apiOut, apiSymbolATOM, 4, 6, "T2"),
+		protoRow(apiTransfer, "in", "JUNK", 4, 0, "T3"),
 	}
 	rows[1].Time = rows[0].Time.Add(time.Hour)
 	rows[2].Time = rows[0].Time.Add(2 * time.Hour)
@@ -130,11 +130,11 @@ func TestUserTagsChangeLabelsAnd8949(t *testing.T) {
 	if len(form) != 1 || !strings.Contains(form[0].Description, "4 ATOM") {
 		t.Fatalf("only the gift should reach 8949 as a disposal, got %+v", form)
 	}
-	koinly := readExport(t, "koinly", rows)
+	koinly := readExport(t, apiKoinly, rows)
 	if len(koinly) != 4 { // header + reward + internal + gift; spam excluded
 		t.Fatalf("koinly rows = %d", len(koinly))
 	}
-	if koinly[3][9] != "gift" || koinly[2][9] != "" {
+	if koinly[3][9] != TagGift || koinly[2][9] != "" {
 		t.Fatalf("koinly labels: %q %q", koinly[2][9], koinly[3][9])
 	}
 	if _, err := ParseUserTags(`{"a":"nonsense"}`); err == nil {
@@ -144,11 +144,11 @@ func TestUserTagsChangeLabelsAnd8949(t *testing.T) {
 
 func TestJournalBalancesAndPositionsTrackOpenLots(t *testing.T) {
 	rows := []Row{
-		protoRow("reward", "in", "ATOM", 10, 5, "R1"),
-		protoRow("delegate", "out", "ATOM", 6, 5, "D1"),
-		protoRow("fee", "out", "ATOM", 0.01, 5, "D1"),
-		protoRow("income", "in", "ATOM", 2, 5, "I1"),
-		protoRow("transfer", "out", "ATOM", 1, 8, "T1"),
+		protoRow(apiReward, "in", apiSymbolATOM, 10, 5, "R1"),
+		protoRow(apiDelegate, apiOut, apiSymbolATOM, 6, 5, "D1"),
+		protoRow(apiFee, apiOut, apiSymbolATOM, 0.01, 5, "D1"),
+		protoRow(TagIncome, "in", apiSymbolATOM, 2, 5, "I1"),
+		protoRow(apiTransfer, apiOut, apiSymbolATOM, 1, 8, "T1"),
 	}
 	rows[3].RewardTrigger = "tribute"
 	for i := range rows {
@@ -208,7 +208,7 @@ func TestCatalogCoversEveryCategory(t *testing.T) {
 			t.Fatalf("category %s missing from catalog", c)
 		}
 	}
-	if undisclosedAlways("cosmosvaloper1anonymous") != "undisclosed" {
+	if undisclosedAlways("cosmosvaloper1anonymous") != undisclosedJurisdiction {
 		t.Fatal("validators without an attestation must read undisclosed")
 	}
 }

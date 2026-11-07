@@ -36,5 +36,5 @@ const (
 // display units, not native ATOM equivalence or a market price. Retain the raw
 // denomination, use a distinct identity, and keep the price unknown.
 func isUnverifiedJunoFactoryUatom(chain, denom, base string) bool {
-	return chain == "mainnet" && (denom == junoFactoryUatomVoucher || base == junoFactoryUatomBase)
+	return chain == apiMainnet && (denom == junoFactoryUatomVoucher || base == junoFactoryUatomBase)
 }

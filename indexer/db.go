@@ -43,19 +43,18 @@ func (indexer *Indexer) DoDBUpdates(wg *sync.WaitGroup, txDataChan chan *DBData,
 			if !indexer.DryRun {
 				var err error
 				config.Log.Info(fmt.Sprintf("Indexing %v TXs from block %d", len(data.txDBWrappers), data.block.Height))
-				indexedBlock, indexedDataset, err = dbTypes.IndexNewBlock(indexer.DB, data.block, data.txDBWrappers, *indexer.Config)
+				err = retryTransient(func() error {
+					var writeErr error
+					indexedBlock, indexedDataset, writeErr = dbTypes.IndexBlockData(indexer.DB, data.block, data.txDBWrappers, *indexer.Config, indexer.CustomMessageParserTrackers)
+					return writeErr
+				})
 				if err != nil {
 					// Do a single reattempt on failure
 					dbReattempts++
-					_, _, err = dbTypes.IndexNewBlock(indexer.DB, data.block, data.txDBWrappers, *indexer.Config)
+					indexedBlock, indexedDataset, err = dbTypes.IndexBlockData(indexer.DB, data.block, data.txDBWrappers, *indexer.Config, indexer.CustomMessageParserTrackers)
 					if err != nil {
 						config.Log.Fatal(fmt.Sprintf("Error indexing block %v.", data.block.Height), err)
 					}
-				}
-
-				err = dbTypes.IndexCustomMessages(*indexer.Config, indexer.DB, indexer.DryRun, indexedDataset, indexer.CustomMessageParserTrackers)
-				if err != nil {
-					config.Log.Fatal(fmt.Sprintf("Error indexing custom messages for block %d", data.block.Height), err)
 				}
 
 				config.Log.Info(fmt.Sprintf("Finished indexing %v TXs from block %d", len(data.txDBWrappers), data.block.Height))
@@ -103,12 +102,19 @@ func (indexer *Indexer) DoDBUpdates(wg *sync.WaitGroup, txDataChan chan *DBData,
 			config.Log.Info(fmt.Sprintf("Indexing %v Block Events from block %d", numEvents, eventData.blockDBWrapper.Block.Height))
 			identifierLoggingString := fmt.Sprintf("block %d", eventData.blockDBWrapper.Block.Height)
 
-			indexedDataset, err := dbTypes.IndexBlockEvents(indexer.DB, indexer.DryRun, eventData.blockDBWrapper, identifierLoggingString)
+			var indexedDataset *dbTypes.BlockDBWrapper
+			err := retryTransient(func() error {
+				var writeErr error
+				indexedDataset, writeErr = dbTypes.IndexBlockEvents(indexer.DB, indexer.DryRun, eventData.blockDBWrapper, identifierLoggingString)
+				return writeErr
+			})
 			if err != nil {
 				config.Log.Fatal(fmt.Sprintf("Error indexing block events for %s.", identifierLoggingString), err)
 			}
 
-			err = dbTypes.IndexCustomBlockEvents(*indexer.Config, indexer.DB, indexer.DryRun, indexedDataset, identifierLoggingString, indexer.CustomBeginBlockParserTrackers, indexer.CustomEndBlockParserTrackers)
+			err = retryTransient(func() error {
+				return dbTypes.IndexCustomBlockEvents(*indexer.Config, indexer.DB, indexer.DryRun, indexedDataset, identifierLoggingString, indexer.CustomBeginBlockParserTrackers, indexer.CustomEndBlockParserTrackers)
+			})
 			if err != nil {
 				config.Log.Fatal(fmt.Sprintf("Error indexing custom block events for %s.", identifierLoggingString), err)
 			}

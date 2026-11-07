@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"sort"
@@ -63,6 +64,9 @@ func GenerateBlockFileEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, clien
 			config.Log.Fatal("Error getting blockchain latest height. Err: %v", err)
 		}
 
+		if earliestBlock < 0 || latestBlock < 0 || latestBlock < earliestBlock {
+			return fmt.Errorf("invalid archive height range: %d through %d", earliestBlock, latestBlock)
+		}
 		unindexableBlockHeights := []uint64{}
 		blockInRange := []uint64{}
 		for _, block := range blocksToIndex {
@@ -84,6 +88,9 @@ func GenerateBlockFileEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, clien
 
 		// Add jobs to the queue to be processed
 		for _, height := range blockInRange {
+			if height == 0 || height > math.MaxInt64 {
+				return fmt.Errorf("invalid block height: %d", height)
+			}
 			if cfg.Base.Throttling != 0 {
 				time.Sleep(time.Second * time.Duration(cfg.Base.Throttling))
 			}

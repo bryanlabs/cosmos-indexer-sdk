@@ -13,9 +13,22 @@
 // necessarily the JSON FungibleTokenPacketData that v1 carries: on Cosmos Hub
 // they arrive encoded as application/x-solidity-abi from the Ethereum bridge, so
 // decoding them would mean an ABI decoder. The module emits a
-// fungible_token_packet event with the sender, receiver, denom, amount and
-// success flag already extracted, which is the same four fields the v1 path
-// reads out of the packet data, so classification uses that instead.
+// fungible_token_packet event with the sender, receiver, packet denom, amount
+// and success flag already extracted. Classification requires bank credit
+// evidence too: the packet denomination path is not the local bank denom.
+// Ports/client IDs plus that path constrain the actual local bank credit;
+// amount-only matches can select unrelated callback assets. Missing or ambiguous
+// successful receive evidence returns a persistent ClassificationIncompleteError.
+// ibccallbackerror- events describe discarded application caches, not committed
+// assets, even if their lower transfer app emitted success=true. In v10.1.1 the
+// channel-v2 keeper commits successful payloads individually before a later
+// payload can fail; keep those unprefixed credits, not the failed payload's
+// prefixed events. In v10.1.1 destination callback errors yield an error ack
+// (callbacks/v1) or Failure (callbacks/v2), unlike v8.7.0 callbacks/v1 which can
+// keep the app's successful ack.
+// Timeout and error-ack refunds are principal returns, linked to this packet,
+// never new income. v2 error acknowledgements use the protocol's SHA256 sentinel
+// wrapped in Acknowledgement.app_acknowledgements, not a JSON ICS20 error.
 
 package tax
 

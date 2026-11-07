@@ -10,7 +10,7 @@ import (
 // extension point (INF-206) for if pending legislation changes when staking
 // income is realized — not implemented yet, requests for it are rejected
 // rather than silently falling back to at-claim.
-const RecognitionPolicyDefault = "at-claim"
+const RecognitionPolicyDefault = apiAtClaim
 
 // RecognitionPolicy documents when staking/commission income is recognized,
 // for the /tax/methodology page and as a citation on income reports.
@@ -40,6 +40,6 @@ func currentRecognitionPolicy() RecognitionPolicy {
 }
 
 func (s *Server) handleRecognitionPolicy(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(currentRecognitionPolicy())
 }

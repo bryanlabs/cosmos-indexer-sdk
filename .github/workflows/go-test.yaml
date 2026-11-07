@@ -10,17 +10,33 @@ on:
     branches:
       - main
 
-env:
-  GO_VERSION: '^1.22'
-
 jobs:
   go-test:
     runs-on: ubuntu-latest
+    env:
+      GOMAXPROCS: "2"
+      GOFLAGS: -p=1
+      COSMOS_TAX_SNAPSHOT_DOCKER: "1"
+      COSMOS_TAX_TEST_DSN: host=127.0.0.1 port=5432 user=test password=test dbname=test sslmode=disable
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
-      - uses: actions/setup-go@v3
-        with:
-          go-version: ${{ env.GO_VERSION }}
       - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
       - name: test code
         run: |
           go test -timeout 30m -v ./...

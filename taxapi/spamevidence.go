@@ -17,7 +17,7 @@ func (s *Server) eventMemos(events []tax.TaxableEvent) (map[string]string, error
 	hashes := []string{}
 	seen := map[string]bool{}
 	for _, e := range events {
-		if e.Denom != "uatom" && !seen[e.TxHash] {
+		if e.Denom != apiUatom && !seen[e.TxHash] {
 			seen[e.TxHash] = true
 			hashes = append(hashes, e.TxHash)
 		}
@@ -48,22 +48,22 @@ func assetRecordID(chain, wallet string, event tax.TaxableEvent, identity *Asset
 
 func attachSpamEvidence(row *Row, event tax.TaxableEvent, chain, wallet, memo string) {
 	lower := strings.ToLower(memo)
-	promotional := (strings.Contains(lower, "https://") || strings.Contains(lower, "http://")) && (strings.Contains(lower, "claim") || strings.Contains(lower, "airdrop"))
-	knownSuspect := chain == "mainnet" && (event.Denom == junoFactoryUatomVoucher || event.Denom == airdrop67Voucher)
+	promotional := (strings.Contains(lower, "https://") || strings.Contains(lower, "http://")) && (strings.Contains(lower, "claim") || strings.Contains(lower, TagAirdrop))
+	knownSuspect := chain == apiMainnet && (event.Denom == junoFactoryUatomVoucher || event.Denom == airdrop67Voucher)
 	// Missing price alone is not a spam signal, nor is a normal native-token receipt.
-	suspicious := knownSuspect || (event.Denom != "uatom" && event.Denom != cosmosHubNobleUSDCDenom && row.PriceMissing && promotional)
+	suspicious := knownSuspect || (event.Denom != apiUatom && event.Denom != cosmosHubNobleUSDCDenom && row.PriceMissing && promotional)
 	if row.AssetIdentity == nil && !suspicious {
 		return
 	}
 	if row.AssetIdentity == nil {
-		row.AssetIdentity = &AssetIdentity{ReportedLabel: row.Symbol, TokenName: row.Symbol, RawDenom: event.Denom, RawAmount: event.Amount, BaseToken: event.Denom, Treatment: "unreviewed"}
+		row.AssetIdentity = &AssetIdentity{ReportedLabel: row.Symbol, TokenName: row.Symbol, RawDenom: event.Denom, RawAmount: event.Amount, BaseToken: event.Denom, Treatment: apiUnreviewed}
 	}
 	a := row.AssetIdentity
 	a.Wallet = wallet
 	a.Memo = memo
 	a.SuspectedSpam = suspicious
 	a.Note = "Review required. The reported label and original transaction remain visible. No valuation or exclusion is applied without your explicit choice."
-	if !a.OfficialAtomMatch && strings.EqualFold(a.ReportedLabel, "ATOM") {
+	if !a.OfficialAtomMatch && strings.EqualFold(a.ReportedLabel, apiSymbolATOM) {
 		a.addReason(ReasonLabelMismatch)
 	}
 	if knownSuspect {
@@ -76,7 +76,7 @@ func attachSpamEvidence(row *Row, event tax.TaxableEvent, chain, wallet, memo st
 		a.addReason(ReasonIdentityMismatch)
 	}
 	if event.Denom == airdrop67Voucher {
-		a.SourceChain = "juno-1"
+		a.SourceChain = apiJunoChainID
 		a.ChannelPath = "transfer/channel-207"
 		a.BaseToken = "factory/juno1wypsnn7n5hsd2kvk424qv9yuretz9m6k6wcztk/uairdrop67"
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 func TestHandleMethodology(t *testing.T) {
-	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	s := &Server{oracle: NewOracle(apiTestUnusedOrigin, "")}
 	req := httptest.NewRequest(http.MethodGet, "/methodology", nil)
 	rec := httptest.NewRecorder()
 	s.handleMethodology(rec, req)
@@ -19,7 +19,7 @@ func TestHandleMethodology(t *testing.T) {
 	}
 	var m Methodology
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-		t.Fatalf("bad json: %v", err)
+		t.Fatalf(apiBadJSONFormat, err)
 	}
 	if m.Version == "" || m.EffectiveDate == "" || len(m.Sources) == 0 || len(m.FallbackOrder) == 0 {
 		t.Fatalf("methodology should be fully populated: %+v", m)
@@ -27,7 +27,7 @@ func TestHandleMethodology(t *testing.T) {
 }
 
 func TestHandleRecognitionPolicy(t *testing.T) {
-	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	s := &Server{oracle: NewOracle(apiTestUnusedOrigin, "")}
 	req := httptest.NewRequest(http.MethodGet, "/recognition-policy", nil)
 	rec := httptest.NewRecorder()
 	s.handleRecognitionPolicy(rec, req)
@@ -37,7 +37,7 @@ func TestHandleRecognitionPolicy(t *testing.T) {
 	}
 	var p RecognitionPolicy
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
-		t.Fatalf("bad json: %v", err)
+		t.Fatalf(apiBadJSONFormat, err)
 	}
 	if p.Policy != RecognitionPolicyDefault || p.Explanation == "" || p.EffectiveDate == "" {
 		t.Fatalf("recognition policy should be fully populated: %+v", p)
@@ -46,7 +46,7 @@ func TestHandleRecognitionPolicy(t *testing.T) {
 
 func TestHandlePriceSeriesJSON(t *testing.T) {
 	oracleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		_, _ = w.Write([]byte(`{"usd":2.5,"found":true}`))
 	}))
 	defer oracleSrv.Close()
@@ -65,15 +65,15 @@ func TestHandlePriceSeriesJSON(t *testing.T) {
 		Points             []pricePoint `json:"points"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("bad json: %v", err)
+		t.Fatalf(apiBadJSONFormat, err)
 	}
-	if body.Denom != "uatom" || body.MethodologyVersion != MethodologyVersion {
+	if body.Denom != apiUatom || body.MethodologyVersion != MethodologyVersion {
 		t.Fatalf("wrong metadata: %+v", body)
 	}
 	if len(body.Points) != 3 {
 		t.Fatalf("want 3 daily points (Jan 1-3 inclusive), got %d: %+v", len(body.Points), body.Points)
 	}
-	if body.Points[0].Date != "2026-01-01" || body.Points[2].Date != "2026-01-03" {
+	if body.Points[0].Date != apiTestPeriodStart || body.Points[2].Date != "2026-01-03" {
 		t.Fatalf("wrong date range: %+v", body.Points)
 	}
 	for _, p := range body.Points {
@@ -85,7 +85,7 @@ func TestHandlePriceSeriesJSON(t *testing.T) {
 
 func TestHandlePriceSeriesUnknownDenomAllUnfound(t *testing.T) {
 	oracleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		_, _ = w.Write([]byte(`{"usd":0,"found":false}`))
 	}))
 	defer oracleSrv.Close()
@@ -99,7 +99,7 @@ func TestHandlePriceSeriesUnknownDenomAllUnfound(t *testing.T) {
 		Points []pricePoint `json:"points"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("bad json: %v", err)
+		t.Fatalf(apiBadJSONFormat, err)
 	}
 	for _, p := range body.Points {
 		if p.Found {
@@ -109,7 +109,7 @@ func TestHandlePriceSeriesUnknownDenomAllUnfound(t *testing.T) {
 }
 
 func TestHandlePriceSeriesRangeTooLarge(t *testing.T) {
-	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	s := &Server{oracle: NewOracle(apiTestUnusedOrigin, "")}
 	req := httptest.NewRequest(http.MethodGet, "/price-series?start=2020-01-01&end=2026-01-01", nil)
 	rec := httptest.NewRecorder()
 	s.handlePriceSeries(rec, req)
@@ -120,7 +120,7 @@ func TestHandlePriceSeriesRangeTooLarge(t *testing.T) {
 }
 
 func TestHandlePriceSeriesEndBeforeStart(t *testing.T) {
-	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	s := &Server{oracle: NewOracle(apiTestUnusedOrigin, "")}
 	req := httptest.NewRequest(http.MethodGet, "/price-series?start=2026-01-10&end=2026-01-01", nil)
 	rec := httptest.NewRecorder()
 	s.handlePriceSeries(rec, req)
@@ -132,7 +132,7 @@ func TestHandlePriceSeriesEndBeforeStart(t *testing.T) {
 
 func TestHandlePriceSeriesCSV(t *testing.T) {
 	oracleSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		_, _ = w.Write([]byte(`{"usd":1.95,"found":true}`))
 	}))
 	defer oracleSrv.Close()
@@ -142,7 +142,7 @@ func TestHandlePriceSeriesCSV(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.handlePriceSeries(rec, req)
 
-	if ct := rec.Header().Get("Content-Type"); ct != "text/csv" {
+	if ct := rec.Header().Get(apiContentType); ct != apiCSVContentType {
 		t.Fatalf("want text/csv, got %q", ct)
 	}
 	body := rec.Body.String()

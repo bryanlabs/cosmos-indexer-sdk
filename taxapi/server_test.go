@@ -18,8 +18,8 @@ import (
 func stubChainServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "ustars") {
+		w.Header().Set(apiContentType, apiJSONContentType)
+		if strings.Contains(r.URL.Path, apiUstars) {
 			_, _ = w.Write([]byte(`{"metadata":{"symbol":"STARS","denom_units":[{"denom":"ustars","exponent":0},{"denom":"stars","exponent":6}]}}`))
 			return
 		}
@@ -32,13 +32,13 @@ func stubChainServer(t *testing.T) *httptest.Server {
 func TestBuildRowKnownDenomUsesOracleMeta(t *testing.T) {
 	stub := stubChainServer(t)
 	s := &Server{oracle: NewOracle(stub.URL, "")}
-	meta := map[string]DenomMeta{"uatom": {Symbol: "ATOM", Decimals: 6}}
+	meta := map[string]DenomMeta{apiUatom: {Symbol: apiSymbolATOM, Decimals: 6}}
 
-	row := s.buildRow("mainnet", meta, time.Now(), "hash1", "transfer", "in", "uatom", "5000000", "a", "b")
+	row := s.buildRow(apiMainnet, meta, time.Now(), "hash1", apiTransfer, "in", apiUatom, "5000000", "a", "b")
 	if row.DecimalsAssumed {
 		t.Fatalf("known denom should not be flagged: %+v", row)
 	}
-	if row.Symbol != "ATOM" || !row.Amount.Equal(d(5)) {
+	if row.Symbol != apiSymbolATOM || !row.Amount.Equal(d(5)) {
 		t.Fatalf("want ATOM/5, got symbol=%s amount=%s", row.Symbol, row.Amount)
 	}
 }
@@ -47,7 +47,7 @@ func TestBuildRowOracleMissFallsBackToChainBankModule(t *testing.T) {
 	stub := stubChainServer(t)
 	s := &Server{oracle: NewOracle(stub.URL, stub.URL)}
 
-	row := s.buildRow("mainnet", map[string]DenomMeta{}, time.Now(), "hash2", "transfer", "in", "ustars", "7000000", "a", "b")
+	row := s.buildRow(apiMainnet, map[string]DenomMeta{}, time.Now(), "hash2", apiTransfer, "in", apiUstars, "7000000", "a", "b")
 	if row.DecimalsAssumed {
 		t.Fatalf("chain bank-module fallback should resolve decimals, not flag: %+v", row)
 	}
@@ -61,14 +61,14 @@ func TestBuildRowBothMissesAssumesAndFlags(t *testing.T) {
 	// No nodeREST configured, so the bank-module fallback is unavailable too.
 	s := &Server{oracle: NewOracle(stub.URL, "")}
 
-	row := s.buildRow("mainnet", map[string]DenomMeta{}, time.Now(), "hash3", "transfer", "in", "factory/cosmos1xyz/mystery", "1234", "a", "b")
+	row := s.buildRow(apiMainnet, map[string]DenomMeta{}, time.Now(), "hash3", apiTransfer, "in", "factory/cosmos1xyz/mystery", "1234", "a", "b")
 	if !row.DecimalsAssumed {
 		t.Fatalf("want DecimalsAssumed=true when both oracle and chain miss: %+v", row)
 	}
 	// The stub also has no price for this denom, so PriceMissing is set too;
 	// both warnings should surface.
 	if got, want := row.description(), "transfer (decimals unknown, amount may be wrong) (price missing)"; got != want {
-		t.Fatalf("description = %q, want %q", got, want)
+		t.Fatalf(apiDescriptionMismatchFormat, got, want)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestBuildRowBothMissesAssumesAndFlags(t *testing.T) {
 // being treated as an opaque unknown base denom (cross-chain IBC, INF-208).
 func TestBuildRowResolvesHashedIBCDenomViaTrace(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		switch {
 		case strings.Contains(r.URL.Path, "denom_traces"):
 			_, _ = w.Write([]byte(`{"denom_trace":{"path":"transfer/channel-141","base_denom":"uosmo"}}`))
@@ -91,7 +91,7 @@ func TestBuildRowResolvesHashedIBCDenomViaTrace(t *testing.T) {
 	s := &Server{oracle: NewOracle(stub.URL, stub.URL)}
 	meta := map[string]DenomMeta{"uosmo": {Symbol: "OSMO", Decimals: 6}}
 
-	row := s.buildRow("mainnet", meta, time.Now(), "h1", "transfer", "in", "ibc/AAAABBBBCCCC", "5000000", "a", "b")
+	row := s.buildRow(apiMainnet, meta, time.Now(), "h1", apiTransfer, "in", "ibc/AAAABBBBCCCC", "5000000", "a", "b")
 	if !row.IsIBC {
 		t.Fatalf("want IsIBC=true once resolved via denom trace: %+v", row)
 	}
@@ -107,7 +107,7 @@ func TestBuildRowUnresolvableHashedIBCDenomStillFlags(t *testing.T) {
 	stub := stubChainServer(t)
 	s := &Server{oracle: NewOracle(stub.URL, "")} // no nodeREST: trace + bank fallback both disabled
 
-	row := s.buildRow("mainnet", map[string]DenomMeta{}, time.Now(), "h2", "transfer", "in", "ibc/UNRESOLVABLE", "5000000", "a", "b")
+	row := s.buildRow(apiMainnet, map[string]DenomMeta{}, time.Now(), "h2", apiTransfer, "in", "ibc/UNRESOLVABLE", "5000000", "a", "b")
 	if row.IsIBC {
 		t.Fatalf("should not claim IsIBC when the hash never resolved: %+v", row)
 	}
@@ -118,7 +118,7 @@ func TestBuildRowUnresolvableHashedIBCDenomStillFlags(t *testing.T) {
 
 func TestBuildRowPriceFoundVsMissing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		if strings.Contains(r.URL.RawQuery, "denom=uatom") {
 			_, _ = w.Write([]byte(`{"usd":2,"found":true}`))
 			return
@@ -128,34 +128,34 @@ func TestBuildRowPriceFoundVsMissing(t *testing.T) {
 	defer srv.Close()
 	s := &Server{oracle: NewOracle(srv.URL, "")}
 	meta := map[string]DenomMeta{
-		"uatom":    {Symbol: "ATOM", Decimals: 6},
-		"umystery": {Symbol: "MYST", Decimals: 6},
+		apiUatom:   {Symbol: apiSymbolATOM, Decimals: 6},
+		"umystery": {Symbol: apiTestSymbolMyst, Decimals: 6},
 	}
 
-	priced := s.buildRow("mainnet", meta, time.Now(), "h1", "transfer", "in", "uatom", "5000000", "a", "b")
+	priced := s.buildRow(apiMainnet, meta, time.Now(), "h1", apiTransfer, "in", apiUatom, "5000000", "a", "b")
 	if priced.PriceMissing || !priced.ValueUSD.Equal(d(10)) {
 		t.Fatalf("known price wrong: %+v", priced)
 	}
 
-	unpriced := s.buildRow("mainnet", meta, time.Now(), "h2", "transfer", "in", "umystery", "5000000", "a", "b")
+	unpriced := s.buildRow(apiMainnet, meta, time.Now(), "h2", apiTransfer, "in", "umystery", "5000000", "a", "b")
 	if !unpriced.PriceMissing || !unpriced.ValueUSD.IsZero() {
 		t.Fatalf("missing price should flag and stay 0, not fabricate a value: %+v", unpriced)
 	}
 	if got, want := unpriced.description(), "transfer (price missing)"; got != want {
-		t.Fatalf("description = %q, want %q", got, want)
+		t.Fatalf(apiDescriptionMismatchFormat, got, want)
 	}
 }
 
 func TestBuildRowPinnedUSDCFallbackProducesPricedReward(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		_, _ = w.Write([]byte(`{"usd":0,"found":false}`))
 	}))
 	defer srv.Close()
 
 	s := &Server{oracle: NewOracle(srv.URL, "")}
-	meta := map[string]DenomMeta{cosmosHubNobleUSDCDenom: {Symbol: "USDC", Decimals: 6}}
-	row := s.buildRow("mainnet", meta, time.Now(), "h-usdc", "reward", "in", cosmosHubNobleUSDCDenom, "243", "", "wallet")
+	meta := map[string]DenomMeta{cosmosHubNobleUSDCDenom: {Symbol: apiSymbolUSDC, Decimals: 6}}
+	row := s.buildRow(apiMainnet, meta, time.Now(), "h-usdc", apiReward, "in", cosmosHubNobleUSDCDenom, "243", "", apiWallet)
 	if row.PriceMissing || !row.PriceUSD.Equal(d(1)) || !row.ValueUSD.Equal(decimal.RequireFromString("0.000243")) {
 		t.Fatalf("pinned USDC reward should be valued at $1 per unit: %+v", row)
 	}
@@ -167,18 +167,18 @@ func TestBuildRowPinnedUSDCFallbackProducesPricedReward(t *testing.T) {
 func TestBuildIncomeCSVWarnsOnMissingPrice(t *testing.T) {
 	now := time.Now()
 	rows := []Row{
-		{Time: now, Category: "reward", Symbol: "ATOM", ValueUSD: d(10)},
-		{Time: now, Category: "commission", Symbol: "MYST", ValueUSD: decimal.Zero, PriceMissing: true},
-		{Time: now, Category: "transfer", Symbol: "ATOM", ValueUSD: d(999)}, // not income, must be excluded
+		{Time: now, Category: apiReward, Symbol: apiSymbolATOM, ValueUSD: d(10)},
+		{Time: now, Category: apiCommission, Symbol: apiTestSymbolMyst, ValueUSD: decimal.Zero, PriceMissing: true},
+		{Time: now, Category: apiTransfer, Symbol: apiSymbolATOM, ValueUSD: d(999)}, // not income, must be excluded
 	}
-	csvOut := buildIncomeCSV(rows, "cosmos1wallet", RecognitionPolicyDefault, undisclosedAlways)
-	if !strings.Contains(csvOut, "TOTAL") || strings.Contains(csvOut, "999") {
+	csvOut := buildIncomeCSV(rows, apiTestGenericWallet, RecognitionPolicyDefault, undisclosedAlways)
+	if !strings.Contains(csvOut, apiTotalLabel) || strings.Contains(csvOut, "999") {
 		t.Fatalf("csv should total only reward/commission rows: %s", csvOut)
 	}
-	if !strings.Contains(csvOut, "WARNING") || !strings.Contains(csvOut, "MYST") {
+	if !strings.Contains(csvOut, apiWarningLabel) || !strings.Contains(csvOut, apiTestSymbolMyst) {
 		t.Fatalf("csv should warn about the MYST row with no price: %s", csvOut)
 	}
-	if !strings.Contains(csvOut, "cosmos1wallet") {
+	if !strings.Contains(csvOut, apiTestGenericWallet) {
 		t.Fatalf("csv should stamp the address on every line (INF-204): %s", csvOut)
 	}
 	if !strings.Contains(csvOut, "RECOGNITION POLICY") || !strings.Contains(csvOut, RecognitionPolicyDefault) {
@@ -187,15 +187,15 @@ func TestBuildIncomeCSVWarnsOnMissingPrice(t *testing.T) {
 }
 
 func TestBuildIncomeCSVNoWarningWhenAllPriced(t *testing.T) {
-	rows := []Row{{Time: time.Now(), Category: "reward", Symbol: "ATOM", ValueUSD: d(5)}}
-	csvOut := buildIncomeCSV(rows, "cosmos1wallet", RecognitionPolicyDefault, undisclosedAlways)
-	if strings.Contains(csvOut, "WARNING") {
+	rows := []Row{{Time: time.Now(), Category: apiReward, Symbol: apiSymbolATOM, ValueUSD: d(5)}}
+	csvOut := buildIncomeCSV(rows, apiTestGenericWallet, RecognitionPolicyDefault, undisclosedAlways)
+	if strings.Contains(csvOut, apiWarningLabel) {
 		t.Fatalf("no warning expected when every row has a price: %s", csvOut)
 	}
 }
 
 func TestHandleIncomeRejectsUnimplementedRecognitionPolicy(t *testing.T) {
-	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	s := &Server{oracle: NewOracle(apiTestUnusedOrigin, "")}
 	req := httptest.NewRequest(http.MethodGet, "/income?address=cosmos1abc&recognition=at-sale", nil)
 	rec := httptest.NewRecorder()
 	s.handleIncome(rec, req)
@@ -206,7 +206,7 @@ func TestHandleIncomeRejectsUnimplementedRecognitionPolicy(t *testing.T) {
 }
 
 func TestHandle990TRejectsUnimplementedRecognitionPolicy(t *testing.T) {
-	s := &Server{oracle: NewOracle("http://unused-in-this-test", "")}
+	s := &Server{oracle: NewOracle(apiTestUnusedOrigin, "")}
 	req := httptest.NewRequest(http.MethodGet, "/990t?address=cosmos1abc&recognition=at-sale", nil)
 	rec := httptest.NewRecorder()
 	s.handle990T(rec, req)
@@ -218,9 +218,9 @@ func TestHandle990TRejectsUnimplementedRecognitionPolicy(t *testing.T) {
 
 func TestSumUBTICountsMissingPrices(t *testing.T) {
 	rows := []Row{
-		{Category: "reward", ValueUSD: d(3)},
-		{Category: "commission", ValueUSD: decimal.Zero, PriceMissing: true},
-		{Category: "transfer", ValueUSD: d(100)}, // not UBTI
+		{Category: apiReward, ValueUSD: d(3)},
+		{Category: apiCommission, ValueUSD: decimal.Zero, PriceMissing: true},
+		{Category: apiTransfer, ValueUSD: d(100)}, // not UBTI
 	}
 	ubti, missing := sumUBTI(rows)
 	if !ubti.Equal(d(3)) || missing != 1 {
@@ -232,13 +232,13 @@ func TestIBCRowWithUnknownDecimalsFlagsBoth(t *testing.T) {
 	stub := stubChainServer(t)
 	s := &Server{oracle: NewOracle(stub.URL, "")}
 
-	row := s.buildRow("mainnet", map[string]DenomMeta{}, time.Now(), "hash4", "transfer", "in", "transfer/channel-0/mystery", "1234", "a", "b")
+	row := s.buildRow(apiMainnet, map[string]DenomMeta{}, time.Now(), "hash4", apiTransfer, "in", "transfer/channel-0/mystery", "1234", "a", "b")
 	if !row.DecimalsAssumed || !row.IsIBC || !row.PriceMissing {
 		t.Fatalf("want IsIBC, DecimalsAssumed and PriceMissing all set: %+v", row)
 	}
 	want := "ibc transfer/channel-0/mystery (decimals unknown, amount may be wrong) (price missing)"
 	if got := row.description(); got != want {
-		t.Fatalf("description = %q, want %q", got, want)
+		t.Fatalf(apiDescriptionMismatchFormat, got, want)
 	}
 }
 
@@ -249,7 +249,7 @@ func TestPrewarmPricesDedupesAndWarmsCache(t *testing.T) {
 	var calls int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&calls, 1)
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		_, _ = w.Write([]byte(`{"usd":9.5,"found":true}`))
 	}))
 	t.Cleanup(srv.Close)
@@ -258,21 +258,21 @@ func TestPrewarmPricesDedupesAndWarmsCache(t *testing.T) {
 	day1 := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	day2 := time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC)
 	events := []tax.TaxableEvent{
-		{Denom: "uatom", Timestamp: day1},
-		{Denom: "uatom", Timestamp: day1},
-		{Denom: "uatom", Timestamp: day1},
-		{Denom: "uatom", Timestamp: day2},
-		{Denom: "uusdc", Timestamp: day1},
+		{Denom: apiUatom, Timestamp: day1},
+		{Denom: apiUatom, Timestamp: day1},
+		{Denom: apiUatom, Timestamp: day1},
+		{Denom: apiUatom, Timestamp: day2},
+		{Denom: apiUusdc, Timestamp: day1},
 	}
 
-	s.prewarmPrices("mainnet", events, nil)
+	s.prewarmPrices(apiMainnet, events, nil)
 	if got := atomic.LoadInt64(&calls); got != 3 {
 		t.Fatalf("want exactly 3 oracle calls for 3 distinct (denom,date) pairs, got %d", got)
 	}
 
 	// The sequential path (buildRow, via PriceAt) must now be pure cache hits.
 	for _, e := range events {
-		if _, found := s.oracle.PriceAt("mainnet", e.Denom, e.Timestamp.UTC().Format("2006-01-02")); !found {
+		if _, found := s.oracle.PriceAt(apiMainnet, e.Denom, e.Timestamp.UTC().Format(apiDateLayout)); !found {
 			t.Fatalf("expected a warm cache hit for %s/%s", e.Denom, e.Timestamp)
 		}
 	}

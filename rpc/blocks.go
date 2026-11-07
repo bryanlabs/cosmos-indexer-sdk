@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,10 +91,48 @@ func (c *URIClient) DoHTTPGet(ctx context.Context, method string, params map[str
 	return unmarshalResponseBytes(responseBytes, jsonrpc.URIClientRequestID, result)
 }
 
+// DoHTTPPost supports gateways that expose JSON-RPC at their exact base URL
+// but do not route URI-style /method requests.
+func (c *URIClient) DoHTTPPost(ctx context.Context, method string, params map[string]interface{}, result interface{}) (interface{}, error) {
+	request, err := types.MapToRequest(jsonrpc.URIClientRequestID, method, params)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode RPC request: %w", err)
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal RPC request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Address, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RPC request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.AuthHeader != "" {
+		req.Header.Set("Authorization", c.AuthHeader)
+	}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("RPC POST: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("RPC POST returned HTTP %d", resp.StatusCode)
+	}
+	response, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024+1))
+	if err != nil {
+		return nil, fmt.Errorf("read RPC response: %w", err)
+	}
+	if len(response) > 64*1024*1024 {
+		return nil, errors.New("RPC response exceeds 64 MiB limit")
+	}
+	return unmarshalResponseBytes(response, jsonrpc.URIClientRequestID, result)
+}
+
 type URIClient struct {
 	Address    string
 	Client     *http.Client
 	AuthHeader string
+	JSONRPC    bool
 }
 
 func unmarshalResponseBytes(responseBytes []byte, expectedID types.JSONRPCIntID, result interface{}) (interface{}, error) {
@@ -159,7 +198,12 @@ func (c *URIClient) DoBlockResults(ctx context.Context, height *int64) (*CustomB
 		params["height"] = height
 	}
 
-	_, err := c.DoHTTPGet(ctx, "block_results", params, result)
+	var err error
+	if c.JSONRPC {
+		_, err = c.DoHTTPPost(ctx, "block_results", params, result)
+	} else {
+		_, err = c.DoHTTPGet(ctx, "block_results", params, result)
+	}
 	if err != nil {
 		return nil, err
 	}

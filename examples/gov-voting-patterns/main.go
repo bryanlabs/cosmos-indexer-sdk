@@ -24,11 +24,11 @@ import (
 // This defines the custom message parser for the governance vote message type
 // It implements the MessageParser interface
 type MsgVoteParser struct {
-	Id string
+	ID string
 }
 
 func (c *MsgVoteParser) Identifier() string {
-	return c.Id
+	return c.ID
 }
 
 func (c *MsgVoteParser) ParseMessage(cosmosMsg stdTypes.Msg, log *indexerTxTypes.LogMessage, cfg config.IndexConfig) (*any, error) {
@@ -138,11 +138,11 @@ func (c *MsgVoteParser) IndexMessage(dataset *any, db *gorm.DB, message models.M
 }
 
 type MsgSubmitProposalParser struct {
-	Id string
+	ID string
 }
 
 func (c *MsgSubmitProposalParser) Identifier() string {
-	return c.Id
+	return c.ID
 }
 
 func (c *MsgSubmitProposalParser) ParseMessage(cosmosMsg stdTypes.Msg, log *indexerTxTypes.LogMessage, cfg config.IndexConfig) (*any, error) {
@@ -285,10 +285,10 @@ func main() {
 
 	// Register the custom message parser for the vote message types. Our parser can handle both v1 and v1beta1 vote messages.
 	// However, they must be uniquely identified by the Identifier() method. This will make identifying any parser errors easier.
-	v1Beta1VoteParser := &MsgVoteParser{Id: "vote-v1beta1"}
-	v1VoteParser := &MsgVoteParser{Id: "vote-v1"}
-	v1Beta1SubmitParser := &MsgSubmitProposalParser{Id: "submit-proposal-v1beta1"}
-	v1SubmitParser := &MsgSubmitProposalParser{Id: "submit-proposal-v1"}
+	v1Beta1VoteParser := &MsgVoteParser{ID: "vote-v1beta1"}
+	v1VoteParser := &MsgVoteParser{ID: "vote-v1"}
+	v1Beta1SubmitParser := &MsgSubmitProposalParser{ID: "submit-proposal-v1beta1"}
+	v1SubmitParser := &MsgSubmitProposalParser{ID: "submit-proposal-v1"}
 	indexer.RegisterCustomMessageParser("/cosmos.gov.v1beta1.MsgVote", v1Beta1VoteParser)
 	indexer.RegisterCustomMessageParser("/cosmos.gov.v1.MsgVote", v1VoteParser)
 	indexer.RegisterCustomMessageParser("/cosmos.gov.v1beta1.MsgSubmitProposal", v1Beta1SubmitParser)

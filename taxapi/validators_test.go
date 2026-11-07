@@ -11,14 +11,14 @@ func TestValidatorMonikersPaginationAndCaching(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.URL.Path != "/cosmos/staking/v1beta1/validators" || r.URL.Query().Get("pagination.limit") != "1000" {
+		if r.URL.Path != "/cosmos/staking/v1beta1/validators" || r.URL.Query().Get(apiPaginationLimit) != "1000" {
 			t.Error("bad validator route")
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Query().Get("pagination.key") == "" {
+		w.Header().Set(apiContentType, apiJSONContentType)
+		if r.URL.Query().Get(apiPaginationKey) == "" {
 			_, _ = w.Write([]byte(`{"validators":[{"operator_address":"val1","description":{"moniker":"First"}}],"pagination":{"next_key":"abc+/="}}`))
 		} else {
-			if r.URL.Query().Get("pagination.key") != "abc+/=" {
+			if r.URL.Query().Get(apiPaginationKey) != "abc+/=" {
 				t.Error("pagination key corrupted")
 			}
 			_, _ = w.Write([]byte(`{"validators":[{"operator_address":"val2","description":{"moniker":"Second"}}],"pagination":{"next_key":""}}`))
@@ -51,8 +51,8 @@ func TestValidatorLookupFailureDoesNotInventNames(t *testing.T) {
 }
 
 func TestIncomeCSVIncludesValidatorAndTrigger(t *testing.T) {
-	rows := []Row{{Category: "reward", Symbol: "ATOM", Amount: d(2), ValueUSD: d(4), ValidatorAddress: "cosmosvaloper1test", ValidatorMoniker: "Validator Name", RewardTrigger: "redelegate"}}
-	csv := buildIncomeCSV(rows, "wallet", RecognitionPolicyDefault, undisclosedAlways)
+	rows := []Row{{Category: apiReward, Symbol: apiSymbolATOM, Amount: d(2), ValueUSD: d(4), ValidatorAddress: "cosmosvaloper1test", ValidatorMoniker: "Validator Name", RewardTrigger: apiRedelegate}}
+	csv := buildIncomeCSV(rows, apiWallet, RecognitionPolicyDefault, undisclosedAlways)
 	if !strings.Contains(csv, "validator_address,validator_moniker,reward_trigger") || !strings.Contains(csv, "cosmosvaloper1test,Validator Name,redelegate") {
 		t.Fatal(csv)
 	}

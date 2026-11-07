@@ -77,12 +77,3 @@ func (a *AssetIdentity) addReason(code string) {
 		a.Reasons = append(a.Reasons, text)
 	}
 }
-
-func (a *AssetIdentity) hasReason(code string) bool {
-	for _, existing := range a.ReasonCodes {
-		if existing == code {
-			return true
-		}
-	}
-	return false
-}

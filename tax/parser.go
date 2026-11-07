@@ -1,11 +1,13 @@
 package tax
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -13,6 +15,7 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
 	"github.com/DefiantLabs/cosmos-indexer/parsers"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -28,30 +31,54 @@ import (
 // MessageTypeURLs is every message type this parser classifies. main() registers
 // the same parser instance under each.
 var MessageTypeURLs = []string{
+	"/cosmos.staking.v1beta1.MsgCreateValidator",
+	"/cosmos.distribution.v1beta1.MsgFundCommunityPool",
+	"/cosmos.vesting.v1beta1.MsgCreateVestingAccount",
+	"/cosmos.vesting.v1beta1.MsgCreatePermanentLockedAccount",
+	"/cosmos.vesting.v1beta1.MsgCreatePeriodicVestingAccount",
+	"/cosmwasm.wasm.v1.MsgInstantiateContract",
+	"/cosmwasm.wasm.v1.MsgInstantiateContract2",
+	"/cosmwasm.wasm.v1.MsgMigrateContract",
 	"/cosmos.bank.v1beta1.MsgSend",
 	"/cosmos.bank.v1beta1.MsgMultiSend",
-	"/cosmos.staking.v1beta1.MsgDelegate",
-	"/cosmos.staking.v1beta1.MsgUndelegate",
-	"/cosmos.staking.v1beta1.MsgBeginRedelegate",
-	"/cosmos.staking.v1beta1.MsgCancelUnbondingDelegation",
-	"/cosmos.gov.v1.MsgDeposit",
-	"/cosmos.gov.v1.MsgSubmitProposal",
-	"/cosmos.gov.v1beta1.MsgDeposit",
-	"/cosmos.gov.v1beta1.MsgSubmitProposal",
-	"/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
+	typeURLDelegate,
+	typeURLUndelegate,
+	typeURLBeginRedelegate,
+	typeURLCancelUnbondingDelegation,
+	typeURLGovDeposit,
+	typeURLGovSubmitProposal,
+	typeURLLegacyGovDeposit,
+	typeURLLegacyGovSubmitProposal,
+	typeURLWithdrawDelegatorReward,
 	"/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission",
 	"/cosmos.authz.v1beta1.MsgExec",
-	"/ibc.applications.transfer.v1.MsgTransfer",
-	"/ibc.core.channel.v1.MsgRecvPacket",
-	"/cosmwasm.wasm.v1.MsgExecuteContract",
+	typeURLIBCTransfer,
+	typeURLIBCRecvPacket,
+	"/ibc.core.channel.v1.MsgTimeout",
+	"/ibc.core.channel.v1.MsgTimeoutOnClose",
+	"/ibc.core.channel.v1.MsgAcknowledgement",
+	typeURLExecuteContract,
 	TypeURLWithdrawTokenizeShareReward,
 	TypeURLWithdrawAllTokenizeShareReward,
+	LegacyTypeURLTokenizeShares,
+	LegacyTypeURLRedeemTokensForShares,
+	LegacyTypeURLTransferTokenizeShareRecord,
+	LegacyTypeURLDisableTokenizeShares,
+	LegacyTypeURLEnableTokenizeShares,
+	LegacyTypeURLValidatorBond,
+	LegacyTypeURLUnbondValidator,
+	LegacyTypeURLWithdrawTokenizeShareReward,
+	LegacyTypeURLWithdrawAllTokenizeShareReward,
 	TypeURLTokenizeShares,
 	TypeURLRedeemTokensForShares,
 	TypeURLTransferTokenizeShareRecord,
 	TypeURLV2RecvPacket,
+	TypeURLV2Timeout,
+	TypeURLV2Acknowledgement,
 	TypeURLTFMint,
 	TypeURLTFForceTransfer,
+	TypeURLTFBurn,
+	TypeURLTFCreateDenom,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -71,24 +98,48 @@ func (p *Parser) ParseMessage(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage,
 				return nil, err
 			}
 			for _, a := range groups {
-				if _, err := sdk.ParseCoinsNormalized(a["amount"]); err != nil {
+				if _, err := sdk.ParseCoinsNormalized(a[attributeAmount]); err != nil {
 					return nil, fmt.Errorf("tax: malformed withdraw_rewards amount: %w", err)
 				}
 			}
 		}
 	}
-	events := classify(cosmosMsg, log)
+	state := &classificationState{}
+	events := classifyWithState(cosmosMsg, log, state, 0, "")
 	// Persist empty results too, so reclassification removes stale rows.
 	v := any(events)
+	if len(state.issues) != 0 {
+		return &v, &ClassificationIncompleteError{Issues: state.issues}
+	}
 	return &v, nil
 }
 
 // classify turns a single message + its event log into taxable events. It's a
 // standalone function so MsgExec can recurse into its inner messages.
 func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent {
+	return classifyWithState(cosmosMsg, log, &classificationState{}, 0, "")
+}
+
+func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state *classificationState, depth int, path string) []TaxableEvent {
+	if log == nil {
+		log = &indexerTxTypes.LogMessage{}
+	}
 	var events []TaxableEvent
 
 	switch m := cosmosMsg.(type) {
+	// The legacy SDK fork emits the same economic events as x/liquid. Its
+	// WithdrawAll emits one aggregate reward event rather than one per record;
+	// tokenizeShareRewardEvents handles both without counting module transfers.
+	case *LegacyMsgTokenizeShares:
+		return classify(&m.MsgTokenizeShares, log)
+	case *LegacyMsgRedeemTokensForShares:
+		return classify(&m.MsgRedeemTokensForShares, log)
+	case *LegacyMsgTransferTokenizeShareRecord:
+		return classify(&m.MsgTransferTokenizeShareRecord, log)
+	case *LegacyMsgWithdrawTokenizeShareRecordReward:
+		return classify(&m.MsgWithdrawTokenizeShareRecordReward, log)
+	case *LegacyMsgWithdrawAllTokenizeShareRecordReward:
+		return classify(&m.MsgWithdrawAllTokenizeShareRecordReward, log)
 	case *banktypes.MsgSend:
 		for _, c := range m.Amount {
 			events = append(events, TaxableEvent{
@@ -132,6 +183,52 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding")...)
 		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
 
+	// A new validator's self-bond is staking principal like any delegation. The
+	// SDK emits create_validator rather than delegate, so the amount comes from
+	// the message.
+	case *stakingtypes.MsgCreateValidator:
+		delegator := m.DelegatorAddress
+		if delegator == "" {
+			delegator = accountForValidator(m.ValidatorAddress)
+		}
+		if m.Value.IsPositive() && delegator != "" {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryDelegate), FromAddr: delegator,
+				Amount: m.Value.Amount.String(), Denom: m.Value.Denom, ValidatorAddress: m.ValidatorAddress,
+			})
+		}
+
+	// Funding the community pool gives coins away with nothing in return.
+	case *disttypes.MsgFundCommunityPool:
+		for _, c := range m.Amount {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryTransfer), FromAddr: m.Depositor, ToAddr: distributionModuleAddress,
+				Amount: c.Amount.String(), Denom: c.Denom, Detail: detailJSON(map[string]string{detailProtocol: "community_pool"}),
+			})
+		}
+
+	// Creating a vesting account moves the full grant to the new account up
+	// front; vesting only restricts when it can be spent.
+	case *vestingtypes.MsgCreateVestingAccount:
+		events = append(events, coinTransfers(m.FromAddress, m.ToAddress, m.Amount)...)
+	case *vestingtypes.MsgCreatePermanentLockedAccount:
+		events = append(events, coinTransfers(m.FromAddress, m.ToAddress, m.Amount)...)
+	case *vestingtypes.MsgCreatePeriodicVestingAccount:
+		total := sdk.NewCoins()
+		for _, period := range m.VestingPeriods {
+			total = total.Add(period.Amount...)
+		}
+		events = append(events, coinTransfers(m.FromAddress, m.ToAddress, total)...)
+
+	// Instantiating or migrating a contract runs contract code that can sell,
+	// mint or distribute just like an execute.
+	case *wasmtypes.MsgInstantiateContract:
+		events = append(events, wasmExecuteEvents(log)...)
+	case *wasmtypes.MsgInstantiateContract2:
+		events = append(events, wasmExecuteEvents(log)...)
+	case *wasmtypes.MsgMigrateContract:
+		events = append(events, wasmExecuteEvents(log)...)
+
 	// Governance deposits are refundable, so record-only.
 	case *govv1.MsgDeposit:
 		events = append(events, govDepositEvents(log, m.Depositor)...)
@@ -160,10 +257,14 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 		events = append(events, lsmRecordEvents(log, m.Sender)...)
 
 	case *disttypes.MsgWithdrawDelegatorReward:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "claim")...)
+		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, actionClaim)...)
 
 	case *disttypes.MsgWithdrawValidatorCommission:
-		for recv, coins := range receivedCoinsByReceiver(log) {
+		credits := receivedCoinsByReceiver(log)
+		if len(credits) == 0 {
+			credits = transfersFromSender(log, distributionModuleAddress)
+		}
+		for recv, coins := range credits {
 			for _, c := range coins {
 				events = append(events, TaxableEvent{
 					Category: string(CategoryCommission),
@@ -187,23 +288,16 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress)...)
 
 	case *authz.MsgExec:
-		// GetMessages is all-or-nothing: one inner message the codec cannot
-		// decode makes it error, which used to discard the entire MsgExec.
-		// Restake bots wrap reward withdrawals and delegations in here, so that
-		// silently dropped real income. Unpack them one at a time instead and
-		// keep the index alignment the event lookup depends on.
-		for i, anyMsg := range m.Msgs {
-			inner, ok := anyMsg.GetCachedValue().(sdk.Msg)
-			if !ok || inner == nil {
-				config.Log.Debugf("tax: skipping undecodable authz inner message %d of type %s", i, anyMsg.TypeUrl)
-				continue
-			}
-			sub := eventsForAuthzIndex(log, i)
-			events = append(events, classify(inner, sub)...)
-		}
+		return classifyAuthz(m, log, state, depth, path)
 
 	case *transfertypes.MsgTransfer:
 		trigger, detail := ibcMemoIntent(m.Memo)
+		if detail == nil {
+			detail = map[string]string{}
+		}
+		for key, value := range OutboundPacketDetail(log, m) {
+			detail[key] = value
+		}
 		events = append(events, TaxableEvent{
 			Category: string(CategoryIBCOut),
 			FromAddr: m.Sender, ToAddr: m.Receiver,
@@ -231,6 +325,30 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 			})
 		}
 
+	// A burn first moves the coins from the holder to the tokenfactory module,
+	// so the holder's disposal is that transfer. Read it from the events: the
+	// message does not say whose coins went when burnFromAddress is empty.
+	case *MsgTFBurn:
+		from := m.BurnFromAddress
+		if from == "" {
+			from = m.Sender
+		}
+		for to, coins := range transfersFromSender(log, from) {
+			events = append(events, coinTransfers(from, to, coins)...)
+		}
+
+	// Creating a denom charges a creation fee (10 ATOM on Cosmos Hub, paid to
+	// the community pool) with nothing coming back.
+	case *MsgTFCreateDenom:
+		for to, coins := range transfersFromSender(log, m.Sender) {
+			for _, c := range coins {
+				events = append(events, TaxableEvent{
+					Category: string(CategoryExpense), FromAddr: m.Sender, ToAddr: to,
+					Amount: c.Amount.String(), Denom: c.Denom, RewardTrigger: "denom_creation_fee",
+				})
+			}
+		}
+
 	// An admin moving someone else's coins is still a movement for both sides.
 	case *MsgTFForceTransfer:
 		if m.Amount != "" && m.Denom != "" {
@@ -246,14 +364,40 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 	// packet payload, because v2 payloads on Cosmos Hub arrive solidity-ABI
 	// encoded from the Ethereum bridge. See tax/ibcv2.go.
 	case *MsgRecvPacketV2:
-		for _, e := range ibcV2ReceiveEvents(log) {
+		received, issues := ibcV2ReceiveEvents(log, m.Packet)
+		state.issues = append(state.issues, issues...)
+		for _, e := range received {
 			if isSkipRouterHop(log, e.ToAddr) {
-				e.RewardTrigger = "skip_forward"
-				e.Detail = detailJSON(map[string]string{"protocol": "skip-go", "routed_from_hub": "true"})
+				e.RewardTrigger = triggerSkipForward
+				e.Detail = detailJSON(map[string]string{detailProtocol: contractNameSkipGo, detailRoutedFromHub: attributeTrue})
 			}
 			events = append(events, e)
 		}
 		events = append(events, skipForwardEvents(log)...)
+
+	case *chantypes.MsgTimeout:
+		refunded, issues := ibcV1RefundEvents(log, m.Packet, true, nil)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
+	case *chantypes.MsgTimeoutOnClose:
+		refunded, issues := ibcV1RefundEvents(log, m.Packet, true, nil)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
+	case *chantypes.MsgAcknowledgement:
+		refunded, issues := ibcV1RefundEvents(log, m.Packet, false, m.Acknowledgement)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
+	case *MsgTimeoutV2:
+		refunded, issues := ibcV2RefundEvents(log, m.Packet, true)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
+	case *MsgAcknowledgementV2:
+		if !isV2ErrorAcknowledgement(m.AcknowledgementRaw) {
+			break
+		}
+		refunded, issues := ibcV2RefundEvents(log, m.Packet, false)
+		events = append(events, refunded...)
+		state.issues = append(state.issues, issues...)
 
 	case *chantypes.MsgRecvPacket:
 		// An NFT bridge packet lands on a wasm.<ics721> port and carries
@@ -266,22 +410,24 @@ func classify(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage) []TaxableEvent 
 			break
 		}
 		var data transfertypes.FungibleTokenPacketData
-		if err := json.Unmarshal(m.Packet.GetData(), &data); err == nil && data.Amount != "" {
-			e := TaxableEvent{
-				Category: string(CategoryIBCIn),
-				FromAddr: data.Sender, ToAddr: data.Receiver,
-				Amount: data.Amount, Denom: data.Denom,
-			}
-			if isSkipRouterHop(log, data.Receiver) {
-				e.RewardTrigger = "skip_forward"
-				e.Detail = detailJSON(map[string]string{"protocol": "skip-go", "routed_from_hub": "true"})
-			} else if trigger, detail := ibcMemoIntent(data.Memo); trigger != "" {
-				e.RewardTrigger = trigger
-				e.Detail = detailJSON(detail)
-			}
-			events = append(events, e)
-			events = append(events, skipForwardEvents(log)...)
+		if err := json.Unmarshal(m.Packet.GetData(), &data); err != nil {
+			data = transfertypes.FungibleTokenPacketData{}
 		}
+		received, issues := ibcV1ReceiveEvents(log, m.Packet, data)
+		state.issues = append(state.issues, issues...)
+		if len(received) == 0 {
+			break
+		}
+		e := received[0]
+		if isSkipRouterHop(log, data.Receiver) {
+			e.RewardTrigger = triggerSkipForward
+			e.Detail = detailJSON(map[string]string{detailProtocol: contractNameSkipGo, detailRoutedFromHub: attributeTrue})
+		} else if trigger, detail := ibcMemoIntent(data.Memo); trigger != "" {
+			e.RewardTrigger = trigger
+			e.Detail = detailJSON(detail)
+		}
+		events = append(events, e)
+		events = append(events, skipForwardEvents(log)...)
 	}
 
 	return events
@@ -294,6 +440,7 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		for i := range events {
+			boundIndexedFields(&events[i])
 			events[i].MessageID = message.ID
 			events[i].SubIndex = i
 			events[i].BlockHeight = message.Tx.Block.Height
@@ -301,13 +448,43 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 			events[i].TxHash = message.Tx.Hash
 			if err := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "message_id"}, {Name: "sub_index"}},
-				DoUpdates: clause.AssignmentColumns([]string{"category", "amount", "denom", "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash", "validator_address", "reward_trigger", "detail"}),
+				DoUpdates: clause.AssignmentColumns([]string{"category", attributeAmount, attributeDenom, "asset", "from_addr", "to_addr", "block_height", "timestamp", "tx_hash", "validator_address", "reward_trigger", "detail"}),
 			}).Create(&events[i]).Error; err != nil {
 				return err
 			}
 		}
 		return tx.Where("message_id = ? AND sub_index >= ?", message.ID, len(events)).Delete(&TaxableEvent{}).Error
 	})
+}
+
+// maxIndexedField bounds the taxable_events columns that carry a btree index.
+// Postgres refuses an index entry over a few kilobytes, and the counterparty
+// on an IBC transfer is whatever string the sender typed: spam transfers carry
+// receivers of 600 kB, which failed the whole block. No real address comes
+// near the bound, so a longer value, or one Postgres text cannot hold, is kept
+// as a readable prefix plus the SHA-256 of the whole string. That stays unique,
+// never matches a wallet, and leaves the coin movement of the real sender in
+// place; the full string remains in the message's own event attributes.
+const maxIndexedField = 512
+
+func boundIndexed(s string) string {
+	if len(s) <= maxIndexedField && utf8.ValidString(s) && !strings.ContainsRune(s, 0) {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	prefix := s
+	if len(prefix) > 64 {
+		prefix = prefix[:64]
+	}
+	prefix = strings.ReplaceAll(strings.ToValidUTF8(prefix, ""), "\x00", "")
+	return prefix + "...sha256:" + hex.EncodeToString(sum[:])
+}
+
+func boundIndexedFields(e *TaxableEvent) {
+	e.FromAddr = boundIndexed(e.FromAddr)
+	e.ToAddr = boundIndexed(e.ToAddr)
+	e.Asset = boundIndexed(e.Asset)
+	e.ValidatorAddress = boundIndexed(e.ValidatorAddress)
 }
 
 // nftSaleEvents turns each wasm-finalize-sale event (CosmWasm NFT marketplace,
@@ -327,7 +504,7 @@ func nftSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 				collection = a.Value
 			case "token_id":
 				tokenID = a.Value
-			case "denom":
+			case attributeDenom:
 				denom = a.Value
 			case "price":
 				price = a.Value
@@ -356,14 +533,14 @@ func nftSaleEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 func swapEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var out []TaxableEvent
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
-		if a["action"] != "swap" {
+		if a[attributeAction] != string(CategorySwap) {
 			continue
 		}
-		recv := a["receiver"]
+		recv := a[attributeReceiver]
 		if recv == "" || a["offer_asset"] == "" || a["ask_asset"] == "" {
 			continue
 		}
@@ -389,18 +566,18 @@ func swapEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 func nftMintEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	var out []TaxableEvent
 	for _, ev := range log.Events {
-		if ev.Type != "wasm" {
+		if ev.Type != eventWasm {
 			continue
 		}
 		a := attrMap(ev)
-		if a["action"] != "mint" || a["token_id"] == "" {
+		if a[attributeAction] != "mint" || a["token_id"] == "" {
 			continue
 		}
 		owner := a["owner"]
 		if owner == "" {
 			owner = a["minter"]
 		}
-		collection := a["_contract_address"]
+		collection := a[attributeContractAddress]
 		// Mint cost = what the owner spent in this message (the mint price).
 		cost := coinsSpentBy(log, owner)
 		amount, denom := "", ""
@@ -438,7 +615,7 @@ func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 			switch a.Key {
 			case "spender":
 				cur = a.Value
-			case "amount":
+			case attributeAmount:
 				if cur == target {
 					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
 						total = total.Add(coins...)
@@ -470,10 +647,10 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger st
 		}
 		for _, a := range groups {
 			// Older SDKs omit the delegator, so use the message's delegator.
-			if a["delegator"] != "" && a["delegator"] != delegator {
+			if a[attributeDelegator] != "" && a[attributeDelegator] != delegator {
 				continue
 			}
-			coins, err := sdk.ParseCoinsNormalized(a["amount"])
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
 			if err != nil {
 				continue
 			}
@@ -484,7 +661,7 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger st
 				out = append(out, TaxableEvent{
 					Category: string(CategoryReward), ToAddr: delegator,
 					Amount: coin.Amount.String(), Denom: coin.Denom,
-					ValidatorAddress: a["validator"], RewardTrigger: trigger,
+					ValidatorAddress: a[attributeValidator], RewardTrigger: trigger,
 				})
 			}
 		}
@@ -503,7 +680,7 @@ func rewardAttributeGroups(event indexerTxTypes.LogMessageEvent) ([]map[string]s
 		if len(current) == 0 {
 			return nil
 		}
-		if _, ok := current["amount"]; !ok || current["validator"] == "" {
+		if _, ok := current[attributeAmount]; !ok || current[attributeValidator] == "" {
 			return errors.New("tax: incomplete withdraw_rewards event")
 		}
 		groups = append(groups, current)
@@ -511,7 +688,7 @@ func rewardAttributeGroups(event indexerTxTypes.LogMessageEvent) ([]map[string]s
 		return nil
 	}
 	for _, a := range event.Attributes {
-		if a.Key != "amount" && a.Key != "validator" && a.Key != "delegator" {
+		if a.Key != attributeAmount && a.Key != attributeValidator && a.Key != attributeDelegator {
 			continue
 		}
 		if _, exists := current[a.Key]; exists {
@@ -530,58 +707,9 @@ func rewardAttributeGroups(event indexerTxTypes.LogMessageEvent) ([]map[string]s
 	return groups, nil
 }
 
-// ibcCallbackErrorPrefix is what ibc-go's callbacks middleware prepends to the
-// type and attribute keys of events emitted during a callback it had to revert.
+// ibcCallbackErrorPrefix marks events re-emitted by IBC core from a discarded
+// application receive cache, on both event types and attribute keys.
 const ibcCallbackErrorPrefix = "ibccallbackerror-"
-
-// ibcV2ReceiveEvents turns the fungible_token_packet events of a channel v2
-// receive into inbound transfers. The module emits one per payload with the
-// sender, receiver, denom and amount already extracted, which is exactly what
-// the v1 path digs out of the packet's JSON data.
-//
-// Unlike v1, the event carries a success flag, so a receive that wrote an error
-// acknowledgement and moved no funds is not recorded as an acquisition.
-func ibcV2ReceiveEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
-	var out []TaxableEvent
-	for _, ev := range log.Events {
-		// When a destination callback fails, ibc-go's callbacks middleware
-		// reverts the callback and re-emits that execution's events with an
-		// ibccallbackerror- prefix on the type AND on every attribute key. The
-		// transfer itself is not reverted, so the recipient still received the
-		// coins and it is still an acquisition. Matching the bare type only
-		// silently dropped those.
-		if strings.TrimPrefix(ev.Type, ibcCallbackErrorPrefix) != "fungible_token_packet" {
-			continue
-		}
-		var sender, receiver, denom, amount, success string
-		for _, a := range ev.Attributes {
-			switch strings.TrimPrefix(a.Key, ibcCallbackErrorPrefix) {
-			case "sender":
-				sender = a.Value
-			case "receiver":
-				receiver = a.Value
-			case "denom":
-				denom = a.Value
-			case "amount":
-				amount = a.Value
-			case "success":
-				success = a.Value
-			}
-		}
-		if success != "" && success != "true" {
-			continue
-		}
-		if amount == "" || receiver == "" {
-			continue
-		}
-		out = append(out, TaxableEvent{
-			Category: string(CategoryIBCIn),
-			FromAddr: sender, ToAddr: receiver,
-			Amount: amount, Denom: denom,
-		})
-	}
-	return out
-}
 
 // tokenizeShareRewardEvents reads the withdraw_tokenize_share_reward events the
 // x/liquid module emits, one per tokenize-share record settled, and attributes
@@ -598,7 +726,7 @@ func tokenizeShareRewardEvents(log *indexerTxTypes.LogMessage, owner string) []T
 			continue
 		}
 		for _, a := range ev.Attributes {
-			if a.Key != "amount" {
+			if a.Key != attributeAmount {
 				continue
 			}
 			if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
@@ -622,15 +750,15 @@ func tokenizeShareRewardEvents(log *indexerTxTypes.LogMessage, owner string) []T
 func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coins {
 	out := map[string]sdk.Coins{}
 	for _, ev := range log.Events {
-		if ev.Type != "coin_received" {
+		if ev.Type != eventCoinReceived {
 			continue
 		}
 		cur := ""
 		for _, a := range ev.Attributes {
 			switch a.Key {
-			case "receiver":
+			case attributeReceiver:
 				cur = a.Value
-			case "amount":
+			case attributeAmount:
 				if cur != "" {
 					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
 						out[cur] = out[cur].Add(coins...)
@@ -642,19 +770,61 @@ func receivedCoinsByReceiver(log *indexerTxTypes.LogMessage) map[string]sdk.Coin
 	return out
 }
 
+// coinTransfers records a message-declared movement of coins between accounts.
+func coinTransfers(from, to string, coins sdk.Coins) []TaxableEvent {
+	var out []TaxableEvent
+	for _, c := range coins {
+		if c.IsPositive() {
+			out = append(out, TaxableEvent{Category: string(CategoryTransfer), FromAddr: from, ToAddr: to, Amount: c.Amount.String(), Denom: c.Denom})
+		}
+	}
+	return out
+}
+
+// accountForValidator returns the account that operates a validator: the
+// same key under the account prefix.
+func accountForValidator(valoper string) string {
+	addr, err := sdk.ValAddressFromBech32(valoper)
+	if err != nil {
+		return ""
+	}
+	return sdk.AccAddress(addr).String()
+}
+
+// transfersFromSender groups transfer amounts paid by sender, by recipient.
+// SDK 0.42 and earlier (Gaia v4 and v5) emit no coin_received, so commission
+// is only visible as the distribution module's transfer to the withdraw
+// address. Those logs merge repeated transfers into one event, so attributes
+// are read as recipient, sender, amount runs.
+func transfersFromSender(log *indexerTxTypes.LogMessage, sender string) map[string]sdk.Coins {
+	out := map[string]sdk.Coins{}
+	for _, ev := range log.Events {
+		if ev.Type != string(CategoryTransfer) {
+			continue
+		}
+		recipient, from := "", ""
+		for _, a := range ev.Attributes {
+			switch a.Key {
+			case attributeRecipient:
+				recipient, from = a.Value, ""
+			case attributeSender:
+				from = a.Value
+			case attributeAmount:
+				if recipient != "" && from == sender {
+					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
+						out[recipient] = out[recipient].Add(coins...)
+					}
+				}
+				recipient, from = "", ""
+			}
+		}
+	}
+	return out
+}
+
 // eventsForAuthzIndex returns a sub-log containing only the events tagged with
 // the given authz_msg_index, so an inner MsgExec message classifies against its
 // own events.
 func eventsForAuthzIndex(log *indexerTxTypes.LogMessage, idx int) *indexerTxTypes.LogMessage {
-	target := strconv.Itoa(idx)
-	sub := &indexerTxTypes.LogMessage{}
-	for _, ev := range log.Events {
-		for _, a := range ev.Attributes {
-			if a.Key == "authz_msg_index" && a.Value == target {
-				sub.Events = append(sub.Events, ev)
-				break
-			}
-		}
-	}
-	return sub
+	return authzSubLog(log, idx)
 }

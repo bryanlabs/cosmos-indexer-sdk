@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -39,27 +40,67 @@ func env(k, d string) string {
 	return d
 }
 
-var client = &http.Client{Timeout: 30 * time.Second}
+var client = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		if len(via) == 0 || !sameOrigin(req.URL, via[0].URL) {
+			return fmt.Errorf("cross-origin redirect refused")
+		}
+		return nil
+	},
+}
 
-func getJSON(url string, out any) error {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func sameOrigin(a, b *url.URL) bool {
+	return a.Scheme == b.Scheme && strings.EqualFold(a.Host, b.Host)
+}
+
+// Only the GitHub API and endpoints configured by the operator may be read.
+// Private node REST endpoints are intentional; request input cannot add hosts.
+func allowedURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
+		return nil, fmt.Errorf("invalid HTTP endpoint")
+	}
+	for _, endpoint := range []string{"https://api.github.com", env("NODE_REST_API", "http://localhost:1317"), os.Getenv("UPGRADES_API_URL")} {
+		approved, err := url.Parse(endpoint)
+		if err == nil && sameOrigin(u, approved) {
+			return u, nil
+		}
+	}
+	return nil, fmt.Errorf("HTTP endpoint is not configured")
+}
+
+func getJSON(rawURL string, out any) error {
+	u, err := allowedURL(rawURL)
+	if err != nil {
+		return err
+	}
+	// #nosec G704 -- allowedURL pins the origin to operator configuration; redirects cannot change it.
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "bryanlabs-taxwatch/1.0")
-	if strings.Contains(url, "api.github.com") {
+	if u.Scheme == "https" && strings.EqualFold(u.Host, "api.github.com") {
 		if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 		}
 	}
+	// #nosec G704 -- the validated request and every redirect stay on the approved origin.
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s: HTTP %d", url, resp.StatusCode)
+		return fmt.Errorf("%s: HTTP %d", u.Redacted(), resp.StatusCode)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

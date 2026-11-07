@@ -4,9 +4,8 @@
 package taxapi
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -98,7 +97,7 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 			Decimals int    `json:"decimals"`
 		} `json:"denoms"`
 	}
-	if err := o.get(fmt.Sprintf("%s/denoms?chain=%s", o.base, chain), &body); err == nil {
+	if err := o.get(o.base, "/denoms", url.Values{apiChain: {chain}}, &body); err == nil {
 		for d, v := range body.Denoms {
 			m[d] = DenomMeta{Symbol: v.Symbol, Decimals: v.Decimals}
 		}
@@ -118,7 +117,7 @@ const cosmosHubNobleUSDCDenom = "ibc/27BCBC098A3AE31C80E18A3EA7A516F2530B7362F83
 // trace is pinned to transfer/channel-1266/transfer/channel-2/uusdc. The oracle
 // currently knows its symbol and decimals but has no CoinGecko mapping for it.
 func fixedUSDStablecoinPrice(chain, denom string) (float64, bool) {
-	if chain == "mainnet" && denom == cosmosHubNobleUSDCDenom {
+	if chain == apiMainnet && denom == cosmosHubNobleUSDCDenom {
 		return 1, true
 	}
 	return 0, false
@@ -148,9 +147,8 @@ func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
 		USD   float64 `json:"usd"`
 		Found bool    `json:"found"`
 	}
-	url := fmt.Sprintf("%s/price?chain=%s&denom=%s&date=%s", o.base, chain, denom, date)
 	usd, found := 0.0, false
-	if err := o.get(url, &body); err == nil {
+	if err := o.get(o.base, "/price", url.Values{apiChain: {chain}, apiDenom: {denom}, apiDate: {date}}, &body); err == nil {
 		usd, found = body.USD, body.Found
 	}
 	if !found {
@@ -190,8 +188,7 @@ func (o *Oracle) BankMetaFallback(denom string) (DenomMeta, bool) {
 			} `json:"denom_units"`
 		} `json:"metadata"`
 	}
-	url := fmt.Sprintf("%s/cosmos/bank/v1beta1/denoms_metadata/%s", o.nodeREST, denom)
-	if err := o.get(url, &body); err != nil {
+	if err := o.get(o.nodeREST, "/cosmos/bank/v1beta1/denoms_metadata/"+denom, nil, &body); err != nil {
 		return DenomMeta{}, false
 	}
 	decimals := 0
@@ -246,8 +243,7 @@ func (o *Oracle) DenomTrace(hash string) (string, bool) {
 		} `json:"denom_trace"`
 	}
 	path, found := "", false
-	url := fmt.Sprintf("%s/ibc/apps/transfer/v1/denom_traces/%s", o.nodeREST, hash)
-	if err := o.get(url, &body); err == nil && body.DenomTrace.Path != "" && body.DenomTrace.BaseDenom != "" {
+	if err := o.get(o.nodeREST, "/ibc/apps/transfer/v1/denom_traces/"+hash, nil, &body); err == nil && body.DenomTrace.Path != "" && body.DenomTrace.BaseDenom != "" {
 		path, found = body.DenomTrace.Path+"/"+body.DenomTrace.BaseDenom, true
 	}
 
@@ -257,16 +253,8 @@ func (o *Oracle) DenomTrace(hash string) (string, bool) {
 	return path, found
 }
 
-func (o *Oracle) get(url string, out any) error {
-	resp, err := o.http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("oracle %s: %d", url, resp.StatusCode)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+func (o *Oracle) get(origin, path string, query url.Values, out any) error {
+	return configuredJSONGet(o.http, origin, path, query, out)
 }
 
 func nowUTC() time.Time { return time.Now().UTC() }
