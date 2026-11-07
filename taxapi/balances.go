@@ -131,7 +131,7 @@ func getNativeHoldings(host, address string, native NativeAsset) (nativeHoldings
 // mono-app's TAX_API_URL can point here instead of the cli.
 //
 //	GET /balance?address=cosmos1...            -> latest (live from node, persisted)
-//	GET /balance?address=...&date=YYYY-MM-DD   -> holdings as of a date (from snapshots)
+//	GET /balance?address=...&date=YYYY-MM-DD   -> holdings at the end of that UTC day, rebuilt from the index
 //	GET /balance?address=...&history=true      -> full daily series
 //
 // Node REST endpoint for live reads comes from NODE_REST_API.
@@ -157,19 +157,14 @@ func (s *Server) handleBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// "As of" a past date: serve from snapshots only (can't historically re-fetch).
-	var asOf time.Time
+	// A past date is rebuilt from the index at the end of that UTC day.
 	if d := q.Get(apiDate); d != "" {
-		if t, err := time.Parse(apiDateLayout, d); err == nil {
-			asOf = t
-		}
-	}
-	if !asOf.IsZero() {
-		if b, ok := GetBalanceSnapshotAsOf(s.db, address, asOf); ok {
-			s.writeBalance(w, address, b, false)
+		day, err := time.Parse(apiDateLayout, d)
+		if err != nil {
+			http.Error(w, "date must be YYYY-MM-DD", http.StatusBadRequest)
 			return
 		}
-		http.Error(w, "no balance snapshot for this address on or before that date", http.StatusNotFound)
+		s.handleHistoricalBalance(w, r, address, day)
 		return
 	}
 

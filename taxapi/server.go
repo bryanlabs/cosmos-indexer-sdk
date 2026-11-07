@@ -40,6 +40,8 @@ type Server struct {
 
 	indexCovMu      sync.RWMutex
 	coverageScanner *indexCoverageScanner
+
+	ledgerCov ledgerCoverage
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -59,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	mux.HandleFunc("GET /index-coverage", s.handleIndexCoverage)
 	mux.HandleFunc("GET /balance", s.handleBalance)
+	mux.HandleFunc("GET /balance-statement", s.handleBalanceStatement)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)

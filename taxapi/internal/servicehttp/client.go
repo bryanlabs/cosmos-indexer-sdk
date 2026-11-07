@@ -33,6 +33,12 @@ func New(client *http.Client, origin string) (*Endpoint, error) {
 // GetJSON cannot change the origin, including through // paths, query values,
 // path traversal or redirects. Path input is never resolved as another URL.
 func (e *Endpoint) GetJSON(path string, query url.Values, out any) error {
+	return e.GetJSONWithHeaders(path, query, nil, out)
+}
+
+// GetJSONWithHeaders is GetJSON with request headers, such as the block height
+// a Cosmos REST query is answered at.
+func (e *Endpoint) GetJSONWithHeaders(path string, query url.Values, headers map[string]string, out any) error {
 	target := e.base
 	target.Path = strings.TrimRight(target.Path, "/") + "/" + strings.TrimLeft(path, "/")
 	target.RawPath = ""
@@ -40,6 +46,9 @@ func (e *Endpoint) GetJSON(path string, query url.Values, out any) error {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target.String(), nil)
 	if err != nil {
 		return err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
 	}
 	resp, err := e.client.Do(req)
 	if err != nil {
