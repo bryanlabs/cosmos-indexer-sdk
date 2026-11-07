@@ -433,8 +433,16 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 	out := make([]Row, 0, len(events)+len(fees))
 	for _, e := range events {
 		dir := eventDirection(e, addr)
-		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
+		denom, amount := e.Denom, e.Amount
+		bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail)
+		if isShare {
+			denom, amount = bonded, bondedAmount
+		}
+		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, denom, amount, e.FromAddr, e.ToAddr)
 		row.Asset = e.Asset
+		if isShare {
+			row.Asset = e.Denom
+		}
 		row.ValidatorAddress = e.ValidatorAddress
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
@@ -465,6 +473,10 @@ func (s *Server) prewarmPrices(chain string, events []tax.TaxableEvent, fees []f
 		seen[dateKey{base, ts.UTC().Format(apiDateLayout)}] = struct{}{}
 	}
 	for _, e := range events {
+		if bonded, _, ok := lsmUnderlying(e.Category, e.Denom, e.Detail); ok {
+			add(bonded, e.Timestamp)
+			continue
+		}
 		add(e.Denom, e.Timestamp)
 	}
 	for _, f := range fees {
