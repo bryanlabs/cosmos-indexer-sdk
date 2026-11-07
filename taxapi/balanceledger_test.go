@@ -156,6 +156,14 @@ func TestWalkBackRoundingIsApproximate(t *testing.T) {
 	if got[10].Approximate[ledgerTestVal2] {
 		t.Fatal("rounding on one validator must not mark another approximate")
 	}
+	in.Events = nil
+	got, err = walkBack(in, []int64{50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[50].Approximate[ledgerTestVal] || got[50].Approximate[ledgerTestVal2] {
+		t.Fatalf("a delegation below one token per share drifts with no event of the wallet's, got %v", got[50].Approximate)
+	}
 }
 
 func TestWalkBackRedeemShares(t *testing.T) {
@@ -211,7 +219,7 @@ func TestWalkBackSlashIsApproximate(t *testing.T) {
 	in := ledgerInput{
 		Address:   ledgerTestAddr,
 		BondDenom: "uatom",
-		Anchor:    ledgerAnchor{Height: 100, Bank: map[string]*big.Int{}, Delegations: map[string]*big.Int{ledgerTestVal: bi(10990)}},
+		Anchor:    ledgerAnchor{Height: 100, Bank: map[string]*big.Int{}, Delegations: map[string]*big.Int{ledgerTestVal: bi(10990)}, Rates: map[string]validatorRate{ledgerTestVal: unitRate(20000)}},
 		// The delegation made in the slash block's transactions was not slashed.
 		Events:  []ledgerEvent{ev(1, 60, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "1000uatom")},
 		Slashes: []ledgerSlash{{Height: 60, Validator: ledgerTestVal, Fraction: decimal.RequireFromString("0.001")}},

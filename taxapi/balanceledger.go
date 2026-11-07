@@ -76,8 +76,9 @@ type ledgerAnchor struct {
 // delegation is held as shares and shown as tokens rounded down, so on a
 // validator whose tokens per share is not exactly one (it was slashed at some
 // point) each delegation change moves the shown tokens by up to one base unit
-// more or less than the event's amount. Shares stay put through a slash, so
-// the ratio is constant between slashes.
+// more or less than the event's amount, and the shares issued to every new
+// delegation are rounded, which moves the rate slightly. A validator at
+// exactly one stays there until it is slashed.
 type validatorRate struct {
 	Tokens *big.Int
 	Shares decimal.Decimal
@@ -259,6 +260,17 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		}
 		unb, unbApprox := unbondingAt(in, h)
 		shown := copyInts(dels)
+		// Other delegators' share issue on a validator below one token per
+		// share moves its rate a little, so a delegation there can shift a few
+		// base units with no event of the wallet's.
+		drift := map[string]bool{}
+		if h < in.Anchor.Height {
+			for v, d := range shown {
+				if d.Sign() != 0 && !in.Anchor.Rates[v].unit() {
+					drift[v] = true
+				}
+			}
+		}
 		for v, n := range slack {
 			approx[v] = true
 			// A delegation the rounding carried just below zero was emptied.
@@ -277,6 +289,9 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 			hold.Approximate[v] = true
 		}
 		for v := range unbApprox {
+			hold.Approximate[v] = true
+		}
+		for v := range drift {
 			hold.Approximate[v] = true
 		}
 		for _, m := range []map[string]*big.Int{hold.Liquid, hold.Delegations, hold.Unbonding} {
