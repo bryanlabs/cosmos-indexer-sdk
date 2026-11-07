@@ -71,3 +71,12 @@ func TestArchiveGuardTimeout(t *testing.T) {
 		t.Fatal("expected timeout")
 	}
 }
+
+func TestLoggableMethodHidesUnknownPathSegments(t *testing.T) {
+	if got := loggableMethod("block_results"); got != "block_results" {
+		t.Fatalf("got %q", got)
+	}
+	if got := loggableMethod("s3cr3t-path-token"); got != "other" {
+		t.Fatalf("got %q", got)
+	}
+}
