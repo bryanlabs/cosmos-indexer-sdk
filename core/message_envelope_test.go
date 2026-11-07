@@ -19,6 +19,9 @@ import (
 	tx "github.com/cosmos/cosmos-sdk/types/tx"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	bank "github.com/cosmos/cosmos-sdk/x/bank/types"
+	govv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
+	"github.com/cosmos/gogoproto/proto"
+	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -80,5 +83,44 @@ func TestKnownAuthzEnvelopeReachesParserWithUnknownChild(t *testing.T) {
 			require.Equal(t, original, wrappers[0].Messages[0].Message.MessageBytes)
 			require.ErrorContains(t, wrappers[0].Messages[0].MessageParsedDatasets[0].Error, "classification incomplete")
 		})
+	}
+}
+
+// Cosmos Hub's 08-wasm light client and newer proposal content are absent from
+// this build's codec. The outer client and gov messages still have to decode,
+// because they carry the signer and the proposal deposit.
+func TestClientAndProposalEnvelopesDecodeWithUnknownChild(t *testing.T) {
+	signer := sdk.AccAddress([]byte("12345678901234567890")).String()
+	unknown := &codectypes.Any{TypeUrl: "/ibc.lightclients.wasm.v1.ClientMessage", Value: []byte{10, 1, 1}}
+	update := &clienttypes.MsgUpdateClient{ClientId: "08-wasm-1369", ClientMessage: unknown, Signer: signer}
+	proposal := &govv1.MsgSubmitProposal{Messages: []*codectypes.Any{unknown}, InitialDeposit: sdk.NewCoins(sdk.NewInt64Coin("uatom", 250000000)), Proposer: signer}
+	for _, msg := range []interface {
+		sdk.Msg
+		Marshal() ([]byte, error)
+	}{update, proposal} {
+		original, err := msg.Marshal()
+		require.NoError(t, err)
+		url := "/" + proto.MessageName(msg)
+		codec := client.MakeCodecConfig()
+		clienttypes.RegisterInterfaces(codec.InterfaceRegistry)
+		govv1.RegisterInterfaces(codec.InterfaceRegistry)
+		chain := &client.ChainClient{Codec: codec}
+		body := &tx.TxBody{Messages: []*codectypes.Any{{TypeUrl: url, Value: original}}}
+		bb, err := body.Marshal()
+		require.NoError(t, err)
+		aa, err := (&tx.AuthInfo{Fee: &tx.Fee{}}).Marshal()
+		require.NoError(t, err)
+		raw, err := (&tx.TxRaw{BodyBytes: bb, AuthInfoBytes: aa}).Marshal()
+		require.NoError(t, err)
+		now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		wrappers, _, err := ProcessRPCBlockByHeightTXs(&config.IndexConfig{}, nil, chain, nil, nil, &ctypes.ResultBlock{Block: &tm.Block{Header: tm.Header{Height: 1, Time: now}, Data: tm.Data{Txs: tm.Txs{raw}}}}, &rpc.CustomBlockResults{Height: 1, TxsResults: []*abci.ResponseDeliverTx{{Log: "[]"}}}, nil)
+		require.NoError(t, err)
+		require.Len(t, wrappers[0].Messages, 1, url)
+		m := wrappers[0].Messages[0]
+		require.False(t, m.Message.Opaque, url)
+		require.Equal(t, url, m.Message.MessageType.MessageType)
+		require.Equal(t, original, m.Message.MessageBytes)
+		require.Len(t, wrappers[0].Tx.SignerAddresses, 1, url)
+		require.Equal(t, signer, wrappers[0].Tx.SignerAddresses[0].Address)
 	}
 }
