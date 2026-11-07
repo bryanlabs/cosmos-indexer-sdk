@@ -555,20 +555,27 @@ func (s *Server) windowIndexed(ids []int64, lo, hi int64) (int64, error) {
 }
 
 // indexHoles counts the recorded index holes in (lo, hi] that may touch addr
-// and returns the
-// lowest.
+// and returns the lowest.
 func (s *Server) indexHoles(chain, addr string, lo, hi int64) (int64, int64, error) {
-	var r struct {
-		N     int64
-		First int64
+	heights, err := s.holeHeights(chain, addr, lo, hi)
+	if err != nil || len(heights) == 0 {
+		return 0, 0, err
 	}
+	return int64(len(heights)), heights[0], nil
+}
+
+// holeHeights lists, ascending, the recorded index holes in (lo, hi] that may
+// touch addr.
+func (s *Server) holeHeights(chain, addr string, lo, hi int64) ([]int64, error) {
+	var heights []int64
 	err := s.db.Raw(`
-SELECT count(*) AS n, COALESCE(min(h.height), 0) AS first FROM tax_index_holes h
+SELECT h.height FROM tax_index_holes h
 WHERE h.chain = @chain AND h.height > @lo AND h.height <= @hi
 AND (NOT h.addresses_known OR EXISTS (SELECT 1 FROM tax_index_hole_addresses a
-     WHERE a.chain = h.chain AND a.height = h.height AND a.address = @addr))`,
-		map[string]any{"chain": chain, "addr": addr, "lo": lo, "hi": hi}).Scan(&r).Error
-	return r.N, r.First, err
+     WHERE a.chain = h.chain AND a.height = h.height AND a.address = @addr))
+ORDER BY h.height`,
+		map[string]any{"chain": chain, "addr": addr, "lo": lo, "hi": hi}).Scan(&heights).Error
+	return heights, err
 }
 
 // clearIndexHoles drops the holes whose block now holds every transaction.
@@ -1156,13 +1163,8 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	if err != nil {
 		return nil, err
 	}
-	operator, _ := AccountOperator(addr)
-
-	type target struct {
-		idx int
-		ht  heightTime
-	}
-	var targets []target
+	var idx []int
+	var targets []heightTime
 	for i, d := range days {
 		ht, err := s.dayEndBlock(ids, d)
 		if err != nil {
@@ -1172,143 +1174,178 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 			}
 			continue
 		}
-		targets = append(targets, target{i, ht})
+		idx, targets = append(idx, i), append(targets, ht)
 	}
 	if len(targets) == 0 {
 		return out, nil
 	}
-	scan, err := s.ledgerScan(chain)
+	rebuilt, anchor, err := s.rebuildHoldings(chain, ids, node, addr, targets)
 	if err != nil {
 		return nil, err
+	}
+	meta := s.oracle.Denoms(chain)
+	for j, r := range rebuilt {
+		hb := &out[idx[j]]
+		if r.Status != "" {
+			hb.Status, hb.Reason = r.Status, r.Reason
+			continue
+		}
+		bt := targets[j].TimeStamp.UTC()
+		hb.Height, hb.BlockTime, hb.AnchorHeight = targets[j].Height, &bt, anchor
+		s.fillBalanceLines(chain, meta, hb, r.Holdings, days[idx[j]])
+	}
+	return out, nil
+}
+
+// walletDay is a wallet's rebuilt holdings at the end of one target block, or
+// the status and reason it cannot be rebuilt.
+type walletDay struct {
+	Status, Reason string
+	Holdings       ledgerHoldings
+}
+
+// rebuildHoldings walks addr back from the ledger tip to each target block,
+// with one anchor and one event read for all of them. It returns one entry
+// per target, in order, and the anchor height.
+func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, addr string, targets []heightTime) ([]walletDay, int64, error) {
+	out := make([]walletDay, len(targets))
+	operator, _ := AccountOperator(addr)
+	scan, err := s.ledgerScan(chain)
+	if err != nil {
+		return nil, 0, err
 	}
 	grantsFrom := scan.FeeGrantsFrom
 	tip, err := s.ledgerTip(ids, node, scan.FeeGrantsTo)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	lowest := tip.Height
-	var usable []target
 	for _, t := range targets {
-		if t.ht.Height > tip.Height {
-			out[t.idx].Status, out[t.idx].Reason = balanceNotReached, "the index has not reached the end of this day yet"
-			continue
-		}
-		if grantsFrom == 0 || t.ht.Height+1 < grantsFrom {
-			out[t.idx].Status = balanceIncompleteS
-			out[t.idx].Reason = fmt.Sprintf("fee grant use before height %d has not been scanned yet, so fees paid through grants after this date cannot be attributed", grantsFrom)
-			continue
-		}
-		missing, err := s.windowIndexed(ids, t.ht.Height, tip.Height)
+		lowest = min(lowest, t.Height)
+	}
+	// Coverage up to the tip is monotone, so when the lowest target's window
+	// is complete every target's is.
+	allIndexed := false
+	if lowest < tip.Height {
+		missing, err := s.windowIndexed(ids, lowest, tip.Height)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		if missing > 0 {
-			out[t.idx].Status = balanceIncompleteS
-			out[t.idx].Reason = fmt.Sprintf("%d blocks between this date (height %d) and the index tip (height %d) are not indexed yet, so the balance cannot be rebuilt exactly", missing, t.ht.Height, tip.Height)
+		allIndexed = missing == 0
+	}
+	holes, err := s.holeHeights(chain, addr, lowest, tip.Height)
+	if err != nil {
+		return nil, 0, err
+	}
+	lowest = tip.Height
+	var usable []int
+	for i, t := range targets {
+		if t.Height > tip.Height {
+			out[i].Status, out[i].Reason = balanceNotReached, "the index has not reached the end of this day yet"
 			continue
 		}
-		holes, first, err := s.indexHoles(chain, addr, t.ht.Height, tip.Height)
-		if err != nil {
-			return nil, err
-		}
-		if holes > 0 {
-			out[t.idx].Status = balanceIncompleteS
-			out[t.idx].Reason = fmt.Sprintf("%d blocks between this date and the index tip, the first at height %d, are missing transactions in the index, so the balance cannot be rebuilt exactly", holes, first)
+		if grantsFrom == 0 || t.Height+1 < grantsFrom {
+			out[i].Status = balanceIncompleteS
+			out[i].Reason = fmt.Sprintf("fee grant use before height %d has not been scanned yet, so fees paid through grants after this date cannot be attributed", grantsFrom)
 			continue
 		}
-		usable = append(usable, t)
-		if t.ht.Height < lowest {
-			lowest = t.ht.Height
+		if !allIndexed {
+			missing, err := s.windowIndexed(ids, t.Height, tip.Height)
+			if err != nil {
+				return nil, 0, err
+			}
+			if missing > 0 {
+				out[i].Status = balanceIncompleteS
+				out[i].Reason = fmt.Sprintf("%d blocks between this date (height %d) and the index tip (height %d) are not indexed yet, so the balance cannot be rebuilt exactly", missing, t.Height, tip.Height)
+				continue
+			}
 		}
+		// holes is ascending, so the first above the target is the lowest.
+		if k := sort.Search(len(holes), func(k int) bool { return holes[k] > t.Height }); k < len(holes) {
+			out[i].Status = balanceIncompleteS
+			out[i].Reason = fmt.Sprintf("%d blocks between this date and the index tip, the first at height %d, are missing transactions in the index, so the balance cannot be rebuilt exactly", len(holes)-k, holes[k])
+			continue
+		}
+		usable = append(usable, i)
+		lowest = min(lowest, t.Height)
 	}
 	if len(usable) == 0 {
-		return out, nil
+		return out, tip.Height, nil
+	}
+	refuse := func(reason string) ([]walletDay, int64, error) {
+		for _, i := range usable {
+			out[i].Status, out[i].Reason = balanceIncompleteS, reason
+		}
+		return out, tip.Height, nil
 	}
 
 	anchor, err := node.anchor(addr, tip.Height)
 	if err != nil {
-		return nil, fmt.Errorf("anchor state at height %d: %w", tip.Height, err)
+		return nil, 0, fmt.Errorf("anchor state at height %d: %w", tip.Height, err)
 	}
 	anchor.Time = tip.TimeStamp
 	events, unattributed, err := s.ledgerEvents(ids, addr, operator, lowest, tip.Height)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if unattributed > 0 {
 		kept := usable[:0]
-		for _, t := range usable {
-			if t.ht.Height < unattributed {
-				out[t.idx].Status = balanceIncompleteS
-				out[t.idx].Reason = fmt.Sprintf("a redelegation at height %d after this date cannot be attributed to one delegator", unattributed)
+		for _, i := range usable {
+			if targets[i].Height < unattributed {
+				out[i].Status = balanceIncompleteS
+				out[i].Reason = fmt.Sprintf("a redelegation at height %d after this date cannot be attributed to one delegator", unattributed)
 				continue
 			}
-			kept = append(kept, t)
+			kept = append(kept, i)
 		}
 		if usable = kept; len(usable) == 0 {
-			return out, nil
+			return out, tip.Height, nil
 		}
 	}
 	fees, unknownFees, err := s.ledgerFees(ids, addr, lowest, tip.Height, node)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if unknownFees > 0 {
-		for _, t := range usable {
-			out[t.idx].Status = balanceIncompleteS
-			out[t.idx].Reason = fmt.Sprintf("%d failed transactions this wallet paid for after this date have no recorded fee outcome yet", unknownFees)
-		}
-		return out, nil
+		return refuse(fmt.Sprintf("%d failed transactions this wallet paid for after this date have no recorded fee outcome yet", unknownFees))
 	}
 	var slashes []ledgerSlash
 	if needsSlashes(anchor, events) {
 		if anchor.Rates, err = node.validatorRates(tip.Height); err != nil {
-			return nil, fmt.Errorf("validator rates at height %d: %w", tip.Height, err)
+			return nil, 0, fmt.Errorf("validator rates at height %d: %w", tip.Height, err)
 		}
 		if slashes, err = s.ledgerSlashes(ids, lowest, tip.Height, node, tip.Height, touchedValidators(anchor, events)); err != nil {
 			var inc balanceIncomplete
 			if errors.As(err, &inc) {
-				for _, t := range usable {
-					out[t.idx].Status, out[t.idx].Reason = balanceIncompleteS, inc.reason
-				}
-				return out, nil
+				return refuse(inc.reason)
 			}
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	samples, err := s.rateSamples(chain, sampledValidators(anchor, events, slashes), lowest, tip.Height)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	heights := make([]int64, 0, len(usable))
-	for _, t := range usable {
-		heights = append(heights, t.ht.Height)
+	for _, i := range usable {
+		heights = append(heights, targets[i].Height)
 	}
 	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {
-			for _, t := range usable {
-				out[t.idx].Status, out[t.idx].Reason = balanceIncompleteS, "the indexed history does not reconcile with chain state: "+inc.msg
-			}
-			return out, nil
+			return refuse("the indexed history does not reconcile with chain state: " + inc.msg)
 		}
 		var unk ledgerUnknown
 		if errors.As(err, &unk) {
-			for _, t := range usable {
-				out[t.idx].Status, out[t.idx].Reason = balanceIncompleteS, unk.msg
-			}
-			return out, nil
+			return refuse(unk.msg)
 		}
-		return nil, err
+		return nil, 0, err
 	}
-	meta := s.oracle.Denoms(chain)
-	for _, t := range usable {
-		bt := t.ht.TimeStamp.UTC()
-		hb := &out[t.idx]
-		hb.Height, hb.BlockTime, hb.AnchorHeight = t.ht.Height, &bt, tip.Height
-		s.fillBalanceLines(chain, meta, hb, held[t.ht.Height], days[t.idx])
+	for _, i := range usable {
+		out[i].Holdings = held[targets[i].Height]
 	}
-	return out, nil
+	return out, tip.Height, nil
 }
 
 // touchedValidators is every operator the wallet held stake with at the
