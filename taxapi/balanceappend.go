@@ -33,7 +33,8 @@ func (s *Server) AppendBalanceDays(chain, prefix string, node *ledgerNode, throu
 		return err
 	}
 	if build.ToDay == nil {
-		return errors.New("no built span to append to")
+		logf("balance days: no build has finished yet, nothing appended")
+		return nil
 	}
 	if build.BuildingFrom != nil {
 		if !build.BuildingFrom.Equal(build.ToDay.AddDate(0, 0, 1)) {
