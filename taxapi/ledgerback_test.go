@@ -136,8 +136,8 @@ func TestScanBackBlock(t *testing.T) {
 		{Hash: "BB", Code: 5, Charged: "2500uatom", Accounts: []string{backTestSigner}},
 	}
 	index := []backTx{
-		{indexedTx: indexedTx{Height: 7, Indexed: true, Hash: "aa", Code: 0, Messages: true}, TxID: 11},
-		{indexedTx: indexedTx{Height: 7, Indexed: true, Hash: "bb", Code: 5}, TxID: 12},
+		{Height: 7, Indexed: true, Hash: "aa", Code: 0, Messages: true, TxID: 11},
+		{Height: 7, Indexed: true, Hash: "bb", Code: 5, TxID: 12},
 	}
 	b := scanBackBlock(7, chain, index)
 	if b.chainTxs != 0 || len(b.accounts) != 0 {

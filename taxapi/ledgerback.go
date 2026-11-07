@@ -34,9 +34,15 @@ func NewArchiveLedgerNode(cacheDir, archiveREST string) (*ledgerNode, error) {
 var ErrLedgerScanUnindexed = errors.New("reached a block that is not fully indexed")
 
 // backTx is one indexed transaction of a block the backward scan compares.
+// Its fields are flat because gorm does not scan into an embedded unexported
+// struct, which left every row at height 0.
 type backTx struct {
-	indexedTx
-	TxID uint
+	Height   int64
+	Indexed  bool
+	TxID     uint
+	Hash     string
+	Code     uint32
+	Messages bool
 }
 
 // backBlock is what the scan of one block records.
@@ -56,7 +62,7 @@ func scanBackBlock(height int64, chain []nodeTx, index []backTx) backBlock {
 	plain := make([]indexedTx, len(index))
 	byHash := map[string]uint{}
 	for i, x := range index {
-		plain[i] = x.indexedTx
+		plain[i] = indexedTx{Height: x.Height, Indexed: x.Indexed, Hash: x.Hash, Code: x.Code, Messages: x.Messages}
 		if x.Hash != "" {
 			byHash[strings.ToUpper(x.Hash)] = x.TxID
 		}
