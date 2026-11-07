@@ -14,7 +14,9 @@ import (
 	"strings"
 )
 
-const maxArchiveResponseBytes = 64 << 20
+// maxArchiveResponseBytes is three times the largest Cosmos Hub response seen,
+// a block_results of 84.6 MB at 20950641.
+const maxArchiveResponseBytes = 256 << 20
 
 type archiveCall struct {
 	method string
