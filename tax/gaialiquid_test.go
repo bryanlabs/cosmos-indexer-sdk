@@ -206,8 +206,22 @@ func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
 			Size() int
 		})
 	}
-	if len(all) != 17 {
-		t.Fatalf("expected 17 registered custom types, got %d", len(all))
+	for url, m := range ProviderMsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	for url, m := range IBCClientV2MsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	if len(all) != 28 {
+		t.Fatalf("expected 28 registered custom types, got %d", len(all))
 	}
 
 	// Field 1 is a string on some of these and a nested message on others, so an
@@ -228,6 +242,49 @@ func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
 		}
 		if m.Size() != len(payload) {
 			t.Fatalf("%s: Size() = %d, want %d", url, m.Size(), len(payload))
+		}
+	}
+}
+
+// A redemption's share token amount equals its tokens only on a validator that
+// was never slashed. The record keeps the share amount and adds the tokens the
+// delegation actually received, in the current per-event log shape and in the
+// older shape that merges every coin_spent into one event.
+func TestRedeemSharesRecordsRedeemedTokens(t *testing.T) {
+	share := "571099998cosmosvaloper1share/87231"
+	module := "cosmos1notbondedpool"
+	current := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_spent", [2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, share}),
+		ev("burn", [2]string{"burner", module}, [2]string{attributeAmount, share}),
+		ev("coin_spent", [2]string{"spender", module}, [2]string{attributeAmount, "571042888uatom"}),
+		ev("coin_spent", [2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, "571042888uatom"}),
+		ev("redeem_shares", [2]string{attributeDelegator, fixtureLSMOwner}, [2]string{attributeAmount, share}),
+	}}
+	merged := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_spent",
+			[2]string{"spender", module}, [2]string{attributeAmount, "66ibc/0025F8,613410uatom"},
+			[2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, share},
+			[2]string{"spender", module}, [2]string{attributeAmount, "571042888uatom"},
+			[2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, "571042888uatom"}),
+		ev("redeem_shares", [2]string{attributeDelegator, fixtureLSMOwner}, [2]string{attributeAmount, share}),
+	}}
+	for name, log := range map[string]*indexerTxTypes.LogMessage{"current": current, "merged": merged} {
+		out := lsmRecordEvents(log, fixtureLSMOwner)
+		if len(out) != 1 || out[0].Category != string(CategoryRedeemShares) {
+			t.Fatalf("%s: expected one redeem_shares record, got %+v", name, out)
+		}
+		if out[0].Amount+out[0].Denom != share {
+			t.Fatalf("%s: record amount = %s%s, want the share token %s", name, out[0].Amount, out[0].Denom, share)
+		}
+		if out[0].Detail != `{"redeemed_amount":"571042888uatom"}` {
+			t.Fatalf("%s: detail = %s", name, out[0].Detail)
+		}
+	}
+
+	twice := &indexerTxTypes.LogMessage{Events: append(append([]indexerTxTypes.LogMessageEvent{}, current.Events...), current.Events...)}
+	for _, rec := range lsmRecordEvents(twice, fixtureLSMOwner) {
+		if rec.Detail != "" {
+			t.Fatalf("a message that redeems twice cannot be split, got detail %s", rec.Detail)
 		}
 	}
 }
