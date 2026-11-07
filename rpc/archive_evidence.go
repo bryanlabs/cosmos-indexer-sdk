@@ -14,9 +14,9 @@ import (
 	"strings"
 )
 
-// maxArchiveResponseBytes is three times the largest Cosmos Hub response seen,
-// a block_results of 84.6 MB at 20950641.
-const maxArchiveResponseBytes = 256 << 20
+// maxRPCResponseBytes is three times the largest Cosmos Hub response seen, a
+// block_results of 84.6 MB at 20950641.
+const maxRPCResponseBytes = 256 << 20
 
 type archiveCall struct {
 	method string
@@ -96,9 +96,9 @@ func (g *ArchiveGuard) inspectResponse(request *http.Request, response *http.Res
 	if call.method != "status" && call.method != "block" && call.method != "block_results" {
 		return nil
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxArchiveResponseBytes+1))
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRPCResponseBytes+1))
 	response.Body.Close()
-	if err != nil || len(body) > maxArchiveResponseBytes {
+	if err != nil || len(body) > maxRPCResponseBytes {
 		return fmt.Errorf("archive response unreadable or exceeds size limit")
 	}
 	var envelope struct {

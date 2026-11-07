@@ -118,12 +118,12 @@ func (c *URIClient) DoHTTPPost(ctx context.Context, method string, params map[st
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("RPC POST returned HTTP %d", resp.StatusCode)
 	}
-	response, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024+1))
+	response, err := io.ReadAll(io.LimitReader(resp.Body, maxRPCResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read RPC response: %w", err)
 	}
-	if len(response) > 64*1024*1024 {
-		return nil, errors.New("RPC response exceeds 64 MiB limit")
+	if len(response) > maxRPCResponseBytes {
+		return nil, fmt.Errorf("RPC response exceeds %d MiB limit", maxRPCResponseBytes>>20)
 	}
 	return unmarshalResponseBytes(response, jsonrpc.URIClientRequestID, result)
 }
