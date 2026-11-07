@@ -1,7 +1,9 @@
 package tax
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -237,5 +239,29 @@ func TestClassifyFundCommunityPoolAndVestingGrantAreTransfers(t *testing.T) {
 	grant := classify(periodic, &indexerTxTypes.LogMessage{})
 	if len(grant) != 1 || grant[0].FromAddr != del || grant[0].ToAddr != other || grant[0].Amount != "84" {
 		t.Fatalf("a periodic vesting grant should move the summed periods up front, got %+v", grant)
+	}
+}
+
+// A spam IBC transfer whose receiver is 600 kB failed its block on the
+// to_addr index. The counterparty is stored bounded and unique while the real
+// sender, amount and denom are untouched.
+func TestBoundIndexedFieldsKeepsSenderAndBoundsSpamReceiver(t *testing.T) {
+	spam := strings.Repeat("x", 600001)
+	e := TaxableEvent{Category: string(CategoryTransfer), FromAddr: fixtureCosmosAddress, ToAddr: spam, Amount: "1", Denom: "uatom"}
+	boundIndexedFields(&e)
+	if e.FromAddr != fixtureCosmosAddress || e.Amount != "1" || e.Denom != "uatom" {
+		t.Fatalf("sender side changed: %+v", e)
+	}
+	if len(e.ToAddr) > maxIndexedField || !strings.HasPrefix(e.ToAddr, "xxxx") || !strings.Contains(e.ToAddr, "...sha256:") {
+		t.Fatalf("receiver not bounded: %d bytes", len(e.ToAddr))
+	}
+	if boundIndexed(spam+"y") == e.ToAddr {
+		t.Fatal("distinct oversized strings must stay distinct")
+	}
+	if got := boundIndexed("bad\x00addr\xff"); strings.ContainsRune(got, 0) || !utf8.ValidString(got) {
+		t.Fatalf("text Postgres cannot store survived: %q", got)
+	}
+	if got := boundIndexed(fixtureIBCReceiver); got != fixtureIBCReceiver {
+		t.Fatalf("a real address changed: %q", got)
 	}
 }

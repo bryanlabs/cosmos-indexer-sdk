@@ -1,10 +1,13 @@
 package tax
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -437,6 +440,7 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		for i := range events {
+			boundIndexedFields(&events[i])
 			events[i].MessageID = message.ID
 			events[i].SubIndex = i
 			events[i].BlockHeight = message.Tx.Block.Height
@@ -451,6 +455,36 @@ func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message,
 		}
 		return tx.Where("message_id = ? AND sub_index >= ?", message.ID, len(events)).Delete(&TaxableEvent{}).Error
 	})
+}
+
+// maxIndexedField bounds the taxable_events columns that carry a btree index.
+// Postgres refuses an index entry over a few kilobytes, and the counterparty
+// on an IBC transfer is whatever string the sender typed: spam transfers carry
+// receivers of 600 kB, which failed the whole block. No real address comes
+// near the bound, so a longer value, or one Postgres text cannot hold, is kept
+// as a readable prefix plus the SHA-256 of the whole string. That stays unique,
+// never matches a wallet, and leaves the coin movement of the real sender in
+// place; the full string remains in the message's own event attributes.
+const maxIndexedField = 512
+
+func boundIndexed(s string) string {
+	if len(s) <= maxIndexedField && utf8.ValidString(s) && !strings.ContainsRune(s, 0) {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	prefix := s
+	if len(prefix) > 64 {
+		prefix = prefix[:64]
+	}
+	prefix = strings.ReplaceAll(strings.ToValidUTF8(prefix, ""), "\x00", "")
+	return prefix + "...sha256:" + hex.EncodeToString(sum[:])
+}
+
+func boundIndexedFields(e *TaxableEvent) {
+	e.FromAddr = boundIndexed(e.FromAddr)
+	e.ToAddr = boundIndexed(e.ToAddr)
+	e.Asset = boundIndexed(e.Asset)
+	e.ValidatorAddress = boundIndexed(e.ValidatorAddress)
 }
 
 // nftSaleEvents turns each wasm-finalize-sale event (CosmWasm NFT marketplace,
