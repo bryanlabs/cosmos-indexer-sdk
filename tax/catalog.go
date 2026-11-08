@@ -90,6 +90,7 @@ func Triggers() []TriggerInfo {
 		{"ibc_callback", string(CategoryIBCOut), "An IBC transfer with a callback contract."},
 		{"ics721_out", "nft_transfer", "An NFT sent to another chain over the ICS721 bridge."},
 		{"ics721_in", "nft_transfer", "An NFT received from another chain over the ICS721 bridge."},
+		{TriggerStargazeMigration, "nft_transfer", "An NFT Stargaze minted on Cosmos Hub to the holder who already owned it on Stargaze (March 2026 migration). Not a purchase: its cost basis and acquired date are the original Stargaze purchase."},
 		{TriggerCommunityPoolSpend, string(CategoryIncome), "A community pool payout made by a passed governance proposal at the end of a block."},
 		{TriggerBlockWithdrawal, string(CategoryReward), "A staking reward the chain withdrew for the delegator at the start or end of a block, outside any transaction."},
 	}

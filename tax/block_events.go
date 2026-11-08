@@ -31,6 +31,9 @@ const (
 	// TriggerBlockWithdrawal names a staking reward the chain withdrew for the
 	// delegator outside any transaction.
 	TriggerBlockWithdrawal = "block_withdrawal"
+	// TriggerStargazeMigration names an NFT Stargaze minted on Cosmos Hub to
+	// the holder who already owned it on Stargaze.
+	TriggerStargazeMigration = "stargaze_migration"
 
 	ReviewUnclassifiedBlockMovement = "unclassified_block_movement"
 	ReviewGovDepositOutcome         = "gov_deposit_outcome_unverified"

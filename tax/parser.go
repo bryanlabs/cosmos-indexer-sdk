@@ -220,11 +220,11 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// Instantiating or migrating a contract runs contract code that can sell,
 	// mint or distribute just like an execute.
 	case *wasmtypes.MsgInstantiateContract:
-		events = append(events, wasmExecuteEvents(log)...)
+		events = append(events, wasmExecuteEvents(log, m.Sender)...)
 	case *wasmtypes.MsgInstantiateContract2:
-		events = append(events, wasmExecuteEvents(log)...)
+		events = append(events, wasmExecuteEvents(log, m.Sender)...)
 	case *wasmtypes.MsgMigrateContract:
-		events = append(events, wasmExecuteEvents(log)...)
+		events = append(events, wasmExecuteEvents(log, m.Sender)...)
 
 	// Governance deposits are refundable, so record-only.
 	case *govv1.MsgDeposit:
@@ -308,7 +308,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// Beyond sales, the Hub's contracts run auctions, vaults, voting locks,
 	// reward distributors, raffles and name services; see protocols.go.
 	case *wasmtypes.MsgExecuteContract:
-		events = append(events, wasmExecuteEvents(log)...)
+		events = append(events, wasmExecuteEvents(log, m.Sender)...)
 
 	// A tokenfactory mint credits the recipient with newly created coins, which
 	// is an acquisition for them. Cosmos Hub's observed traffic is STARS
@@ -526,11 +526,23 @@ func swapEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 	return out
 }
 
+// stargazeMigrationSupervisor is the migration_supervisor of every
+// cw721-migration collection (codes 416, 434 and 591) Stargaze used to move
+// its NFTs onto Cosmos Hub from 2026-03-17. It minted each token a Stargaze
+// holder already owned by executing mint on the collection itself. Its other
+// mints go through the collection's vending minter and are paid like anyone
+// else's. On the 1,605,731 mints indexed for 2026 this split matched the
+// collections' own is_airdropped_token answer for every token.
+const stargazeMigrationSupervisor = "cosmos1s8qx0zvz8yd6e4x0mqmqf7fr9vvfn6226hkvrq"
+
 // nftMintEvents turns each CosmWasm NFT mint (wasm event, action=mint) into an
 // acquisition for the owner, with the mint cost (coins the owner spent in this
-// message) as the basis.
-func nftMintEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
+// message) as the basis. A Stargaze migration mint is not an acquisition: the
+// holder already owned the token on Stargaze, so it is an nft_transfer in
+// that keeps the Stargaze purchase as its basis and acquired date.
+func nftMintEvents(log *indexerTxTypes.LogMessage, sender string) []TaxableEvent {
 	var out []TaxableEvent
+	called := calledContract(log)
 	for _, ev := range log.Events {
 		if ev.Type != eventWasm {
 			continue
@@ -544,6 +556,16 @@ func nftMintEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 			owner = a["minter"]
 		}
 		collection := a[attributeContractAddress]
+		if sender == stargazeMigrationSupervisor && collection == called {
+			out = append(out, TaxableEvent{
+				Category:      string(CategoryNFTTransfer),
+				ToAddr:        owner,
+				Asset:         collection + "/" + a["token_id"],
+				RewardTrigger: TriggerStargazeMigration,
+				Detail:        contractDetail(collection, map[string]string{detailProtocol: contractNameStargaze, "migrated_from": "stargaze-1"}),
+			})
+			continue
+		}
 		// Mint cost = what the owner spent in this message (the mint price).
 		cost := coinsSpentBy(log, owner)
 		amount, denom := "", ""
@@ -558,6 +580,17 @@ func nftMintEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
 		})
 	}
 	return out
+}
+
+// calledContract is the contract the message itself executed: the first
+// execute event belongs to the top-level call, later ones to submessages.
+func calledContract(log *indexerTxTypes.LogMessage) string {
+	for _, ev := range log.Events {
+		if ev.Type == "execute" {
+			return attrMap(ev)[attributeContractAddress]
+		}
+	}
+	return ""
 }
 
 // attrMap flattens an event's attributes into a map.
