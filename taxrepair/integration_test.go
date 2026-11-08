@@ -131,7 +131,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := load(db, 0, 2, 100, nil, nil)
+	rows, err := load(db, 0, 2, 100, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err := db.Exec("UPDATE messages SET message_bytes=NULL").Error; err != nil {
 		t.Fatal(err)
 	}
-	rows, err = load(db, 0, 2, 100, nil, nil)
+	rows, err = load(db, 0, 2, 100, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,12 +207,22 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if after[2][0].Amount != "35629" || after[2][1].Amount != "47507213" || after[2][0].BlockHeight != 30672572 {
 		t.Fatal(after[2])
 	}
-	only, err := load(db, 0, 2, 100, nil, []string{string(tax.CategoryRedelegate)})
+	ids, err := categoryIDs(db, []string{string(tax.CategoryRedelegate)}, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("category candidates = %v", ids)
+	}
+	only, err := load(db, 0, 2, 100, ids)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(only) != 1 || only[0].ID != 2 {
-		t.Fatalf("category filter loaded %d messages", len(only))
+		t.Fatalf("candidate load got %d messages", len(only))
+	}
+	if got := intersect([]uint{1, 2, 5}, []uint{2, 3, 5}); len(got) != 2 || got[0] != 2 || got[1] != 5 {
+		t.Fatalf("intersect = %v", got)
 	}
 	again, _, err := planBatch(db, codec, rows)
 	if err != nil {
@@ -247,7 +257,7 @@ func TestRepairRejectsConcurrentChanges(t *testing.T) {
 	wire, _ := msg.Marshal()
 	seedMessage(t, db, 1, urls[0], wire, "delegate-principal")
 	codec, _ := repairCodec()
-	rows, err := load(db, 0, 1, 100, nil, nil)
+	rows, err := load(db, 0, 1, 100, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
