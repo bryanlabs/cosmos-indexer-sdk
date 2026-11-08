@@ -332,8 +332,15 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	if err != nil {
 		return nil, nil, err
 	}
+	// The ids go in as one opaque array: with a literal list of hundreds the
+	// planner estimates enough events to merge join against the whole
+	// attribute index (measured 35 s for 500 messages, 0.35 s this way).
+	idList := make([]string, len(ids))
+	for i, id := range ids {
+		idList[i] = fmt.Sprint(id)
+	}
 	var attrs []eventRow
-	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id IN ?", ids).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
+	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id = ANY(ARRAY(SELECT unnest(?::bigint[])))", "{"+strings.Join(idList, ",")+"}").Order("e.message_id,e.index,a.index").Scan(&attrs).Error
 	if err != nil {
 		return nil, nil, err
 	}
