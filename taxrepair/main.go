@@ -141,6 +141,7 @@ func run() int {
 	batch := flag.Int("batch", 500, "bounded messages per batch")
 	from := flag.Uint("from-message-id", 0, "exclusive lower message ID for resume")
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
+	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -185,6 +186,12 @@ func run() int {
 			wallets = append(wallets, a)
 		}
 	}
+	var categories []string
+	for _, c := range strings.Split(*only, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			categories = append(categories, c)
+		}
+	}
 	var candidates []uint
 	if len(wallets) > 0 {
 		candidates, err = walletIDs(db, wallets)
@@ -202,9 +209,9 @@ func run() int {
 	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
-	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d\n", maxID, *apply, len(candidates))
+	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d categories=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","))
 	for len(wallets) == 0 || len(candidates) > 0 {
-		rows, err := load(db, last, maxID, *batch, candidates)
+		rows, err := load(db, last, maxID, *batch, candidates, categories)
 		if err != nil {
 			fatal(err.Error())
 		}
@@ -285,10 +292,16 @@ func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
 	return ids, err
 }
 
-func load(db *gorm.DB, last, maxID uint, n int, candidates []uint) ([]row, error) {
+// load reads the next batch of replayable messages after last. With
+// categories it keeps only messages that already hold a stored row in one of
+// them, so a repair of one classification leaves every other message alone.
+func load(db *gorm.DB, last, maxID uint, n int, candidates []uint, categories []string) ([]row, error) {
 	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, maxID, urls).Order("m.id").Limit(n)
 	if candidates != nil {
 		q = q.Where("m.id IN ?", candidates)
+	}
+	if len(categories) > 0 {
+		q = q.Where("EXISTS (SELECT 1 FROM taxable_events te WHERE te.message_id=m.id AND te.category IN ?)", categories)
 	}
 	var rows []row
 	err := q.Scan(&rows).Error

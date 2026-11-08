@@ -131,7 +131,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := load(db, 0, 2, 100, nil)
+	rows, err := load(db, 0, 2, 100, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if err := db.Exec("UPDATE messages SET message_bytes=NULL").Error; err != nil {
 		t.Fatal(err)
 	}
-	rows, err = load(db, 0, 2, 100, nil)
+	rows, err = load(db, 0, 2, 100, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +207,13 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if after[2][0].Amount != "35629" || after[2][1].Amount != "47507213" || after[2][0].BlockHeight != 30672572 {
 		t.Fatal(after[2])
 	}
+	only, err := load(db, 0, 2, 100, nil, []string{string(tax.CategoryRedelegate)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only) != 1 || only[0].ID != 2 {
+		t.Fatalf("category filter loaded %d messages", len(only))
+	}
 	again, _, err := planBatch(db, codec, rows)
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +247,7 @@ func TestRepairRejectsConcurrentChanges(t *testing.T) {
 	wire, _ := msg.Marshal()
 	seedMessage(t, db, 1, urls[0], wire, "delegate-principal")
 	codec, _ := repairCodec()
-	rows, err := load(db, 0, 1, 100, nil)
+	rows, err := load(db, 0, 1, 100, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
