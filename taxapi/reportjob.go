@@ -267,6 +267,9 @@ func (s *Server) handleReportJob(w http.ResponseWriter, r *http.Request) {
 			apiCSV:         job.CSV,
 			"rowCount":     job.RowCount,
 			"computedAt":   job.ComputedThrough,
+			// Coverage is evaluated per response, not cached with the job,
+			// so a cached report picks up backfill progress immediately.
+			"index_coverage": s.periodCoverage(start, end),
 		})
 	case ReportJobFailed:
 		writeJSON(w, map[string]any{apiStatus: ReportJobFailed, apiError: job.Error})
