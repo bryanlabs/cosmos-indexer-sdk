@@ -202,3 +202,23 @@ func TestStoredBalanceDayPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, ok, "an address with no rows falls back to the live walk")
 }
+
+// A column added to tax_balance_builds by a newer image's migration must not
+// break a running API's cached statements (SQLSTATE 0A000, 2026-11-08).
+func TestBalanceBuildSurvivesAddedColumnPostgres(t *testing.T) {
+	database := balanceDaysTestDB(t)
+	s := &Server{db: database, native: DefaultNativeAsset}
+	from, to := time.Date(2025, 3, 3, 0, 0, 0, 0, time.UTC), time.Date(2025, 3, 20, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, database.Save(&BalanceBuild{Chain: "cosmoshub", FromDay: &from, ToDay: &to}).Error)
+
+	read := func() {
+		t.Helper()
+		build, err := s.balanceBuild("cosmoshub")
+		require.NoError(t, err)
+		require.NotNil(t, build)
+		require.NoError(t, s.lockBalanceBuild("cosmoshub", func(*gorm.DB, *BalanceBuild) error { return nil }))
+	}
+	read()
+	require.NoError(t, database.Exec("ALTER TABLE tax_balance_builds ADD COLUMN later_column text").Error)
+	read()
+}

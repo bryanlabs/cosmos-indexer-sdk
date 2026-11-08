@@ -29,7 +29,7 @@ import (
 // and those days keep walking back live.
 func (s *Server) AppendBalanceDays(chain, prefix string, node *ledgerNode, through time.Time, workers int, logf func(string, ...any)) error {
 	var build BalanceBuild
-	if err := s.db.Where("chain = ?", chain).Limit(1).Find(&build).Error; err != nil {
+	if err := buildFields(s.db).Where("chain = ?", chain).Limit(1).Find(&build).Error; err != nil {
 		return err
 	}
 	if build.ToDay == nil {

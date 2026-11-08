@@ -375,17 +375,22 @@ func (s *Server) lockBalanceBuild(chain string, change func(tx *gorm.DB, b *Bala
 			return err
 		}
 		var b BalanceBuild
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("chain = ?", chain).First(&b).Error; err != nil {
+		if err := buildFields(tx).Clauses(clause.Locking{Strength: "UPDATE"}).Where("chain = ?", chain).First(&b).Error; err != nil {
 			return err
 		}
 		return change(tx, &b)
 	})
 }
 
+// buildFields names BalanceBuild's columns instead of selecting *, so a column
+// a newer image's migration adds to tax_balance_builds does not change the
+// result type of statements a running API has cached (SQLSTATE 0A000).
+func buildFields(db *gorm.DB) *gorm.DB { return db.Session(&gorm.Session{QueryFields: true}) }
+
 // balanceBuild is the chain's stored build state, or nil before any build.
 func (s *Server) balanceBuild(chain string) (*BalanceBuild, error) {
 	var build BalanceBuild
-	res := s.db.Where("chain = ?", chain).Limit(1).Find(&build)
+	res := buildFields(s.db).Where("chain = ?", chain).Limit(1).Find(&build)
 	if res.Error != nil || res.RowsAffected == 0 || build.FromDay == nil {
 		return nil, res.Error
 	}
