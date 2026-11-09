@@ -5,7 +5,11 @@ package tax
 // nor in MessageTypeURLs holds a report back until it is classified, because
 // it may have moved coins the tax layer never saw. Types that can move coins
 // (MsgCancelProposal burns part of a deposit, MsgStoreAndInstantiateContract
-// can carry funds) stay out of this list on purpose.
+// can carry funds) stay out of this list on purpose. So do three types seen on
+// cosmoshub-4 that do move coins: ibc.core.channel.v2.MsgSendPacket (an IBC v2
+// transfer), MsgRegisterConsumerRewardDenom (its registration fee) and the
+// Gravity DEX liquidity messages. An interchain account's MsgSendTx moves
+// coins only on the host chain, never on the Hub.
 var NoTaxEffectTypeURLs = []string{
 	"/cosmos.authz.v1beta1.MsgGrant",
 	"/cosmos.authz.v1beta1.MsgRevoke",
@@ -28,6 +32,8 @@ var NoTaxEffectTypeURLs = []string{
 	"/ibc.core.client.v1.MsgUpdateClient",
 	"/ibc.core.client.v1.MsgUpgradeClient",
 	"/ibc.core.client.v1.MsgSubmitMisbehaviour",
+	"/ibc.core.client.v2.MsgRegisterCounterparty",
+	"/ibc.core.client.v2.MsgUpdateClientConfig",
 	"/ibc.core.connection.v1.MsgConnectionOpenInit",
 	"/ibc.core.connection.v1.MsgConnectionOpenTry",
 	"/ibc.core.connection.v1.MsgConnectionOpenAck",
@@ -38,7 +44,11 @@ var NoTaxEffectTypeURLs = []string{
 	"/ibc.core.channel.v1.MsgChannelOpenConfirm",
 	"/ibc.core.channel.v1.MsgChannelCloseInit",
 	"/ibc.core.channel.v1.MsgChannelCloseConfirm",
+	"/ibc.applications.interchain_accounts.controller.v1.MsgRegisterInterchainAccount",
+	"/ibc.applications.interchain_accounts.controller.v1.MsgSendTx",
 	"/interchain_security.ccv.provider.v1.MsgAssignConsumerKey",
+	"/interchain_security.ccv.provider.v1.MsgCreateConsumer",
+	"/interchain_security.ccv.provider.v1.MsgUpdateConsumer",
 	"/interchain_security.ccv.provider.v1.MsgOptIn",
 	"/interchain_security.ccv.provider.v1.MsgOptOut",
 	"/interchain_security.ccv.provider.v1.MsgRemoveConsumer",
