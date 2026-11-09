@@ -182,3 +182,39 @@ func TestClassifyIBCV2PrefixedFailedTransferStillExcluded(t *testing.T) {
 		t.Fatalf("a failed transfer produced %d events", len(out))
 	}
 }
+
+// Mainnet v2 send at height 25030653: 1 ATOM over client 08-wasm-1369 to an
+// Ethereum receiver, sequence 1.
+func TestClassifyIBCV2SendIsOutbound(t *testing.T) {
+	const v2Sent = "1000000uatom"
+	escrow := "cosmos1escrow0000000000000000000000000000000"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("send_packet", [2]string{"packet_source_client", safetyV2Client}, [2]string{"packet_dest_client", "cosmoshub-0"}, [2]string{attributeIBCPacketSequence, "1"}),
+		ev("coin_spent", [2]string{attributeSpender, del}, [2]string{attributeAmount, v2Sent}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, escrow}, [2]string{attributeAmount, v2Sent}),
+		ev("transfer", [2]string{attributeRecipient, escrow}, [2]string{attributeSender, del}, [2]string{attributeAmount, v2Sent}),
+		ev("ibc_transfer", [2]string{attributeSender, del}, [2]string{attributeReceiver, "0xDEe2d946DaE6ABdca3C6C2ce72BfBE5cc14898f5"},
+			[2]string{attributeDenom, fixtureNativeDenom}, [2]string{attributeAmount, "1000000"}, [2]string{attributeMemo, "i love cosmos"}),
+	}}
+	out := classify(&MsgSendPacketV2{SourceClient: safetyV2Client, Signer: del}, log)
+	if len(out) != 1 || out[0].Category != string(CategoryIBCOut) || out[0].Amount != "1000000" || out[0].Denom != fixtureNativeDenom ||
+		out[0].FromAddr != del || out[0].ToAddr != "0xDEe2d946DaE6ABdca3C6C2ce72BfBE5cc14898f5" {
+		t.Fatalf("events = %+v", out)
+	}
+	d := blockDetail(t, out[0])
+	if d["ibc_generation"] != "v2" || d["packet_destination_client"] != "cosmoshub-0" || d[attributeIBCPacketSequence] != "1" {
+		t.Fatalf("detail %v", d)
+	}
+}
+
+// A v2 send without the transfer module's event cannot say what moved.
+func TestClassifyIBCV2SendWithoutTransferEventNeedsReview(t *testing.T) {
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("ibc_transfer", [2]string{attributeSender, del}, [2]string{attributeReceiver, other}, [2]string{attributeDenom, fixtureNativeDenom}, [2]string{attributeAmount, "5"}),
+	}}
+	state := &classificationState{}
+	out := classifyWithState(&MsgSendPacketV2{SourceClient: safetyV2Client, Signer: del}, log, state, 0, "")
+	if len(out) != 0 || len(state.issues) != 1 {
+		t.Fatalf("events = %+v issues %v", out, state.issues)
+	}
+}

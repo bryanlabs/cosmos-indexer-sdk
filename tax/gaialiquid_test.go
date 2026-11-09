@@ -220,8 +220,15 @@ func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
 			Size() int
 		})
 	}
-	if len(all) != 28 {
-		t.Fatalf("expected 28 registered custom types, got %d", len(all))
+	for url, m := range LiquidityMsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	if len(all) != 33 {
+		t.Fatalf("expected 33 registered custom types, got %d", len(all))
 	}
 
 	// Field 1 is a string on some of these and a nested message on others, so an

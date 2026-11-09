@@ -54,6 +54,12 @@ func main() {
 		log.Fatalf("tax-indexer: registering IBC client v2 message types: %v", err)
 	}
 
+	// Gravity DEX (x/liquidity, Gaia v5 to v10). Its batch messages escrow
+	// coins and pool creation swaps them. See tax/liquidity.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.LiquidityMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering liquidity message types: %v", err)
+	}
+
 	// Interchain accounts ship in this build's ibc-go but not in probe's
 	// default module set.
 	indexer.RegisterCustomModuleBasics([]module.AppModuleBasic{ica.AppModuleBasic{}})

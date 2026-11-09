@@ -30,20 +30,28 @@ const (
 	TypeURLCCVRemoveConsumer             = "/interchain_security.ccv.provider.v1.MsgRemoveConsumer"
 	TypeURLCCVSubmitConsumerMisbehaviour = "/interchain_security.ccv.provider.v1.MsgSubmitConsumerMisbehaviour"
 	TypeURLCCVSubmitConsumerDoubleVoting = "/interchain_security.ccv.provider.v1.MsgSubmitConsumerDoubleVoting"
+	// ICS v1 to v3 let anyone whitelist a consumer reward denom for a fee paid
+	// to the community pool, so unlike the rest this one moves coins.
+	TypeURLCCVRegisterConsumerRewardDenom = "/interchain_security.ccv.provider.v1.MsgRegisterConsumerRewardDenom"
 )
+
+// TriggerConsumerRewardDenomFee marks the community pool fee paid to register
+// a consumer reward denom.
+const TriggerConsumerRewardDenomFee = "consumer_reward_denom_fee"
 
 // ProviderMsgTypes maps the provider module's type URLs to registrable instances.
 func ProviderMsgTypes() map[string]sdk.Msg {
 	return map[string]sdk.Msg{
-		TypeURLCCVAssignConsumerKey:          &MsgAssignConsumerKey{},
-		TypeURLCCVOptIn:                      &MsgOptIn{},
-		TypeURLCCVOptOut:                     &MsgOptOut{},
-		TypeURLCCVSetConsumerCommissionRate:  &MsgSetConsumerCommissionRate{},
-		TypeURLCCVCreateConsumer:             &MsgCreateConsumer{},
-		TypeURLCCVUpdateConsumer:             &MsgUpdateConsumer{},
-		TypeURLCCVRemoveConsumer:             &MsgRemoveConsumer{},
-		TypeURLCCVSubmitConsumerMisbehaviour: &MsgSubmitConsumerMisbehaviour{},
-		TypeURLCCVSubmitConsumerDoubleVoting: &MsgSubmitConsumerDoubleVoting{},
+		TypeURLCCVAssignConsumerKey:           &MsgAssignConsumerKey{},
+		TypeURLCCVOptIn:                       &MsgOptIn{},
+		TypeURLCCVOptOut:                      &MsgOptOut{},
+		TypeURLCCVSetConsumerCommissionRate:   &MsgSetConsumerCommissionRate{},
+		TypeURLCCVCreateConsumer:              &MsgCreateConsumer{},
+		TypeURLCCVUpdateConsumer:              &MsgUpdateConsumer{},
+		TypeURLCCVRemoveConsumer:              &MsgRemoveConsumer{},
+		TypeURLCCVSubmitConsumerMisbehaviour:  &MsgSubmitConsumerMisbehaviour{},
+		TypeURLCCVSubmitConsumerDoubleVoting:  &MsgSubmitConsumerDoubleVoting{},
+		TypeURLCCVRegisterConsumerRewardDenom: &MsgRegisterConsumerRewardDenom{},
 	}
 }
 
@@ -203,4 +211,42 @@ func (m *MsgSubmitConsumerDoubleVoting) Unmarshal(b []byte) error {
 //revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
 func (*MsgSubmitConsumerDoubleVoting) XXX_MessageName() string {
 	return TypeURLCCVSubmitConsumerDoubleVoting[1:]
+}
+
+// MsgRegisterConsumerRewardDenom is read from interchain-security
+// proto/interchain_security/ccv/provider/v1/tx.proto at v1.1.0-multiden: denom
+// is field 1 and depositor field 2. The depositor signs and pays the
+// registration fee.
+type MsgRegisterConsumerRewardDenom struct {
+	rawMsg
+	Denom     string `json:"denom,omitempty"`
+	Depositor string `json:"depositor,omitempty"`
+}
+
+func (m *MsgRegisterConsumerRewardDenom) Reset()                       { *m = MsgRegisterConsumerRewardDenom{} }
+func (*MsgRegisterConsumerRewardDenom) ProtoMessage()                  {}
+func (*MsgRegisterConsumerRewardDenom) ValidateBasic() error           { return nil }
+func (m *MsgRegisterConsumerRewardDenom) GetSigners() []sdk.AccAddress { return signerOf(m.Depositor) }
+
+func (m *MsgRegisterConsumerRewardDenom) String() string {
+	return fmt.Sprintf("MsgRegisterConsumerRewardDenom{%s %s}", m.Depositor, m.Denom)
+}
+
+func (m *MsgRegisterConsumerRewardDenom) Unmarshal(b []byte) error {
+	*m = MsgRegisterConsumerRewardDenom{}
+	m.keep(b)
+	return scanFields(b, func(w wireField) error {
+		switch w.num {
+		case 1:
+			m.Denom = string(w.bytes)
+		case 2:
+			m.Depositor = string(w.bytes)
+		}
+		return nil
+	})
+}
+
+//revive:disable-next-line var-naming -- gogoproto requires this exact interface method name.
+func (*MsgRegisterConsumerRewardDenom) XXX_MessageName() string {
+	return TypeURLCCVRegisterConsumerRewardDenom[1:]
 }

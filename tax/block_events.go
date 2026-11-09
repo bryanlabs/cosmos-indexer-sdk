@@ -172,6 +172,7 @@ func ClassifyBlockLifecycle(events []BlockEvent, owner string, deposits []GovDep
 		out = append(out, blockRow(c, CategoryGovDepositRefund, govModuleAddress, owner, "", "", kv))
 	}
 	out = append(out, settleGovDeposits(events, owner, deposits, ended, endedOrder, refunded, govBurn)...)
+	out = append(out, liquidityBlockEvents(events, owner, addIn)...)
 	out = append(out, blockResiduals(events, owner, classifiedIn)...)
 	return out
 }
@@ -236,7 +237,7 @@ func settleGovDeposits(events []BlockEvent, owner string, deposits []GovDeposit,
 }
 
 // blockResiduals compares what the bank module says the owner received and
-// spent in the lifecycle against the classified rows. Chains before SDK 0.46
+// spent in the lifecycle against the classified rows. Chains before SDK 0.44
 // emit no coin_received or coin_spent events, so nothing is checked there.
 func blockResiduals(events []BlockEvent, owner string, classifiedIn map[string]sdkmath.Int) []TaxableEvent {
 	received := map[string][]blockCoin{}
