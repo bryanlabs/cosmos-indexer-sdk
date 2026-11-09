@@ -141,6 +141,7 @@ func (m *MsgSetConsumerCommissionRate) Reset() { *m = MsgSetConsumerCommissionRa
 func (m *MsgSetConsumerCommissionRate) String() string {
 	return m.describe("MsgSetConsumerCommissionRate")
 }
+
 func (m *MsgSetConsumerCommissionRate) Unmarshal(b []byte) error {
 	return m.decode(b, providerFields{signer: 4, provider: 1, consumer: 5, chain: 2})
 }
@@ -189,6 +190,7 @@ func (m *MsgSubmitConsumerMisbehaviour) Reset() { *m = MsgSubmitConsumerMisbehav
 func (m *MsgSubmitConsumerMisbehaviour) String() string {
 	return m.describe("MsgSubmitConsumerMisbehaviour")
 }
+
 func (m *MsgSubmitConsumerMisbehaviour) Unmarshal(b []byte) error {
 	return m.decode(b, providerFields{signer: 1, consumer: 3})
 }
@@ -204,6 +206,7 @@ func (m *MsgSubmitConsumerDoubleVoting) Reset() { *m = MsgSubmitConsumerDoubleVo
 func (m *MsgSubmitConsumerDoubleVoting) String() string {
 	return m.describe("MsgSubmitConsumerDoubleVoting")
 }
+
 func (m *MsgSubmitConsumerDoubleVoting) Unmarshal(b []byte) error {
 	return m.decode(b, providerFields{signer: 1, consumer: 4})
 }

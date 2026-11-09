@@ -677,9 +677,9 @@ func redeemedTokens(log *indexerTxTypes.LogMessage, who string) string {
 			switch {
 			case ev.Type == "redeem_shares" && a.Key == attributeDelegator && a.Value == who:
 				redeems++
-			case ev.Type == "coin_spent" && a.Key == "spender":
+			case ev.Type == eventCoinSpent && a.Key == attributeSpender:
 				cur = a.Value
-			case ev.Type == "coin_spent" && a.Key == attributeAmount && cur == who:
+			case ev.Type == eventCoinSpent && a.Key == attributeAmount && cur == who:
 				if c, err := sdk.ParseCoinNormalized(a.Value); err == nil && !strings.Contains(c.Denom, "/") {
 					last = c.String()
 				}
