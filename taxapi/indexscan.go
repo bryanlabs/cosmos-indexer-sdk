@@ -29,6 +29,10 @@ type nodeTx struct {
 	Charged string
 	// Granter is the account whose fee grant paid the fee, if any.
 	Granter string
+	// Rejected is a failed transaction with no events: the ante handler
+	// turned it away, so it changed nothing, not even the fee, and the same
+	// bytes can be included again in a later block.
+	Rejected bool
 }
 
 // rpcResult reads one RPC response at height, from the block cache when the
@@ -130,7 +134,7 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 				}
 			}
 		}
-		tx := nodeTx{Hash: strings.ToUpper(hex.EncodeToString(sum[:])), Code: t.Code, Granter: granter}
+		tx := nodeTx{Hash: strings.ToUpper(hex.EncodeToString(sum[:])), Code: t.Code, Granter: granter, Rejected: t.Code != 0 && len(t.Events) == 0}
 		if t.Code != 0 {
 			tx.Charged = strings.Join(spent, ",")
 		}
@@ -154,7 +158,9 @@ type indexedTx struct {
 // scanHole compares one block's transactions on chain with the index. It
 // returns the hole to record, if any: the distinct transactions the chain
 // holds, and every account named by a transaction the index lacks or holds
-// without its messages.
+// without its messages. A rejected transaction needs no index row, since it
+// changed nothing; the index keeps its hash at the block that included it
+// again.
 func scanHole(chain []nodeTx, index []indexedTx) (int, []string) {
 	have := map[string]indexedTx{}
 	for _, x := range index {
@@ -166,7 +172,7 @@ func scanHole(chain []nodeTx, index []indexedTx) (int, []string) {
 	accounts := map[string]bool{}
 	short := false
 	for _, t := range chain {
-		if distinct[t.Hash] {
+		if t.Rejected || distinct[t.Hash] {
 			continue
 		}
 		distinct[t.Hash] = true

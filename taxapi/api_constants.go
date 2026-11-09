@@ -74,6 +74,7 @@ const (
 	apiReward              = "reward"
 	apiSend                = "send"
 	apiStaked              = "staked"
+	apiUnbonding           = "unbonding"
 	apiStaking             = "staking"
 	apiStart               = "start"
 	apiStatus              = "status"

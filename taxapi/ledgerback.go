@@ -176,6 +176,64 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 	return from, nil
 }
 
+// RecheckIndexHoles reads every recorded hole's block from node again and
+// compares it with the index the way the scan now does: a hole that is no
+// longer short is dropped, and the rest get their transaction count and
+// accounts rewritten. It returns how many holes it dropped and how many are
+// left.
+func (s *Server) RecheckIndexHoles(chain string, node *ledgerNode, logf func(string, ...any)) (int, int, error) {
+	ids, err := s.chainRowIDs(chain)
+	if err != nil {
+		return 0, 0, err
+	}
+	var heights []int64
+	if err := s.db.Model(&IndexHole{}).Where("chain = ?", chain).Order("height").Pluck("height", &heights).Error; err != nil {
+		return 0, 0, err
+	}
+	dropped := 0
+	for _, h := range heights {
+		txs, err := node.blockTxs(h)
+		if err != nil {
+			return dropped, len(heights) - dropped, fmt.Errorf("block %d: %w", h, err)
+		}
+		var index []indexedTx
+		if err := s.db.Raw(`
+SELECT b.height, b.tx_indexed AND b.block_events_indexed AS indexed, COALESCE(x.hash, '') AS hash, COALESCE(x.code, 0) AS code,
+       EXISTS (SELECT 1 FROM messages m WHERE m.tx_id = x.id) AS messages
+FROM blocks b LEFT JOIN txes x ON x.block_id = b.id
+WHERE b.chain_id IN @ids AND b.height = @h`, map[string]any{"ids": ids, "h": h}).Scan(&index).Error; err != nil {
+			return dropped, len(heights) - dropped, fmt.Errorf("index rows at %d: %w", h, err)
+		}
+		n, accounts := scanHole(txs, index)
+		if err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Where("chain = ? AND height = ?", chain, h).Delete(&IndexHoleAddress{}).Error; err != nil {
+				return err
+			}
+			if n == 0 {
+				return tx.Where("chain = ? AND height = ?", chain, h).Delete(&IndexHole{}).Error
+			}
+			if err := tx.Model(&IndexHole{}).Where("chain = ? AND height = ?", chain, h).Updates(map[string]any{"chain_txs": n, "addresses_known": true}).Error; err != nil {
+				return err
+			}
+			rows := make([]IndexHoleAddress, 0, len(accounts))
+			for _, a := range accounts {
+				rows = append(rows, IndexHoleAddress{Chain: chain, Height: h, Address: a})
+			}
+			if len(rows) == 0 {
+				return nil
+			}
+			return tx.CreateInBatches(rows, 500).Error
+		}); err != nil {
+			return dropped, len(heights) - dropped, fmt.Errorf("hole at %d: %w", h, err)
+		}
+		if n == 0 {
+			dropped++
+		}
+	}
+	logf("index holes: rechecked %d, dropped %d, %d left", len(heights), dropped, len(heights)-dropped)
+	return dropped, len(heights) - dropped, nil
+}
+
 // recordBackScan stores one chunk's records and moves the span's start to
 // from, all or nothing.
 func (s *Server) recordBackScan(chain string, blocks []backBlock, from int64) (int, error) {
