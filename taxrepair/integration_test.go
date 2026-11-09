@@ -221,6 +221,13 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if len(only) != 1 || only[0].ID != 2 {
 		t.Fatalf("candidate load got %d messages", len(only))
 	}
+	kinds, err := typeIDs(db, []string{urls[2]}, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 1 || kinds[0] != 2 {
+		t.Fatalf("message type candidates = %v", kinds)
+	}
 	if got := intersect([]uint{1, 2, 5}, []uint{2, 3, 5}); len(got) != 2 || got[0] != 2 || got[1] != 5 {
 		t.Fatalf("intersect = %v", got)
 	}

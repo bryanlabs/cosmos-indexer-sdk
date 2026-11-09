@@ -63,7 +63,8 @@ const (
 )
 
 const (
-	attributeRecipient = "recipient"
+	attributeRecipient       = "recipient"
+	attributeWithdrawAddress = "withdraw_address"
 	// distributionModuleAddress is the Hub's x/distribution module account.
 	distributionModuleAddress = "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
 )

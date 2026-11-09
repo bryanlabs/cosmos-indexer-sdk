@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
+	sdkmath "cosmossdk.io/math"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
@@ -254,7 +256,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
 	case *MsgRedeemTokensForShares:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redeem")...)
-		for _, e := range tokenizeShareRewardEvents(log, m.DelegatorAddress) {
+		for _, e := range tokenizeShareRewardEvents(log, m.DelegatorAddress, shareDenomValidator(m.AmountRaw)) {
 			e.RewardTrigger = "redeem"
 			events = append(events, e)
 		}
@@ -288,10 +290,10 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// module emits withdraw_tokenize_share_reward with the settled amount per
 	// record, which is the authoritative figure.
 	case *MsgWithdrawTokenizeShareRecordReward:
-		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress)...)
+		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress, "")...)
 
 	case *MsgWithdrawAllTokenizeShareRecordReward:
-		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress)...)
+		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress, "")...)
 
 	case *authz.MsgExec:
 		return classifyAuthz(m, log, state, depth, path)
@@ -787,30 +789,167 @@ const ibcCallbackErrorPrefix = "ibccallbackerror-"
 // Income is attributed to the owner even when the event's withdraw_address
 // differs, matching how redirected staking rewards are attributed to the
 // delegator rather than the withdraw address (INF-213).
-func tokenizeShareRewardEvents(log *indexerTxTypes.LogMessage, owner string) []TaxableEvent {
+//
+// The reward event names no validator, so the per-denom total is split by
+// record: each record's module account withdraws from its validator
+// (withdraw_rewards with that account as delegator) and then pays the
+// withdraw address. The legacy SDK fork emits one summed reward event for all
+// records, so the split follows those module transfers rather than pairing
+// events. recordValidator, when set, is the one record a redeem settles; it
+// takes any part the transfers cannot place. What cannot be proven keeps an
+// empty validator, and the total per denom never changes.
+func tokenizeShareRewardEvents(log *indexerTxTypes.LogMessage, owner, recordValidator string) []TaxableEvent {
 	total := sdk.NewCoins()
+	payees := map[string]bool{}
 	for _, ev := range log.Events {
 		if ev.Type != "withdraw_tokenize_share_reward" {
 			continue
 		}
 		for _, a := range ev.Attributes {
-			if a.Key != attributeAmount {
-				continue
-			}
-			if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
-				total = total.Add(coins...)
+			switch a.Key {
+			case attributeAmount:
+				if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
+					total = total.Add(coins...)
+				}
+			case attributeWithdrawAddress:
+				payees[a.Value] = true
 			}
 		}
 	}
+	if len(payees) == 0 {
+		payees[owner] = true
+	}
+	attributed := recordRewardsByValidator(log, owner, payees)
 	var out []TaxableEvent
+	emit := func(validator string, amount sdkmath.Int, denom string) {
+		if amount.IsPositive() {
+			out = append(out, TaxableEvent{
+				Category: string(CategoryReward),
+				ToAddr:   owner,
+				Amount:   amount.String(), Denom: denom,
+				ValidatorAddress: validator,
+			})
+		}
+	}
+	validators := make([]string, 0, len(attributed))
+	for v := range attributed {
+		validators = append(validators, v)
+	}
+	sort.Strings(validators)
 	for _, c := range total {
-		out = append(out, TaxableEvent{
-			Category: string(CategoryReward),
-			ToAddr:   owner,
-			Amount:   c.Amount.String(), Denom: c.Denom,
-		})
+		placed := sdkmath.ZeroInt()
+		for _, v := range validators {
+			placed = placed.Add(attributed[v].AmountOf(c.Denom))
+		}
+		if placed.GT(c.Amount) {
+			emit(recordValidator, c.Amount, c.Denom)
+			continue
+		}
+		for _, v := range validators {
+			emit(v, attributed[v].AmountOf(c.Denom), c.Denom)
+		}
+		emit(recordValidator, c.Amount.Sub(placed), c.Denom)
+	}
+	return mergeRewardRows(out)
+}
+
+// recordRewardsByValidator sums the transfers each tokenize-share record
+// account makes to a withdraw address, keyed by the validator that account
+// withdrew from in the same log. An account seen withdrawing from two
+// validators proves neither and is left out.
+//
+// SDK 0.45 withdraw_rewards carries no delegator. There the withdrawing
+// account is the one recipient of a distribution module transfer of exactly
+// the withdrawn coins; an amount paid to two accounts proves neither.
+func recordRewardsByValidator(log *indexerTxTypes.LogMessage, owner string, payees map[string]bool) map[string]sdk.Coins {
+	paidBy := map[string]map[string]bool{}
+	for _, p := range transferRuns(log, distributionModuleAddress) {
+		k := p.coins.String()
+		if paidBy[k] == nil {
+			paidBy[k] = map[string]bool{}
+		}
+		paidBy[k][p.recipient] = true
+	}
+	validatorOf := map[string]string{}
+	ambiguous := map[string]bool{}
+	for _, ev := range log.Events {
+		if ev.Type != "withdraw_rewards" {
+			continue
+		}
+		groups, err := rewardAttributeGroups(ev)
+		if err != nil {
+			continue
+		}
+		for _, g := range groups {
+			acct, val := g[attributeDelegator], g[attributeValidator]
+			if acct == "" {
+				if coins, err := sdk.ParseCoinsNormalized(g[attributeAmount]); err == nil && !coins.IsZero() && len(paidBy[coins.String()]) == 1 {
+					for r := range paidBy[coins.String()] {
+						acct = r
+					}
+				}
+			}
+			if acct == "" || acct == owner || payees[acct] {
+				continue
+			}
+			if prev, ok := validatorOf[acct]; ok && prev != val {
+				ambiguous[acct] = true
+			}
+			validatorOf[acct] = val
+		}
+	}
+	out := map[string]sdk.Coins{}
+	for acct, val := range validatorOf {
+		if ambiguous[acct] {
+			continue
+		}
+		for recipient, coins := range transfersFromSender(log, acct) {
+			if payees[recipient] {
+				out[val] = out[val].Add(coins...)
+			}
+		}
 	}
 	return out
+}
+
+// mergeRewardRows folds rows that share a validator and denom, which happens
+// when a redeem's record validator also appears through its module transfer.
+func mergeRewardRows(rows []TaxableEvent) []TaxableEvent {
+	var out []TaxableEvent
+	index := map[[2]string]int{}
+	for _, r := range rows {
+		k := [2]string{r.ValidatorAddress, r.Denom}
+		i, ok := index[k]
+		if !ok {
+			index[k] = len(out)
+			out = append(out, r)
+			continue
+		}
+		a, _ := sdkmath.NewIntFromString(out[i].Amount)
+		b, _ := sdkmath.NewIntFromString(r.Amount)
+		out[i].Amount = a.Add(b).String()
+	}
+	return out
+}
+
+// shareDenomValidator returns the validator of a tokenize-share denom
+// ("cosmosvaloper1.../<record id>") carried in a raw Coin message field.
+func shareDenomValidator(rawCoin []byte) string {
+	denom := ""
+	_ = scanFields(rawCoin, func(f wireField) error {
+		if f.num == 1 {
+			denom = string(f.bytes)
+		}
+		return nil
+	})
+	valoper, _, ok := strings.Cut(denom, "/")
+	if !ok {
+		return ""
+	}
+	if _, err := sdk.ValAddressFromBech32(valoper); err != nil {
+		return ""
+	}
+	return valoper
 }
 
 // receivedCoinsByReceiver groups coin_received amounts by receiver (used for
@@ -862,10 +1001,25 @@ func accountForValidator(valoper string) string {
 // transfersFromSender groups transfer amounts paid by sender, by recipient.
 // SDK 0.42 and earlier (Gaia v4 and v5) emit no coin_received, so commission
 // is only visible as the distribution module's transfer to the withdraw
-// address. Those logs merge repeated transfers into one event, so attributes
-// are read as recipient, sender, amount runs.
+// address.
 func transfersFromSender(log *indexerTxTypes.LogMessage, sender string) map[string]sdk.Coins {
 	out := map[string]sdk.Coins{}
+	for _, p := range transferRuns(log, sender) {
+		out[p.recipient] = out[p.recipient].Add(p.coins...)
+	}
+	return out
+}
+
+type transferRun struct {
+	recipient string
+	coins     sdk.Coins
+}
+
+// transferRuns lists each transfer paid by sender. Older logs merge repeated
+// transfers into one event, so attributes are read as recipient, sender,
+// amount runs.
+func transferRuns(log *indexerTxTypes.LogMessage, sender string) []transferRun {
+	var out []transferRun
 	for _, ev := range log.Events {
 		if ev.Type != string(CategoryTransfer) {
 			continue
@@ -880,7 +1034,7 @@ func transfersFromSender(log *indexerTxTypes.LogMessage, sender string) map[stri
 			case attributeAmount:
 				if recipient != "" && from == sender {
 					if coins, err := sdk.ParseCoinsNormalized(a.Value); err == nil {
-						out[recipient] = out[recipient].Add(coins...)
+						out = append(out, transferRun{recipient: recipient, coins: coins})
 					}
 				}
 				recipient, from = "", ""
