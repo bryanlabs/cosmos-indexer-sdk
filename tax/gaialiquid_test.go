@@ -220,8 +220,15 @@ func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
 			Size() int
 		})
 	}
-	if len(all) != 28 {
-		t.Fatalf("expected 28 registered custom types, got %d", len(all))
+	for url, m := range LiquidityMsgTypes() {
+		all[url] = m.(interface {
+			Unmarshal([]byte) error
+			Marshal() ([]byte, error)
+			Size() int
+		})
+	}
+	if len(all) != 33 {
+		t.Fatalf("expected 33 registered custom types, got %d", len(all))
 	}
 
 	// Field 1 is a string on some of these and a nested message on others, so an
@@ -251,21 +258,22 @@ func TestEveryCustomTypeRoundTripsItsBytes(t *testing.T) {
 // delegation actually received, in the current per-event log shape and in the
 // older shape that merges every coin_spent into one event.
 func TestRedeemSharesRecordsRedeemedTokens(t *testing.T) {
+	const redeemed = "571042888uatom"
 	share := "571099998cosmosvaloper1share/87231"
 	module := "cosmos1notbondedpool"
 	current := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_spent", [2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, share}),
+		ev("coin_spent", [2]string{attributeSpender, fixtureLSMOwner}, [2]string{attributeAmount, share}),
 		ev("burn", [2]string{"burner", module}, [2]string{attributeAmount, share}),
-		ev("coin_spent", [2]string{"spender", module}, [2]string{attributeAmount, "571042888uatom"}),
-		ev("coin_spent", [2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, "571042888uatom"}),
+		ev("coin_spent", [2]string{attributeSpender, module}, [2]string{attributeAmount, redeemed}),
+		ev("coin_spent", [2]string{attributeSpender, fixtureLSMOwner}, [2]string{attributeAmount, redeemed}),
 		ev("redeem_shares", [2]string{attributeDelegator, fixtureLSMOwner}, [2]string{attributeAmount, share}),
 	}}
 	merged := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev("coin_spent",
-			[2]string{"spender", module}, [2]string{attributeAmount, "66ibc/0025F8,613410uatom"},
-			[2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, share},
-			[2]string{"spender", module}, [2]string{attributeAmount, "571042888uatom"},
-			[2]string{"spender", fixtureLSMOwner}, [2]string{attributeAmount, "571042888uatom"}),
+			[2]string{attributeSpender, module}, [2]string{attributeAmount, "66ibc/0025F8,613410uatom"},
+			[2]string{attributeSpender, fixtureLSMOwner}, [2]string{attributeAmount, share},
+			[2]string{attributeSpender, module}, [2]string{attributeAmount, redeemed},
+			[2]string{attributeSpender, fixtureLSMOwner}, [2]string{attributeAmount, redeemed}),
 		ev("redeem_shares", [2]string{attributeDelegator, fixtureLSMOwner}, [2]string{attributeAmount, share}),
 	}}
 	for name, log := range map[string]*indexerTxTypes.LogMessage{"current": current, "merged": merged} {

@@ -93,5 +93,11 @@ func Triggers() []TriggerInfo {
 		{TriggerStargazeMigration, "nft_transfer", "An NFT Stargaze minted on Cosmos Hub to the holder who already owned it on Stargaze (March 2026 migration). Not a purchase: its cost basis and acquired date are the original Stargaze purchase."},
 		{TriggerCommunityPoolSpend, string(CategoryIncome), "A community pool payout made by a passed governance proposal at the end of a block."},
 		{TriggerBlockWithdrawal, string(CategoryReward), "A staking reward the chain withdrew for the delegator at the start or end of a block, outside any transaction."},
+		{TriggerConsumerRewardDenomFee, string(CategoryExpense), "The community pool fee for registering a consumer chain reward denom (ICS v1 to v3)."},
+		{TriggerGravityDEXSwap, string(CategorySwap), "A Gravity DEX swap order settled at the end of its block: the offer coin plus the swap fee out, the demand coin in."},
+		{TriggerGravityDEXDeposit, string(CategorySwap), "A Gravity DEX pool deposit settled at the end of its block: the accepted coins out, pool coins (LP tokens) in. Unaccepted coins are returned and not booked."},
+		{TriggerGravityDEXWithdraw, string(CategorySwap), "A Gravity DEX pool withdrawal settled at the end of its block: pool coins out, the reserve coins in."},
+		{TriggerGravityDEXCreatePool, string(CategorySwap), "A Gravity DEX pool created: the deposit coins out, the first pool coins in."},
+		{TriggerGravityDEXPoolCreationFee, string(CategoryExpense), "The Gravity DEX pool creation fee, paid to the community pool."},
 	}
 }

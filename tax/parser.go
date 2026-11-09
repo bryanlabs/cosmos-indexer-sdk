@@ -79,6 +79,12 @@ var MessageTypeURLs = []string{
 	TypeURLTFForceTransfer,
 	TypeURLTFBurn,
 	TypeURLTFCreateDenom,
+	TypeURLCCVRegisterConsumerRewardDenom,
+	TypeURLV2SendPacket,
+	TypeURLLiquidityCreatePool,
+	TypeURLLiquidityDepositWithinBatch,
+	TypeURLLiquidityWithdrawWithinBatch,
+	TypeURLLiquiditySwapWithinBatch,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -349,6 +355,18 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 			}
 		}
 
+	// Registering a consumer reward denom (ICS v1 to v3) charged the depositor
+	// a fee (10 ATOM on Cosmos Hub) paid to the community pool, with nothing
+	// coming back.
+	case *MsgRegisterConsumerRewardDenom:
+		for _, c := range transfersFromSender(log, m.Depositor)[distributionModuleAddress] {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryExpense), FromAddr: m.Depositor, ToAddr: distributionModuleAddress,
+				Amount: c.Amount.String(), Denom: c.Denom, RewardTrigger: TriggerConsumerRewardDenomFee,
+				Detail: detailJSON(map[string]string{detailProtocol: detailCommunityPool, "consumer_reward_denom": m.Denom}),
+			})
+		}
+
 	// An admin moving someone else's coins is still a movement for both sides.
 	case *MsgTFForceTransfer:
 		if m.Amount != "" && m.Denom != "" {
@@ -374,6 +392,23 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 			events = append(events, e)
 		}
 		events = append(events, skipForwardEvents(log)...)
+
+	// IBC channel v2 send: an outbound transfer, same as v1 MsgTransfer. The
+	// payload is solidity-ABI encoded for the Ethereum bridge, so the amount,
+	// denom and receiver come from the transfer module's ibc_transfer event.
+	case *MsgSendPacketV2:
+		sent, issues := ibcV2SendEvents(log, m)
+		events = append(events, sent...)
+		state.issues = append(state.issues, issues...)
+
+	// Gravity DEX. Batch messages only escrow the sender's coins; the batch
+	// settles at the end of the block, so their rows come from block events.
+	// Creating a pool settles at once. See tax/liquidity.go.
+	case *MsgLiquidityCreatePool:
+		created, issues := liquidityCreatePoolEvents(log, m)
+		events = append(events, created...)
+		state.issues = append(state.issues, issues...)
+	case *MsgLiquidityDepositWithinBatch, *MsgLiquidityWithdrawWithinBatch, *MsgLiquiditySwapWithinBatch:
 
 	case *chantypes.MsgTimeout:
 		refunded, issues := ibcV1RefundEvents(log, m.Packet, true, nil)
