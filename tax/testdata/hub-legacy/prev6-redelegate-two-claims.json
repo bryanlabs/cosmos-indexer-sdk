@@ -1,0 +1,90 @@
+{
+ "chain_id": "cosmoshub-4",
+ "height": 5400452,
+ "tx_index": 0,
+ "time": "2021-03-07T01:33:51.269509613Z",
+ "code": 0,
+ "tx": "CuIBCt8BCiovY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dCZWdpblJlZGVsZWdhdGUSsAEKLWNvc21vczF3emE1Y2d4NXphaHBodTNnZmQycnFwZ2xocWZkamhqNnRobWtmehI0Y29zbW9zdmFsb3BlcjE0bDBmcDYzOXl1ZGZsNDZ6YXV2djhya3pqZ2Q0dTB6azJhc2V5cxo0Y29zbW9zdmFsb3BlcjFjbHBxcjRucms0a2hna3hqNzhmY3d3aDZkbDN1dzRlcHNsdWZmbiITCgV1YXRvbRIKMTAwMDAwMDAwMBJlCk4KRgofL2Nvc21vcy5jcnlwdG8uc2VjcDI1NmsxLlB1YktleRIjCiEDjvb/S8G0eGXkhBspq0WLYuGmiN/m0CZp6c+pzG9c1eASBAoCCH8SEwoNCgV1YXRvbRIENzUwMBDgpxIaQIcWgP853l1dDxLOcwCs9Zw+kxgFi9utR/tfSx6vOYwHJm4BxPG2XMBE+eAHI2CrcoE00ReKrT0OA79kJK6Ejds=",
+ "logs": [
+  {
+   "events": [
+    {
+     "type": "message",
+     "attributes": [
+      {
+       "key": "action",
+       "value": "begin_redelegate"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "module",
+       "value": "staking"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1wza5cgx5zahphu3gfd2rqpglhqfdjhj6thmkfz"
+      }
+     ]
+    },
+    {
+     "type": "redelegate",
+     "attributes": [
+      {
+       "key": "source_validator",
+       "value": "cosmosvaloper14l0fp639yudfl46zauvv8rkzjgd4u0zk2aseys"
+      },
+      {
+       "key": "destination_validator",
+       "value": "cosmosvaloper1clpqr4nrk4khgkxj78fcwwh6dl3uw4epsluffn"
+      },
+      {
+       "key": "amount",
+       "value": "1000000000"
+      },
+      {
+       "key": "completion_time",
+       "value": "2021-03-28T01:33:51Z"
+      }
+     ]
+    },
+    {
+     "type": "transfer",
+     "attributes": [
+      {
+       "key": "recipient",
+       "value": "cosmos1wza5cgx5zahphu3gfd2rqpglhqfdjhj6thmkfz"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "9324uatom"
+      },
+      {
+       "key": "recipient",
+       "value": "cosmos1wza5cgx5zahphu3gfd2rqpglhqfdjhj6thmkfz"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "2499uatom"
+      }
+     ]
+    }
+   ],
+   "msg_index": 0
+  }
+ ]
+}

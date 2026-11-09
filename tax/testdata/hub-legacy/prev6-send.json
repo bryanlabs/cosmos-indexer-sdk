@@ -1,0 +1,49 @@
+{
+ "chain_id": "cosmoshub-4",
+ "height": 5400012,
+ "tx_index": 0,
+ "time": "2021-03-07T00:41:19.90392044Z",
+ "code": 0,
+ "tx": "CpMBCpABChwvY29zbW9zLmJhbmsudjFiZXRhMS5Nc2dTZW5kEnAKLWNvc21vczF0NXUwamZnM2xqc2pyaDJtOWU0N2Q0bnkyaGVhN2VlaHhyemRnZBItY29zbW9zMXRoZ3Fsd24wdmVlbDg4YzIycTI3c216eWcwY3docTNweDgwcjA0GhAKBXVhdG9tEgc5MDIzNTUxEmUKTgpGCh8vY29zbW9zLmNyeXB0by5zZWNwMjU2azEuUHViS2V5EiMKIQLqGodLEwWelzPDXpDLKlhlpGtk7ZDSVVR8B8pSOSf8YhIECgIIfxITCg0KBXVhdG9tEgQyNTAwEIiYBRpAAJjyfWPlENHKuQVGT4n81Jo1hY46Ein2O8xVUImtUWl2AeH2R4XD03hOwk4LwhsfHcTAeMPZC+Oq4YfXjBN03g==",
+ "logs": [
+  {
+   "events": [
+    {
+     "type": "message",
+     "attributes": [
+      {
+       "key": "action",
+       "value": "send"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1t5u0jfg3ljsjrh2m9e47d4ny2hea7eehxrzdgd"
+      },
+      {
+       "key": "module",
+       "value": "bank"
+      }
+     ]
+    },
+    {
+     "type": "transfer",
+     "attributes": [
+      {
+       "key": "recipient",
+       "value": "cosmos1thgqlwn0veel88c22q27smzyg0cwhq3px80r04"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1t5u0jfg3ljsjrh2m9e47d4ny2hea7eehxrzdgd"
+      },
+      {
+       "key": "amount",
+       "value": "9023551uatom"
+      }
+     ]
+    }
+   ],
+   "msg_index": 0
+  }
+ ]
+}

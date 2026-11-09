@@ -55,7 +55,7 @@ var MessageTypeURLs = []string{
 	typeURLLegacyGovSubmitProposal,
 	typeURLWithdrawDelegatorReward,
 	"/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission",
-	"/cosmos.authz.v1beta1.MsgExec",
+	typeURLAuthzExec,
 	typeURLIBCTransfer,
 	typeURLIBCRecvPacket,
 	"/ibc.core.channel.v1.MsgTimeout",
@@ -181,17 +181,17 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// The principal itself is recorded too (record-only categories), so a
 	// controller can reconcile liquid against bonded balances.
 	case *stakingtypes.MsgDelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "delegate")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "delegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgUndelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "undelegate")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "undelegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgBeginRedelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redelegate")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "redelegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgCancelUnbondingDelegation:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 
 	// A new validator's self-bond is staking principal like any delegation. The
 	// SDK emits create_validator rather than delegate, so the amount comes from
@@ -751,6 +751,51 @@ func delegatorRewardEventsExcept(log *indexerTxTypes.LogMessage, delegator, trig
 					ValidatorAddress: validator, RewardTrigger: trigger,
 				})
 			}
+		}
+	}
+	return out
+}
+
+// stakingRewardEvents reads the reward a delegate, undelegate or redelegate
+// withdrew for the delegator. Before the Hub's SDK emitted withdraw_rewards
+// for that automatic withdrawal (SDK 0.42, and 0.44 and 0.45 into 2023) its
+// only trace is the distribution module's transfer, so a log with no
+// withdraw_rewards event at all reads those transfers instead. A redelegation
+// withdraws from the source validator and then from the destination when the
+// delegator already had stake there; a single transfer could be either, so it
+// carries no validator.
+func stakingRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger string) []TaxableEvent {
+	if log == nil {
+		return nil
+	}
+	var validators []string
+	for _, ev := range log.Events {
+		a := attrMap(ev)
+		switch ev.Type {
+		case eventWithdrawRewards:
+			return delegatorRewardEvents(log, delegator, trigger)
+		case string(CategoryDelegate), eventUnbond:
+			validators = []string{a[attributeValidator]}
+		case string(CategoryRedelegate):
+			validators = []string{a["source_validator"], a["destination_validator"]}
+		}
+	}
+	runs := transferRuns(log, distributionModuleAddress)
+	var out []TaxableEvent
+	for i, p := range runs {
+		validator := ""
+		if len(runs) == len(validators) {
+			validator = validators[i]
+		}
+		for _, coin := range p.coins {
+			if !coin.IsPositive() {
+				continue
+			}
+			out = append(out, TaxableEvent{
+				Category: string(CategoryReward), ToAddr: delegator,
+				Amount: coin.Amount.String(), Denom: coin.Denom,
+				ValidatorAddress: validator, RewardTrigger: trigger,
+			})
 		}
 	}
 	return out
