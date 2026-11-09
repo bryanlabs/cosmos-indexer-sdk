@@ -2,6 +2,7 @@ package tax
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
@@ -240,9 +241,9 @@ func TestBlockGravityDEXMismatchedEscrowCreditNeedsReview(t *testing.T) {
 	}
 }
 
-// Pool creation settles in the transaction. Event order follows liquidity
-// v1.4.5 MintAndSendPoolCoin (one InputOutputCoins for the deposit and the
-// minted pool coins) followed by FundCommunityPool for the fee.
+// Pool creation settles in the transaction. When the deposit and minted pool
+// coins carry bank events (one InputOutputCoins, then FundCommunityPool for the
+// fee), the pool coin amount comes from the creator's receipt.
 func TestLiquidityCreatePoolSwapsDepositForPoolCoins(t *testing.T) {
 	deposit := "1000000" + liqOffer + ",2000000uatom"
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
@@ -274,6 +275,39 @@ func TestLiquidityCreatePoolSwapsDepositForPoolCoins(t *testing.T) {
 		t.Fatalf("pool coin leg %+v", r)
 	}
 	if r := out[3]; r.Category != string(CategoryExpense) || r.Amount != "40000000" || r.ToAddr != distributionModuleAddress || r.RewardTrigger != TriggerGravityDEXPoolCreationFee {
+		t.Fatalf("fee %+v", r)
+	}
+}
+
+// Mainnet pool 15 at 9229836: the module emitted no bank events for the
+// deposit or the minted pool coins, only the fee transfer and create_pool.
+func TestLiquidityCreatePoolMainnetShapeUsesInitialMint(t *testing.T) {
+	const (
+		poolDenom  = "poolFD005C5AB01714A4B62E87F5213F5D5CDE357773D70712916A93664BCE5A6931"
+		depositIBC = "ibc/ADBEC1A7AC2FEF73E06B066A1C94DAB6C27924EF7EA3F5A43378150009620284"
+		txFee      = "5000uatom"
+	)
+	feeCollector := authtypes.NewModuleAddress(authtypes.FeeCollectorName).String()
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(eventCoinSpent, [2]string{attributeSpender, del}, [2]string{attributeAmount, txFee}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, feeCollector}, [2]string{attributeAmount, txFee}),
+		ev("transfer", [2]string{attributeRecipient, feeCollector}, [2]string{attributeSender, del}, [2]string{attributeAmount, txFee}),
+		ev(eventCoinSpent, [2]string{attributeSpender, del}, [2]string{attributeAmount, liqCreationFee}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, distributionModuleAddress}, [2]string{attributeAmount, liqCreationFee}),
+		ev("transfer", [2]string{attributeRecipient, distributionModuleAddress}, [2]string{attributeSender, del}, [2]string{attributeAmount, liqCreationFee}),
+		ev("create_pool", [2]string{attributePoolID, "15"}, [2]string{"pool_type_id", "1"}, [2]string{"reserve_account", liqReserve},
+			[2]string{"deposit_coins", "299000000" + depositIBC + ",1100000uatom"}, [2]string{"pool_coin_denom", poolDenom}),
+	}}
+	msg := &MsgLiquidityCreatePool{PoolCreator: del, PoolTypeID: 1, DepositCoins: sdk.NewCoins(sdk.NewInt64Coin(depositIBC, 299000000), sdk.NewInt64Coin(fixtureNativeDenom, 1100000))}
+	out := classify(msg, log)
+	if len(out) != 4 {
+		t.Fatalf("rows %+v", out)
+	}
+	if r := out[2]; r.Category != string(CategorySwap) || r.ToAddr != del || r.Amount != "1000000" || r.Denom != poolDenom ||
+		!strings.Contains(r.Detail, `"pool_coin_mint":"init_pool_coin_mint_amount"`) {
+		t.Fatalf("pool coin leg %+v", r)
+	}
+	if r := out[3]; r.Category != string(CategoryExpense) || r.Amount != "40000000" || r.Denom != fixtureNativeDenom {
 		t.Fatalf("fee %+v", r)
 	}
 }
