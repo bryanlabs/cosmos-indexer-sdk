@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/shopspring/decimal"
 )
 
@@ -36,6 +37,11 @@ type Form8949Row struct {
 const basisUnknownNote = " (basis unknown, complete in your aggregator)"
 
 const proceedsUnknownNote = " (no USD price on the sale date, proceeds unknown)"
+
+// stargazeBasisNote marks the sale of an NFT that arrived in Stargaze's
+// March 2026 migration. Its basis and acquired date are the holder's Stargaze
+// purchase, which Cosmos Hub does not show.
+const stargazeBasisNote = " (migrated from Stargaze: enter the Stargaze purchase cost and date)"
 
 type lot struct {
 	qty          decimal.Decimal // display units
@@ -92,6 +98,12 @@ func Build8949(rows []Row) []Form8949Row {
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
+		// A Stargaze migration mint is record-only, but the NFT keeps the
+		// holder's Stargaze lot, so a later sale says where its basis is.
+		if r.Category == apiNFTTransfer && r.RewardTrigger == tax.TriggerStargazeMigration && r.Direction == "in" && r.UserTag == "" {
+			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), date: r.Time, basisUnknown: true})
+			continue
+		}
 		// Record-only rows describe where the user's own assets went; they
 		// are neither acquisitions nor disposals. The same holds for rows the
 		// user tagged as an internal transfer, a protocol deposit or spam.
@@ -131,8 +143,20 @@ func Build8949(rows []Row) []Form8949Row {
 						BasisUnknown:    true,
 						ProceedsUnknown: r.PriceMissing,
 					})
+				} else if l := q[0]; l.basisUnknown {
+					out = append(out, Form8949Row{
+						Description:     desc + stargazeBasisNote,
+						DateAcquired:    apiVariousDates,
+						DateSold:        r.Time.UTC().Format(apiUSDateLayout),
+						Proceeds:        proceeds,
+						CostBasis:       decimal.Zero,
+						GainLoss:        proceeds,
+						LongTerm:        false,
+						BasisUnknown:    true,
+						ProceedsUnknown: r.PriceMissing,
+					})
+					nftLots[key] = q[1:]
 				} else {
-					l := q[0]
 					out = append(out, Form8949Row{
 						Description:     desc,
 						DateAcquired:    l.date.UTC().Format(apiUSDateLayout),

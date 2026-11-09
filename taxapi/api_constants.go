@@ -65,6 +65,7 @@ const (
 	apiMethodologyVersion  = "methodology_version"
 	apiNFTMint             = "nft_mint"
 	apiNFTSale             = "nft_sale"
+	apiNFTTransfer         = "nft_transfer"
 	apiNote                = "note"
 	apiOut                 = "out"
 	apiPath                = "path"

@@ -261,3 +261,29 @@ func TestFullHistoryFinancialFingerprintScopePostgres(t *testing.T) {
 	}
 	require.Equal(t, base, before)
 }
+
+// A poll of a report still being built answers from its job row, while a new
+// report for a wallet that is not ready is still refused.
+func TestPendingReportPollSkipsReadinessPostgres(t *testing.T) {
+	s := refundCachePGFixture(t)
+	start := time.Date(2025, 12, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	startStr, endStr := start.Format(apiDateLayout), end.Format(apiDateLayout)
+	require.NoError(t, s.db.Exec("UPDATE pg_temp.messages SET opaque=true WHERE id=2").Error)
+
+	_, err := s.getOrStartReportJob(apiMainnet, []string{"wallet"}, start, end, startStr, endStr, apiSumm, false, nil, nil)
+	var refused reportReadinessRequired
+	require.ErrorAs(t, err, &refused)
+
+	key, err := reportJobKey(apiMainnet, normalizedWalletScope([]string{"wallet"}), startStr, endStr, apiSumm, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, s.db.Create(&ReportJob{Key: key, Chain: apiMainnet, Addresses: "wallet", Format: apiSumm, Status: ReportJobPending}).Error)
+	job, err := s.getOrStartReportJob(apiMainnet, []string{"wallet"}, start, end, startStr, endStr, apiSumm, false, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, ReportJobPending, job.Status)
+
+	// Once the build has failed, the gate runs again.
+	require.NoError(t, s.db.Model(&ReportJob{}).Where(apiKey, key).Update(apiStatus, ReportJobFailed).Error)
+	_, err = s.getOrStartReportJob(apiMainnet, []string{"wallet"}, start, end, startStr, endStr, apiSumm, false, nil, nil)
+	require.ErrorAs(t, err, &refused)
+}

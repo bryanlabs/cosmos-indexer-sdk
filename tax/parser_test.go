@@ -1,8 +1,10 @@
 package tax
 
 import (
+	"strings"
 	"testing"
 
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
@@ -194,10 +196,56 @@ func TestClassifyNFTMint(t *testing.T) {
 			[2]string{"token_id", "1047"},
 		),
 	}}
-	out := nftMintEvents(log)
+	out := nftMintEvents(log, del)
 	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].ToAddr != del ||
 		out[0].Asset != "coll1/1047" || out[0].Amount != "5000000" || out[0].Denom != fixtureNativeDenom {
 		t.Fatalf("nft mint classification wrong: %+v", out)
+	}
+}
+
+// Stargaze's March 2026 migration: the supervisor executes mint on the
+// collection for a holder who already owned the token on Stargaze. That is a
+// transfer in, not a purchase at zero. The supervisor's own paid mints go
+// through the vending minter and stay ordinary mints, as does anyone else
+// calling the collection directly. Shapes are from cosmoshub-4 heights
+// 30283017 and 30587753.
+func TestClassifyStargazeMigrationMint(t *testing.T) {
+	const collection, vending = "coll1", "vending1"
+	mint := func(owner, token string) indexerTxTypes.LogMessageEvent {
+		return ev(eventWasm,
+			[2]string{attributeContractAddress, collection},
+			[2]string{attributeAction, "mint"},
+			[2]string{"minter", vending},
+			[2]string{"owner", owner},
+			[2]string{"token_id", token},
+		)
+	}
+	direct := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("execute", [2]string{attributeContractAddress, collection}),
+		mint(del, "19"),
+	}}
+	out := classify(&wasmtypes.MsgExecuteContract{Sender: stargazeMigrationSupervisor, Contract: collection}, direct)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTTransfer) || out[0].ToAddr != del || out[0].FromAddr != "" ||
+		out[0].Asset != "coll1/19" || out[0].RewardTrigger != TriggerStargazeMigration || out[0].Amount != "" ||
+		!strings.Contains(out[0].Detail, `"migrated_from":"stargaze-1"`) || !strings.Contains(out[0].Detail, `"protocol":"Stargaze"`) {
+		t.Fatalf("migration mint classified wrong: %+v", out)
+	}
+
+	paid := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_spent", [2]string{"spender", stargazeMigrationSupervisor}, [2]string{attributeAmount, "50000uatom"}),
+		ev("execute", [2]string{attributeContractAddress, vending}),
+		ev(eventWasm, [2]string{attributeContractAddress, vending}, [2]string{attributeAction, "mint"}, [2]string{attributeSender, stargazeMigrationSupervisor}),
+		ev("execute", [2]string{attributeContractAddress, collection}),
+		mint(stargazeMigrationSupervisor, "20"),
+	}}
+	out = classify(&wasmtypes.MsgExecuteContract{Sender: stargazeMigrationSupervisor, Contract: vending}, paid)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].Amount != "50000" || out[0].RewardTrigger != "" {
+		t.Fatalf("supervisor's paid mint classified wrong: %+v", out)
+	}
+
+	out = classify(&wasmtypes.MsgExecuteContract{Sender: del, Contract: collection}, direct)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].RewardTrigger != "" {
+		t.Fatalf("a holder's own mint classified wrong: %+v", out)
 	}
 }
 

@@ -82,18 +82,38 @@ func (s *Server) reportIsStale(job *ReportJob, _ []string) bool {
 	return time.Since(job.ComputedThrough) > reportMaxAge
 }
 
+// reportJobKey is the cache key of one report: its scope, period and format,
+// the asset decisions and tags applied to it, and the gate versions.
+func reportJobKey(chain string, addresses []string, startStr, endStr, format string, decisions AssetDecisions, tags UserTags) (string, error) {
+	canonical, err := CanonicalAssetDecisionsJSON(decisions)
+	if err != nil {
+		return "", assetReviewInputError{err}
+	}
+	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|readiness:v2|reader-snapshot:v1|review:%x", sha256.Sum256([]byte(canonical)))
+	if len(tags) > 0 {
+		key += fmt.Sprintf("|tags:%x", sha256.Sum256([]byte(tags.Canonical())))
+	}
+	return key, nil
+}
+
 // getOrStartReportJob returns the current status for this key, kicking off a
 // fresh computation if the cache is missing, stale or resync=true. Failed jobs
 // remain failed until explicit resync. It never blocks on computation itself.
 func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions, tags UserTags) (*ReportJob, error) {
 	addresses = normalizedWalletScope(addresses)
-	canonical, err := CanonicalAssetDecisionsJSON(decisions)
+	key, err := reportJobKey(chain, addresses, startStr, endStr, format, decisions, tags)
 	if err != nil {
-		return nil, assetReviewInputError{err}
+		return nil, err
 	}
-	key := canonicalReportKey(chain, addresses, startStr, endStr, format) + fmt.Sprintf("|readiness:v2|reader-snapshot:v1|review:%x", sha256.Sum256([]byte(canonical)))
-	if len(tags) > 0 {
-		key += fmt.Sprintf("|tags:%x", sha256.Sum256([]byte(tags.Canonical())))
+
+	// A poll of a report still being built answers from its job row alone. The
+	// build runs the readiness checks itself before it publishes a result, and
+	// a new report and a finished one still pass them below.
+	var pending ReportJob
+	if err := s.db.Where(apiKey, key).Where(apiStatus+" = ?", ReportJobPending).First(&pending).Error; err == nil {
+		return &pending, nil
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, err
 	}
 
 	var job ReportJob

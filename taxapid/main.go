@@ -99,9 +99,16 @@ func main() {
 		log.Printf("readiness index migrate: %v", err)
 	}
 
+	// Fee outcomes, fee grant use, and validator consensus keys the past-date
+	// balance ledger reads.
+	if err := taxapi.BalanceHistoryMigrate(db); err != nil {
+		log.Printf("balance ledger table migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
+	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
 	// Per-year block coverage for /index-coverage and the coverage warning
 	// on reports. TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true counts a block only
 	// once its block events are indexed too; reports read transactions only,

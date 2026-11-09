@@ -22,6 +22,7 @@ const (
 	contractNameHydro       = "Hydro"
 	contractNameInflow      = "Inflow"
 	contractNameSkipGo      = "skip-go"
+	contractNameStargaze    = "Stargaze"
 	contractRoleAuction     = "auction"
 	contractRoleDAOStaking  = "dao_staking"
 	contractRoleMarketplace = "marketplace"

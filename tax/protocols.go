@@ -511,11 +511,11 @@ func vaultLegs(log *indexerTxTypes.LogMessage, contract, sender, payee, atomAmou
 }
 
 // wasmExecuteEvents is the full classification of one MsgExecuteContract.
-func wasmExecuteEvents(log *indexerTxTypes.LogMessage) []TaxableEvent {
+func wasmExecuteEvents(log *indexerTxTypes.LogMessage, sender string) []TaxableEvent {
 	var out []TaxableEvent
 	sales := nftSaleEvents(log)
 	sales = append(sales, auctionSaleEvents(log)...)
-	mints := nftMintEvents(log)
+	mints := nftMintEvents(log, sender)
 	sold := map[string]bool{}
 	for _, s := range sales {
 		sold[s.Asset] = true

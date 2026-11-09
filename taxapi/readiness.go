@@ -121,14 +121,18 @@ func (s *Server) scopedTaxEvents(chain string) *gorm.DB {
 // No address substring search, moniker inference or unsupported-type tax guess.
 // The set is found from the addresses, one index lookup per kind of evidence,
 // so a full-history scope costs the wallet's history rather than a pass over
-// every transaction and event attribute (114s on the live database).
+// every transaction and event attribute (114s on the live database). The ids
+// go through ARRAY() so Postgres collects them first and reads txes by key;
+// as IN it misjudged the chain filter and scanned every block and
+// transaction (24s per pass for a 34-transaction wallet once 2024 and 2025
+// were indexed, against 0.6s this way).
 func walletTxScope(q *gorm.DB, addresses []string) *gorm.DB {
-	return q.Where(`t.id IN (
+	return q.Where(`t.id = ANY(ARRAY(
  SELECT tsa.tx_id FROM tx_signer_addresses tsa JOIN addresses a ON a.id=tsa.address_id WHERE a.address IN ?
  UNION SELECT f.tx_id FROM fees f JOIN addresses a ON a.id=f.payer_address_id WHERE a.address IN ?
  UNION SELECT wm.tx_id FROM taxable_events te JOIN messages wm ON wm.id=te.message_id WHERE te.from_addr IN ? OR te.to_addr IN ? OR te.validator_address IN ?
  UNION SELECT wm.tx_id FROM message_event_attributes mea JOIN message_events me ON me.id=mea.message_event_id JOIN messages wm ON wm.id=me.message_id WHERE left(mea.value, 100) IN ? AND mea.value IN ?
- )`, addresses, addresses, addresses, addresses, addresses, valuePrefixes(addresses), addresses)
+ ))`, addresses, addresses, addresses, addresses, addresses, valuePrefixes(addresses), addresses)
 }
 
 // valuePrefixes matches the attribute value index, which is on a prefix
