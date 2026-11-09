@@ -30,9 +30,12 @@ import (
 
 // urls are every message type the production parser classifies and that can
 // be replayed from the stored event log: the event-only types ReconstructMsg
-// rebuilds, authz (handled event by event) and validator commission (kept
-// from the stored rows with the operator address verified).
-var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec")
+// rebuilds, authz (handled event by event), validator commission (kept
+// from the stored rows with the operator address verified) and the pre-v24
+// SDK fork's tokenize-share reward messages, which are always stored with
+// their bytes.
+var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec",
+	tax.LegacyTypeURLRedeemTokensForShares, tax.LegacyTypeURLWithdrawTokenizeShareReward, tax.LegacyTypeURLWithdrawAllTokenizeShareReward)
 
 type row struct {
 	models.Message
@@ -542,6 +545,9 @@ func applyPlans(db *gorm.DB, plans []backup) error {
 
 func repairCodec() (codectypes.AnyUnpacker, error) {
 	m := tax.GaiaLiquidMsgTypes()
+	for k, v := range tax.LegacyLSMMsgTypes() {
+		m[k] = v
+	}
 	for k, v := range tax.IBCChannelV2MsgTypes() {
 		m[k] = v
 	}
