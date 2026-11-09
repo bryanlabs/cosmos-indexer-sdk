@@ -48,6 +48,12 @@ const (
 	liquidityKindWithdraw = "withdraw"
 )
 
+// liquidityInitPoolCoinMint is the module's InitPoolCoinMintAmount, the pool
+// coins a new pool mints to its creator. The param store held 1000000 from
+// the module's launch (6910001) to its removal, and pool 15's supply went
+// from 0 to 1000000 in its creation block.
+var liquidityInitPoolCoinMint = sdkmath.NewInt(1_000_000)
+
 // LiquidityMsgTypes maps the Gravity DEX type URLs to registrable instances.
 func LiquidityMsgTypes() map[string]sdk.Msg {
 	return map[string]sdk.Msg{
@@ -282,12 +288,21 @@ func liquidityCreatePoolEvents(log *txlog.LogMessage, m *MsgLiquidityCreatePool)
 	if poolDenom == "" {
 		return nil, []string{"create_pool event missing pool coin denom"}
 	}
+	if m.DepositCoins.Empty() {
+		return nil, []string{"pool creation without deposit coins"}
+	}
+	// On mainnet the module moved the deposit and minted the pool coins
+	// without bank events (pool 15 at 9229836 has only create_pool and the
+	// fee), so a missing receipt means the fixed initial mint.
 	minted := ibcCredits(log)[m.PoolCreator].AmountOf(poolDenom)
-	if !minted.IsPositive() || m.DepositCoins.Empty() {
-		return nil, []string{"pool creation without minted pool coins or deposit"}
+	mintSource := "coin_received"
+	if !minted.IsPositive() {
+		minted, mintSource = liquidityInitPoolCoinMint, "init_pool_coin_mint_amount"
 	}
 	group := strings.Join([]string{protocolGravityDEX, "create", created[attributePoolID]}, ":")
-	detail := detailJSON(map[string]string{detailProtocol: protocolGravityDEX, attributePoolID: created[attributePoolID], "swap_group": group})
+	detail := detailJSON(map[string]string{
+		detailProtocol: protocolGravityDEX, attributePoolID: created[attributePoolID], "swap_group": group, "pool_coin_mint": mintSource,
+	})
 	var out []TaxableEvent
 	for _, c := range m.DepositCoins {
 		out = append(out, TaxableEvent{
