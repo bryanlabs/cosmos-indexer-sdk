@@ -177,3 +177,158 @@ func TestRedeemTokenizeShareRewardUsesShareDenomValidator(t *testing.T) {
 		t.Fatalf("plain denom gave validator %q", v)
 	}
 }
+
+type rewardRow struct{ validator, amount, denom string }
+
+func redeemRewardRows(out []TaxableEvent) []rewardRow {
+	var rows []rewardRow
+	for _, e := range out {
+		if e.Category == string(CategoryReward) {
+			rows = append(rows, rewardRow{e.ValidatorAddress, e.Amount, e.Denom})
+		}
+	}
+	return rows
+}
+
+// The legacy record account for record 26746, from mainnet message 84031116.
+const lsmTestRecord26746 = "cosmos10ayavmqf9v643kwuftypzjnl7g66ptqdqgc5r97eh5l6acaeujgsd263jg"
+
+func TestLSMRecordAccountMatchesChain(t *testing.T) {
+	if got := lsmRecordAccount("26746"); got != lsmTestRecord26746 {
+		t.Fatalf("record account = %s", got)
+	}
+}
+
+func legacyRedeem(t *testing.T, validator string) *LegacyMsgRedeemTokensForShares {
+	t.Helper()
+	shares := sdk.Coin{Denom: validator + "/26746", Amount: sdkmath.NewInt(30200000)}
+	raw, err := shares.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &LegacyMsgRedeemTokensForShares{MsgRedeemTokensForShares{DelegatorAddress: lsmTestOwner, AmountRaw: raw}}
+}
+
+func requireRewardRows(t *testing.T, out []TaxableEvent, want []rewardRow) {
+	t.Helper()
+	got := redeemRewardRows(out)
+	if len(got) != len(want) {
+		t.Fatalf("reward rows = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("reward rows = %v, want %v", got, want)
+		}
+	}
+}
+
+// Mainnet legacy redeem at height 18.49M (message 101269222): withdraw_rewards
+// names no delegator, so the record account's withdrawal of 86301507999ibc and
+// 43121uatom reads like the owner's own reward, while the record forwards
+// those coins inside the 48442uatom settled total. Only the owner's own 1uatom
+// and the settled total are income.
+func TestLegacyRedeemDropsRecordWithdrawalFromOwnReward(t *testing.T) {
+	record := lsmRecordAccount("26746")
+	ibc := "ibc/B011C1A0AD5E717F674BA59FD8E05B2F946E4FD41C9CB3311A8B5E2D2B6E9F2C"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "86301507999" + ibc + ",43121uatom"},
+			[2]string{attributeRecipient, lsmTestOwner}, [2]string{attributeSender, record}, [2]string{attributeAmount, "111102764034" + ibc + ",48442uatom"},
+			[2]string{attributeRecipient, lsmTestOwner}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "1uatom"},
+		),
+		ev("withdraw_rewards",
+			[2]string{attributeAmount, "86301507999" + ibc + ",43121uatom"}, [2]string{attributeValidator, lsmTestValoperC},
+			[2]string{attributeAmount, "1uatom"}, [2]string{attributeValidator, lsmTestValoperC},
+		),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, lsmTestOwner}, [2]string{attributeAmount, "111102764034" + ibc + ",48442uatom"}),
+	}}
+	requireRewardRows(t, classify(legacyRedeem(t, lsmTestValoperC), log), []rewardRow{
+		{lsmTestValoperC, "1", fixtureNativeDenom},
+		{lsmTestValoperC, "111102764034", ibc},
+		{lsmTestValoperC, "48442", fixtureNativeDenom},
+	})
+}
+
+// Legacy redeem with a separate withdraw address (message 84031116): the record
+// withdraws 9uatom and forwards its 1544uatom balance to the withdraw address.
+// The owner had no reward of its own.
+func TestLegacyRedeemRecordPaysWithdrawAddress(t *testing.T) {
+	record := lsmRecordAccount("26746")
+	payee, withdrawn, settled := "cosmos1lsmpayee", "9uatom", "1544uatom"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, withdrawn},
+			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, settled},
+		),
+		ev("withdraw_rewards", [2]string{attributeAmount, withdrawn}, [2]string{attributeValidator, lsmTestValoperA}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, settled}),
+	}}
+	requireRewardRows(t, classify(legacyRedeem(t, lsmTestValoperA), log), []rewardRow{
+		{lsmTestValoperA, "1544", fixtureNativeDenom},
+	})
+}
+
+// The owner and the record each withdrew 5uatom from different validators:
+// one group is dropped, and the one kept cannot be tied to a validator.
+func TestLegacyRedeemEqualOwnAndRecordAmountsStayUnattributed(t *testing.T) {
+	record := lsmRecordAccount("26746")
+	five, settled := "5uatom", "12uatom"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, five},
+			[2]string{attributeRecipient, lsmTestOwner}, [2]string{attributeSender, record}, [2]string{attributeAmount, settled},
+			[2]string{attributeRecipient, lsmTestOwner}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, five},
+		),
+		ev("withdraw_rewards",
+			[2]string{attributeAmount, five}, [2]string{attributeValidator, lsmTestValoperA},
+			[2]string{attributeAmount, five}, [2]string{attributeValidator, lsmTestValoperB},
+		),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, lsmTestOwner}, [2]string{attributeAmount, settled}),
+	}}
+	requireRewardRows(t, classify(legacyRedeem(t, lsmTestValoperA), log), []rewardRow{
+		{"", "5", fixtureNativeDenom},
+		{lsmTestValoperA, "12", fixtureNativeDenom},
+	})
+}
+
+// Modern logs name the delegator, so a record's withdrawal never reaches the
+// owner's own reward and nothing is dropped.
+// A partial legacy redeem (message 24526115) withdraws the record's reward
+// into the record account and leaves it there for a later
+// WithdrawTokenizeShareRecordReward, so nothing is income here.
+func TestLegacyPartialRedeemLeavesRecordRewardForLaterWithdrawal(t *testing.T) {
+	pending := "1331uatom"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(string(CategoryTransfer), [2]string{attributeRecipient, lsmRecordAccount("26746")}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, pending}),
+		ev("withdraw_rewards", [2]string{attributeAmount, pending}, [2]string{attributeValidator, lsmTestValoperA}),
+	}}
+	requireRewardRows(t, classify(legacyRedeem(t, lsmTestValoperA), log), nil)
+}
+
+// A record account other than the redeemed record is not dropped: its
+// withdrawal cannot be proven to be the redeemed record's.
+func TestLegacyRedeemOtherAccountKeepsReward(t *testing.T) {
+	pending := "1331uatom"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(string(CategoryTransfer), [2]string{attributeRecipient, lsmRecordAccount("26747")}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, pending}),
+		ev("withdraw_rewards", [2]string{attributeAmount, pending}, [2]string{attributeValidator, lsmTestValoperA}),
+	}}
+	requireRewardRows(t, classify(legacyRedeem(t, lsmTestValoperA), log), []rewardRow{
+		{lsmTestValoperA, "1331", fixtureNativeDenom},
+	})
+}
+
+func TestRedeemModernOwnRewardUnchanged(t *testing.T) {
+	reward := "9uatom"
+	events := recordWithdrawal(lsmTestRecordA, lsmTestValoperA, reward)
+	events = append(events,
+		ev(string(CategoryTransfer), [2]string{attributeRecipient, lsmTestOwner}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, reward}),
+		ev("withdraw_rewards", [2]string{attributeAmount, reward}, [2]string{attributeValidator, lsmTestValoperB}, [2]string{attributeDelegator, lsmTestOwner}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, lsmTestOwner}, [2]string{attributeAmount, reward}),
+	)
+	msg := &MsgRedeemTokensForShares{DelegatorAddress: lsmTestOwner, AmountRaw: legacyRedeem(t, lsmTestValoperA).AmountRaw}
+	requireRewardRows(t, classify(msg, &indexerTxTypes.LogMessage{Events: events}), []rewardRow{
+		{lsmTestValoperB, "9", fixtureNativeDenom},
+		{lsmTestValoperA, "9", fixtureNativeDenom},
+	})
+}
