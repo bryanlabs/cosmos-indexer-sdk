@@ -96,6 +96,7 @@ func balanceDaysTestDB(t *testing.T) *gorm.DB {
 		"CREATE INDEX ON block_event_attributes (left(value, 100))",
 		"CREATE TEMP TABLE tax_balance_days (chain text, address text, day date, height bigint, anchor_height bigint, status text, reason text, holdings jsonb, PRIMARY KEY (chain, address, day))",
 		"CREATE TEMP TABLE tax_balance_builds (chain text PRIMARY KEY, from_day date, to_day date, building_from date, building_to date, cursor text, appending_to date, updated_at timestamptz)",
+		"CREATE TEMP TABLE tax_balance_deferred (chain text, address text, rows bigint, created_at timestamptz, PRIMARY KEY (chain, address))",
 	} {
 		require.NoError(t, database.Exec(sql).Error, sql)
 	}
@@ -221,4 +222,38 @@ func TestBalanceBuildSurvivesAddedColumnPostgres(t *testing.T) {
 	read()
 	require.NoError(t, database.Exec("ALTER TABLE tax_balance_builds ADD COLUMN later_column text").Error)
 	read()
+}
+
+func TestDeferHeavyWalletPostgres(t *testing.T) {
+	database := balanceDaysTestDB(t)
+	s := &Server{db: database, native: DefaultNativeAsset}
+	heavy, light := testAddress(t, 1), testAddress(t, 2)
+	// heavy names one row past the limit, split across both tables; light
+	// names exactly the limit.
+	require.NoError(t, database.Exec("INSERT INTO message_event_attributes (value) SELECT ? FROM generate_series(1, ?)", heavy, 300000).Error)
+	require.NoError(t, database.Exec("INSERT INTO block_event_attributes (value) SELECT ? FROM generate_series(1, ?)", heavy, ledgerHeavyRows-300000+1).Error)
+	require.NoError(t, database.Exec("INSERT INTO message_event_attributes (value) SELECT ? FROM generate_series(1, ?)", light, ledgerHeavyRows).Error)
+	day := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, database.Create([]BalanceDay{
+		{Chain: "cosmoshub", Address: heavy, Day: day, Holdings: `{"liquid":{"uatom":"1"}}`},
+		{Chain: "cosmoshub", Address: light, Day: day, Holdings: `{"liquid":{"uatom":"2"}}`},
+	}).Error)
+
+	for range 2 {
+		deferred, err := s.deferHeavyWallet("cosmoshub", heavy)
+		require.NoError(t, err)
+		require.True(t, deferred)
+	}
+	deferred, err := s.deferHeavyWallet("cosmoshub", light)
+	require.NoError(t, err)
+	require.False(t, deferred, "a wallet at the limit is built")
+
+	var rows []BalanceDeferred
+	require.NoError(t, database.Find(&rows).Error)
+	require.Len(t, rows, 1)
+	require.Equal(t, heavy, rows[0].Address)
+	require.Equal(t, int64(ledgerHeavyRows+1), rows[0].Rows)
+	var left []string
+	require.NoError(t, database.Model(&BalanceDay{}).Pluck("address", &left).Error)
+	require.Equal(t, []string{light}, left, "a deferred wallet keeps no stored row, so it walks back live")
 }

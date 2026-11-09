@@ -49,6 +49,50 @@ type BalanceBuild struct {
 
 func (BalanceBuild) TableName() string { return "tax_balance_builds" }
 
+// BalanceDeferred is a wallet whose events are too many for the stored build
+// to rebuild in one walk-back. It has no stored rows, so /balance keeps
+// walking it back live, until a later pass builds it.
+type BalanceDeferred struct {
+	Chain     string `gorm:"primaryKey"`
+	Address   string `gorm:"primaryKey"`
+	Rows      int64
+	CreatedAt time.Time
+}
+
+func (BalanceDeferred) TableName() string { return "tax_balance_deferred" }
+
+// ledgerHeavyRows is the most event attribute rows a wallet may name for the
+// stored build to load its events in one walk-back. Module accounts and the
+// busiest wallets name millions (bonded_tokens_pool about 21M, distribution
+// about 113M), which one query cannot load within the build's memory.
+const ledgerHeavyRows = 500000
+
+// walletRows counts the event attribute rows that name addr, up to limit+1.
+func (s *Server) walletRows(addr string, limit int) (int64, error) {
+	var n int64
+	err := s.db.Raw(`
+SELECT (SELECT count(*) FROM (SELECT 1 FROM message_event_attributes WHERE left(value, 100) = left(@addr, 100) AND value = @addr LIMIT @lim) m)
+     + (SELECT count(*) FROM (SELECT 1 FROM block_event_attributes WHERE left(value, 100) = left(@addr, 100) AND value = @addr LIMIT @lim) b)`,
+		map[string]any{"addr": addr, "lim": limit + 1}).Scan(&n).Error
+	return n, err
+}
+
+// deferHeavyWallet records addr as deferred when it names more than
+// ledgerHeavyRows attribute rows, and removes any rows stored for it, so no
+// day is served from a row that later days were not appended to.
+func (s *Server) deferHeavyWallet(chain, addr string) (bool, error) {
+	n, err := s.walletRows(addr, ledgerHeavyRows)
+	if err != nil || n <= ledgerHeavyRows {
+		return false, err
+	}
+	return true, s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("chain = ? AND address = ?", chain, addr).Delete(&BalanceDay{}).Error; err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&BalanceDeferred{Chain: chain, Address: addr, Rows: n}).Error
+	})
+}
+
 // storedHoldings is ledgerHoldings as stored, in base units.
 type storedHoldings struct {
 	Liquid          map[string]string `json:"liquid,omitempty"`
@@ -162,8 +206,12 @@ func NewLedgerNode() (*ledgerNode, error) { return newLedgerNode() }
 
 // buildWalletDays stores addr's holdings at the end of each day that differ
 // from the day before. Rows already stored in the span are replaced, so a
-// rebuild after a correction leaves no stale row.
+// rebuild after a correction leaves no stale row. A wallet too heavy to load
+// is deferred instead.
 func (s *Server) buildWalletDays(chain string, ids []int64, node *ledgerNode, addr string, days []time.Time, ends []heightTime) (int, error) {
+	if heavy, err := s.deferHeavyWallet(chain, addr); err != nil || heavy {
+		return 0, err
+	}
 	rebuilt, anchor, err := s.rebuildHoldings(chain, ids, node, addr, ends)
 	if err != nil {
 		return 0, err
