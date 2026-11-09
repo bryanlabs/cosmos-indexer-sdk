@@ -11,6 +11,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdktx "github.com/cosmos/cosmos-sdk/types/tx"
 	"github.com/cosmos/cosmos-sdk/x/authz"
+	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
@@ -260,4 +261,54 @@ func TestAuthzUntaggedMismatchIsIncomplete(t *testing.T) {
 	if _, err := (&Parser{ID: legacyParserID}).ParseMessage(msgs[0], log, config.IndexConfig{}); err == nil {
 		t.Fatal("an Exec with a missing delegate record classified without error")
 	}
+}
+
+// A validator's REStake-style Exec: its own reward, then its commission, with
+// no index. The commission handler closes with the operator address.
+func TestAuthzUntaggedRewardAndCommission(t *testing.T) {
+	msgs, logs := hubLegacyFixture(t, "v045-exec-commission")
+	exec := msgs[0].(*authz.MsgExec)
+	var delegator, operator string
+	for _, a := range exec.Msgs {
+		inner, err := unpackAuthzInner(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch m := inner.(type) {
+		case *disttypes.MsgWithdrawDelegatorReward:
+			delegator = m.DelegatorAddress
+		case *disttypes.MsgWithdrawValidatorCommission:
+			operator = m.ValidatorAddress
+		}
+	}
+	out := parseLegacy(t, msgs[0], logs[0])
+	rewards := byCategory(out, string(CategoryReward))
+	commission := byCategory(out, string(CategoryCommission))
+	if len(rewards) != 1 || rewards[0].ToAddr != delegator || rewards[0].RewardTrigger != actionClaim {
+		t.Fatalf("rewards %+v", rewards)
+	}
+	withdrawn, err := sdk.ParseCoinsNormalized(attrValue(eventAttrs(logs[0], eventWithdrawCommission), attributeAmount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commission) != 1 || commission[0].ValidatorAddress != operator || commission[0].Amount != withdrawn.AmountOf(fixtureNativeDenom).String() {
+		t.Fatalf("commission %+v", commission)
+	}
+}
+
+// An Exec restaking for many granters that used up one grant: the chain's
+// EventRevoke for it closes no handler and must not shift the others.
+func TestAuthzUntaggedRestakeWithRevoke(t *testing.T) {
+	msgs, logs := hubLegacyFixture(t, "v045-exec-revoke")
+	out := parseLegacy(t, msgs[0], logs[0])
+	assertPerGranter(t, out, execDelegates(t, msgs[0]))
+}
+
+func eventAttrs(log *txlog.LogMessage, typ string) []txlog.Attribute {
+	for _, ev := range log.Events {
+		if ev.Type == typ {
+			return ev.Attributes
+		}
+	}
+	return nil
 }
