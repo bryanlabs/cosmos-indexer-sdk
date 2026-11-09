@@ -142,6 +142,7 @@ func run() int {
 	from := flag.Uint("from-message-id", 0, "exclusive lower message ID for resume")
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
 	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
+	kinds := flag.String("message-types", "", "optional comma-separated message type URLs; replay only messages of those types")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -192,6 +193,12 @@ func run() int {
 			categories = append(categories, c)
 		}
 	}
+	var types []string
+	for _, t := range strings.Split(*kinds, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			types = append(types, t)
+		}
+	}
 	var candidates []uint
 	if len(wallets) > 0 {
 		candidates, err = walletIDs(db, wallets)
@@ -209,7 +216,17 @@ func run() int {
 		}
 		candidates = ids
 	}
-	restricted := len(wallets) > 0 || len(categories) > 0
+	if len(types) > 0 {
+		ids, err := typeIDs(db, types, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 || len(categories) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0
 	b, err := newBackup(*path)
 	if err != nil {
 		fatal(err.Error())
@@ -220,7 +237,7 @@ func run() int {
 	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
-	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","))
+	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s message_types=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","), strings.Join(types, ","))
 	for {
 		// A restricted run walks its candidate ids a batch at a time instead of
 		// every message id, so sparse candidates never make one load scan
@@ -329,6 +346,14 @@ func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
 func categoryIDs(db *gorm.DB, categories []string, from, maxID uint) ([]uint, error) {
 	var ids []uint
 	err := db.Raw("SELECT DISTINCT message_id FROM taxable_events WHERE category IN ? AND message_id > ? AND message_id <= ? ORDER BY 1", categories, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// typeIDs lists the messages in (from, maxID] of one of the given type URLs,
+// so a repair of one message kind leaves every other message alone.
+func typeIDs(db *gorm.DB, types []string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Raw("SELECT m.id FROM messages m JOIN message_types mt ON mt.id=m.message_type_id WHERE mt.message_type IN ? AND m.id > ? AND m.id <= ? ORDER BY 1", types, from, maxID).Scan(&ids).Error
 	return ids, err
 }
 
