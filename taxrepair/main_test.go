@@ -1,10 +1,13 @@
 package main
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 )
@@ -43,5 +46,25 @@ func TestTrivialLog(t *testing.T) {
 	moved := &txlog.LogMessage{Events: []txlog.LogMessageEvent{{Type: "message"}, {Type: "coin_received"}}}
 	if trivialLog(moved) {
 		t.Fatal("coin movement is not trivial")
+	}
+}
+
+func TestRepairCodecDecodesLegacyTokenizeShareRewards(t *testing.T) {
+	codec, err := repairCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := append([]byte{0x0a, byte(len(fixtureWallet))}, fixtureWallet...)
+	var msg sdk.Msg
+	if err := codec.UnpackAny(&codectypes.Any{TypeUrl: tax.LegacyTypeURLWithdrawAllTokenizeShareReward, Value: wire}, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := msg.(*tax.LegacyMsgWithdrawAllTokenizeShareRecordReward); !ok || m.OwnerAddress != fixtureWallet {
+		t.Fatalf("decoded %T %+v", msg, msg)
+	}
+	for _, u := range []string{tax.LegacyTypeURLRedeemTokensForShares, tax.LegacyTypeURLWithdrawTokenizeShareReward, tax.LegacyTypeURLWithdrawAllTokenizeShareReward} {
+		if !slices.Contains(urls, u) {
+			t.Fatalf("%s is not replayable", u)
+		}
 	}
 }
