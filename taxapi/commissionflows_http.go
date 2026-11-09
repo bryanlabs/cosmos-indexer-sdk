@@ -414,10 +414,13 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// A failed run keeps its last good flows for its own page, but the Hub
+	// leaves that validator out of both sides so shares stay whole.
 	var flows []CommissionFlow
 	if err := s.db.Table(CommissionFlow{}.TableName()).
 		Select("month, class, detail, via_unbonding, SUM(amount_base)::text AS amount_base").
 		Where("chain = ? AND rule = ?", chain, rule).
+		Where("validator NOT IN (?)", s.db.Table(CommissionFlowRun{}.TableName()).Select(apiValidator).Where("chain = ? AND status = ?", chain, flowStatusError)).
 		Group("month, class, detail, via_unbonding").Scan(&flows).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

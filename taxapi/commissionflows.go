@@ -459,7 +459,10 @@ func (s *Server) commissionUntracked(chain, validator string, from, to time.Time
 // commissionValidators lists every validator that paid commission on chain.
 func (s *Server) commissionValidators(chain string) ([]string, error) {
 	var out []string
-	err := s.db.Raw(`SELECT DISTINCT validator_address FROM taxable_events WHERE category = ? AND validator_address <> '' ORDER BY 1`, apiCommission).Scan(&out).Error
+	err := s.scopedTaxEvents(chain).
+		Distinct("taxable_events.validator_address").
+		Where("taxable_events.category = ? AND taxable_events.validator_address <> ''", apiCommission).
+		Order("taxable_events.validator_address").Pluck("taxable_events.validator_address", &out).Error
 	if err != nil {
 		return nil, err
 	}
