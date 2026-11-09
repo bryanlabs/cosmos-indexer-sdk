@@ -162,4 +162,12 @@ func TestScanBackBlock(t *testing.T) {
 	if b.chainTxs != 2 || len(b.grants) != 0 || len(b.fees) != 1 {
 		t.Fatalf("missing tx %+v", b)
 	}
+
+	// A rejected transaction changed nothing, so the index need not hold it.
+	index[0].Messages = true
+	rejected := append(chain, nodeTx{Hash: "CC", Code: 11, Rejected: true, Accounts: []string{backTestSigner}})
+	b = scanBackBlock(7, rejected, index)
+	if b.chainTxs != 0 || len(b.accounts) != 0 {
+		t.Fatalf("rejected tx recorded a hole: %+v", b)
+	}
 }

@@ -57,6 +57,7 @@ func main() {
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
 	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
+	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
 
 	db, err := indexerDB.PostgresDbConnect(
@@ -87,6 +88,12 @@ func main() {
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	if *recheck {
+		if _, _, err := srv.RecheckIndexHoles(*chain, node, log.Printf); err != nil {
+			log.Fatalf("index holes: %v", err)
+		}
+		return
+	}
 	from, err := srv.ExtendLedgerScanBack(*chain, node, *floor, *chunk, *workers, log.Printf)
 	switch {
 	case errors.Is(err, taxapi.ErrLedgerScanUnindexed):
