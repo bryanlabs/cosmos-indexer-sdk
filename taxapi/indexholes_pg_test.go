@@ -13,6 +13,37 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+const (
+	cachedBlock     = "block"
+	coinSpent       = "coin_spent"
+	spender         = "spender"
+	tempSearchPath  = "SET search_path = pg_temp"
+	tempChainsTable = "CREATE TEMP TABLE chains (id bigint, chain_id text)"
+	tempTxesTable   = "CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)"
+	tempMsgsTable   = "CREATE TEMP TABLE messages (id bigint, tx_id bigint)"
+)
+
+type cachedTxResult struct {
+	Code   uint32  `json:"code"`
+	Events []event `json:"events"`
+}
+
+type cachedBlockBody struct {
+	Block struct {
+		Header struct {
+			Height string `json:"height"`
+		} `json:"header"`
+		Data struct {
+			Txs []string `json:"txs"`
+		} `json:"data"`
+	} `json:"block"`
+}
+
+type cachedBlockResults struct {
+	Height  string           `json:"height"`
+	Results []cachedTxResult `json:"txs_results"`
+}
+
 // A failed vote rejected by the ante handler at one height and included again
 // at the next was recorded as a hole at the first. The recheck drops it and
 // keeps a hole whose transaction really is missing.
@@ -34,26 +65,30 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 
 	dir := t.TempDir()
 	vote, kept, lost := "tx-vote "+backTestSigner, "tx-kept "+backTestSigner, "tx-lost "+backTestGranter
-	cacheTxs := func(height int64, txs []string, results []map[string]any) {
+	cacheTxs := func(height int64, txs []string, results []cachedTxResult) {
 		h := strconv.FormatInt(height, 10)
 		raw := make([]string, len(txs))
 		for i, x := range txs {
 			raw[i] = b64(x)
 		}
-		writeCached(t, dir, height, "block", map[string]any{"block": map[string]any{"header": map[string]any{"height": h}, "data": map[string]any{"txs": raw}}})
-		writeCached(t, dir, height, "block_results", map[string]any{"height": h, "txs_results": results})
+		var blk cachedBlockBody
+		blk.Block.Header.Height, blk.Block.Data.Txs = h, raw
+		writeCached(t, dir, height, cachedBlock, blk)
+		writeCached(t, dir, height, "block_results", cachedBlockResults{Height: h, Results: results})
 	}
-	charged := []event{{Type: "coin_spent", Attributes: []attr{{"spender", backTestSigner}, {"amount", "900uatom"}}}}
-	cacheTxs(100, []string{vote, kept}, []map[string]any{{"code": 11, "events": []event{}}, {"code": 0, "events": charged}})
-	cacheTxs(101, []string{vote}, []map[string]any{{"code": 11, "events": charged}})
-	cacheTxs(200, []string{lost}, []map[string]any{{"code": 0, "events": []event{{Type: "coin_spent", Attributes: []attr{{"spender", backTestGranter}, {"amount", "900uatom"}}}}}})
+	fee := func(payer string) []event {
+		return []event{{Type: coinSpent, Attributes: []attr{{spender, payer}, {apiAmount, "900uatom"}}}}
+	}
+	cacheTxs(100, []string{vote, kept}, []cachedTxResult{{Code: 11, Events: []event{}}, {Events: fee(backTestSigner)}})
+	cacheTxs(101, []string{vote}, []cachedTxResult{{Code: 11, Events: fee(backTestSigner)}})
+	cacheTxs(200, []string{lost}, []cachedTxResult{{Events: fee(backTestGranter)}})
 
 	for _, sql := range []string{
-		"SET search_path = pg_temp",
-		"CREATE TEMP TABLE chains (id bigint, chain_id text)",
+		tempSearchPath,
+		tempChainsTable,
 		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, height bigint, tx_indexed boolean, block_events_indexed boolean)",
-		"CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)",
-		"CREATE TEMP TABLE messages (id bigint, tx_id bigint)",
+		tempTxesTable,
+		tempMsgsTable,
 		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false, PRIMARY KEY (chain, height))",
 		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text, PRIMARY KEY (chain, height, address))",
 		"INSERT INTO chains VALUES (1,'cosmoshub-4')",
