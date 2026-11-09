@@ -110,7 +110,7 @@ func unpackAuthzInner(a *codectypes.Any) (sdk.Msg, error) {
 		return m, nil
 	}
 	var m sdk.Msg
-	for _, custom := range []map[string]sdk.Msg{GaiaLiquidMsgTypes(), LegacyLSMMsgTypes(), IBCChannelV2MsgTypes(), TokenFactoryMsgTypes()} {
+	for _, custom := range []map[string]sdk.Msg{GaiaLiquidMsgTypes(), LegacyLSMMsgTypes(), IBCChannelV2MsgTypes(), TokenFactoryMsgTypes(), ProviderMsgTypes(), LiquidityMsgTypes()} {
 		if prototype, ok := custom[a.TypeUrl]; ok {
 			m = reflect.New(reflect.TypeOf(prototype).Elem()).Interface().(sdk.Msg)
 			break

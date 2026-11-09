@@ -168,7 +168,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 					// Force update of block event type ID
 					DoUpdates: clause.AssignmentColumns([]string{"block_event_type_id"}),
 				},
-			).Create(&allBlockEvents).Error; err != nil {
+			).CreateInBatches(allBlockEvents, rowInsertBatchSize).Error; err != nil {
 				config.Log.Error("Error creating begin block events.", err)
 				return err
 			}
@@ -203,7 +203,7 @@ func IndexBlockEvents(db *gorm.DB, dryRun bool, blockDBWrapper *BlockDBWrapper, 
 					Columns: []clause.Column{{Name: "block_event_id"}, {Name: columnIndex}},
 					// Force update of value
 					DoUpdates: clause.AssignmentColumns([]string{"value"}),
-				}).Create(&allAttributes).Error; err != nil {
+				}).CreateInBatches(allAttributes, rowInsertBatchSize).Error; err != nil {
 					config.Log.Error("Error creating begin block event attributes.", err)
 					return err
 				}

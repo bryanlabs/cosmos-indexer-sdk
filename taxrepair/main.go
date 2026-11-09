@@ -141,6 +141,7 @@ func run() int {
 	batch := flag.Int("batch", 500, "bounded messages per batch")
 	from := flag.Uint("from-message-id", 0, "exclusive lower message ID for resume")
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
+	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -185,6 +186,12 @@ func run() int {
 			wallets = append(wallets, a)
 		}
 	}
+	var categories []string
+	for _, c := range strings.Split(*only, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			categories = append(categories, c)
+		}
+	}
 	var candidates []uint
 	if len(wallets) > 0 {
 		candidates, err = walletIDs(db, wallets)
@@ -192,6 +199,17 @@ func run() int {
 			fatal(err.Error())
 		}
 	}
+	if len(categories) > 0 {
+		ids, err := categoryIDs(db, categories, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	restricted := len(wallets) > 0 || len(categories) > 0
 	b, err := newBackup(*path)
 	if err != nil {
 		fatal(err.Error())
@@ -202,13 +220,30 @@ func run() int {
 	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
-	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d\n", maxID, *apply, len(candidates))
-	for len(wallets) == 0 || len(candidates) > 0 {
-		rows, err := load(db, last, maxID, *batch, candidates)
+	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","))
+	for {
+		// A restricted run walks its candidate ids a batch at a time instead of
+		// every message id, so sparse candidates never make one load scan
+		// millions of messages.
+		var chunk []uint
+		if restricted {
+			for len(candidates) > 0 && candidates[0] <= last {
+				candidates = candidates[1:]
+			}
+			if len(candidates) == 0 {
+				break
+			}
+			chunk = candidates[:min(*batch, len(candidates))]
+		}
+		rows, err := load(db, last, maxID, *batch, chunk)
 		if err != nil {
 			fatal(err.Error())
 		}
 		if len(rows) == 0 {
+			if restricted {
+				last = chunk[len(chunk)-1]
+				continue
+			}
 			break
 		}
 		plans, skips, err := planBatch(db, codec, rows)
@@ -237,6 +272,9 @@ func run() int {
 			}
 		}
 		last = rows[len(rows)-1].ID
+		if restricted {
+			last = chunk[len(chunk)-1]
+		}
 		fmt.Printf("last_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d\n", last, scanned, changed, zeroed, skipped)
 	}
 	sum, err := b.verify()
@@ -285,10 +323,49 @@ func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
 	return ids, err
 }
 
+// categoryIDs lists the messages in (from, maxID] that hold a stored row in
+// one of categories, so a repair of one classification leaves every other
+// message alone.
+func categoryIDs(db *gorm.DB, categories []string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Raw("SELECT DISTINCT message_id FROM taxable_events WHERE category IN ? AND message_id > ? AND message_id <= ? ORDER BY 1", categories, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// intersect keeps the ids present in both sorted lists.
+func intersect(a, b []uint) []uint {
+	var out []uint
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
+}
+
+// idArray renders ids as one Postgres array literal. Passed as a single
+// parameter it keeps the planner from treating hundreds of ids as constants.
+func idArray(ids []uint) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprint(id)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// load reads the next batch of replayable messages after last, only from
+// candidates when they are given.
 func load(db *gorm.DB, last, maxID uint, n int, candidates []uint) ([]row, error) {
 	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, maxID, urls).Order("m.id").Limit(n)
 	if candidates != nil {
-		q = q.Where("m.id IN ?", candidates)
+		q = q.Where("m.id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(candidates))
 	}
 	var rows []row
 	err := q.Scan(&rows).Error
@@ -319,8 +396,11 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	if err != nil {
 		return nil, nil, err
 	}
+	// The ids go in as one opaque array: with a literal list of hundreds the
+	// planner estimates enough events to merge join against the whole
+	// attribute index (measured 35 s for 500 messages, 0.35 s this way).
 	var attrs []eventRow
-	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id IN ?", ids).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
+	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(ids)).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
 	if err != nil {
 		return nil, nil, err
 	}
@@ -441,6 +521,12 @@ func repairCodec() (codectypes.AnyUnpacker, error) {
 		m[k] = v
 	}
 	for k, v := range tax.TokenFactoryMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.ProviderMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.LiquidityMsgTypes() {
 		m[k] = v
 	}
 	c, err := probe.GetProbeClient(config.Probe{RPC: "http://127.0.0.1:1"}, nil, m)

@@ -316,6 +316,26 @@ func protocolName(detail string) string {
 	return m["contract"]
 }
 
+// swapKey groups the legs of one swap. A transaction's legs share its hash.
+// Block rows have no hash, so their legs share the swap_group the parser
+// put in Detail, and a block row without one stands alone.
+func swapKey(r Row) string {
+	if r.TxHash != "" || r.Detail == "" {
+		return r.TxHash
+	}
+	var m map[string]string
+	if json.Unmarshal([]byte(r.Detail), &m) != nil {
+		return ""
+	}
+	if m["swap_group"] != "" {
+		return "block:" + m["swap_group"]
+	}
+	if m["block_event_id"] != "" {
+		return "block_event:" + m["block_event_id"]
+	}
+	return ""
+}
+
 // implySwapPrices values the unpriced leg of a swap from the priced leg in
 // the same transaction. Vault shares and freshly listed tokens rarely have an
 // oracle price, but the ATOM the user gave up for them does, and that is the
@@ -324,7 +344,7 @@ func implySwapPrices(rows []Row) {
 	byTx := map[string][]int{}
 	for i, r := range rows {
 		if r.Category == apiSwap {
-			byTx[r.TxHash] = append(byTx[r.TxHash], i)
+			byTx[swapKey(r)] = append(byTx[swapKey(r)], i)
 		}
 	}
 	for _, idx := range byTx {

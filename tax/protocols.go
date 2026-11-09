@@ -644,8 +644,12 @@ func lsmRecordEvents(log *indexerTxTypes.LogMessage, delegator string) []Taxable
 			if err != nil || who == "" {
 				continue
 			}
+			var detail string
+			if redeemed := redeemedTokens(log, who); redeemed != "" && len(coins) == 1 {
+				detail = detailJSON(map[string]string{"redeemed_amount": redeemed})
+			}
 			for _, c := range coins {
-				out = append(out, TaxableEvent{Category: string(CategoryRedeemShares), FromAddr: who, ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator]})
+				out = append(out, TaxableEvent{Category: string(CategoryRedeemShares), FromAddr: who, ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator], Detail: detail})
 			}
 		case "transfer_tokenize_share_record":
 			if a[attributeSender] == "" || a["share_owner"] == "" {
@@ -655,6 +659,37 @@ func lsmRecordEvents(log *indexerTxTypes.LogMessage, delegator string) []Taxable
 		}
 	}
 	return out
+}
+
+// redeemedTokens returns the staking tokens a redemption delegated back to
+// who. The redeem_shares event names only the share token, whose amount equals
+// the tokens only while the validator has never been slashed, so the tokens
+// come from the delegation itself: the last bond-denom coin_spent by the
+// delegator in the message. Older logs merge every coin_spent into one event,
+// which keeps attribute order but not order across event types, and nothing
+// else in a redemption debits the delegator's staking token. A message that
+// redeems more than once cannot be split this way and returns "".
+func redeemedTokens(log *indexerTxTypes.LogMessage, who string) string {
+	redeems, last := 0, ""
+	for _, ev := range log.Events {
+		cur := ""
+		for _, a := range ev.Attributes {
+			switch {
+			case ev.Type == "redeem_shares" && a.Key == attributeDelegator && a.Value == who:
+				redeems++
+			case ev.Type == "coin_spent" && a.Key == "spender":
+				cur = a.Value
+			case ev.Type == "coin_spent" && a.Key == attributeAmount && cur == who:
+				if c, err := sdk.ParseCoinNormalized(a.Value); err == nil && !strings.Contains(c.Denom, "/") {
+					last = c.String()
+				}
+			}
+		}
+	}
+	if redeems != 1 {
+		return ""
+	}
+	return last
 }
 
 // govDepositEvents records a proposal deposit. Deposits are refunded when a

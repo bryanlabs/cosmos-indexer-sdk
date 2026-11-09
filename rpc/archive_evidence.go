@@ -14,7 +14,9 @@ import (
 	"strings"
 )
 
-const maxArchiveResponseBytes = 64 << 20
+// maxRPCResponseBytes is three times the largest Cosmos Hub response seen, a
+// block_results of 84.6 MB at 20950641.
+const maxRPCResponseBytes = 256 << 20
 
 type archiveCall struct {
 	method string
@@ -56,6 +58,18 @@ func archiveRequestCall(request *http.Request) (archiveCall, error) {
 	return call, nil
 }
 
+// loggableMethod names a CometBFT RPC method for an error message. Anything
+// else becomes "other": a GET's method is the URL's last path segment, which
+// on a bare endpoint can be part of its credential.
+func loggableMethod(method string) string {
+	switch method {
+	case "status", "block", "block_results", "abci_query", "abci_info", "tx", "tx_search",
+		"validators", "commit", "header", "blockchain", "genesis", "net_info", "health":
+		return method
+	}
+	return "other"
+}
+
 func archiveHeight(raw json.RawMessage) (int64, error) {
 	value, err := strconv.ParseInt(strings.Trim(string(raw), `"`), 10, 64)
 	if err != nil || value < 0 {
@@ -67,11 +81,14 @@ func archiveHeight(raw json.RawMessage) (int64, error) {
 // inspectResponse checks RPC-level failures as well as HTTP denials. Captured
 // responses contain source data only, never the credential-bearing request URL.
 func (g *ArchiveGuard) inspectResponse(request *http.Request, response *http.Response, sequence uint64) error {
+	call, err := archiveRequestCall(request)
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		response.Body.Close()
-		return fmt.Errorf("HTTP %d", response.StatusCode)
+		if err != nil {
+			return fmt.Errorf("HTTP %d", response.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d for %s at height %d", response.StatusCode, loggableMethod(call.method), call.height)
 	}
-	call, err := archiveRequestCall(request)
 	if err != nil {
 		response.Body.Close()
 		return err
@@ -79,9 +96,9 @@ func (g *ArchiveGuard) inspectResponse(request *http.Request, response *http.Res
 	if call.method != "status" && call.method != "block" && call.method != "block_results" {
 		return nil
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxArchiveResponseBytes+1))
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRPCResponseBytes+1))
 	response.Body.Close()
-	if err != nil || len(body) > maxArchiveResponseBytes {
+	if err != nil || len(body) > maxRPCResponseBytes {
 		return fmt.Errorf("archive response unreadable or exceeds size limit")
 	}
 	var envelope struct {

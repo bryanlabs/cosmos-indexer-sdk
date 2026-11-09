@@ -100,6 +100,27 @@ func TestReadinessRetainedEvidencePostgres(t *testing.T) {
 	require.Equal(t, int64(1), r.UnreviewedMessages)
 	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET message_type_id=2").Error)
 	check(wallet, true, 0, 0, 0)
+
+	// A failed transaction moved nothing but its fee, so its opaque or
+	// unreviewed messages do not hold the report back.
+	for _, sql := range []string{
+		"INSERT INTO pg_temp.txes VALUES (2,1,'failed-tx',5)",
+		"INSERT INTO pg_temp.tx_signer_addresses VALUES (2,1)",
+		"INSERT INTO pg_temp.messages VALUES (2,2,true,1),(3,2,false,3)",
+	} {
+		require.NoError(t, database.Exec(sql).Error)
+	}
+	r, err = server.classificationReadiness(apiMainnet, wallet, start, end)
+	require.NoError(t, err)
+	require.True(t, r.ParserDecodeComplete)
+	require.Zero(t, r.OpaqueMessages)
+	require.Zero(t, r.UnreviewedMessages)
+	require.NoError(t, database.Exec("UPDATE pg_temp.txes SET code=0 WHERE id=2").Error)
+	r, err = server.classificationReadiness(apiMainnet, wallet, start, end)
+	require.NoError(t, err)
+	require.False(t, r.ParserDecodeComplete)
+	require.Equal(t, int64(1), r.OpaqueMessages)
+	require.Equal(t, int64(1), r.UnreviewedMessages)
 }
 
 // walletTxScope finds the set from the addresses. The per-transaction EXISTS
