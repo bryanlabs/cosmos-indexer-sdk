@@ -375,6 +375,11 @@ func (s *Server) handleValidatorCommissionFlows(w http.ResponseWriter, r *http.R
 	if out.Receivers == nil {
 		out.Receivers = []CommissionReceiver{}
 	}
+	for i := range out.Receivers {
+		if b, err := decimal.NewFromString(out.Receivers[i].AmountBase); err == nil {
+			out.Receivers[i].Amount = s.displayAmount(b).String()
+		}
+	}
 	if strings.EqualFold(q.Get(apiFormat), "csv") {
 		writeFlowCSV(w, "commission-flows-"+val+"-"+rule+".csv", months)
 		return

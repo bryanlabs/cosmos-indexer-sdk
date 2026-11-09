@@ -429,6 +429,7 @@ type CommissionReceiver struct {
 	LastAt      time.Time `json:"last_withdrawal"`
 	Withdrawals int       `json:"withdrawals"`
 	AmountBase  string    `json:"amount_base"`
+	Amount      string    `json:"amount" gorm:"-"`
 }
 
 // commissionUntracked is the commission paid in other denoms, by month.
