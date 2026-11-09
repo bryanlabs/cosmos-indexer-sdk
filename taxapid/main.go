@@ -104,6 +104,9 @@ func main() {
 	if err := taxapi.BalanceHistoryMigrate(db); err != nil {
 		log.Printf("balance ledger table migrate: %v", err)
 	}
+	if err := taxapi.CommissionFlowsMigrate(db); err != nil {
+		log.Printf("commission flow tables migrate: %v", err)
+	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())

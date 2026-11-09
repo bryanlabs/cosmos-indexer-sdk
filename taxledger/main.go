@@ -12,8 +12,12 @@
 // the index, the ledger scan and the validator rates cover, up to yesterday,
 // rebuilding only the wallets those days can have changed.
 //
+// With -commission-flows it traces every validator's withdrawn commission
+// from -commission-flows-from to today and stores where it went (OPS-818).
+//
 // Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, and NODE_REST_API for
-// -days-from and -days-append.
+// -days-from, -days-append and -commission-flows (which also reads
+// ORACLE_URL for denoms).
 package main
 
 import (
@@ -21,6 +25,7 @@ import (
 	"flag"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
@@ -48,6 +53,10 @@ func main() {
 	daysBatch := flag.Int("days-batch", 2000, "addresses read per batch of the build")
 	daysWorkers := flag.Int("days-workers", 8, "addresses built in parallel")
 	daysAppend := flag.Bool("days-append", false, "append the finished days after the stored balance build")
+	flows := flag.Bool("commission-flows", false, "trace where each validator's commission went")
+	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
+	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
+	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
 	flag.Parse()
 
 	db, err := indexerDB.PostgresDbConnect(
@@ -60,6 +69,10 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
+	}
+	if *flows {
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers)
+		return
 	}
 	if *daysAppend {
 		appendDays(db, *chain, *daysWorkers)
@@ -127,5 +140,27 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	through := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
 	if err := srv.AppendBalanceDays(chain, "cosmos", node, through, workers, log.Printf); err != nil {
 		log.Fatalf("balance days: %v", err)
+	}
+}
+
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
+	from, err := time.Parse(time.DateOnly, fromText)
+	if err != nil {
+		log.Fatalf("-commission-flows-from: %v", err)
+	}
+	node, err := taxapi.NewLedgerNode()
+	if err != nil {
+		log.Fatal(err)
+	}
+	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
+	srv := taxapi.NewServer(db, oracle, taxapi.DefaultNativeAsset)
+	var validators []string
+	for _, v := range strings.Split(only, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			validators = append(validators, v)
+		}
+	}
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf); err != nil {
+		log.Fatalf("commission flows: %v", err)
 	}
 }
