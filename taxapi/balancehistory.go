@@ -1267,6 +1267,10 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	if err != nil {
 		return nil, 0, err
 	}
+	unnamed, err := s.unnamedStakingHeights(chain, addr, lowest)
+	if err != nil {
+		return nil, 0, err
+	}
 	lowest = tip.Height
 	var usable []int
 	for i, t := range targets {
@@ -1294,6 +1298,15 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		if k := sort.Search(len(holes), func(k int) bool { return holes[k] > t.Height }); k < len(holes) {
 			out[i].Status = balanceIncompleteS
 			out[i].Reason = fmt.Sprintf("%d blocks between this date and the index tip, the first at height %d, are missing transactions in the index, so the balance cannot be rebuilt exactly", len(holes)-k, holes[k])
+			continue
+		}
+		if reason := preCoinEventsReason(chain, t.Height); reason != "" {
+			out[i].Status, out[i].Reason = balanceIncompleteS, reason
+			continue
+		}
+		if k := sort.Search(len(unnamed), func(k int) bool { return unnamed[k] > t.Height }); k < len(unnamed) {
+			out[i].Status = balanceIncompleteS
+			out[i].Reason = fmt.Sprintf("the wallet moved stake at height %d, before Gaia v15 (block %d), when staking events did not name the delegator; rebuilding those from the messages is not deployed yet", unnamed[k], hubStakingDelegatorFrom)
 			continue
 		}
 		usable = append(usable, i)
