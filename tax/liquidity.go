@@ -42,10 +42,21 @@ const (
 	TriggerGravityDEXWithdraw        = "gravity_dex_withdraw"
 	TriggerGravityDEXCreatePool      = "gravity_dex_create_pool"
 	TriggerGravityDEXPoolCreationFee = "gravity_dex_pool_creation_fee"
+	TriggerGravityDEXForcedWithdraw  = "gravity_dex_forced_withdraw"
 
-	liquiditySuccess      = "success"
-	liquidityKindDeposit  = "deposit"
-	liquidityKindWithdraw = "withdraw"
+	// AttributeReconstructed marks a block event rebuilt from archive state
+	// because the chain moved the coins without emitting it. Its value names
+	// the cause.
+	AttributeReconstructed = "reconstructed"
+	// ReconstructedGaiaV11ForcedWithdrawal is the Gaia v11 upgrade at
+	// cosmoshub-4 16596000. Its liquidity migration withdrew every pool coin
+	// inside a cache context, and SDK 0.45 drops a cache context's events.
+	ReconstructedGaiaV11ForcedWithdrawal = "gaia_v11_forced_withdrawal"
+
+	liquiditySuccess            = "success"
+	liquidityKindDeposit        = "deposit"
+	liquidityKindWithdraw       = "withdraw"
+	liquidityKindForcedWithdraw = "forced_withdraw"
 )
 
 // liquidityInitPoolCoinMint is the module's InitPoolCoinMintAmount, the pool
@@ -332,7 +343,11 @@ func liquidityCreatePoolEvents(log *txlog.LogMessage, m *MsgLiquidityCreatePool)
 // Refunds (unaccepted deposit coins, unmatched offer coins, a failed
 // withdrawal's pool coins) are the owner's own escrowed coins coming back, so
 // they get no row: liquidityEscrowReturns counts them as classified.
-func liquidityBlockEvents(events []BlockEvent, owner string, addIn func(string, sdkmath.Int)) []TaxableEvent {
+//
+// The Gaia v11 forced withdrawal escrowed the pool coins in the same block
+// lifecycle that paid them out, so its pool coins out are reported through
+// addOut and the owner's escrow debit is not left for review.
+func liquidityBlockEvents(events []BlockEvent, owner string, addIn, addOut func(string, sdkmath.Int)) []TaxableEvent {
 	var out []TaxableEvent
 	escrowed := map[string]sdkmath.Int{}
 	for _, e := range events {
@@ -345,6 +360,9 @@ func liquidityBlockEvents(events []BlockEvent, owner string, addIn func(string, 
 			who, kind, trigger = a["depositor"], liquidityKindDeposit, TriggerGravityDEXDeposit
 		case "withdraw_from_pool":
 			who, kind, trigger = a["withdrawer"], liquidityKindWithdraw, TriggerGravityDEXWithdraw
+			if a[AttributeReconstructed] == ReconstructedGaiaV11ForcedWithdrawal {
+				kind, trigger = liquidityKindForcedWithdraw, TriggerGravityDEXForcedWithdraw
+			}
 		default:
 			continue
 		}
@@ -357,6 +375,9 @@ func liquidityBlockEvents(events []BlockEvent, owner string, addIn func(string, 
 			"batch_index":   a["batch_index"],
 			"msg_index":     a["msg_index"],
 			"swap_group":    strings.Join([]string{protocolGravityDEX, kind, a[attributePoolID], a["batch_index"], a["msg_index"]}, ":"),
+		}
+		if v := a[AttributeReconstructed]; v != "" {
+			kv[AttributeReconstructed] = v
 		}
 		var given, got []blockCoin
 		switch kind {
@@ -375,13 +396,16 @@ func liquidityBlockEvents(events []BlockEvent, owner string, addIn func(string, 
 				got = append(got, blockCoin{event: e, amount: p, denom: a["pool_coin_denom"]})
 				escrowed[a["pool_coin_denom"]] = addInt(escrowed[a["pool_coin_denom"]], p)
 			}
-		case liquidityKindWithdraw:
+		case liquidityKindWithdraw, liquidityKindForcedWithdraw:
 			if p := intAttr(a["pool_coin_amount"]); p.IsPositive() {
 				given = append(given, blockCoin{event: e, amount: p, denom: a["pool_coin_denom"]})
 			}
 			got = blockCoins(e, a["withdraw_coins"])
 		}
 		for _, c := range given {
+			if kind == liquidityKindForcedWithdraw {
+				addOut(c.denom, c.amount)
+			}
 			out = append(out, blockRow(c, CategorySwap, owner, "", "", trigger, kv))
 		}
 		for _, c := range got {

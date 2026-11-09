@@ -99,5 +99,6 @@ func Triggers() []TriggerInfo {
 		{TriggerGravityDEXWithdraw, string(CategorySwap), "A Gravity DEX pool withdrawal settled at the end of its block: pool coins out, the reserve coins in."},
 		{TriggerGravityDEXCreatePool, string(CategorySwap), "A Gravity DEX pool created: the deposit coins out, the first pool coins in."},
 		{TriggerGravityDEXPoolCreationFee, string(CategoryExpense), "The Gravity DEX pool creation fee, paid to the community pool."},
+		{TriggerGravityDEXForcedWithdraw, string(CategorySwap), "The Gaia v11 upgrade (cosmoshub-4 block 16596000) withdrew every Gravity DEX pool coin held by an account that had signed a transaction: pool coins out, the reserve coins in, no fee. The chain emitted no events for it; the rows are rebuilt from archive balances and carry detail reconstructed=gaia_v11_forced_withdrawal."},
 	}
 }

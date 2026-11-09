@@ -211,6 +211,67 @@ func TestBlockGravityDEXWithdraw(t *testing.T) {
 	}
 }
 
+// forcedWithdrawEvents is what the Gaia v11 migration would have emitted for
+// one holder: the pool coins escrowed, the reserve paid out, the escrow burned.
+func forcedWithdrawEvents(escrowed, burned string) []BlockEvent {
+	paid := "1406" + liqOffer + ",322uatom"
+	r := ReconstructedGaiaV11ForcedWithdrawal
+	return []BlockEvent{
+		blockEvent(1, BlockPhaseBegin, "coin_spent", attributeSpender, blockOwner, "amount", escrowed+liqPoolCoin, AttributeReconstructed, r),
+		blockEvent(2, BlockPhaseBegin, "coin_received", "receiver", liquidityEscrowAddress, "amount", escrowed+liqPoolCoin, AttributeReconstructed, r),
+		blockEvent(3, BlockPhaseBegin, "transfer", "recipient", liquidityEscrowAddress, "sender", blockOwner, "amount", escrowed+liqPoolCoin, AttributeReconstructed, r),
+		blockEvent(4, BlockPhaseBegin, "message", "sender", blockOwner, AttributeReconstructed, r),
+		blockEvent(5, BlockPhaseBegin, "coin_spent", attributeSpender, liqReserve, "amount", paid, AttributeReconstructed, r),
+		blockEvent(6, BlockPhaseBegin, "message", "sender", liqReserve, AttributeReconstructed, r),
+		blockEvent(7, BlockPhaseBegin, "coin_received", "receiver", blockOwner, "amount", paid, AttributeReconstructed, r),
+		blockEvent(8, BlockPhaseBegin, "transfer", "recipient", blockOwner, "amount", paid, AttributeReconstructed, r),
+		blockEvent(9, BlockPhaseBegin, "coin_spent", attributeSpender, liquidityEscrowAddress, "amount", burned+liqPoolCoin, AttributeReconstructed, r),
+		blockEvent(10, BlockPhaseBegin, "burn", "burner", liquidityEscrowAddress, "amount", burned+liqPoolCoin, AttributeReconstructed, r),
+		blockEvent(11, BlockPhaseBegin, "withdraw_from_pool", "pool_id", "1", "batch_index", "1", "msg_index", "1",
+			"withdrawer", blockOwner, "pool_coin_denom", liqPoolCoin, "pool_coin_amount", burned,
+			"withdraw_coins", paid, "withdraw_fee_coins", "0"+liqOffer+",0uatom", "success", "success", AttributeReconstructed, r),
+	}
+}
+
+// The forced withdrawal escrowed and paid out in one lifecycle: the same swap
+// rows as a batch withdrawal, under its own trigger, and the owner's escrow
+// debit is the disposal, not a movement left for review.
+func TestBlockGravityDEXForcedWithdraw(t *testing.T) {
+	rows := ClassifyBlockLifecycle(forcedWithdrawEvents("1200", "1200"), blockOwner, nil)
+	if len(rows) != 3 {
+		t.Fatalf("rows %+v", rows)
+	}
+	if r := rows[0]; r.FromAddr != blockOwner || r.Amount != "1200" || r.Denom != liqPoolCoin || r.Category != string(CategorySwap) {
+		t.Fatalf("disposal %+v", r)
+	}
+	if r := rows[1]; r.ToAddr != blockOwner || r.Amount != "1406" || r.Denom != liqOffer {
+		t.Fatalf("acquisition %+v", r)
+	}
+	if r := rows[2]; r.ToAddr != blockOwner || r.Amount != "322" || r.Denom != fixtureNativeDenom {
+		t.Fatalf("acquisition %+v", r)
+	}
+	for _, r := range rows {
+		d := blockDetail(t, r)
+		if r.RewardTrigger != TriggerGravityDEXForcedWithdraw || d[AttributeReconstructed] != ReconstructedGaiaV11ForcedWithdrawal ||
+			d["swap_group"] != "gravity_dex:forced_withdraw:1:1:1" || d["phase"] != BlockPhaseBegin || d["review_required"] != "" {
+			t.Fatalf("row %+v detail %v", r, d)
+		}
+	}
+}
+
+// Only the pool coins the withdrawal booked are covered: an escrow debit
+// larger than the withdrawal leaves the difference for review.
+func TestBlockGravityDEXForcedWithdrawUncoveredDebit(t *testing.T) {
+	rows := ClassifyBlockLifecycle(forcedWithdrawEvents("1500", "1200"), blockOwner, nil)
+	if len(rows) != 4 {
+		t.Fatalf("rows %+v", rows)
+	}
+	r := rows[3]
+	if r.FromAddr != blockOwner || r.Amount != "300" || r.Denom != liqPoolCoin || blockDetail(t, r)["review_reason"] != ReviewUnclassifiedBlockMovement {
+		t.Fatalf("review %+v", r)
+	}
+}
+
 // An unmatched order's escrow comes back with a failure event: no swap rows,
 // and the return is not left for review.
 func TestBlockGravityDEXUnmatchedSwapRefund(t *testing.T) {
