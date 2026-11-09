@@ -146,6 +146,7 @@ func run() int {
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
 	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
 	kinds := flag.String("message-types", "", "optional comma-separated message type URLs; replay only messages of those types")
+	port := flag.String("packet-dst-port", "", "optional IBC port; replay only messages that received a packet on it")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -229,7 +230,17 @@ func run() int {
 		}
 		candidates = ids
 	}
-	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0
+	if *port != "" {
+		ids, err := portIDs(db, *port, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 || len(categories) > 0 || len(types) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0 || *port != ""
 	b, err := newBackup(*path)
 	if err != nil {
 		fatal(err.Error())
@@ -357,6 +368,24 @@ func categoryIDs(db *gorm.DB, categories []string, from, maxID uint) ([]uint, er
 func typeIDs(db *gorm.DB, types []string, from, maxID uint) ([]uint, error) {
 	var ids []uint
 	err := db.Raw("SELECT m.id FROM messages m JOIN message_types mt ON mt.id=m.message_type_id WHERE mt.message_type IN ? AND m.id > ? AND m.id <= ? ORDER BY 1", types, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// portIDs finds received packets by the stored packet_dst_port value, which the
+// attribute value index covers. It reads every attribute with that value, so it
+// gets its own statement timeout.
+func portIDs(db *gorm.DB, port string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SET LOCAL statement_timeout='1800s'").Error; err != nil {
+			return err
+		}
+		return tx.Raw(`SELECT DISTINCT me.message_id FROM message_event_attributes a
+JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id AND k.key='packet_dst_port'
+JOIN message_events me ON me.id=a.message_event_id
+JOIN message_event_types et ON et.id=me.message_event_type_id AND et.type='recv_packet'
+WHERE left(a.value,100)=? AND me.message_id > ? AND me.message_id <= ? ORDER BY 1`, port, from, maxID).Scan(&ids).Error
+	})
 	return ids, err
 }
 

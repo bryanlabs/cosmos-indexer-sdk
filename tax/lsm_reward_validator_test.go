@@ -85,7 +85,7 @@ func TestTokenizeShareRewardSplitsAggregateByRecordValidator(t *testing.T) {
 // redelegated position 1uatom, and the record forwards its whole 48442uatom
 // balance. The 1uatom is the owner's own reward, not the record's.
 func TestTokenizeShareRewardLegacyMergedEvents(t *testing.T) {
-	ibc := "ibc/B011C1A0AD5E717F674BA59FD8E05B2F946E4FD41C9CB3311A8B5E2D2B6E9F2C"
+	ibc := lsmTestIBCDenom
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
 			[2]string{attributeRecipient, lsmTestRecordA}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "86301507999" + ibc + ",43121uatom"},
@@ -190,6 +190,8 @@ func redeemRewardRows(out []TaxableEvent) []rewardRow {
 	return rows
 }
 
+const lsmTestIBCDenom = "ibc/B011C1A0AD5E717F674BA59FD8E05B2F946E4FD41C9CB3311A8B5E2D2B6E9F2C"
+
 // The legacy record account for record 26746, from mainnet message 84031116.
 const lsmTestRecord26746 = "cosmos10ayavmqf9v643kwuftypzjnl7g66ptqdqgc5r97eh5l6acaeujgsd263jg"
 
@@ -229,7 +231,7 @@ func requireRewardRows(t *testing.T, out []TaxableEvent, want []rewardRow) {
 // and the settled total are income.
 func TestLegacyRedeemDropsRecordWithdrawalFromOwnReward(t *testing.T) {
 	record := lsmRecordAccount("26746")
-	ibc := "ibc/B011C1A0AD5E717F674BA59FD8E05B2F946E4FD41C9CB3311A8B5E2D2B6E9F2C"
+	ibc := lsmTestIBCDenom
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
 			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "86301507999" + ibc + ",43121uatom"},
@@ -249,9 +251,10 @@ func TestLegacyRedeemDropsRecordWithdrawalFromOwnReward(t *testing.T) {
 	})
 }
 
-// Legacy redeem with a separate withdraw address (message 84031116): the record
-// withdraws 9uatom and forwards its 1544uatom balance to the withdraw address.
-// The owner had no reward of its own.
+// Legacy redeem of someone else's record (message 84031116): the record
+// withdraws 9uatom and forwards its 1544uatom balance to its owner, who
+// tokenized it. The redeemer had no reward of its own, and the settlement is
+// the owner's income, not the redeemer's.
 func TestLegacyRedeemRecordPaysWithdrawAddress(t *testing.T) {
 	record := lsmRecordAccount("26746")
 	payee, withdrawn, settled := "cosmos1lsmpayee", "9uatom", "1544uatom"
@@ -263,9 +266,54 @@ func TestLegacyRedeemRecordPaysWithdrawAddress(t *testing.T) {
 		ev("withdraw_rewards", [2]string{attributeAmount, withdrawn}, [2]string{attributeValidator, lsmTestValoperA}),
 		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, settled}),
 	}}
-	requireRewardRows(t, classify(legacyRedeem(t, lsmTestValoperA), log), []rewardRow{
+	out := classify(legacyRedeem(t, lsmTestValoperA), log)
+	requireRewardRows(t, out, []rewardRow{
 		{lsmTestValoperA, "1544", fixtureNativeDenom},
 	})
+	requireRewardRecipients(t, out, payee)
+}
+
+func requireRewardRecipients(t *testing.T, out []TaxableEvent, want ...string) {
+	t.Helper()
+	var got []string
+	for _, e := range out {
+		if e.Category == string(CategoryReward) {
+			got = append(got, e.ToAddr)
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("reward recipients = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("reward recipients = %v, want %v", got, want)
+		}
+	}
+}
+
+// A redeemer whose own reward goes to the same withdraw address the record
+// pays is the record's owner, so the settlement stays its income.
+func TestLegacyRedeemOwnWithdrawAddressKeepsRedeemer(t *testing.T) {
+	record := lsmRecordAccount("26746")
+	payee := "cosmos1lsmpayee"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "9uatom"},
+			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, "1544uatom"},
+			[2]string{attributeRecipient, payee}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "3uatom"},
+		),
+		ev("withdraw_rewards",
+			[2]string{attributeAmount, "9uatom"}, [2]string{attributeValidator, lsmTestValoperA},
+			[2]string{attributeAmount, "3uatom"}, [2]string{attributeValidator, lsmTestValoperA},
+		),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, "1544uatom"}),
+	}}
+	out := classify(legacyRedeem(t, lsmTestValoperA), log)
+	requireRewardRows(t, out, []rewardRow{
+		{lsmTestValoperA, "3", fixtureNativeDenom},
+		{lsmTestValoperA, "1544", fixtureNativeDenom},
+	})
+	requireRewardRecipients(t, out, lsmTestOwner, lsmTestOwner)
 }
 
 // The owner and the record each withdrew 5uatom from different validators:

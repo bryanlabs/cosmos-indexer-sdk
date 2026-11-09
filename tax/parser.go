@@ -252,8 +252,10 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
 	case *MsgRedeemTokensForShares:
 		events = append(events, redeemOwnRewardEvents(log, m.DelegatorAddress, m.AmountRaw)...)
+		payee := redeemRecordPayee(log, m.DelegatorAddress)
 		for _, e := range tokenizeShareRewardEvents(log, m.DelegatorAddress, shareDenomValidator(m.AmountRaw)) {
 			e.RewardTrigger = "redeem"
+			e.ToAddr = payee
 			events = append(events, e)
 		}
 		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
@@ -404,6 +406,10 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		state.issues = append(state.issues, issues...)
 
 	case *chantypes.MsgRecvPacket:
+		if m.Packet.GetDestPort() == icaHostPort {
+			events = append(events, icaHostEvents(m.Packet, log, state, depth)...)
+			break
+		}
 		// An NFT bridge packet lands on a wasm.<ics721> port and carries
 		// NonFungibleTokenPacketData instead of coins.
 		if strings.HasPrefix(m.Packet.GetDestPort(), "wasm.") {
@@ -779,6 +785,41 @@ func redeemOwnRewardEvents(log *indexerTxTypes.LogMessage, delegator string, raw
 		}
 		return true, g[attributeValidator]
 	})
+}
+
+// redeemRecordPayee returns the account a redeem's record settlement belongs
+// to. The record pays its owner's withdraw address, and the redeemer is often
+// not the owner: share tokens change hands, records are transferred, and an
+// interchain-account redeem by a liquid staking provider never owns the
+// record. On mainnet such a payee is the record's tokenizer or an account
+// the record was transferred to. The redeemer keeps the row when it is the
+// payee or the payee also received the redeemer's own reward, which marks it
+// as the redeemer's withdraw address; two payees prove neither.
+func redeemRecordPayee(log *indexerTxTypes.LogMessage, redeemer string) string {
+	payee := ""
+	for _, ev := range log.Events {
+		if ev.Type != "withdraw_tokenize_share_reward" {
+			continue
+		}
+		for _, a := range ev.Attributes {
+			if a.Key != attributeWithdrawAddress {
+				continue
+			}
+			if payee != "" && payee != a.Value {
+				return redeemer
+			}
+			payee = a.Value
+		}
+	}
+	if payee == "" || payee == redeemer {
+		return redeemer
+	}
+	for _, p := range transferRuns(log, distributionModuleAddress) {
+		if p.recipient == payee {
+			return redeemer
+		}
+	}
+	return payee
 }
 
 // lsmRecordAccount is the module account that holds a tokenize-share record's
