@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
 	"github.com/DefiantLabs/cosmos-indexer/parsers"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/address"
 	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
@@ -249,7 +251,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "tokenize")...)
 		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
 	case *MsgRedeemTokensForShares:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redeem")...)
+		events = append(events, redeemOwnRewardEvents(log, m.DelegatorAddress, m.AmountRaw)...)
 		for _, e := range tokenizeShareRewardEvents(log, m.DelegatorAddress, shareDenomValidator(m.AmountRaw)) {
 			e.RewardTrigger = "redeem"
 			events = append(events, e)
@@ -668,6 +670,13 @@ func coinsSpentBy(log *indexerTxTypes.LogMessage, target string) sdk.Coins {
 // even when its payment is redirected to a different withdrawal address.
 // Redelegation may withdraw from BOTH validators; retain each event separately.
 func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger string) []TaxableEvent {
+	return delegatorRewardEventsExcept(log, delegator, trigger, nil)
+}
+
+// delegatorRewardEventsExcept is delegatorRewardEvents with a filter over
+// delegator-less groups: keep reports whether the group is the delegator's
+// and the validator to book it under.
+func delegatorRewardEventsExcept(log *indexerTxTypes.LogMessage, delegator, trigger string, keep func(group map[string]string, coins sdk.Coins) (bool, string)) []TaxableEvent {
 	var out []TaxableEvent
 	if log == nil {
 		return out
@@ -689,6 +698,14 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger st
 			if err != nil {
 				continue
 			}
+			validator := a[attributeValidator]
+			if keep != nil && a[attributeDelegator] == "" {
+				ok, v := keep(a, coins)
+				if !ok {
+					continue
+				}
+				validator = v
+			}
 			for _, coin := range coins {
 				if !coin.IsPositive() {
 					continue
@@ -696,12 +713,79 @@ func delegatorRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger st
 				out = append(out, TaxableEvent{
 					Category: string(CategoryReward), ToAddr: delegator,
 					Amount: coin.Amount.String(), Denom: coin.Denom,
-					ValidatorAddress: a[attributeValidator], RewardTrigger: trigger,
+					ValidatorAddress: validator, RewardTrigger: trigger,
 				})
 			}
 		}
 	}
 	return out
+}
+
+// redeemOwnRewardEvents reads the redeeming delegator's own reward. SDK 0.45
+// names no delegator on withdraw_rewards, so the redeemed record's withdrawal
+// from its validator looks like the delegator's. Those coins are paid to the
+// record's module account, which either forwards them inside the
+// tokenize-share total or keeps them until the owner withdraws the record's
+// reward later; either way they are not the delegator's reward here. Each
+// distribution payment to the record account drops one group of exactly that
+// amount. When the same amount also went to another account and the groups of
+// that amount name different validators, which group was the record's is
+// unproven, so the kept ones carry no validator.
+func redeemOwnRewardEvents(log *indexerTxTypes.LogMessage, delegator string, rawShares []byte) []TaxableEvent {
+	_, recordID := shareDenomRecord(rawShares)
+	if log == nil || recordID == "" {
+		return delegatorRewardEvents(log, delegator, "redeem")
+	}
+	record := lsmRecordAccount(recordID)
+	recordPaid, otherPaid := map[string]int{}, map[string]int{}
+	for _, p := range transferRuns(log, distributionModuleAddress) {
+		if p.recipient == record {
+			recordPaid[p.coins.String()]++
+		} else {
+			otherPaid[p.coins.String()]++
+		}
+	}
+	validators := map[string]map[string]bool{}
+	for _, ev := range log.Events {
+		if ev.Type != "withdraw_rewards" {
+			continue
+		}
+		groups, err := rewardAttributeGroups(ev)
+		if err != nil {
+			continue
+		}
+		for _, g := range groups {
+			if g[attributeDelegator] != "" {
+				continue
+			}
+			if coins, err := sdk.ParseCoinsNormalized(g[attributeAmount]); err == nil {
+				k := coins.String()
+				if validators[k] == nil {
+					validators[k] = map[string]bool{}
+				}
+				validators[k][g[attributeValidator]] = true
+			}
+		}
+	}
+	dropped := map[string]int{}
+	return delegatorRewardEventsExcept(log, delegator, "redeem", func(g map[string]string, coins sdk.Coins) (bool, string) {
+		k := coins.String()
+		if dropped[k] < recordPaid[k] {
+			dropped[k]++
+			return false, ""
+		}
+		if recordPaid[k] > 0 && otherPaid[k] > 0 && len(validators[k]) > 1 {
+			return true, ""
+		}
+		return true, g[attributeValidator]
+	})
+}
+
+// lsmRecordAccount is the module account that holds a tokenize-share record's
+// delegation and collects its rewards: address.Module("lsm",
+// "tokenizeshare_<record id>").
+func lsmRecordAccount(recordID string) string {
+	return sdk.AccAddress(address.Module("lsm", []byte("tokenizeshare_"+recordID))).String()
 }
 
 // Older SDK ABCI logs combine same-type events into one ordered attribute list.
@@ -900,6 +984,13 @@ func mergeRewardRows(rows []TaxableEvent) []TaxableEvent {
 // shareDenomValidator returns the validator of a tokenize-share denom
 // ("cosmosvaloper1.../<record id>") carried in a raw Coin message field.
 func shareDenomValidator(rawCoin []byte) string {
+	valoper, _ := shareDenomRecord(rawCoin)
+	return valoper
+}
+
+// shareDenomRecord splits a tokenize-share denom carried in a raw Coin message
+// field into its validator and record id.
+func shareDenomRecord(rawCoin []byte) (string, string) {
 	denom := ""
 	_ = scanFields(rawCoin, func(f wireField) error {
 		if f.num == 1 {
@@ -907,14 +998,17 @@ func shareDenomValidator(rawCoin []byte) string {
 		}
 		return nil
 	})
-	valoper, _, ok := strings.Cut(denom, "/")
+	valoper, id, ok := strings.Cut(denom, "/")
 	if !ok {
-		return ""
+		return "", ""
 	}
 	if _, err := sdk.ValAddressFromBech32(valoper); err != nil {
-		return ""
+		return "", ""
 	}
-	return valoper
+	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
+		return valoper, ""
+	}
+	return valoper, id
 }
 
 // receivedCoinsByReceiver groups coin_received amounts by receiver (used for
