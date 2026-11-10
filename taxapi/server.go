@@ -37,6 +37,11 @@ type Server struct {
 
 	attestOnce sync.Once
 	attest     *attestationCache
+
+	indexCovMu      sync.RWMutex
+	coverageScanner *indexCoverageScanner
+
+	ledgerCov ledgerCoverage
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -46,23 +51,28 @@ func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
-	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("GET /report-job", s.handleReportJob)
-	mux.HandleFunc("GET /asset-review", s.handleAssetReview)
-	mux.HandleFunc("GET /8949", s.handle8949)
-	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
-	mux.HandleFunc("GET /income", s.handleIncome)
-	mux.HandleFunc("GET /990t", s.handle990T)
+	mux.HandleFunc("GET /events", s.withPeriodCoverage(s.handleEvents))
+	mux.HandleFunc("GET /report-job", s.withPeriodCoverage(s.handleReportJob))
+	mux.HandleFunc("GET /asset-review", s.withPeriodCoverage(s.handleAssetReview))
+	mux.HandleFunc("GET /8949", s.withPeriodCoverage(s.handle8949))
+	mux.HandleFunc("GET /schedule-d", s.withPeriodCoverage(s.handleScheduleD))
+	mux.HandleFunc("GET /income", s.withPeriodCoverage(s.handleIncome))
+	mux.HandleFunc("GET /990t", s.withPeriodCoverage(s.handle990T))
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
+	mux.HandleFunc("GET /index-coverage", s.handleIndexCoverage)
 	mux.HandleFunc("GET /balance", s.handleBalance)
+	mux.HandleFunc("GET /balance-statement", s.handleBalanceStatement)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	mux.HandleFunc("GET /catalog", s.handleCatalog)
 	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
-	mux.HandleFunc("GET /journal", s.handleJournal)
-	mux.HandleFunc("GET /positions", s.handlePositions)
-	mux.HandleFunc("GET /validator-statement", s.handleValidatorStatement)
+	mux.HandleFunc("GET /journal", s.withPeriodCoverage(s.handleJournal))
+	mux.HandleFunc("GET /positions", s.withPeriodCoverage(s.handlePositions))
+	mux.HandleFunc("GET /validator-statement", s.withPeriodCoverage(s.handleValidatorStatement))
+	mux.HandleFunc("GET /validator-commission-flows", s.handleValidatorCommissionFlows)
+	mux.HandleFunc("GET /commission-flows", s.handleCommissionFlowsHub)
+	mux.HandleFunc("GET /address-labels", s.handleAddressLabels)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
 	mux.HandleFunc("GET /validators/attest/check", s.handleAttestationCheck)
 	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
@@ -71,7 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /wasm/submissions", s.handleListWasmSubmissions)
 	mux.HandleFunc("GET /wasm/submissions/status", s.handleWasmSubmissionStatus)
 	mux.HandleFunc("PATCH /wasm/submissions/{id}", s.handleUpdateWasmSubmission)
-	mux.HandleFunc("GET /delegator-report", s.handleDelegatorReport)
+	mux.HandleFunc("GET /delegator-report", s.withPeriodCoverage(s.handleDelegatorReport))
 	mux.HandleFunc("POST /admin/validator-keys", s.handleCreateValidatorKey)
 	mux.HandleFunc("GET /admin/validator-keys", s.handleListValidatorKeys)
 	return withCORS(mux)
@@ -128,6 +138,7 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	// completeness. Exposed as a header (the body is a CSV) so the web UI can
 	// gate the confident-download path without re-parsing the CSV.
 	w.Header().Set("X-Basis-Unknown-Count", strconv.Itoa(CountUnknownBasis(form)))
+	w.Header().Set("X-Proceeds-Unknown-Count", strconv.Itoa(CountUnknownProceeds(form)))
 	w.Header().Set(apiContentType, apiCSVContentType)
 	w.Header().Set(apiContentDisposition, "attachment; filename=form-8949.csv")
 	_ = Write8949CSV(w, form)
@@ -151,6 +162,7 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 	sched.Address = addr
 	sched.WalletByWallet = true
 	sched.UnknownBasisLines = CountUnknownBasis(form)
+	sched.UnknownProceedsLines = CountUnknownProceeds(form)
 	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(sched)
 }
@@ -344,7 +356,7 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 
 // loadWalletRows performs database work only. Pricing and shared Server caches
 // are deliberately used only after the read snapshot has been released.
-func (s *Server) loadWalletRows(chain, addr string, start, end time.Time) (walletRows, error) {
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (walletRows, error) {
 	var events []tax.TaxableEvent
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
@@ -353,6 +365,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time) (walle
 		Find(&events).Error; err != nil {
 		return walletRows{}, err
 	}
+	reconcileIBCRefunds(events, refundPairs)
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.
@@ -426,8 +439,16 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 	out := make([]Row, 0, len(events)+len(fees))
 	for _, e := range events {
 		dir := eventDirection(e, addr)
-		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
+		denom, amount := e.Denom, e.Amount
+		bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail)
+		if isShare {
+			denom, amount = bonded, bondedAmount
+		}
+		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, denom, amount, e.FromAddr, e.ToAddr)
 		row.Asset = e.Asset
+		if isShare {
+			row.Asset = e.Denom
+		}
 		row.ValidatorAddress = e.ValidatorAddress
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
@@ -458,6 +479,10 @@ func (s *Server) prewarmPrices(chain string, events []tax.TaxableEvent, fees []f
 		seen[dateKey{base, ts.UTC().Format(apiDateLayout)}] = struct{}{}
 	}
 	for _, e := range events {
+		if bonded, _, ok := lsmUnderlying(e.Category, e.Denom, e.Detail); ok {
+			add(bonded, e.Timestamp)
+			continue
+		}
 		add(e.Denom, e.Timestamp)
 	}
 	for _, f := range fees {

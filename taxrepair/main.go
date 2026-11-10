@@ -583,6 +583,12 @@ func repairCodec() (codectypes.AnyUnpacker, error) {
 	for k, v := range tax.TokenFactoryMsgTypes() {
 		m[k] = v
 	}
+	for k, v := range tax.ProviderMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.LiquidityMsgTypes() {
+		m[k] = v
+	}
 	c, err := probe.GetProbeClient(config.Probe{RPC: "http://127.0.0.1:1"}, nil, m)
 	if err != nil {
 		return nil, err

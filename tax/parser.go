@@ -55,7 +55,7 @@ var MessageTypeURLs = []string{
 	typeURLLegacyGovSubmitProposal,
 	typeURLWithdrawDelegatorReward,
 	"/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission",
-	"/cosmos.authz.v1beta1.MsgExec",
+	typeURLAuthzExec,
 	typeURLIBCTransfer,
 	typeURLIBCRecvPacket,
 	"/ibc.core.channel.v1.MsgTimeout",
@@ -83,6 +83,12 @@ var MessageTypeURLs = []string{
 	TypeURLTFForceTransfer,
 	TypeURLTFBurn,
 	TypeURLTFCreateDenom,
+	TypeURLCCVRegisterConsumerRewardDenom,
+	TypeURLV2SendPacket,
+	TypeURLLiquidityCreatePool,
+	TypeURLLiquidityDepositWithinBatch,
+	TypeURLLiquidityWithdrawWithinBatch,
+	TypeURLLiquiditySwapWithinBatch,
 }
 
 // Parser implements parsers.MessageParser. One instance handles all the message
@@ -175,17 +181,17 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// The principal itself is recorded too (record-only categories), so a
 	// controller can reconcile liquid against bonded balances.
 	case *stakingtypes.MsgDelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "delegate")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "delegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgUndelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "undelegate")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "undelegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgBeginRedelegate:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "redelegate")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "redelegate")...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgCancelUnbondingDelegation:
 		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding")...)
-		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress)...)
+		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 
 	// A new validator's self-bond is staking principal like any delegation. The
 	// SDK emits create_validator rather than delegate, so the amount comes from
@@ -355,6 +361,18 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 			}
 		}
 
+	// Registering a consumer reward denom (ICS v1 to v3) charged the depositor
+	// a fee (10 ATOM on Cosmos Hub) paid to the community pool, with nothing
+	// coming back.
+	case *MsgRegisterConsumerRewardDenom:
+		for _, c := range transfersFromSender(log, m.Depositor)[distributionModuleAddress] {
+			events = append(events, TaxableEvent{
+				Category: string(CategoryExpense), FromAddr: m.Depositor, ToAddr: distributionModuleAddress,
+				Amount: c.Amount.String(), Denom: c.Denom, RewardTrigger: TriggerConsumerRewardDenomFee,
+				Detail: detailJSON(map[string]string{detailProtocol: detailCommunityPool, "consumer_reward_denom": m.Denom}),
+			})
+		}
+
 	// An admin moving someone else's coins is still a movement for both sides.
 	case *MsgTFForceTransfer:
 		if m.Amount != "" && m.Denom != "" {
@@ -380,6 +398,23 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 			events = append(events, e)
 		}
 		events = append(events, skipForwardEvents(log)...)
+
+	// IBC channel v2 send: an outbound transfer, same as v1 MsgTransfer. The
+	// payload is solidity-ABI encoded for the Ethereum bridge, so the amount,
+	// denom and receiver come from the transfer module's ibc_transfer event.
+	case *MsgSendPacketV2:
+		sent, issues := ibcV2SendEvents(log, m)
+		events = append(events, sent...)
+		state.issues = append(state.issues, issues...)
+
+	// Gravity DEX. Batch messages only escrow the sender's coins; the batch
+	// settles at the end of the block, so their rows come from block events.
+	// Creating a pool settles at once. See tax/liquidity.go.
+	case *MsgLiquidityCreatePool:
+		created, issues := liquidityCreatePoolEvents(log, m)
+		events = append(events, created...)
+		state.issues = append(state.issues, issues...)
+	case *MsgLiquidityDepositWithinBatch, *MsgLiquidityWithdrawWithinBatch, *MsgLiquiditySwapWithinBatch:
 
 	case *chantypes.MsgTimeout:
 		refunded, issues := ibcV1RefundEvents(log, m.Packet, true, nil)
@@ -722,6 +757,51 @@ func delegatorRewardEventsExcept(log *indexerTxTypes.LogMessage, delegator, trig
 					ValidatorAddress: validator, RewardTrigger: trigger,
 				})
 			}
+		}
+	}
+	return out
+}
+
+// stakingRewardEvents reads the reward a delegate, undelegate or redelegate
+// withdrew for the delegator. Before the Hub's SDK emitted withdraw_rewards
+// for that automatic withdrawal (SDK 0.42, and 0.44 and 0.45 into 2023) its
+// only trace is the distribution module's transfer, so a log with no
+// withdraw_rewards event at all reads those transfers instead. A redelegation
+// withdraws from the source validator and then from the destination when the
+// delegator already had stake there; a single transfer could be either, so it
+// carries no validator.
+func stakingRewardEvents(log *indexerTxTypes.LogMessage, delegator, trigger string) []TaxableEvent {
+	if log == nil {
+		return nil
+	}
+	var validators []string
+	for _, ev := range log.Events {
+		a := attrMap(ev)
+		switch ev.Type {
+		case eventWithdrawRewards:
+			return delegatorRewardEvents(log, delegator, trigger)
+		case string(CategoryDelegate), eventUnbond:
+			validators = []string{a[attributeValidator]}
+		case string(CategoryRedelegate):
+			validators = []string{a["source_validator"], a["destination_validator"]}
+		}
+	}
+	runs := transferRuns(log, distributionModuleAddress)
+	var out []TaxableEvent
+	for i, p := range runs {
+		validator := ""
+		if len(runs) == len(validators) {
+			validator = validators[i]
+		}
+		for _, coin := range p.coins {
+			if !coin.IsPositive() {
+				continue
+			}
+			out = append(out, TaxableEvent{
+				Category: string(CategoryReward), ToAddr: delegator,
+				Amount: coin.Amount.String(), Denom: coin.Denom,
+				ValidatorAddress: validator, RewardTrigger: trigger,
+			})
 		}
 	}
 	return out

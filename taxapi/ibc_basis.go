@@ -16,6 +16,13 @@ const (
 	ibcPacketIdentityRequired = "ibc_outbound_packet_identity_required"
 	ibcTimeoutRefund          = "ibc_timeout_refund"
 	ibcErrorAckRefund         = "ibc_error_ack_refund"
+	// A send whose packet came back: the coins sat in the channel's escrow and
+	// returned, so the send is a record-only protocol deposit, and its refund a
+	// record-only withdrawal, under these triggers.
+	ibcRefundedSend       = "ibc_refunded_send"
+	ibcRefundReconciled   = "ibc_refund_reconciled"
+	ibcRefundRoleSend     = "send"
+	ibcRefundRoleReturned = "refund"
 )
 
 func normalizedWalletScope(addresses []string) []string {
@@ -35,18 +42,72 @@ func isIBCRefund(trigger string) bool {
 	return trigger == ibcTimeoutRefund || trigger == ibcErrorAckRefund
 }
 
-// IBC refunds are not acquisitions. Until the FIFO engines can undo an exact
-// send and restore its original lots, neither that disposal nor subsequent
-// inventory is authoritative. Look beyond the requested year so a January
-// refund cannot leave a December phantom gain certified by an old report.
+// matchIBCRefunds pairs each refund with the one send it returned: same owner,
+// same packet identity, same coin, and the refund no earlier than the send. A
+// matched send never left the wallet, so undoing it keeps the original lots
+// with their dates and cost. Two refunds or two sends for one packet, a coin
+// that differs, or a row without an id is left unmatched and keeps blocking.
+// The result maps taxable event id to its role in the pair.
+func matchIBCRefunds(events []tax.TaxableEvent) map[uint]string {
+	refunds := map[string][]tax.TaxableEvent{}
+	sends := map[string][]tax.TaxableEvent{}
+	for _, e := range events {
+		switch {
+		case isIBCRefund(e.RewardTrigger):
+			if key := tax.IBCPacketKey(e.Detail); key != "" {
+				refunds[e.ToAddr+":"+key] = append(refunds[e.ToAddr+":"+key], e)
+			}
+		case e.Category == string(tax.CategoryIBCOut):
+			if key := tax.IBCPacketKey(e.Detail); key != "" {
+				sends[e.FromAddr+":"+key] = append(sends[e.FromAddr+":"+key], e)
+			}
+		}
+	}
+	pairs := map[uint]string{}
+	for key, returned := range refunds {
+		sent := sends[key]
+		if len(returned) != 1 || len(sent) != 1 {
+			continue
+		}
+		r, o := returned[0], sent[0]
+		if r.ID == 0 || o.ID == 0 || r.Denom == "" || r.Denom != o.Denom || r.Amount == "" || r.Amount != o.Amount || r.Timestamp.Before(o.Timestamp) {
+			continue
+		}
+		pairs[o.ID] = ibcRefundRoleSend
+		pairs[r.ID] = ibcRefundRoleReturned
+	}
+	return pairs
+}
+
+// reconcileIBCRefunds rewrites matched pairs as the escrow round trip they
+// were: the send a record-only protocol deposit, the refund a record-only
+// withdrawal. Neither is a disposal or an acquisition, so the FIFO engines
+// keep the original lots in place.
+func reconcileIBCRefunds(events []tax.TaxableEvent, pairs map[uint]string) {
+	for i := range events {
+		switch pairs[events[i].ID] {
+		case ibcRefundRoleSend:
+			events[i].Category = string(tax.CategoryProtocolDeposit)
+			events[i].RewardTrigger = ibcRefundedSend
+		case ibcRefundRoleReturned:
+			events[i].RewardTrigger = ibcRefundReconciled
+		}
+	}
+}
+
+// IBC refunds are not acquisitions. A refund matched to its send is undone by
+// reconcileIBCRefunds; any other refund leaves neither the disposal nor later
+// inventory authoritative. Look beyond the requested year so a January refund
+// cannot leave a December phantom gain certified by an old report.
 func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness {
+	pairs := matchIBCRefunds(events)
 	refunds := map[string]bool{}
 	refundOwners := map[string]bool{}
 	unknownRefundOwners := map[string]bool{}
 	blocked := map[string]bool{}
 	reasons := map[string]bool{}
 	for _, e := range events {
-		if !isIBCRefund(e.RewardTrigger) {
+		if !isIBCRefund(e.RewardTrigger) || pairs[e.ID] != "" {
 			continue
 		}
 		refundOwners[e.ToAddr] = true
@@ -62,7 +123,7 @@ func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness
 		}
 	}
 	for _, e := range events {
-		if e.Category != string(tax.CategoryIBCOut) || !e.Timestamp.Before(end) {
+		if e.Category != string(tax.CategoryIBCOut) || !e.Timestamp.Before(end) || pairs[e.ID] != "" {
 			continue
 		}
 		key := tax.IBCPacketKey(e.Detail)
@@ -87,30 +148,37 @@ func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness
 		r.ReviewRequired = append(r.ReviewRequired, reason)
 	}
 	sort.Strings(r.ReviewRequired)
-	r.Scope = "requested chain and wallets, full persisted IBC history including refunds outside the requested period; packet/basis reconciliation is not implemented"
+	r.Scope = "requested chain and wallets, full persisted IBC history including refunds outside the requested period; only a refund matched to its send by packet identity and coin is reconciled"
 	return r
 }
 
 func (s *Server) requireIBCBasisReady(chain string, addresses []string, end time.Time) error {
+	_, err := s.ibcBasisCheck(chain, addresses, end)
+	return err
+}
+
+// ibcBasisCheck gates the report on IBC refunds and returns the refund pairs
+// that loadWalletRows reconciles, read from the same snapshot.
+func (s *Server) ibcBasisCheck(chain string, addresses []string, end time.Time) (map[uint]string, error) {
 	var events []tax.TaxableEvent
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr IN ? OR to_addr IN ?)", addresses, addresses).
 		Where("category = ? OR reward_trigger IN ?", string(tax.CategoryIBCOut), []string{ibcTimeoutRefund, ibcErrorAckRefund}).
 		Find(&events).Error; err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.retainLegacyOutboundIdentities(events); err != nil {
-		return err
+		return nil, err
 	}
 	incomplete, err := s.incompleteIBCRefunds(chain, addresses)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	events = append(events, incomplete...)
 	if readiness := ibcBasisReadiness(events, end); !readiness.ExportReady {
-		return reportReadinessRequired{readiness}
+		return nil, reportReadinessRequired{readiness}
 	}
-	return nil
+	return matchIBCRefunds(events), nil
 }
 
 // Older outbound classifications omitted Detail. Recover identity from exact

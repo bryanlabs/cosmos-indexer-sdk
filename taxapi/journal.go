@@ -81,7 +81,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	swapsByTx := map[string][]Row{}
 	for _, r := range rows {
 		if r.Category == apiSwap {
-			swapsByTx[r.TxHash] = append(swapsByTx[r.TxHash], r)
+			swapsByTx[swapKey(r)] = append(swapsByTx[swapKey(r)], r)
 		}
 	}
 	swapDone := map[string]bool{}
@@ -162,11 +162,12 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.Category == TagExpense:
 			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(asset, false))
 		case r.Category == apiSwap:
-			if swapDone[r.TxHash] {
+			key := swapKey(r)
+			if swapDone[key] {
 				continue
 			}
-			swapDone[r.TxHash] = true
-			legs := swapsByTx[r.TxHash]
+			swapDone[key] = true
+			legs := swapsByTx[key]
 			var debits, credits decimal.Decimal
 			for _, leg := range legs {
 				lr := leg

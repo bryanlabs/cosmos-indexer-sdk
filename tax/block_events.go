@@ -76,11 +76,11 @@ func ClassifyBlockLifecycle(events []BlockEvent, owner string, deposits []GovDep
 	var out []TaxableEvent
 	classifiedIn := map[string]sdkmath.Int{}
 	addIn := func(denom string, amount sdkmath.Int) {
-		if v, ok := classifiedIn[denom]; ok {
-			classifiedIn[denom] = v.Add(amount)
-		} else {
-			classifiedIn[denom] = amount
-		}
+		classifiedIn[denom] = addInt(classifiedIn[denom], amount)
+	}
+	classifiedOut := map[string]sdkmath.Int{}
+	addOut := func(denom string, amount sdkmath.Int) {
+		classifiedOut[denom] = addInt(classifiedOut[denom], amount)
 	}
 
 	ended := map[string]string{}
@@ -172,7 +172,8 @@ func ClassifyBlockLifecycle(events []BlockEvent, owner string, deposits []GovDep
 		out = append(out, blockRow(c, CategoryGovDepositRefund, govModuleAddress, owner, "", "", kv))
 	}
 	out = append(out, settleGovDeposits(events, owner, deposits, ended, endedOrder, refunded, govBurn)...)
-	out = append(out, blockResiduals(events, owner, classifiedIn)...)
+	out = append(out, liquidityBlockEvents(events, owner, addIn, addOut)...)
+	out = append(out, blockResiduals(events, owner, classifiedIn, classifiedOut)...)
 	return out
 }
 
@@ -236,9 +237,10 @@ func settleGovDeposits(events []BlockEvent, owner string, deposits []GovDeposit,
 }
 
 // blockResiduals compares what the bank module says the owner received and
-// spent in the lifecycle against the classified rows. Chains before SDK 0.46
+// spent in the lifecycle against the classified rows. Chains before SDK 0.44
 // emit no coin_received or coin_spent events, so nothing is checked there.
-func blockResiduals(events []BlockEvent, owner string, classifiedIn map[string]sdkmath.Int) []TaxableEvent {
+// classifiedOut holds debits a rule already booked as the owner's disposal.
+func blockResiduals(events []BlockEvent, owner string, classifiedIn, classifiedOut map[string]sdkmath.Int) []TaxableEvent {
 	received := map[string][]blockCoin{}
 	spent := map[string][]blockCoin{}
 	bankEvents := false
@@ -298,7 +300,16 @@ func blockResiduals(events []BlockEvent, owner string, classifiedIn map[string]s
 		out = append(out, blockRow(blockCoin{event: anchor, amount: gap, denom: denom}, CategoryTransfer, "", owner, "", "", kv))
 	}
 	for _, denom := range sortedDenoms(spent) {
+		covered := classifiedOut[denom]
 		for _, c := range spent[denom] {
+			if !covered.IsNil() && covered.GTE(c.amount) {
+				covered = covered.Sub(c.amount)
+				continue
+			}
+			if !covered.IsNil() {
+				c.amount = c.amount.Sub(covered)
+				covered = sdkmath.ZeroInt()
+			}
 			out = append(out, blockRow(c, CategoryTransfer, owner, "", "", "", review))
 		}
 	}

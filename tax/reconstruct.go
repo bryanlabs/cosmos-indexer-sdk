@@ -144,5 +144,5 @@ var ReplayableTypeURLs = []string{
 // StakingPrincipalFromLog exposes the staking principal rule for replay tools
 // that classify authz inner messages event by event.
 func StakingPrincipalFromLog(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
-	return stakingPrincipalEvents(log, delegator)
+	return stakingPrincipalEvents(log, delegator, "")
 }

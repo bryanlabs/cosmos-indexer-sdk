@@ -82,13 +82,13 @@ func (r Row) taxImportable() bool {
 	return true
 }
 
-// description is the human/tax note; NFT sales name the asset, IBC rows carry the
+// description is the human/tax note; NFT rows name the asset, IBC rows carry the
 // raw trace path so the UI can show an "IBC" badge with full detail on hover.
 // Rows with an unresolved denom get an explicit warning suffix rather than
 // silently reporting a possibly-wrong amount.
 func (r Row) description() string {
 	d := r.Category
-	if (r.Category == apiNFTSale || r.Category == apiNFTMint) && r.Asset != "" {
+	if (r.Category == apiNFTSale || r.Category == apiNFTMint || r.Category == apiNFTTransfer) && r.Asset != "" {
 		d = r.Category + " " + r.Asset
 	} else if r.IsIBC {
 		d = "ibc " + r.Denom

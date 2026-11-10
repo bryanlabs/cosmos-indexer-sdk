@@ -212,3 +212,35 @@ func TestCatalogCoversEveryCategory(t *testing.T) {
 		t.Fatal("validators without an attestation must read undisclosed")
 	}
 }
+
+// Block rows have no transaction hash. Two Gravity DEX swaps settled in one
+// block must stay separate swaps, each grouped by its swap_group.
+func TestBlockSwapLegsGroupBySwapGroup(t *testing.T) {
+	leg := func(dir, symbol string, amt, price float64, group string) Row {
+		r := protoRow(apiSwap, dir, symbol, amt, price, "")
+		r.Detail = `{"source":"block_event","swap_group":"` + group + `"}`
+		return r
+	}
+	rows := []Row{
+		leg(apiOut, apiSymbolATOM, 10, 5, "gravity_dex:swap:1:7:1"),
+		leg("in", "POOL", 3, 0, "gravity_dex:swap:1:7:1"),
+		leg(apiOut, apiSymbolATOM, 2, 5, "gravity_dex:swap:1:7:2"),
+		leg("in", "POOL", 1, 0, "gravity_dex:swap:1:7:2"),
+	}
+	implySwapPrices(rows)
+	if !rows[1].ValueUSD.Round(6).Equal(decimal.NewFromFloat(50)) || !rows[3].ValueUSD.Round(6).Equal(decimal.NewFromFloat(10)) {
+		t.Fatalf("implied values %s %s, want 50 and 10", rows[1].ValueUSD, rows[3].ValueUSD)
+	}
+	if swapKey(rows[0]) == swapKey(rows[2]) || swapKey(rows[0]) != swapKey(rows[1]) {
+		t.Fatalf("swap keys %q %q %q", swapKey(rows[0]), swapKey(rows[1]), swapKey(rows[2]))
+	}
+	entries := map[string]bool{}
+	for _, l := range BuildJournal(rows, nil) {
+		if l.Category == apiSwap {
+			entries[l.EntryID] = true
+		}
+	}
+	if len(entries) != 2 {
+		t.Fatalf("journal swap entries %v, want 2", entries)
+	}
+}

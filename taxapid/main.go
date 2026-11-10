@@ -92,9 +92,35 @@ func main() {
 		log.Printf("block event index migrate: %v", err)
 	}
 
+	// Finds messages of unreviewed types and a wallet's transactions for the
+	// report gates. The attribute value index also takes hours on a large
+	// database, and startup waits on a build in progress.
+	if err := taxapi.ReadinessMigrate(db); err != nil {
+		log.Printf("readiness index migrate: %v", err)
+	}
+
+	// Fee outcomes, fee grant use, and validator consensus keys the past-date
+	// balance ledger reads.
+	if err := taxapi.BalanceHistoryMigrate(db); err != nil {
+		log.Printf("balance ledger table migrate: %v", err)
+	}
+	if err := taxapi.CommissionFlowsMigrate(db); err != nil {
+		log.Printf("commission flow tables migrate: %v", err)
+	}
+
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
+	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
+	// Per-year block coverage for /index-coverage and the coverage warning
+	// on reports. TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true counts a block only
+	// once its block events are indexed too; reports read transactions only,
+	// so transactions alone are the default.
+	coverageEvery := 10 * time.Minute
+	if d, err := time.ParseDuration(os.Getenv("TAX_COVERAGE_INTERVAL")); err == nil && d >= time.Minute {
+		coverageEvery = d
+	}
+	srv.StartIndexCoverage(coverageEvery, os.Getenv("TAX_COVERAGE_REQUIRE_BLOCK_EVENTS") == "true", log.Printf)
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)

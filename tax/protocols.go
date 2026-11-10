@@ -2,6 +2,7 @@ package tax
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -556,7 +557,7 @@ func wasmExecuteEvents(log *indexerTxTypes.LogMessage, sender string) []TaxableE
 // the module's own events. These are record-only: bonding is not a disposal.
 // The delegator comes from the event when the chain emits it and from the
 // message otherwise.
-func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []TaxableEvent {
+func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator, denom string) []TaxableEvent {
 	var out []TaxableEvent
 	if log == nil {
 		return out
@@ -569,7 +570,7 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 		}
 		switch ev.Type {
 		case "delegate":
-			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
+			coins, err := stakingCoins(a[attributeAmount], denom)
 			if err != nil || who == "" {
 				continue
 			}
@@ -577,7 +578,7 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 				out = append(out, TaxableEvent{Category: string(CategoryDelegate), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator]})
 			}
 		case "unbond":
-			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
+			coins, err := stakingCoins(a[attributeAmount], denom)
 			if err != nil || who == "" {
 				continue
 			}
@@ -585,7 +586,7 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 				out = append(out, TaxableEvent{Category: string(CategoryUndelegate), ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a[attributeValidator], Detail: detailJSON(map[string]string{"completion_time": a["completion_time"]})})
 			}
 		case "redelegate":
-			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
+			coins, err := stakingCoins(a[attributeAmount], denom)
 			if err != nil || who == "" {
 				continue
 			}
@@ -593,7 +594,7 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 				out = append(out, TaxableEvent{Category: string(CategoryRedelegate), FromAddr: who, ToAddr: who, Amount: c.Amount.String(), Denom: c.Denom, ValidatorAddress: a["destination_validator"], Detail: detailJSON(map[string]string{"source_validator": a["source_validator"], "destination_validator": a["destination_validator"], "completion_time": a["completion_time"]})})
 			}
 		case "cancel_unbonding_delegation":
-			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
+			coins, err := stakingCoins(a[attributeAmount], denom)
 			if err != nil || who == "" {
 				continue
 			}
@@ -603,6 +604,20 @@ func stakingPrincipalEvents(log *indexerTxTypes.LogMessage, delegator string) []
 		}
 	}
 	return out
+}
+
+// stakingCoins reads a staking event's amount. SDK 0.42 (the Hub before Gaia
+// v6, block 8695000) wrote only the bond amount ("4495000"); later SDKs write
+// the coin. A bare amount takes the denom of the message's coin.
+func stakingCoins(raw, denom string) (sdk.Coins, error) {
+	if denom != "" && raw != "" && strings.Trim(raw, "0123456789") == "" {
+		amount, ok := sdk.NewIntFromString(raw)
+		if !ok {
+			return nil, fmt.Errorf("tax: malformed staking amount %q", raw)
+		}
+		return sdk.NewCoins(sdk.NewCoin(denom, amount)), nil
+	}
+	return sdk.ParseCoinsNormalized(raw)
 }
 
 // lsmRecordEvents records the conversions the Liquid Staking Module performs.
@@ -677,9 +692,9 @@ func redeemedTokens(log *indexerTxTypes.LogMessage, who string) string {
 			switch {
 			case ev.Type == "redeem_shares" && a.Key == attributeDelegator && a.Value == who:
 				redeems++
-			case ev.Type == "coin_spent" && a.Key == "spender":
+			case ev.Type == eventCoinSpent && a.Key == attributeSpender:
 				cur = a.Value
-			case ev.Type == "coin_spent" && a.Key == attributeAmount && cur == who:
+			case ev.Type == eventCoinSpent && a.Key == attributeAmount && cur == who:
 				if c, err := sdk.ParseCoinNormalized(a.Value); err == nil && !strings.Contains(c.Denom, "/") {
 					last = c.String()
 				}
