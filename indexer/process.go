@@ -54,11 +54,25 @@ func (indexer *Indexer) ProcessBlocks(wg *sync.WaitGroup, failedBlockHandler cor
 					blockDBWrapper.EndBlockEvents, endBlockFilterError = core.FilterRPCBlockEvents(blockDBWrapper.EndBlockEvents, *blockEventFilterRegistry.EndBlockEventFilterRegistry)
 				}
 
-				if beginBlockFilterError == nil && endBlockFilterError == nil {
+				filtered := beginBlockFilterError == nil && endBlockFilterError == nil
+				var reconstructedError error
+				if filtered {
+					reconstructedError = core.AppendReconstructedBlockEvents(*indexer.Config, indexer.Config.Probe.ChainID, blockDBWrapper, len(blockData.BlockResultsData.BeginBlockEvents))
+				}
+
+				switch {
+				case reconstructedError != nil:
+					config.Log.Errorf("Failed to add rebuilt block events during block %d event processing, adding to failed block events table: %s", currentHeight, reconstructedError)
+					failedBlockHandler(currentHeight, core.FailedBlockEventHandling, reconstructedError)
+					err := dbTypes.UpsertFailedEventBlock(indexer.DB, currentHeight, indexer.Config.Probe.ChainID, indexer.Config.Probe.ChainName)
+					if err != nil {
+						config.Log.Fatal("Failed to insert failed block event", err)
+					}
+				case filtered:
 					blockEventsDataChan <- &BlockEventsDBData{
 						blockDBWrapper: blockDBWrapper,
 					}
-				} else {
+				default:
 					config.Log.Errorf("Failed to filter block events during block %d event processing, adding to failed block events table. Begin blocker filter error %s. End blocker filter error %s", currentHeight, beginBlockFilterError, endBlockFilterError)
 					failedBlockHandler(currentHeight, core.FailedBlockEventHandling, err)
 					err := dbTypes.UpsertFailedEventBlock(indexer.DB, currentHeight, indexer.Config.Probe.ChainID, indexer.Config.Probe.ChainName)
