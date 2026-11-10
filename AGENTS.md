@@ -170,6 +170,12 @@ verify their counts before claiming completeness.
 - The top-level `README.md` is the **upstream** (generic) doc; the BryanLabs-specific
   code is the `tax*` dirs + `Dockerfile.tax`, on the `tax-layer` branch.
 - Build the deployed image from `Dockerfile.tax`, not the plain `Dockerfile`.
+- `taxledger --recheck-holes` is read-only by default. Run it as a separate
+  Job, review its plan, then use `--apply --backup=/backup/<new-file>.jsonl`
+  on the repair-backup PVC to write. The backup is private, contains wallet
+  addresses, and records before/after plans durably before each commit.
+  Never overwrite an earlier backup. Verify each affected wallet before and
+  after; a backup plan alone does not prove its transaction committed.
 - Before trusting query results, confirm the indexer is caught up
   (`cosmos-tax-sdk-indexer` logs) *and* that the range you care about is actually
   covered: `cosmos-tax-coverage` reports how many days of the tax year are not

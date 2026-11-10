@@ -57,8 +57,19 @@ func main() {
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
 	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
-	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
+	recheck := flag.Bool("recheck-holes", false, "recheck recorded index holes against cached blocks (dry run unless --apply)")
+	apply := flag.Bool("apply", false, "apply an index-hole recheck, requires --backup")
+	backup := flag.String("backup", "", "new private JSONL backup file on durable storage for an index-hole recheck")
 	flag.Parse()
+	if (*apply || *backup != "") && !*recheck {
+		log.Fatal("--apply and --backup are only supported with --recheck-holes")
+	}
+	if *recheck && (*flows || *daysAppend || *daysFrom != "") {
+		log.Fatal("--recheck-holes cannot be combined with another ledger operation")
+	}
+	if *recheck && *apply && *backup == "" {
+		log.Fatal("--recheck-holes --apply requires --backup on durable storage")
+	}
 
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
@@ -89,7 +100,7 @@ func main() {
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
 	if *recheck {
-		if _, _, err := srv.RecheckIndexHoles(*chain, node, log.Printf); err != nil {
+		if _, _, err := srv.RecheckIndexHoles(*chain, node, taxapi.RecheckIndexHolesOptions{Apply: *apply, BackupPath: *backup}, log.Printf); err != nil {
 			log.Fatalf("index holes: %v", err)
 		}
 		return
