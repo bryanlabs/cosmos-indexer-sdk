@@ -20,6 +20,11 @@ import (
 // that execution, so the ICA account's own messages are classified from it.
 const icaHostPort = "icahost"
 
+const (
+	typeURLBankSend      = "/cosmos.bank.v1beta1.MsgSend"
+	typeURLBankMultiSend = "/cosmos.bank.v1beta1.MsgMultiSend"
+)
+
 // icaHostEvents classifies a successful EXECUTE_TX packet as if the ICA account
 // had signed its inner message itself. The stored log merges same-type events
 // across messages, so a packet with several inner messages cannot be split per
@@ -104,7 +109,7 @@ func icaTypeSummary(msgs []*codectypes.Any) string {
 // Bank sends are booked from the message fields alone, so each inner send of
 // a batch is classified without the shared log.
 func messageOnlyClassification(typeURL string) bool {
-	return typeURL == "/cosmos.bank.v1beta1.MsgSend" || typeURL == "/cosmos.bank.v1beta1.MsgMultiSend"
+	return typeURL == typeURLBankSend || typeURL == typeURLBankMultiSend
 }
 
 // icaHostExecuted reports whether the host committed the packet's messages.
