@@ -6,6 +6,7 @@ import (
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
+	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
@@ -20,7 +21,8 @@ import (
 // redelegate or withdraw_rewards record belongs to the k-th inner message of
 // that kind. A validator's commission withdrawal closes with the operator
 // address as sender, and authz grants and revocations close no handler and
-// leave only their typed event. Exec itself deletes a grant it used up, with
+// leave only their typed event. A bank send closes with message{module}
+// alone, after the sender its transfer added. Exec itself deletes a grant it used up, with
 // an EventRevoke for that granter and no message. Every assignment is checked against the inner message's signer
 // and validator; anything that does not fit is an error, never a guess.
 // coin_spent and coin_received are left out: no rule for these inner
@@ -48,6 +50,14 @@ func legacyAuthzSubLogs(inners []sdk.Msg, log *txlog.LogMessage) ([]*txlog.LogMe
 		case "module":
 			if module != "" {
 				return nil, fmt.Errorf("message event module %s has no sender", module)
+			}
+			if a.Value == moduleBank {
+				// A bank send closes with message{module} alone; its signer
+				// is the sender its transfer added.
+				cur.module = moduleBank
+				segments = append(segments, cur)
+				cur = segment{}
+				continue
 			}
 			module = a.Value
 		case attributeSender:
@@ -119,12 +129,21 @@ func legacyAuthzSubLogs(inners []sdk.Msg, log *txlog.LogMessage) ([]*txlog.LogMe
 			wantModule, signer, kind, validator = moduleStaking, m.DelegatorAddress, string(CategoryRedelegate), m.ValidatorSrcAddress
 		case *disttypes.MsgWithdrawDelegatorReward:
 			wantModule, signer, kind, validator = "distribution", m.DelegatorAddress, eventWithdrawRewards, m.ValidatorAddress
+		case *banktypes.MsgSend:
+			wantModule, signer = moduleBank, m.FromAddress
 		default:
 			return nil, fmt.Errorf("inner %d is %T", i, inner)
 		}
 		signers[`"`+signer+`"`] = true
 		handler := segments[seg]
 		seg++
+		if wantModule == moduleBank {
+			// One SendCoins: one transfer from the signer.
+			if len(handler.senders) != 1 {
+				return nil, fmt.Errorf("inner %d bank send made %d transfers", i, len(handler.senders))
+			}
+			handler.signer = handler.senders[0]
+		}
 		if handler.module != wantModule || handler.signer != signer {
 			return nil, fmt.Errorf("inner %d handler is %s for another signer", i, handler.module)
 		}
@@ -139,10 +158,20 @@ func legacyAuthzSubLogs(inners []sdk.Msg, log *txlog.LogMessage) ([]*txlog.LogMe
 			transferAttrs = append(transferAttrs, transfers[next]...)
 			next++
 		}
-		msgAttrs = append(msgAttrs, txlog.Attribute{Key: "module", Value: handler.module}, txlog.Attribute{Key: attributeSender, Value: handler.signer})
+		msgAttrs = append(msgAttrs, txlog.Attribute{Key: "module", Value: handler.module})
+		if wantModule != moduleBank {
+			msgAttrs = append(msgAttrs, txlog.Attribute{Key: attributeSender, Value: handler.signer})
+		}
 		sub.Events = append(sub.Events, txlog.LogMessageEvent{Type: eventMessage, Attributes: msgAttrs})
 		if len(transferAttrs) != 0 {
 			sub.Events = append(sub.Events, txlog.LogMessageEvent{Type: string(CategoryTransfer), Attributes: transferAttrs})
+		}
+		if send, ok := inner.(*banktypes.MsgSend); ok {
+			if attrValue(transferAttrs, attributeRecipient) != send.ToAddress || attrValue(transferAttrs, attributeAmount) != send.Amount.String() {
+				return nil, fmt.Errorf("inner %d transfer is not its send", i)
+			}
+			subs[i] = sub
+			continue
 		}
 		k := used[kind]
 		if k >= len(kinds[kind]) {

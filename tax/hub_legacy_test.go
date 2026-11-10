@@ -11,6 +11,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	sdktx "github.com/cosmos/cosmos-sdk/types/tx"
 	"github.com/cosmos/cosmos-sdk/x/authz"
+	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
@@ -311,4 +312,46 @@ func eventAttrs(log *txlog.LogMessage, typ string) []txlog.Attribute {
 		}
 	}
 	return nil
+}
+
+// An untagged Exec that withdraws a reward, makes two bank sends and two
+// delegations for one granter. Each send closes with message{module bank}
+// and no sender, after the sender its transfer added.
+func TestAuthzUntaggedSendBetweenStaking(t *testing.T) {
+	msgs, logs := hubLegacyFixture(t, "v045-exec-send")
+	out := parseLegacy(t, msgs[0], logs[0])
+	var sends []*banktypes.MsgSend
+	for _, a := range msgs[0].(*authz.MsgExec).Msgs {
+		inner, err := unpackAuthzInner(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s, ok := inner.(*banktypes.MsgSend); ok {
+			sends = append(sends, s)
+		}
+	}
+	transfers := byCategory(out, string(CategoryTransfer))
+	if len(sends) != 2 || len(transfers) != len(sends) {
+		t.Fatalf("%d sends, transfers %+v", len(sends), transfers)
+	}
+	for i, s := range sends {
+		got := transfers[i]
+		if got.FromAddr != s.FromAddress || got.ToAddr != s.ToAddress || got.Amount+got.Denom != s.Amount.String() {
+			t.Fatalf("send %d: %+v", i, got)
+		}
+	}
+	delegates := execDelegates(t, msgs[0])
+	principal := byCategory(out, string(CategoryDelegate))
+	rewards := byCategory(out, string(CategoryReward))
+	if len(delegates) != 2 || len(principal) != 2 || len(rewards) != 1 {
+		t.Fatalf("%d delegates, principal %+v, rewards %+v", len(delegates), principal, rewards)
+	}
+	for i, d := range delegates {
+		if principal[i].FromAddr != d.DelegatorAddress || principal[i].Amount != d.Amount.Amount.String() || principal[i].ValidatorAddress != d.ValidatorAddress {
+			t.Fatalf("delegate %d: %+v", i, principal[i])
+		}
+	}
+	if rewards[0].ToAddr != sends[0].FromAddress || rewards[0].RewardTrigger != actionClaim {
+		t.Fatalf("reward %+v", rewards[0])
+	}
 }

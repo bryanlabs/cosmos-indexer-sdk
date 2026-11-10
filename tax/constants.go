@@ -42,6 +42,7 @@ const (
 	eventAuthzGrant         = "cosmos.authz.v1beta1.EventGrant"
 	eventAuthzRevoke        = "cosmos.authz.v1beta1.EventRevoke"
 	moduleStaking           = "staking"
+	moduleBank              = "bank"
 	attributeSpender        = "spender"
 	attributePoolID         = "pool_id"
 	detailCommunityPool     = "community_pool"
