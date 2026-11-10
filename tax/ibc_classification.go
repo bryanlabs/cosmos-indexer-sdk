@@ -574,3 +574,54 @@ func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) ([]
 	}
 	return out, issues
 }
+
+// ibcV2SendEvents reads each transfer payload the signer sent. The local denom
+// is the one the signer's coins actually left in: a native denom keeps its
+// name, a returning voucher is the ibc/ hash of its trace path.
+func ibcV2SendEvents(log *txlog.LogMessage, m *MsgSendPacketV2) ([]TaxableEvent, []string) {
+	if log == nil {
+		return nil, nil
+	}
+	var out []TaxableEvent
+	var issues []string
+	spent := coinsSpentBy(log, m.Signer)
+	packet := OutboundPacketDetail(log, &transfertypes.MsgTransfer{SourceChannel: m.SourceClient})
+	for _, ev := range log.Events {
+		if ev.Type != "ibc_transfer" || !ibcCommittedEvent(ev) {
+			continue
+		}
+		a := ibcAttrs(ev)
+		if a[attributeSender] != m.Signer {
+			continue
+		}
+		amount, ok := sdk.NewIntFromString(a[attributeAmount])
+		if !ok || !amount.IsPositive() || a[attributeDenom] == "" {
+			issues = append(issues, "committed v2 transfer has incomplete token")
+			continue
+		}
+		var denoms []string
+		for _, d := range ibcLocalCandidates(a[attributeDenom]) {
+			if spent.AmountOf(d).GTE(amount) {
+				denoms = append(denoms, d)
+			}
+		}
+		if len(denoms) != 1 {
+			issues = append(issues, "committed v2 transfer has no single matching debit")
+			continue
+		}
+		trigger, detail := ibcMemoIntent(a["memo"])
+		if detail == nil {
+			detail = map[string]string{}
+		}
+		for key, value := range packet {
+			detail[key] = value
+		}
+		out = append(out, TaxableEvent{
+			Category: string(CategoryIBCOut),
+			FromAddr: m.Signer, ToAddr: a[attributeReceiver],
+			Amount: amount.String(), Denom: denoms[0],
+			RewardTrigger: trigger, Detail: detailJSON(detail),
+		})
+	}
+	return out, issues
+}

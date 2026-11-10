@@ -1,0 +1,66 @@
+{
+ "chain_id": "cosmoshub-4",
+ "height": 5400004,
+ "tx_index": 0,
+ "time": "2021-03-07T00:40:24.370895897Z",
+ "code": 0,
+ "tx": "Cq8BCp4BCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRJ3Ci1jb3Ntb3MxNWNmcHhheHJmemUwOW5hZmthMzUzZHI3amV4a2hzbGdkcXZ2dnoSNGNvc21vc3ZhbG9wZXIxdGZsazMwbXE1dmdxamRseTkya2toaHEzcmFldjJobno2ZWV0ZTMaEAoFdWF0b20SBzEwMDAwMDASDGF0b21pY3dhbGxldBJlCk4KRgofL2Nvc21vcy5jcnlwdG8uc2VjcDI1NmsxLlB1YktleRIjCiECAZaAdowfdmRS5mgqgwMpIsFUEJv9ZhqnoiiU1m+aRM8SBAoCCH8SEwoNCgV1YXRvbRIEMjUwMBDgpxIaQL+o1PxogU4pcP0Hbl4HhunVm2K5COUM7teUbjkpN/u5V4UHTa/gl6ea+504OXiDje9s92+OcRZ33AHq4Mo6xCI=",
+ "logs": [
+  {
+   "events": [
+    {
+     "type": "delegate",
+     "attributes": [
+      {
+       "key": "validator",
+       "value": "cosmosvaloper1tflk30mq5vgqjdly92kkhhq3raev2hnz6eete3"
+      },
+      {
+       "key": "amount",
+       "value": "1000000"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "attributes": [
+      {
+       "key": "action",
+       "value": "delegate"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "module",
+       "value": "staking"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos15cfpxaxrfze09nafka353dr7jexkhslgdqvvvz"
+      }
+     ]
+    },
+    {
+     "type": "transfer",
+     "attributes": [
+      {
+       "key": "recipient",
+       "value": "cosmos15cfpxaxrfze09nafka353dr7jexkhslgdqvvvz"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "31uatom"
+      }
+     ]
+    }
+   ],
+   "msg_index": 0
+  }
+ ]
+}

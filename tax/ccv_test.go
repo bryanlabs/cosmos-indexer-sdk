@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
@@ -24,6 +25,7 @@ func TestProviderMessagesDecodeSigner(t *testing.T) {
 		{TypeURLCCVRemoveConsumer, 2, 1, false},
 		{TypeURLCCVSubmitConsumerMisbehaviour, 1, 3, false},
 		{TypeURLCCVSubmitConsumerDoubleVoting, 1, 4, false},
+		{TypeURLCCVRegisterConsumerRewardDenom, 2, 1, false},
 	}
 	types := ProviderMsgTypes()
 	if len(types) != len(cases) {
@@ -82,9 +84,31 @@ func TestNewlyDecodedNoEffectTypesAreReviewed(t *testing.T) {
 	for _, url := range NoTaxEffectTypeURLs {
 		noEffect[url] = true
 	}
+	for _, url := range MessageTypeURLs {
+		noEffect[url] = true
+	}
 	for _, url := range urls {
 		if !noEffect[url] {
 			t.Fatalf("%s decodes but has no tax decision, so it would hold reports back", url)
 		}
+	}
+}
+
+// Mainnet registration at height 15598226: the depositor paid 10 ATOM to the
+// community pool for the consumer reward denom.
+func TestRegisterConsumerRewardDenomFeeIsExpense(t *testing.T) {
+	const rcrdFee = "10000000uatom"
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_spent", [2]string{attributeSpender, del}, [2]string{attributeAmount, rcrdFee}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, distributionModuleAddress}, [2]string{attributeAmount, rcrdFee}),
+		ev("transfer", [2]string{attributeRecipient, distributionModuleAddress}, [2]string{attributeSender, del}, [2]string{attributeAmount, rcrdFee}),
+		ev("message", [2]string{attributeSender, del}),
+		ev("register_consumer_reward_denom", [2]string{attributeDenom, "ibc/3C3D7B3BE4ECC85A0E5B52A3AEC3B7DFC2AA9CA47C37821E57020D6807043BE9"}, [2]string{"depositor", del}),
+	}}
+	msg := &MsgRegisterConsumerRewardDenom{Denom: "ibc/3C3D7B3BE4ECC85A0E5B52A3AEC3B7DFC2AA9CA47C37821E57020D6807043BE9", Depositor: del}
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Category != string(CategoryExpense) || out[0].Amount != "10000000" || out[0].Denom != fixtureNativeDenom ||
+		out[0].FromAddr != del || out[0].ToAddr != distributionModuleAddress || out[0].RewardTrigger != TriggerConsumerRewardDenomFee {
+		t.Fatalf("events = %+v", out)
 	}
 }

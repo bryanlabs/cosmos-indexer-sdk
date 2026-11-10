@@ -30,9 +30,12 @@ import (
 
 // urls are every message type the production parser classifies and that can
 // be replayed from the stored event log: the event-only types ReconstructMsg
-// rebuilds, authz (handled event by event) and validator commission (kept
-// from the stored rows with the operator address verified).
-var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec")
+// rebuilds, authz (handled event by event), validator commission (kept
+// from the stored rows with the operator address verified) and the pre-v24
+// SDK fork's tokenize-share reward messages, which are always stored with
+// their bytes.
+var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec",
+	tax.LegacyTypeURLRedeemTokensForShares, tax.LegacyTypeURLWithdrawTokenizeShareReward, tax.LegacyTypeURLWithdrawAllTokenizeShareReward)
 
 type row struct {
 	models.Message
@@ -142,6 +145,8 @@ func run() int {
 	from := flag.Uint("from-message-id", 0, "exclusive lower message ID for resume")
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
 	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
+	kinds := flag.String("message-types", "", "optional comma-separated message type URLs; replay only messages of those types")
+	port := flag.String("packet-dst-port", "", "optional IBC port; replay only messages that received a packet on it")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -192,6 +197,12 @@ func run() int {
 			categories = append(categories, c)
 		}
 	}
+	var types []string
+	for _, t := range strings.Split(*kinds, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			types = append(types, t)
+		}
+	}
 	var candidates []uint
 	if len(wallets) > 0 {
 		candidates, err = walletIDs(db, wallets)
@@ -209,7 +220,27 @@ func run() int {
 		}
 		candidates = ids
 	}
-	restricted := len(wallets) > 0 || len(categories) > 0
+	if len(types) > 0 {
+		ids, err := typeIDs(db, types, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 || len(categories) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	if *port != "" {
+		ids, err := portIDs(db, *port, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 || len(categories) > 0 || len(types) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0 || *port != ""
 	b, err := newBackup(*path)
 	if err != nil {
 		fatal(err.Error())
@@ -220,7 +251,7 @@ func run() int {
 	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
-	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","))
+	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s message_types=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","), strings.Join(types, ","))
 	for {
 		// A restricted run walks its candidate ids a batch at a time instead of
 		// every message id, so sparse candidates never make one load scan
@@ -329,6 +360,32 @@ func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
 func categoryIDs(db *gorm.DB, categories []string, from, maxID uint) ([]uint, error) {
 	var ids []uint
 	err := db.Raw("SELECT DISTINCT message_id FROM taxable_events WHERE category IN ? AND message_id > ? AND message_id <= ? ORDER BY 1", categories, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// typeIDs lists the messages in (from, maxID] of one of the given type URLs,
+// so a repair of one message kind leaves every other message alone.
+func typeIDs(db *gorm.DB, types []string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Raw("SELECT m.id FROM messages m JOIN message_types mt ON mt.id=m.message_type_id WHERE mt.message_type IN ? AND m.id > ? AND m.id <= ? ORDER BY 1", types, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// portIDs finds received packets by the stored packet_dst_port value, which the
+// attribute value index covers. It reads every attribute with that value, so it
+// gets its own statement timeout.
+func portIDs(db *gorm.DB, port string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SET LOCAL statement_timeout='1800s'").Error; err != nil {
+			return err
+		}
+		return tx.Raw(`SELECT DISTINCT me.message_id FROM message_event_attributes a
+JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id AND k.key='packet_dst_port'
+JOIN message_events me ON me.id=a.message_event_id
+JOIN message_event_types et ON et.id=me.message_event_type_id AND et.type='recv_packet'
+WHERE left(a.value,100)=? AND me.message_id > ? AND me.message_id <= ? ORDER BY 1`, port, from, maxID).Scan(&ids).Error
+	})
 	return ids, err
 }
 
@@ -517,10 +574,19 @@ func applyPlans(db *gorm.DB, plans []backup) error {
 
 func repairCodec() (codectypes.AnyUnpacker, error) {
 	m := tax.GaiaLiquidMsgTypes()
+	for k, v := range tax.LegacyLSMMsgTypes() {
+		m[k] = v
+	}
 	for k, v := range tax.IBCChannelV2MsgTypes() {
 		m[k] = v
 	}
 	for k, v := range tax.TokenFactoryMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.ProviderMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.LiquidityMsgTypes() {
 		m[k] = v
 	}
 	c, err := probe.GetProbeClient(config.Probe{RPC: "http://127.0.0.1:1"}, nil, m)

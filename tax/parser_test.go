@@ -294,9 +294,9 @@ func TestClassifyFundCommunityPoolAndVestingGrantAreTransfers(t *testing.T) {
 // sender, amount and denom are untouched.
 func TestBoundIndexedFieldsKeepsSenderAndBoundsSpamReceiver(t *testing.T) {
 	spam := strings.Repeat("x", 600001)
-	e := TaxableEvent{Category: string(CategoryTransfer), FromAddr: fixtureCosmosAddress, ToAddr: spam, Amount: "1", Denom: "uatom"}
+	e := TaxableEvent{Category: string(CategoryTransfer), FromAddr: fixtureCosmosAddress, ToAddr: spam, Amount: "1", Denom: fixtureNativeDenom}
 	boundIndexedFields(&e)
-	if e.FromAddr != fixtureCosmosAddress || e.Amount != "1" || e.Denom != "uatom" {
+	if e.FromAddr != fixtureCosmosAddress || e.Amount != "1" || e.Denom != fixtureNativeDenom {
 		t.Fatalf("sender side changed: %+v", e)
 	}
 	if len(e.ToAddr) > maxIndexedField || !strings.HasPrefix(e.ToAddr, "xxxx") || !strings.Contains(e.ToAddr, "...sha256:") {

@@ -1,0 +1,141 @@
+{
+ "chain_id": "cosmoshub-4",
+ "height": 12340359,
+ "tx_index": 0,
+ "time": "2022-10-06T15:00:02.817141519Z",
+ "code": 0,
+ "tx": "Cu4CCusCCh0vY29zbW9zLmF1dGh6LnYxYmV0YTEuTXNnRXhlYxLJAgotY29zbW9zMWY0bnNreGZ3OHVmaHduYWpoN3h3dDB3bWR0eG0wMnZ3eHhoMzZqEqABCjcvY29zbW9zLmRpc3RyaWJ1dGlvbi52MWJldGExLk1zZ1dpdGhkcmF3RGVsZWdhdG9yUmV3YXJkEmUKLWNvc21vczE2azU3OWprNnl0MmN3bXF4OWR6NXh2cTlmdWcydGVrdjZnMzRwbBI0Y29zbW9zdmFsb3BlcjE2azU3OWprNnl0MmN3bXF4OWR6NXh2cTlmdWcydGVrdmx1OXFkdhJ1CjsvY29zbW9zLmRpc3RyaWJ1dGlvbi52MWJldGExLk1zZ1dpdGhkcmF3VmFsaWRhdG9yQ29tbWlzc2lvbhI2CjRjb3Ntb3N2YWxvcGVyMTZrNTc5ams2eXQyY3dtcXg5ZHo1eHZxOWZ1ZzJ0ZWt2bHU5cWR2EmgKUQpGCh8vY29zbW9zLmNyeXB0by5zZWNwMjU2azEuUHViS2V5EiMKIQMM5pt8dXF8ieUqQ/RyKSQyvdGE6bAnW7dkXcOW91m7eRIECgIIARjDARITCg0KBXVhdG9tEgQxNTAwEOCnEhpAX6Ce0eVhfECMkGnyK+r3kamHeiutN42byhyHO6uZnThdgBsLfGGM0q9DVrMSn4SWhD7yvOpgLerhD5i0gccJsQ==",
+ "logs": [
+  {
+   "events": [
+    {
+     "type": "coin_received",
+     "attributes": [
+      {
+       "key": "receiver",
+       "value": "cosmos16k579jk6yt2cwmqx9dz5xvq9fug2tekv6g34pl"
+      },
+      {
+       "key": "amount",
+       "value": "3427691uatom"
+      },
+      {
+       "key": "receiver",
+       "value": "cosmos16k579jk6yt2cwmqx9dz5xvq9fug2tekv6g34pl"
+      },
+      {
+       "key": "amount",
+       "value": "111222247uatom"
+      }
+     ]
+    },
+    {
+     "type": "coin_spent",
+     "attributes": [
+      {
+       "key": "spender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "3427691uatom"
+      },
+      {
+       "key": "spender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "111222247uatom"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "attributes": [
+      {
+       "key": "action",
+       "value": "/cosmos.authz.v1beta1.MsgExec"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "module",
+       "value": "distribution"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos16k579jk6yt2cwmqx9dz5xvq9fug2tekv6g34pl"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "module",
+       "value": "distribution"
+      },
+      {
+       "key": "sender",
+       "value": "cosmosvaloper16k579jk6yt2cwmqx9dz5xvq9fug2tekvlu9qdv"
+      }
+     ]
+    },
+    {
+     "type": "transfer",
+     "attributes": [
+      {
+       "key": "recipient",
+       "value": "cosmos16k579jk6yt2cwmqx9dz5xvq9fug2tekv6g34pl"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "3427691uatom"
+      },
+      {
+       "key": "recipient",
+       "value": "cosmos16k579jk6yt2cwmqx9dz5xvq9fug2tekv6g34pl"
+      },
+      {
+       "key": "sender",
+       "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+      },
+      {
+       "key": "amount",
+       "value": "111222247uatom"
+      }
+     ]
+    },
+    {
+     "type": "withdraw_commission",
+     "attributes": [
+      {
+       "key": "amount",
+       "value": "111222247uatom"
+      }
+     ]
+    },
+    {
+     "type": "withdraw_rewards",
+     "attributes": [
+      {
+       "key": "amount",
+       "value": "3427691uatom"
+      },
+      {
+       "key": "validator",
+       "value": "cosmosvaloper16k579jk6yt2cwmqx9dz5xvq9fug2tekvlu9qdv"
+      }
+     ]
+    }
+   ],
+   "msg_index": 0
+  }
+ ]
+}

@@ -94,17 +94,27 @@ func (s *Server) statementCoverage() statementCoverage {
 		WHERE mt.message_type IN ?`, replayedMessageTypes).Scan(&cursor).Error
 	c.ReplayCursor = cursor.Cursor
 	c.Complete = c.ReplayCursor == nil
-	switch {
-	case c.IndexStart == nil:
-		c.Note = "No events indexed yet."
-	case c.Complete:
-		c.Note = fmt.Sprintf("Index covers %s onward; earlier activity is not yet included.", c.IndexStart.UTC().Format(apiDateLayout))
-	default:
-		c.Note = fmt.Sprintf("Index covers %s onward; earlier activity is not yet included. Reward rows from %s on are still being rewritten under methodology %s, so months from %s are incomplete until the replay finishes.",
-			c.IndexStart.UTC().Format(apiDateLayout), c.ReplayCursor.UTC().Format(apiDateLayout), MethodologyVersion, c.ReplayCursor.UTC().Format(apiMonthLayout))
-	}
 	coverageCached, coverageAt = c, time.Now()
 	return c
+}
+
+// statementNote describes block coverage from the index coverage snapshot
+// (which years are fully indexed) and adds the replay caveat when one runs.
+func (s *Server) statementNote(c statementCoverage) string {
+	if c.IndexStart == nil {
+		return "No events indexed yet."
+	}
+	note := fmt.Sprintf("Earliest indexed event: %s.", c.IndexStart.UTC().Format(apiDateLayout))
+	if sc := s.indexCoverage(); sc != nil {
+		if snap := sc.Snapshot(); snap != nil {
+			note = snap.Note
+		}
+	}
+	if c.ReplayCursor != nil {
+		note += fmt.Sprintf(" Reward rows from %s on are still being rewritten under methodology %s, so months from %s are incomplete until the replay finishes.",
+			c.ReplayCursor.UTC().Format(apiDateLayout), MethodologyVersion, c.ReplayCursor.UTC().Format(apiMonthLayout))
+	}
+	return note
 }
 
 // GET /validator-statement?validator=cosmosvaloper...&chain=&start=&end=&format=csv|json
@@ -173,6 +183,12 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	}
 
 	cov := s.statementCoverage()
+	cov.Note = s.statementNote(cov)
+	period := s.periodCoverage(start, end)
+	var blocks *IndexCoverage
+	if sc := s.indexCoverage(); sc != nil {
+		blocks = sc.Snapshot()
+	}
 	cursorMonth := ""
 	if cov.ReplayCursor != nil {
 		cursorMonth = cov.ReplayCursor.UTC().Format(apiMonthLayout)
@@ -185,7 +201,7 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		month := a.Day.UTC().Format(apiMonthLayout)
 		m := months[month]
 		if m == nil {
-			m = &ValidatorStatementMonth{Month: month, Symbol: s.native.Symbol, UniqueDelegators: delegatorsByMonth[month], Incomplete: cursorMonth != "" && month >= cursorMonth}
+			m = &ValidatorStatementMonth{Month: month, Symbol: s.native.Symbol, UniqueDelegators: delegatorsByMonth[month], Incomplete: (cursorMonth != "" && month >= cursorMonth) || (blocks != nil && !blocks.MonthCovered(month))}
 			months[month] = m
 			missingDays[month] = map[string]bool{}
 		}
@@ -223,22 +239,11 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	}
 	sort.Strings(keys)
 	out := make([]ValidatorStatementMonth, 0, len(keys))
-	var totals ValidatorStatementMonth
-	totals.Month = apiTotalLabel
-	totals.Symbol = s.native.Symbol
 	for _, k := range keys {
 		months[k].PriceMissingDays = len(missingDays[k])
-		m := *months[k]
-		out = append(out, m)
-		totals.CommissionAmount = totals.CommissionAmount.Add(m.CommissionAmount)
-		totals.CommissionUSD = totals.CommissionUSD.Add(m.CommissionUSD)
-		totals.DelegatorRewards = totals.DelegatorRewards.Add(m.DelegatorRewards)
-		totals.DelegatorRewardsUSD = totals.DelegatorRewardsUSD.Add(m.DelegatorRewardsUSD)
-		totals.RewardEvents += m.RewardEvents
-		totals.PriceMissingDays += m.PriceMissingDays
-		totals.PriceMissingEvents += m.PriceMissingEvents
-		totals.Incomplete = totals.Incomplete || m.Incomplete
+		out = append(out, *months[k])
 	}
+	totals := statementTotals(out, period, s.native.Symbol)
 	var allDelegators int64
 	_ = s.db.Table(apiTaxableEvents).
 		Where("validator_address = ? AND category = 'reward' AND timestamp >= ? AND timestamp < ?", val, start, end).
@@ -266,8 +271,27 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		apiMethodologyVersion: MethodologyVersion,
 		"recognition_policy":  RecognitionPolicyDefault,
 		"coverage":            cov,
+		"index_coverage":      period,
 		apiNote:               "Commission is the operator's own withdrawn commission. Delegator rewards are rewards actually withdrawn by delegators through this validator (claims and auto-withdrawals), not rewards accrued. Unique delegators counts distinct withdrawing addresses. USD figures for rows with no reference price are counted at zero; price_missing_days and price_missing_events say how many.",
 		"months":              out,
 		apiTotal:              totals,
 	})
+}
+
+// statementTotals sums the month rows. A month entirely inside an index gap
+// has no rows to flag, so the total is also incomplete whenever the period
+// itself is not complete.
+func statementTotals(months []ValidatorStatementMonth, period PeriodCoverage, symbol string) ValidatorStatementMonth {
+	totals := ValidatorStatementMonth{Month: apiTotalLabel, Symbol: symbol, Incomplete: !period.Complete}
+	for _, m := range months {
+		totals.CommissionAmount = totals.CommissionAmount.Add(m.CommissionAmount)
+		totals.CommissionUSD = totals.CommissionUSD.Add(m.CommissionUSD)
+		totals.DelegatorRewards = totals.DelegatorRewards.Add(m.DelegatorRewards)
+		totals.DelegatorRewardsUSD = totals.DelegatorRewardsUSD.Add(m.DelegatorRewardsUSD)
+		totals.RewardEvents += m.RewardEvents
+		totals.PriceMissingDays += m.PriceMissingDays
+		totals.PriceMissingEvents += m.PriceMissingEvents
+		totals.Incomplete = totals.Incomplete || m.Incomplete
+	}
+	return totals
 }

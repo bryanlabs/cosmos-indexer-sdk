@@ -119,39 +119,97 @@ func (s *Server) scopedTaxEvents(chain string) *gorm.DB {
 // Exact retained signer, payer, classified-leg or ordered-event evidence links
 // a transaction to a requested wallet, including authz granters and recipients.
 // No address substring search, moniker inference or unsupported-type tax guess.
+// The set is found from the addresses, one index lookup per kind of evidence,
+// so a full-history scope costs the wallet's history rather than a pass over
+// every transaction and event attribute (114s on the live database). The ids
+// go through ARRAY() so Postgres collects them first and reads txes by key;
+// as IN it misjudged the chain filter and scanned every block and
+// transaction (24s per pass for a 34-transaction wallet once 2024 and 2025
+// were indexed, against 0.6s this way).
 func walletTxScope(q *gorm.DB, addresses []string) *gorm.DB {
-	return q.Where(`(
+	return q.Where(`t.id = ANY(ARRAY(
+ SELECT tsa.tx_id FROM tx_signer_addresses tsa JOIN addresses a ON a.id=tsa.address_id WHERE a.address IN ?
+ UNION SELECT f.tx_id FROM fees f JOIN addresses a ON a.id=f.payer_address_id WHERE a.address IN ?
+ UNION SELECT wm.tx_id FROM taxable_events te JOIN messages wm ON wm.id=te.message_id WHERE te.from_addr IN ? OR te.to_addr IN ? OR te.validator_address IN ?
+ UNION SELECT wm.tx_id FROM message_event_attributes mea JOIN message_events me ON me.id=mea.message_event_id JOIN messages wm ON wm.id=me.message_id WHERE left(mea.value, 100) IN ? AND mea.value IN ?
+ ))`, addresses, addresses, addresses, addresses, addresses, valuePrefixes(addresses), addresses)
+}
+
+// valuePrefixes matches the attribute value index, which is on a prefix
+// because values can be long (wasm payloads).
+func valuePrefixes(values []string) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		if r := []rune(v); len(r) > 100 {
+			v = string(r[:100])
+		}
+		out[i] = v
+	}
+	return out
+}
+
+// walletFewTxScope applies the same attribution to a handful of candidate
+// transactions. OFFSET 0 keeps the event-attribute check a per-transaction index lookup;
+// without it Postgres may hash the whole attribute table instead, which took
+// 88s on the live database for eight candidates.
+func walletFewTxScope(q *gorm.DB, addresses []string) *gorm.DB {
+	return q.Where(walletTxCondition(" OFFSET 0"), addresses, addresses, addresses, addresses, addresses, addresses)
+}
+
+func walletTxCondition(attributeSuffix string) string {
+	return `(
  EXISTS (SELECT 1 FROM tx_signer_addresses tsa JOIN addresses a ON a.id=tsa.address_id WHERE tsa.tx_id=t.id AND a.address IN ?)
  OR EXISTS (SELECT 1 FROM fees f JOIN addresses a ON a.id=f.payer_address_id WHERE f.tx_id=t.id AND a.address IN ?)
  OR EXISTS (SELECT 1 FROM messages wm JOIN taxable_events te ON te.message_id=wm.id WHERE wm.tx_id=t.id AND (te.from_addr IN ? OR te.to_addr IN ? OR te.validator_address IN ?))
- OR EXISTS (SELECT 1 FROM messages wm JOIN message_events me ON me.message_id=wm.id JOIN message_event_attributes mea ON mea.message_event_id=me.id WHERE wm.tx_id=t.id AND mea.value IN ?)
- )`, addresses, addresses, addresses, addresses, addresses, addresses)
+ OR EXISTS (SELECT 1 FROM messages wm JOIN message_events me ON me.message_id=wm.id JOIN message_event_attributes mea ON mea.message_event_id=me.id WHERE wm.tx_id=t.id AND mea.value IN ?` + attributeSuffix + `)
+ )`
+}
+
+// ReadinessMigrate creates the indexes that find messages of unreviewed types
+// and a wallet's transactions without scanning every row.
+func ReadinessMigrate(db *gorm.DB) error {
+	for _, sql := range []string{
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_message_type_id ON messages (message_type_id)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_tx_signer_addresses_address_id ON tx_signer_addresses (address_id)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_message_event_attr_value ON message_event_attributes (left(value, 100))`,
+	} {
+		if err := db.Exec(sql).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) classificationReadiness(chain string, addresses []string, start, end time.Time) (ReportReadiness, error) {
 	r := readinessForRows(nil)
-	base := func() *gorm.DB {
-		q := s.db.Table("txes t").Joins("JOIN blocks b ON b.id=t.block_id").Joins("JOIN chains c ON c.id=b.chain_id").
-			Where("c.chain_id IN ? AND b.time_stamp >= ? AND b.time_stamp < ? AND t.code = 0", chainIDs(chain), start, end)
-		if len(addresses) > 0 {
-			q = walletTxScope(q, addresses)
-		}
-		return q
-	}
 	// Start with the sparse failure sets. Applying wallet event attribution to
 	// every successful chain transaction would make long-period gates unbounded.
-	if err := base().Joins("JOIN (SELECT DISTINCT m.tx_id FROM message_parser_errors mpe JOIN messages m ON m.id=mpe.message_id) parser_scope ON parser_scope.tx_id=t.id").Count(&r.ParserErrors).Error; err != nil {
+	// The failure set and period are fenced in a subquery (OFFSET 0) so the
+	// wallet checks run only on what is left; otherwise Postgres applies them
+	// to every failure-set transaction before it looks at the block time.
+	count := func(out *int64, failureSet string, args ...interface{}) error {
+		candidates := s.db.Table("txes t").Select("t.id").
+			Joins("JOIN blocks b ON b.id=t.block_id").Joins("JOIN chains c ON c.id=b.chain_id").
+			Joins(failureSet, args...).
+			Where("c.chain_id IN ? AND b.time_stamp >= ? AND b.time_stamp < ? AND t.code = 0", chainIDs(chain), start, end)
+		q := s.db.Table("(? OFFSET 0) t", candidates)
+		if len(addresses) > 0 {
+			q = walletFewTxScope(q, addresses)
+		}
+		return q.Count(out).Error
+	}
+	if err := count(&r.ParserErrors, "JOIN (SELECT DISTINCT m.tx_id FROM message_parser_errors mpe JOIN messages m ON m.id=mpe.message_id) parser_scope ON parser_scope.tx_id=t.id"); err != nil {
 		return r, err
 	}
 	// Failed messages/transactions represent decoding/indexing failures, not
 	// ordinary nonzero-code chain transactions, which still legitimately pay fees.
-	if err := base().Joins(`JOIN (
+	if err := count(&r.DecodeErrors, `JOIN (
  SELECT fm.tx_id FROM failed_messages fm
  UNION SELECT failed_t.id AS tx_id FROM failed_txes ft JOIN txes failed_t ON failed_t.hash=ft.hash AND failed_t.block_id=ft.block_id
- ) decode_scope ON decode_scope.tx_id=t.id`).Count(&r.DecodeErrors).Error; err != nil {
+ ) decode_scope ON decode_scope.tx_id=t.id`); err != nil {
 		return r, err
 	}
-	if err := base().Joins("JOIN (SELECT tx_id FROM messages WHERE opaque = true) opaque_scope ON opaque_scope.tx_id=t.id").Count(&r.OpaqueMessages).Error; err != nil {
+	if err := count(&r.OpaqueMessages, "JOIN (SELECT tx_id FROM messages WHERE opaque = true) opaque_scope ON opaque_scope.tx_id=t.id"); err != nil {
 		return r, err
 	}
 	// A decoded message of a type the tax layer has no decision for may have
@@ -162,7 +220,7 @@ func (s *Server) classificationReadiness(chain string, addresses []string, start
 		return r, err
 	}
 	if len(unreviewed) > 0 {
-		if err := base().Joins("JOIN (SELECT DISTINCT tx_id FROM messages WHERE message_type_id IN ? AND opaque = false) unreviewed_scope ON unreviewed_scope.tx_id=t.id", unreviewed).Count(&r.UnreviewedMessages).Error; err != nil {
+		if err := count(&r.UnreviewedMessages, "JOIN (SELECT DISTINCT tx_id FROM messages WHERE message_type_id IN ? AND opaque = false) unreviewed_scope ON unreviewed_scope.tx_id=t.id", unreviewed); err != nil {
 			return r, err
 		}
 	}
