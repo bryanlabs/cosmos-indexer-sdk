@@ -526,7 +526,9 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 				}
 
 				if len(messagesEventsAttributesSlice) != 0 {
-					if err := dbTransaction.Clauses(clause.OnConflict{
+					// Parents and lookup keys were persisted above and their IDs
+					// assigned to every attribute. Do not recursively save them again.
+					if err := dbTransaction.Omit(clause.Associations).Clauses(clause.OnConflict{
 						Columns:   []clause.Column{{Name: "message_event_id"}, {Name: columnIndex}},
 						DoUpdates: clause.AssignmentColumns([]string{"value", "message_event_attribute_key_id"}),
 					}).CreateInBatches(messagesEventsAttributesSlice, rowInsertBatchSize).Error; err != nil {
