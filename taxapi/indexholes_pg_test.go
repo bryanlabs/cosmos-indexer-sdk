@@ -92,16 +92,31 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false, PRIMARY KEY (chain, height))",
 		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text, PRIMARY KEY (chain, height, address))",
 		"INSERT INTO chains VALUES (1,'cosmoshub-4')",
-		"INSERT INTO blocks VALUES (1,1,100,true,true),(2,1,101,true,true),(3,1,200,true,true)",
+		"INSERT INTO blocks VALUES (1,1,100,true,true),(2,1,101,true,true),(3,1,200,true,true),(4,1,201,true,true)",
 		// The vote's one row is at the height that charged its fee.
-		"INSERT INTO txes VALUES (1,1,'" + txHash(kept) + "',0),(2,2,'" + txHash(vote) + "',11)",
-		"INSERT INTO messages VALUES (1,1),(2,2)",
+		"INSERT INTO txes VALUES (1,1,'" + txHash(kept) + "',0),(2,2,'" + txHash(vote) + "',11),(3,4,'" + txHash(lost) + "',0),(4,3,'FILLER-A',0),(5,3,'FILLER-B',0)",
+		"INSERT INTO messages VALUES (1,1),(2,2),(3,3),(4,4),(5,5)",
 		"INSERT INTO tax_index_holes VALUES ('mainnet',100,2,true),('mainnet',200,1,false)",
 		"INSERT INTO tax_index_hole_addresses VALUES ('mainnet',100,'" + backTestSigner + "')",
 	} {
 		require.NoError(t, database.Exec(sql).Error, sql)
 	}
 	s := &Server{db: database, native: DefaultNativeAsset}
+
+	// At 200 the count exceeds the expected count and all stored successful
+	// transactions have messages, but the successful source hash is at 201.
+	for _, count := range []int{1, 2} {
+		require.NoError(t, database.Exec("UPDATE tax_index_holes SET chain_txs = ? WHERE height = 200", count).Error)
+		cleared, err := s.clearIndexHoles(apiMainnet, []int64{1})
+		require.NoError(t, err)
+		require.Zero(t, cleared, "neither equal nor excess counts prove membership")
+		var holes int64
+		require.NoError(t, database.Model(&IndexHole{}).Count(&holes).Error)
+		require.Equal(t, int64(2), holes)
+		var addresses int64
+		require.NoError(t, database.Model(&IndexHoleAddress{}).Count(&addresses).Error)
+		require.Equal(t, int64(1), addresses)
+	}
 
 	dropped, left, err := s.RecheckIndexHoles(apiMainnet, &ledgerNode{cache: dir}, t.Logf)
 	require.NoError(t, err)
@@ -113,4 +128,23 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 	var addrs []string
 	require.NoError(t, database.Model(&IndexHoleAddress{}).Order("height, address").Pluck("address", &addrs).Error)
 	require.Equal(t, []string{backTestGranter}, addrs, "the dropped hole's accounts go with it and the kept one names its own")
+	n, first, err := s.indexHoles(apiMainnet, backTestGranter, 0, 300)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+	require.Equal(t, int64(200), first)
+
+	// Repair only this synthetic fixture. Membership is now correct, but a
+	// sweep still cannot attest it. Only the explicit recheck removes it.
+	require.NoError(t, database.Exec("UPDATE txes SET block_id = 3 WHERE id = 3").Error)
+	cleared, err := s.clearIndexHoles(apiMainnet, []int64{1})
+	require.NoError(t, err)
+	require.Zero(t, cleared)
+	dropped, left, err = s.RecheckIndexHoles(apiMainnet, &ledgerNode{cache: dir}, t.Logf)
+	require.NoError(t, err)
+	require.Equal(t, 1, dropped)
+	require.Zero(t, left)
+	require.NoError(t, database.Find(&holes).Error)
+	require.Empty(t, holes)
+	require.NoError(t, database.Model(&IndexHoleAddress{}).Pluck("address", &addrs).Error)
+	require.Empty(t, addrs)
 }

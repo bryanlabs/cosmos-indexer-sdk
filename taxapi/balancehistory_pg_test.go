@@ -84,16 +84,16 @@ func TestBalanceLedgerFeesAndHolesPostgres(t *testing.T) {
 
 	cleared, err := s.clearIndexHoles("mainnet", ids)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), cleared, "block 20 now holds its one transaction, block 30 is still short, block 10 still lacks messages")
+	require.Zero(t, cleared, "counts cannot prove source membership, even when all stored transactions have messages")
 	require.NoError(t, database.Exec("INSERT INTO messages VALUES (1,1)").Error)
 	cleared, err = s.clearIndexHoles("mainnet", ids)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), cleared, "block 10 now has its messages")
+	require.Zero(t, cleared, "adding messages is not a source-verified recheck")
 	n, first, err = s.indexHoles("mainnet", "cosmos1granter", 0, 100)
 	require.NoError(t, err)
-	require.Equal(t, int64(1), n)
-	require.Equal(t, int64(30), first)
+	require.Equal(t, int64(2), n)
+	require.Equal(t, int64(20), first)
 	var addrs int64
 	require.NoError(t, database.Raw("SELECT count(*) FROM tax_index_hole_addresses").Scan(&addrs).Error)
-	require.Zero(t, addrs, "a cleared hole drops its address list")
+	require.Equal(t, int64(1), addrs, "ordinary sweeps must preserve named-address protections")
 }

@@ -77,9 +77,9 @@ func (ValidatorConsensus) TableName() string { return "tax_validator_consensus" 
 // shares its hash with the copy the index keeps. A balance whose window covers
 // a hole cannot be rebuilt exactly. When AddressesKnown is set, IndexHoleAddress lists every account
 // the missing transactions name (in their bytes or any of their events), and
-// only those wallets are affected; otherwise every wallet is. The sweeper
-// removes the row once the block holds ChainTxs transactions again and each
-// successful one has its messages.
+// only those wallets are affected; otherwise every wallet is. Only an explicit
+// source-verified RecheckIndexHoles may remove the row, since counts cannot
+// establish that the expected transactions are indexed at this height.
 type IndexHole struct {
 	Chain          string `gorm:"primaryKey"`
 	Height         int64  `gorm:"primaryKey;autoIncrement:false"`
@@ -113,8 +113,8 @@ type ValidatorRateSample struct {
 func (ValidatorRateSample) TableName() string { return "tax_validator_rates" }
 
 // BalanceHistoryMigrate creates the tables the balance ledger reads.
-// The index scan and the hole sweeper read a block's transactions, which the
-// indexer's schema does not index.
+// The index scan and explicit hole recheck read a block's source transactions
+// to verify membership, which a stored transaction count cannot establish.
 func BalanceHistoryMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}, &BalanceDay{}, &BalanceBuild{}, &BalanceDeferred{}); err != nil {
 		return err
@@ -583,33 +583,12 @@ ORDER BY h.height`,
 	return heights, err
 }
 
-// clearIndexHoles drops the holes whose block now holds every transaction.
+// clearIndexHoles deliberately retains recorded holes during ordinary sweeps.
+// Counts and message presence cannot prove source transaction membership: a
+// successful source hash may still be indexed at another height. Only an
+// explicit source-verified RecheckIndexHoles may clear these protections.
 func (s *Server) clearIndexHoles(chain string, ids []int64) (int64, error) {
-	var before int64
-	if err := s.db.Model(&IndexHole{}).Where("chain = ?", chain).Count(&before).Error; err != nil {
-		return 0, err
-	}
-	res := s.db.Exec(`
-WITH done AS (
-  DELETE FROM tax_index_holes h
-  WHERE h.chain = @chain AND h.chain_txs <= (
-    SELECT count(*) FROM txes x JOIN blocks b ON b.id = x.block_id
-    WHERE b.chain_id IN @ids AND b.height = h.height)
-  AND NOT EXISTS (
-    SELECT 1 FROM txes x JOIN blocks b ON b.id = x.block_id
-    WHERE b.chain_id IN @ids AND b.height = h.height AND x.code = 0
-    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.tx_id = x.id))
-  RETURNING h.chain, h.height)
-DELETE FROM tax_index_hole_addresses a USING done
-WHERE a.chain = done.chain AND a.height = done.height`, map[string]any{"chain": chain, "ids": ids})
-	if res.Error != nil {
-		return 0, res.Error
-	}
-	var left int64
-	if err := s.db.Model(&IndexHole{}).Where("chain = ?", chain).Count(&left).Error; err != nil {
-		return 0, err
-	}
-	return before - left, nil
+	return 0, nil
 }
 
 // ledgerScan is the span whose fee grant use and index holes are recorded,
