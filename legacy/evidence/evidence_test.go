@@ -135,3 +135,51 @@ func TestHubThreeFailuresAndRefusals(t *testing.T) {
 	_, err = For("cosmoshub-3", txOf("MsgSend"), &abci.ResponseDeliverTx{Log: stopped}, nil)
 	require.ErrorContains(t, err, "more entries than messages")
 }
+
+func eventOf(kind string, pairs ...string) abci.Event {
+	e := abci.Event{Type: kind}
+	for i := 0; i < len(pairs); i += 2 {
+		e.Attributes = append(e.Attributes, abci.EventAttribute{Key: pairs[i], Value: pairs[i+1]})
+	}
+	return e
+}
+
+func TestTransferSendersPairsBankPayersInOrder(t *testing.T) {
+	// An undelegation: the reward payout, then the pool move, then the
+	// handler's own message event, then the action marker.
+	events := []abci.Event{
+		eventOf("message", "sender", "distribution", "sender", "bonded", "module", "staking", "sender", "delegator", "action", "begin_unbonding"),
+		eventOf("transfer", "recipient", "delegator", "amount", "5uatom", "recipient", "notbonded", "amount", "9uatom"),
+		eventOf("unbond", "validator", "v", "amount", "9"),
+	}
+	got, err := TransferSenders("cosmos-sdk/MsgUndelegate", events)
+	require.NoError(t, err)
+	require.Equal(t, events[0], got[0])
+	require.Equal(t, eventOf("transfer", "recipient", "delegator", "sender", "distribution", "amount", "5uatom",
+		"recipient", "notbonded", "sender", "bonded", "amount", "9uatom"), got[1])
+	require.Equal(t, events[2], got[2])
+	require.Len(t, events[1].Attributes, 4, "the recorded events are not modified")
+}
+
+func TestTransferSendersLeavesOthersAloneAndRefusesMismatch(t *testing.T) {
+	plain := []abci.Event{eventOf("message", "module", "staking", "sender", "delegator", "action", "delegate"), eventOf("delegate", "validator", "v", "amount", "9")}
+	got, err := TransferSenders("cosmos-sdk/MsgDelegate", plain)
+	require.NoError(t, err)
+	require.Equal(t, plain, got)
+
+	multi := []abci.Event{eventOf("message", "sender", "a", "sender", "b", "module", "bank", "action", "multisend"), eventOf("transfer", "recipient", "c", "amount", "1uatom")}
+	got, err = TransferSenders("cosmos-sdk/MsgMultiSend", multi)
+	require.NoError(t, err)
+	require.Equal(t, multi, got)
+
+	for name, events := range map[string][]abci.Event{
+		"no payer":        {eventOf("message", "module", "staking", "sender", "d", "action", "delegate"), eventOf("transfer", "recipient", "d", "amount", "1uatom")},
+		"extra payer":     {eventOf("message", "sender", "x", "sender", "y", "action", "send"), eventOf("transfer", "recipient", "d", "amount", "1uatom")},
+		"odd attributes":  {eventOf("message", "sender", "x"), eventOf("transfer", "recipient", "d")},
+		"already has one": {eventOf("message", "sender", "x"), eventOf("transfer", "recipient", "d", "sender", "x", "amount", "1uatom")},
+	} {
+		got, err := TransferSenders("cosmos-sdk/MsgDelegate", events)
+		require.Error(t, err, name)
+		require.Nil(t, got, name)
+	}
+}

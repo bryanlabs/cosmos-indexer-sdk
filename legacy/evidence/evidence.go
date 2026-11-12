@@ -142,3 +142,65 @@ func fromLog(chain string, tx *legacy.Tx, log string) ([]Message, error) {
 	}
 	return evidence, nil
 }
+
+// TransferSenders returns a Hub 3 message's events with the paying account
+// written onto each transfer, which is the shape the serving tax classifier
+// reads. Hub 3 recorded a transfer as recipient and amount only, and wrote the
+// payer as a separate message event holding a lone sender. A message handler's
+// own message event always put module before sender, so the bank's senders are
+// the ones not preceded by module, in the order the transfers happened.
+//
+// It refuses when the two counts differ. A multisend records one sender per
+// input and one transfer per output, which cannot be paired, so its events are
+// returned unchanged: its amounts are read from the message itself.
+func TransferSenders(aminoName string, events []abci.Event) ([]abci.Event, error) {
+	if aminoName == "cosmos-sdk/MsgMultiSend" {
+		return events, nil
+	}
+	var senders []string
+	transfers := 0
+	for _, e := range events {
+		switch e.Type {
+		case "message":
+			previous := ""
+			for _, a := range e.Attributes {
+				if a.Key == "sender" && previous != "module" {
+					senders = append(senders, a.Value)
+				}
+				previous = a.Key
+			}
+		case "transfer":
+			if len(e.Attributes)%2 != 0 {
+				return nil, fmt.Errorf("legacy transfer is not recipient and amount pairs")
+			}
+			for i := 0; i < len(e.Attributes); i += 2 {
+				if e.Attributes[i].Key != "recipient" || e.Attributes[i+1].Key != "amount" {
+					return nil, fmt.Errorf("legacy transfer is not recipient and amount pairs")
+				}
+			}
+			transfers += len(e.Attributes) / 2
+		}
+	}
+	if transfers != len(senders) {
+		return nil, fmt.Errorf("legacy transfer count differs from recorded payers")
+	}
+	if transfers == 0 {
+		return events, nil
+	}
+	out := make([]abci.Event, 0, len(events))
+	next := 0
+	for _, e := range events {
+		if e.Type != "transfer" {
+			out = append(out, e)
+			continue
+		}
+		paid := abci.Event{Type: e.Type}
+		for i := 0; i < len(e.Attributes); i += 2 {
+			paid.Attributes = append(paid.Attributes, e.Attributes[i],
+				abci.EventAttribute{Key: "sender", Value: senders[next]}, e.Attributes[i+1])
+			next++
+		}
+		out = append(out, paid)
+	}
+	return out, nil
+}

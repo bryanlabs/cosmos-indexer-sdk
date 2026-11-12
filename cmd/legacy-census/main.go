@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,9 +25,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/config"
+	indexertx "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/evidence"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
+	"github.com/DefiantLabs/cosmos-indexer/tax"
+	abci "github.com/cometbft/cometbft/abci/types"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	amino "github.com/tendermint/go-amino"
 )
@@ -162,6 +167,8 @@ type stats struct {
 	EndTagKeys, BlockExtras                              counter
 	FeeDenoms, FeeShape, ActionCheck, SignerCheck        counter
 	FailedEvidence, UpdateShape, MessageEvidence         counter
+	EvidenceShape, Classified, ClassifiedRecorded        counter
+	TransferCheck                                        counter
 	Dirs                                                 map[int64]*dirStat
 	Sample                                               int
 	DirsSeen, DirsUnreadable, CachedHeights              int64
@@ -179,7 +186,7 @@ func (s *stats) counters() []*counter {
 	return []*counter{&s.Skipped, &s.BlockErrors, &s.ResultErrors, &s.Decode, &s.TxIssues, &s.SigIssues, &s.KeyKinds,
 		&s.MsgStatus, &s.MsgShape, &s.MsgOutcome, &s.MsgsPerTx, &s.Codes, &s.CodeEvidence, &s.LogShape, &s.TxEventTypes,
 		&s.TxTagKeys, &s.Actions, &s.BeginEventTypes, &s.EndEventTypes, &s.BeginTagKeys, &s.EndTagKeys, &s.BlockExtras,
-		&s.FeeDenoms, &s.FeeShape, &s.ActionCheck, &s.SignerCheck, &s.FailedEvidence, &s.UpdateShape, &s.MessageEvidence}
+		&s.FeeDenoms, &s.FeeShape, &s.ActionCheck, &s.SignerCheck, &s.FailedEvidence, &s.UpdateShape, &s.MessageEvidence, &s.EvidenceShape, &s.Classified, &s.ClassifiedRecorded, &s.TransferCheck}
 }
 
 func (s *stats) merge(o *stats) {
@@ -749,6 +756,16 @@ func process(j job, opt options, s *stats, sp *spill) {
 		default:
 			s.MessageEvidence.add("failed: no execution marker, fee charge unknown, "+code, 1)
 		}
+		if err == nil {
+			for _, m := range messages {
+				if m.Success {
+					evidenceShape(tx.Messages[m.Index], m, s)
+				}
+			}
+			if j.chain == "cosmoshub-3" && result.Code == 0 {
+				transferCheck(tx, messages, result.Events, s)
+			}
+		}
 		switch {
 		case len(tx.Fee) == 0:
 			s.FeeShape.add(outcome(result.Code)+": no fee coins declared", 1)
@@ -800,6 +817,146 @@ func process(j job, opt options, s *stats, sp *spill) {
 				s.SignerCheck.add("every public key address equals its message signer", 1)
 			}
 		}
+	}
+}
+
+var taxParser = &tax.Parser{ID: "legacy-census"}
+
+// evidenceShape records, for one executed message, which tag keys or event
+// types the chain left for it, and what the serving tax classifier makes of
+// the projection when it is given those events unchanged. Hub 1 and Hub 2
+// tags are not events, so only their keys are counted. Only message names,
+// key names, event type names and category names are kept.
+func evidenceShape(msg legacy.Message, m evidence.Message, s *stats) {
+	seen := map[string]bool{}
+	var names []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	for _, t := range m.Tags {
+		add(label(t.Key))
+	}
+	for _, e := range m.Events {
+		if safeAction.MatchString(e.Type) {
+			add(e.Type)
+		} else {
+			add("(non-identifier event type)")
+		}
+	}
+	sort.Strings(names)
+	kind := "tag keys"
+	if m.Events != nil {
+		kind = "event types"
+	}
+	s.EvidenceShape.add(msg.AminoName+" | "+kind+": "+strings.Join(names, ","), 1)
+	if m.Events == nil {
+		return
+	}
+	if msg.Derived == nil {
+		s.Classified.add(msg.AminoName+" | not classified, no projection", 1)
+		return
+	}
+	recorded := classifyRows(msg, m.Index, m.Events)
+	s.ClassifiedRecorded.add(msg.AminoName+" | "+recorded, 1)
+	paid, err := evidence.TransferSenders(msg.AminoName, m.Events)
+	if err != nil {
+		s.Classified.add(msg.AminoName+" | not classified, "+safe(err), 1)
+		return
+	}
+	s.Classified.add(msg.AminoName+" | "+classifyRows(msg, m.Index, paid), 1)
+}
+
+// classifyRows gives the serving tax classifier one projection and its
+// events, and describes the rows only by category and a count bucket.
+func classifyRows(msg legacy.Message, index int, events []abci.Event) (description string) {
+	defer func() {
+		if recover() != nil {
+			description = "classifier panic"
+		}
+	}()
+	log := &indexertx.LogMessage{MessageIndex: index}
+	for _, e := range events {
+		event := indexertx.LogMessageEvent{Type: e.Type}
+		for _, a := range e.Attributes {
+			event.Attributes = append(event.Attributes, indexertx.Attribute{Key: a.Key, Value: a.Value})
+		}
+		log.Events = append(log.Events, event)
+	}
+	out, err := taxParser.ParseMessage(msg.Derived, log, config.IndexConfig{})
+	var incomplete *tax.ClassificationIncompleteError
+	switch {
+	case errors.As(err, &incomplete):
+		return "classifier reports incomplete"
+	case err != nil || out == nil:
+		return "classifier error"
+	}
+	rows, _ := (*out).([]tax.TaxableEvent)
+	categories := map[string]int{}
+	for _, row := range rows {
+		if safeAction.MatchString(row.Category) {
+			categories[row.Category]++
+		} else {
+			categories["(other category)"]++
+		}
+	}
+	var parts []string
+	for category, n := range categories {
+		parts = append(parts, category+" x"+bucket(int64(n), 1, 2, 5, 20))
+	}
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		return "no rows"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// transferCheck compares the payer given to each Hub 3 transfer from the
+// per message log against the flat event list of the same result, where the
+// bank wrote each transfer immediately before its payer.
+func transferCheck(tx *legacy.Tx, messages []evidence.Message, flat []abci.Event, s *stats) {
+	var fromLog, fromFlat []string
+	for _, m := range messages {
+		name := tx.Messages[m.Index].AminoName
+		if name == "cosmos-sdk/MsgMultiSend" {
+			s.TransferCheck.add("not compared: transaction holds a multisend", 1)
+			return
+		}
+		paid, err := evidence.TransferSenders(name, m.Events)
+		if err != nil {
+			s.TransferCheck.add("not compared: "+safe(err), 1)
+			return
+		}
+		for _, e := range paid {
+			if e.Type != "transfer" {
+				continue
+			}
+			for i := 0; i+2 < len(e.Attributes); i += 3 {
+				fromLog = append(fromLog, e.Attributes[i].Value+"|"+e.Attributes[i+1].Value+"|"+e.Attributes[i+2].Value)
+			}
+		}
+	}
+	for i, e := range flat {
+		if e.Type != "transfer" {
+			continue
+		}
+		if len(e.Attributes) != 2 || e.Attributes[0].Key != "recipient" || e.Attributes[1].Key != "amount" ||
+			i+1 >= len(flat) || flat[i+1].Type != "message" || len(flat[i+1].Attributes) != 1 || flat[i+1].Attributes[0].Key != "sender" {
+			s.TransferCheck.add("flat transfer is not followed by its payer", 1)
+			return
+		}
+		fromFlat = append(fromFlat, e.Attributes[0].Value+"|"+flat[i+1].Attributes[0].Value+"|"+e.Attributes[1].Value)
+	}
+	switch {
+	case len(fromLog) == 0 && len(fromFlat) == 0:
+		s.TransferCheck.add("no transfers", 1)
+	case strings.Join(fromLog, ",") == strings.Join(fromFlat, ","):
+		s.TransferCheck.add("payers from the log equal payers from the flat events", 1)
+		s.TransferCheck.add("transfers given a payer", int64(len(fromLog)))
+	default:
+		s.TransferCheck.add("payers from the log differ from the flat events", 1)
 	}
 }
 
@@ -896,6 +1053,10 @@ func report(out io.Writer, r *result, repeatScope string) {
 		printCounter(out, "messages per decoded transaction (upper bound of bucket)", total.MsgsPerTx)
 		printCounter(out, "decoded messages against recorded actions (successful transactions)", total.ActionCheck)
 		printCounter(out, "evidence attributed to each message, and fee charge of failed transactions", total.MessageEvidence)
+		printCounter(out, "evidence kept per executed message, by message type", total.EvidenceShape)
+		printCounter(out, "serving tax classifier on Hub 3 projections, events as recorded (rows by category, count bucket)", total.ClassifiedRecorded)
+		printCounter(out, "serving tax classifier on Hub 3 projections, transfers given their payer", total.Classified)
+		printCounter(out, "Hub 3 transfer payers, per message log against flat events (successful transactions)", total.TransferCheck)
 		printCounter(out, "recorded action values", total.Actions)
 		printCounter(out, "signer cross-check", total.SignerCheck)
 		printCounter(out, "public key kinds", total.KeyKinds)
