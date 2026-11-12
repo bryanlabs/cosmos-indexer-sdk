@@ -14,6 +14,9 @@ import (
 )
 
 func ProcessRPCBlockResults(conf config.IndexConfig, block models.Block, blockResults *rpc.CustomBlockResults, customBeginBlockParsers map[string][]parsers.BlockEventParser, customEndBlockParsers map[string][]parsers.BlockEventParser) (*db.BlockDBWrapper, error) {
+	if (blockResults != nil && blockResults.Legacy != nil) || IsLegacyHubChain(conf.Probe.ChainID) || IsLegacyHubChain(block.Chain.ChainID) {
+		return nil, LegacyIntakeAdmission()
+	}
 	var blockDBWrapper db.BlockDBWrapper
 
 	blockDBWrapper.Block = &block

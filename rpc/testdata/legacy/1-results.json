@@ -1,0 +1,80 @@
+{
+  "height": "1",
+  "results": {
+    "deliver_tx": null,
+    "end_block": {
+      "validator_updates": [],
+      "events": [
+        {
+          "type": "transfer",
+          "attributes": [
+            {
+              "key": "cmVjaXBpZW50",
+              "value": "W3JlZGFjdGVkXQ=="
+            },
+            {
+              "key": "YW1vdW50",
+              "value": "Mjk4NDEwNjIxNjAwdWF0b20="
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "attributes": [
+            {
+              "key": "c2VuZGVy",
+              "value": "W3JlZGFjdGVkXQ=="
+            }
+          ]
+        }
+      ]
+    },
+    "begin_block": {
+      "events": [
+        {
+          "type": "transfer",
+          "attributes": [
+            {
+              "key": "cmVjaXBpZW50",
+              "value": "W3JlZGFjdGVkXQ=="
+            },
+            {
+              "key": "YW1vdW50",
+              "value": "MzcxNjQ4NXVhdG9t"
+            }
+          ]
+        },
+        {
+          "type": "message",
+          "attributes": [
+            {
+              "key": "c2VuZGVy",
+              "value": "W3JlZGFjdGVkXQ=="
+            }
+          ]
+        },
+        {
+          "type": "mint",
+          "attributes": [
+            {
+              "key": "Ym9uZGVkX3JhdGlv",
+              "value": "W3JlZGFjdGVkXQ=="
+            },
+            {
+              "key": "aW5mbGF0aW9u",
+              "value": "W3JlZGFjdGVkXQ=="
+            },
+            {
+              "key": "YW5udWFsX3Byb3Zpc2lvbnM=",
+              "value": "W3JlZGFjdGVkXQ=="
+            },
+            {
+              "key": "YW1vdW50",
+              "value": "MzcxNjQ4NQ=="
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

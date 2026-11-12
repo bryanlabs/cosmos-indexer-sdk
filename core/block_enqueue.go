@@ -20,6 +20,15 @@ import (
 
 var EnqueueFunctions = map[string]func(chan int64) error{}
 
+// enqueueUpperHeight leaves the live head alone: its ABCI results may not yet
+// be stored. Only an explicitly declared terminal archive may include the head.
+func enqueueUpperHeight(latest, end, terminal int64) int64 {
+	if end > 0 && (end < latest || (end == terminal && end == latest)) {
+		return end
+	}
+	return latest - 1
+}
+
 type EnqueueData struct {
 	Height            int64
 	IndexBlockEvents  bool
@@ -159,6 +168,24 @@ func GenerateMsgTypeEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, chainID
 // indexed according to the current configuration.
 // If failed block reattempts are enabled, it will enqueue those according to the passed in configuration as well.
 func GenerateDefaultEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client *client.ChainClient, chainID uint) (func(chan *EnqueueData) error, error) {
+	if cfg.Base.TerminalArchiveHeight != 0 {
+		return GenerateTerminalArchiveEnqueueFunction(db, cfg, client, chainID, cfg.Base.TerminalArchiveHeight)
+	}
+	return generateDefaultEnqueueFunction(db, cfg, client, chainID, 0)
+}
+
+// GenerateTerminalArchiveEnqueueFunction is an explicit opt-in for a chain
+// independently verified to have halted at terminalHeight. The RPC status is
+// never inflated. Existing live/default callers retain their head safety margin.
+// This is not automatically enabled by a finite end-block or exit-when-caught-up.
+func GenerateTerminalArchiveEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client *client.ChainClient, chainID uint, terminalHeight int64) (func(chan *EnqueueData) error, error) {
+	if terminalHeight <= 0 || cfg.Base.EndBlock != terminalHeight || cfg.Base.BlockInputFile != "" || cfg.Base.ReindexMessageType != "" || cfg.Base.ReattemptFailedBlocks {
+		return nil, fmt.Errorf("terminal archive requires matching end-block and default bounded enqueue without failed-block replay")
+	}
+	return generateDefaultEnqueueFunction(db, cfg, client, chainID, terminalHeight)
+}
+
+func generateDefaultEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client *client.ChainClient, chainID uint, terminalHeight int64) (func(chan *EnqueueData) error, error) {
 	var failedBlockEnqueueData []*EnqueueData
 	if cfg.Base.ReattemptFailedBlocks {
 		var failedEventBlocks []models.FailedEventBlock
@@ -261,7 +288,7 @@ func GenerateDefaultEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client 
 			if endBlock != -1 && currBlock > endBlock {
 				config.Log.Info("Hit the last block we're allowed to index, exiting enqueue func.")
 				return nil
-			} else if cfg.Base.ExitWhenCaughtUp && currBlock > latestBlock {
+			} else if cfg.Base.ExitWhenCaughtUp && latestBlock != math.MaxInt64 && currBlock > enqueueUpperHeight(latestBlock, endBlock, terminalHeight) {
 				config.Log.Info("Hit the last block we're allowed to index, exiting enqueue func.")
 				return nil
 			}
@@ -277,34 +304,38 @@ func GenerateDefaultEnqueueFunction(db *gorm.DB, cfg config.IndexConfig, client 
 					return err
 				}
 
+				if terminalHeight > 0 && latestBlock != terminalHeight {
+					return fmt.Errorf("terminal archive head does not match declared terminal height")
+				}
+
 				// Throttling in case of hitting public APIs
 				if cfg.Base.Throttling != 0 {
 					time.Sleep(time.Second * time.Duration(cfg.Base.Throttling))
 				}
 
-				// Already at the latest block, wait for the next block to be available.
-				for currBlock < latestBlock && (currBlock <= endBlock || endBlock == -1) && len(blockChan) != cap(blockChan) {
+				// Following the chain leaves the head alone. Only an explicitly
+				// declared halted archive includes its known terminal height.
+				last := enqueueUpperHeight(latestBlock, endBlock, terminalHeight)
+				for currBlock <= last && len(blockChan) != cap(blockChan) {
 					var block dbTypes.BlockIndexState
 					var blockExists bool
 					if !reindexing {
-						last := latestBlock - 1
-						if endBlock != -1 && endBlock < last {
-							last = endBlock
-						}
 						block, blockExists, err = window.lookup(currBlock, last)
 						if err != nil {
 							return err
 						}
 					}
 					work := blockIndexWork(currBlock, block, blockExists, cfg.Base.BlockEventIndexingEnabled, cfg.Base.TransactionIndexingEnabled)
-					if work == nil {
-						currBlock++
-						continue
+					if work != nil {
+						blockChan <- work
 					}
-					blockChan <- work
+					if currBlock == endBlock {
+						// Also avoids overflow for an explicit MaxInt64 end.
+						return nil
+					}
 					currBlock++
 
-					if cfg.Base.Throttling != 0 {
+					if work != nil && cfg.Base.Throttling != 0 {
 						time.Sleep(time.Second * time.Duration(cfg.Base.Throttling))
 					}
 				}

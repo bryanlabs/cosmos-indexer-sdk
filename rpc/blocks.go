@@ -189,6 +189,30 @@ type CustomBlockResults struct {
 	ValidatorUpdates      []abci.ValidatorUpdate    `json:"validator_updates"`
 	ConsensusParamUpdates *cmtproto.ConsensusParams `json:"consensus_param_updates"`
 	FinalizeBlockEvents   []abci.Event              `json:"finalize_block_events"`
+	// Legacy retains the source envelope, ordered byte tags, and code evidence.
+	// Tags are not modern events and must never be fed to event classifiers.
+	Legacy *LegacyBlockEvidence `json:"-"`
+}
+
+// UnmarshalJSON normalizes pre-0.33 Tendermint's nested ABCI responses.
+// Encoding is selected by the envelope, never guessed from attribute contents:
+// legacy attributes are byte strings (base64 in JSON), modern ones are text.
+func (r *CustomBlockResults) UnmarshalJSON(data []byte) error {
+	type flat CustomBlockResults
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	legacy, nested := fields["results"]
+	if !nested {
+		var result flat
+		if err := tmjson.Unmarshal(data, &result); err != nil {
+			return err
+		}
+		*r = CustomBlockResults(result)
+		return nil
+	}
+	return r.unmarshalLegacy(data, fields, legacy)
 }
 
 func (c *URIClient) DoBlockResults(ctx context.Context, height *int64) (*CustomBlockResults, error) {

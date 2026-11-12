@@ -37,6 +37,10 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 		return nil, nil, err
 	}
 
+	if resultBlockRes.Legacy != nil || IsLegacyHubChain(blockResults.Block.ChainID) || IsLegacyHubChain(cfg.Probe.ChainID) {
+		return nil, nil, LegacyIntakeAdmission()
+	}
+
 	blockTime := &blockResults.Block.Time
 	blockTimeStr := blockTime.Format(time.RFC3339)
 	var currTxDbWrappers []dbTypes.TxDBWrapper
@@ -263,6 +267,9 @@ func sanitizeMemo(memo string) string {
 // ProcessRPCTXs receives SDK-decoded messages. Their Value bytes may be normalized,
 // not original wire evidence. Use ProcessRPCBlockByHeightTXs for wire preservation.
 func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient, messageTypeFilters []filter.MessageTypeFilter, messageFilters []filter.MessageFilter, txEventResp *cosmosTx.GetTxsEventResponse, customParsers map[string][]parsers.MessageParser) ([]dbTypes.TxDBWrapper, *time.Time, error) {
+	if IsLegacyHubChain(cfg.Probe.ChainID) {
+		return nil, nil, LegacyIntakeAdmission()
+	}
 	var currTxDbWrappers []dbTypes.TxDBWrapper
 	var blockTime *time.Time
 

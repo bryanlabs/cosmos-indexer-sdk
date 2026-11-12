@@ -37,6 +37,7 @@ type IndexBase struct {
 	FailedBlockRetryMaxAttempts     int    `mapstructure:"failed-block-retry-max-attempts"`
 	StartBlock                      int64  `mapstructure:"start-block"`
 	EndBlock                        int64  `mapstructure:"end-block"`
+	TerminalArchiveHeight           int64  `mapstructure:"terminal-archive-height"`
 	BlockInputFile                  string `mapstructure:"block-input-file"`
 	ReIndex                         bool   `mapstructure:"reindex"`
 	RPCWorkers                      int64  `mapstructure:"rpc-workers"`
@@ -70,6 +71,7 @@ func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
 	// chain indexing
 	cmd.PersistentFlags().Int64Var(&conf.Base.StartBlock, "base.start-block", 0, "block to start indexing at (use -1 to resume from highest block indexed)")
 	cmd.PersistentFlags().Int64Var(&conf.Base.EndBlock, "base.end-block", -1, "block to stop indexing at (use -1 to index indefinitely")
+	cmd.PersistentFlags().Int64Var(&conf.Base.TerminalArchiveHeight, "base.terminal-archive-height", 0, "explicit verified halted archive height; must equal end-block and actual RPC head; zero retains live head safety margin")
 	cmd.PersistentFlags().StringVar(&conf.Base.BlockInputFile, "base.block-input-file", "", "A file location containing a JSON list of block heights to index. Will override start and end block flags.")
 	cmd.PersistentFlags().BoolVar(&conf.Base.ReIndex, "base.reindex", false, "if true, this will re-attempt to index blocks we have already indexed (defaults to false)")
 	cmd.PersistentFlags().BoolVar(&conf.Base.ReattemptFailedBlocks, "base.reattempt-failed-blocks", false, "re-enqueue failed blocks for reattempts at startup.")
@@ -102,6 +104,11 @@ func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
 }
 
 func (conf *IndexConfig) Validate() error {
+	// The offline decoder is not admission to the serving schema. Keep this
+	// before DB setup so legacy event-only and empty-block runs cannot start.
+	if conf.Probe.ChainID == "cosmoshub-1" || conf.Probe.ChainID == "cosmoshub-2" || conf.Probe.ChainID == "cosmoshub-3" {
+		return errors.New("legacy serving intake blocked pending inclusion identity, genesis reconciliation, fees, daily balances and report routing")
+	}
 	if conf.Base.ArchiveEvidenceDir != "" && !conf.Base.ArchiveGuard {
 		return errors.New("archive evidence capture requires archive guard")
 	}
@@ -160,6 +167,9 @@ func (conf *IndexConfig) Validate() error {
 }
 
 func (conf *IndexConfig) validateBlockInputValues() error {
+	if conf.Base.TerminalArchiveHeight < 0 || (conf.Base.TerminalArchiveHeight > 0 && (conf.Base.EndBlock != conf.Base.TerminalArchiveHeight || conf.Base.BlockInputFile != "" || conf.Base.ReindexMessageType != "" || conf.Base.ReattemptFailedBlocks)) {
+		return errors.New("terminal archive requires matching end-block and default bounded enqueue without failed-block replay")
+	}
 	if !conf.Base.TransactionIndexingEnabled && !conf.Base.BlockEventIndexingEnabled {
 		return errors.New("must enable at least one of base.index-transactions or base.index-block-events")
 	}
