@@ -124,6 +124,7 @@ func registerProjectionFixtures(c *codec.LegacyAmino, chain string) {
 	c.RegisterConcrete(fixtureCreateValidator{}, "cosmos-sdk/MsgCreateValidator", nil)
 	c.RegisterConcrete(fixtureEditValidator{}, "cosmos-sdk/MsgEditValidator", nil)
 	c.RegisterConcrete(fixtureInvariant{}, "cosmos-sdk/MsgVerifyInvariant", nil)
+	c.RegisterConcrete(fixtureUnjail{}, "cosmos-sdk/MsgUnjail", nil)
 	if chain == "cosmoshub-3" {
 		c.RegisterInterface((*fixtureContent)(nil), nil)
 		c.RegisterConcrete(fixtureTextProposal{}, "cosmos-sdk/TextProposal", nil)
