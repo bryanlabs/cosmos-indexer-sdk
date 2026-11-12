@@ -39,6 +39,13 @@ func checkedObject(raw []byte, allowed ...string) (map[string]json.RawMessage, e
 	if err := uniqueJSON(raw); err != nil {
 		return nil, err
 	}
+	return knownObject(raw, allowed...)
+}
+
+// knownObject rejects unknown keys of an object inside a document that
+// checkedObject has already read. That one read walked every depth, so a
+// duplicate key in this object was refused there and is not looked for again.
+func knownObject(raw []byte, allowed ...string) (map[string]json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) != nil || fields == nil {
 		return nil, fmt.Errorf("legacy result expected object")
@@ -113,7 +120,7 @@ func legacyEvents(raw json.RawMessage) ([]abci.Event, error) {
 	}
 	var events []abci.Event
 	for _, item := range items {
-		f, err := checkedObject(item, "type", "attributes")
+		f, err := knownObject(item, "type", "attributes")
 		if err != nil {
 			return nil, err
 		}
@@ -143,7 +150,7 @@ func legacyTags(raw json.RawMessage) ([]LegacyTag, error) {
 	}
 	var tags []LegacyTag
 	for _, item := range items {
-		f, err := checkedObject(item, "key", "value")
+		f, err := knownObject(item, "key", "value")
 		if err != nil {
 			return nil, err
 		}
@@ -165,11 +172,11 @@ func legacyValidatorUpdates(raw json.RawMessage) ([]abci.ValidatorUpdate, error)
 	}
 	var updates []abci.ValidatorUpdate
 	for _, item := range items {
-		f, err := checkedObject(item, "pub_key", "power")
+		f, err := knownObject(item, "pub_key", "power")
 		if err != nil {
 			return nil, err
 		}
-		key, err := checkedObject(f["pub_key"], "type", "data")
+		key, err := knownObject(f["pub_key"], "type", "data")
 		if err != nil {
 			return nil, err
 		}
@@ -205,7 +212,7 @@ func (r *CustomBlockResults) unmarshalLegacy(data []byte, _ map[string]json.RawM
 	if err != nil {
 		return err
 	}
-	shape, err := checkedObject(nested, "deliver_tx", "begin_block", "end_block", "DeliverTx", "BeginBlock", "EndBlock")
+	shape, err := knownObject(nested, "deliver_tx", "begin_block", "end_block", "DeliverTx", "BeginBlock", "EndBlock")
 	if err != nil {
 		return err
 	}
@@ -238,7 +245,7 @@ func (r *CustomBlockResults) unmarshalLegacy(data []byte, _ map[string]json.RawM
 		} else {
 			allowed = append(allowed, "tags")
 		}
-		f, err := checkedObject(raw, allowed...)
+		f, err := knownObject(raw, allowed...)
 		if err != nil {
 			return err
 		}
@@ -289,7 +296,7 @@ func (r *CustomBlockResults) unmarshalLegacy(data []byte, _ map[string]json.RawM
 		} else {
 			allowed = append(allowed, "tags")
 		}
-		f, err := checkedObject(raw, allowed...)
+		f, err := knownObject(raw, allowed...)
 		if err != nil {
 			return err
 		}

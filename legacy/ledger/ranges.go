@@ -3,7 +3,9 @@ package ledger
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"time"
 )
 
 // Range is one importer's own run of heights on one chain. Every importer
@@ -29,6 +31,23 @@ type Claim struct {
 	r    Range
 }
 
+func lockName(r Range) string {
+	return fmt.Sprintf("legacy import %s %d", r.Chain, r.From)
+}
+
+// unlock gives the range lock back before the connection returns to its
+// pool, where the session would otherwise live on and keep the lock. A
+// session that cannot give it back is closed, which ends the lock with it.
+func unlock(conn *sql.Conn, r Range) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var released bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, lockName(r)).Scan(&released); err != nil || !released {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	_ = conn.Close()
+}
+
 // Begin claims the range and returns where to resume. It refuses a range
 // that overlaps another recorded range of the chain, a range recorded with
 // a different end, and a range another importer is working on right now.
@@ -40,28 +59,24 @@ func Begin(ctx context.Context, db *sql.DB, r Range, build string) (*Claim, Prog
 	if err != nil {
 		return nil, Progress{}, err
 	}
-	fail := func(err error) (*Claim, Progress, error) {
+	var locked bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1, 0))`, lockName(r)).Scan(&locked); err != nil || !locked {
+		// The session holds nothing, so it can go back to the pool. A
+		// session whose state is unknown is closed instead.
+		if err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 		_ = conn.Close()
+		if err != nil {
+			return nil, Progress{}, err
+		}
+		return nil, Progress{}, fmt.Errorf("another importer is working on this range")
+	}
+	fail := func(err error) (*Claim, Progress, error) {
+		unlock(conn, r)
 		return nil, Progress{}, err
 	}
-	var locked bool
-	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1, 0))`,
-		fmt.Sprintf("legacy import %s %d", r.Chain, r.From)).Scan(&locked); err != nil {
-		return fail(err)
-	}
-	if !locked {
-		return fail(fmt.Errorf("another importer is working on this range"))
-	}
-	var overlapping int
-	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM legacy.import_ranges
-WHERE chain_id = $1 AND from_height <> $2 AND from_height <= $3 AND to_height >= $2`, r.Chain, r.From, r.To).Scan(&overlapping); err != nil {
-		return fail(err)
-	}
-	if overlapping != 0 {
-		return fail(fmt.Errorf("the range overlaps another recorded range of this chain"))
-	}
-	if _, err := conn.ExecContext(ctx, `INSERT INTO legacy.import_ranges (chain_id, from_height, to_height, status, next_height, build)
-VALUES ($1, $2, $3, 'running', $2, $4) ON CONFLICT (chain_id, from_height) DO NOTHING`, r.Chain, r.From, r.To, build); err != nil {
+	if err := record(ctx, conn, r, build); err != nil {
 		return fail(err)
 	}
 	var to int64
@@ -84,6 +99,34 @@ WHERE chain_id = $1 AND from_height = $2`, r.Chain, r.From, build); err != nil {
 	return &Claim{conn: conn, r: r}, p, nil
 }
 
+// record adds the range to legacy.import_ranges unless it is there already.
+// Two importers that start at different heights hold different range locks,
+// so the look for an overlap and the insert run under one lock per chain:
+// the second importer sees the first one's range before it adds its own.
+func record(ctx context.Context, conn *sql.Conn, r Range, build string) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "legacy import ranges "+r.Chain); err != nil {
+		return err
+	}
+	var overlapping int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM legacy.import_ranges
+WHERE chain_id = $1 AND from_height <> $2 AND from_height <= $3 AND to_height >= $2`, r.Chain, r.From, r.To).Scan(&overlapping); err != nil {
+		return err
+	}
+	if overlapping != 0 {
+		return fmt.Errorf("the range overlaps another recorded range of this chain")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO legacy.import_ranges (chain_id, from_height, to_height, status, next_height, build)
+VALUES ($1, $2, $3, 'running', $2, $4) ON CONFLICT (chain_id, from_height) DO NOTHING`, r.Chain, r.From, r.To, build); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // Record stores the progress of the range.
 func (c *Claim) Record(ctx context.Context, p Progress) error {
 	if p.Status != "running" && p.Status != "done" && p.Status != "failed" {
@@ -100,5 +143,5 @@ transactions = $7, tax_rows = $8, updated_at = now() WHERE chain_id = $1 AND fro
 
 // Release gives the range up.
 func (c *Claim) Release() {
-	_ = c.conn.Close()
+	unlock(c.conn, c.r)
 }

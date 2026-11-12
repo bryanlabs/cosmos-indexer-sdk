@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -200,4 +201,61 @@ func TestARangeBelongsToOneImporterAndResumesWhereItStopped(t *testing.T) {
 	var recorded string
 	require.NoError(t, db.Owner.Raw(`SELECT status || ' ' || next_height || ' ' || heights_stored || ' ' || heights_held || ' ' || build FROM legacy.import_ranges WHERE chain_id = 'cosmoshub-3' AND from_height = 1`).Scan(&recorded).Error)
 	require.Equal(t, "done 101 100 0 build-b", recorded)
+}
+
+func TestAReleasedRangeIsFreeForAnotherSession(t *testing.T) {
+	db := pgtest.Open(t)
+	ctx := context.Background()
+	pool := importer(t, db)
+	r := ledger.Range{Chain: "cosmoshub-3", From: 1, To: 100}
+	claim, _, err := ledger.Begin(ctx, pool, r, "build-a")
+	require.NoError(t, err)
+	claim.Release()
+	// Keep every idle session of the pool busy, so the next claim runs on a
+	// session that never held the range.
+	for i := 0; i < 3; i++ {
+		busy, err := pool.Conn(ctx)
+		require.NoError(t, err)
+		defer busy.Close()
+	}
+	again, _, err := ledger.Begin(ctx, pool, r, "build-a")
+	require.NoError(t, err, "a released range must not stay locked by a pooled session")
+	// A claim that is refused leaves nothing locked either.
+	_, _, err = ledger.Begin(ctx, pool, ledger.Range{Chain: "cosmoshub-3", From: 1, To: 90}, "build-a")
+	require.Error(t, err)
+	again.Release()
+	var held int
+	require.NoError(t, db.Owner.Raw(`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&held).Error)
+	require.Zero(t, held)
+}
+
+func TestOverlappingRangesClaimedAtOnceGiveOneImporter(t *testing.T) {
+	db := pgtest.Open(t)
+	ctx := context.Background()
+	pool := importer(t, db)
+	for round := int64(0); round < 40; round++ {
+		base := round * 1000
+		ranges := []ledger.Range{{Chain: "cosmoshub-2", From: base + 1, To: base + 100}, {Chain: "cosmoshub-2", From: base + 50, To: base + 150}}
+		errs := make([]error, len(ranges))
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for i := range ranges {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				<-start
+				claim, _, err := ledger.Begin(ctx, pool, ranges[i], "build-a")
+				errs[i] = err
+				if err == nil {
+					claim.Release()
+				}
+			}()
+		}
+		close(start)
+		wait.Wait()
+		require.True(t, (errs[0] == nil) != (errs[1] == nil), "round %d: exactly one of two overlapping ranges may be claimed", round)
+	}
+	var recorded int
+	require.NoError(t, db.Owner.Raw(`SELECT count(*) FROM legacy.import_ranges`).Scan(&recorded).Error)
+	require.Equal(t, 40, recorded)
 }
