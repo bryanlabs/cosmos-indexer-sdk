@@ -176,8 +176,15 @@ func legacyValidatorUpdates(raw json.RawMessage) ([]abci.ValidatorUpdate, error)
 		var typ string
 		var data []byte
 		var power int64
-		if json.Unmarshal(key["type"], &typ) != nil || json.Unmarshal(key["data"], &data) != nil || tmjson.Unmarshal(f["power"], &power) != nil || power < 0 {
+		if json.Unmarshal(key["type"], &typ) != nil || json.Unmarshal(key["data"], &data) != nil {
 			return nil, fmt.Errorf("invalid legacy validator update fields")
+		}
+		// The historical encoder leaves out a zero power, which is how a
+		// validator leaving the set is written. Absent is zero, not an error.
+		if raw, present := f["power"]; present {
+			if tmjson.Unmarshal(raw, &power) != nil || power < 0 {
+				return nil, fmt.Errorf("invalid legacy validator update power")
+			}
 		}
 		var normalized cmtcrypto.PublicKey
 		switch {

@@ -64,6 +64,96 @@ var expectedAction = map[string]string{
 	"cosmos-sdk/MsgVerifyInvariant":             "verify_invariant",
 }
 
+// updateShapes records how each validator update is written, read from the
+// raw capture so it does not depend on the decoder under test. Only key names,
+// the key type word and whether a power is present are kept.
+func updateShapes(result json.RawMessage, s *stats) {
+	if !bytes.Contains(result, []byte("alidator")) {
+		return
+	}
+	var top map[string]json.RawMessage
+	if json.Unmarshal(result, &top) != nil {
+		return
+	}
+	var end map[string]json.RawMessage
+	for _, key := range []string{"results", "end_block", "EndBlock"} {
+		if raw, ok := top[key]; ok {
+			var next map[string]json.RawMessage
+			if json.Unmarshal(raw, &next) == nil && next != nil {
+				if key == "results" {
+					top = next
+					for _, inner := range []string{"end_block", "EndBlock"} {
+						if raw, ok := top[inner]; ok {
+							_ = json.Unmarshal(raw, &end)
+						}
+					}
+				} else {
+					end = next
+				}
+			}
+		}
+	}
+	var updates []map[string]json.RawMessage
+	for _, key := range []string{"validator_updates", "ValidatorUpdates"} {
+		if raw, ok := end[key]; ok && json.Unmarshal(raw, &updates) == nil {
+			break
+		}
+	}
+	for _, u := range updates {
+		keys := make([]string, 0, len(u))
+		for k := range u {
+			if safeAction.MatchString(strings.ToLower(k)) {
+				keys = append(keys, k)
+			} else {
+				keys = append(keys, "(other)")
+			}
+		}
+		sort.Strings(keys)
+		power := "absent"
+		if raw, ok := u["power"]; ok {
+			switch {
+			case len(raw) > 0 && raw[0] == '"':
+				power = "text"
+			case len(raw) > 0 && (raw[0] == '-' || raw[0] >= '0' && raw[0] <= '9'):
+				power = "number"
+			default:
+				power = "other"
+			}
+			if string(raw) == `"0"` || string(raw) == "0" {
+				power += " zero"
+			}
+		}
+		kind := "absent"
+		var key map[string]json.RawMessage
+		if json.Unmarshal(u["pub_key"], &key) == nil && key != nil {
+			var typ string
+			_ = json.Unmarshal(key["type"], &typ)
+			kind = "(other)"
+			if safeAction.MatchString(typ) {
+				kind = typ
+			}
+			names := make([]string, 0, len(key))
+			for k := range key {
+				if safeAction.MatchString(k) {
+					names = append(names, k)
+				}
+			}
+			sort.Strings(names)
+			kind += " with " + strings.Join(names, ",")
+		}
+		s.UpdateShape.add("fields "+strings.Join(keys, ",")+" | key "+kind+" | power "+power, 1)
+	}
+}
+
+// actionName is the action a successful message recorded in its era. The
+// commission withdrawal was renamed between Hub 2 and Hub 3.
+func actionName(chain, aminoName string) string {
+	if aminoName == "cosmos-sdk/MsgWithdrawValidatorCommission" && chain != "cosmoshub-3" {
+		return "withdraw_validator_rewards_all"
+	}
+	return expectedAction[aminoName]
+}
+
 var keyKinds = func() map[[4]byte]string {
 	out := map[[4]byte]string{}
 	for _, name := range []string{"tendermint/PubKeySecp256k1", "tendermint/PubKeyEd25519", "tendermint/PubKeyMultisigThreshold"} {
@@ -99,8 +189,10 @@ type stats struct {
 	BeginEventTypes, EndEventTypes, BeginTagKeys         counter
 	EndTagKeys, BlockExtras                              counter
 	FeeDenoms, FeeShape, ActionCheck, SignerCheck        counter
-	FailedEvidence                                       counter
+	FailedEvidence, UpdateShape                          counter
 	Dirs                                                 map[int64]*dirStat
+	Sample                                               int
+	DirsSeen, DirsUnreadable, CachedHeights              int64
 }
 
 func newStats() *stats {
@@ -115,7 +207,7 @@ func (s *stats) counters() []*counter {
 	return []*counter{&s.Skipped, &s.BlockErrors, &s.ResultErrors, &s.Decode, &s.TxIssues, &s.SigIssues, &s.KeyKinds,
 		&s.MsgStatus, &s.MsgShape, &s.MsgOutcome, &s.MsgsPerTx, &s.Codes, &s.CodeEvidence, &s.LogShape, &s.TxEventTypes,
 		&s.TxTagKeys, &s.Actions, &s.BeginEventTypes, &s.EndEventTypes, &s.BeginTagKeys, &s.EndTagKeys, &s.BlockExtras,
-		&s.FeeDenoms, &s.FeeShape, &s.ActionCheck, &s.SignerCheck, &s.FailedEvidence}
+		&s.FeeDenoms, &s.FeeShape, &s.ActionCheck, &s.SignerCheck, &s.FailedEvidence, &s.UpdateShape}
 }
 
 func (s *stats) merge(o *stats) {
@@ -124,6 +216,10 @@ func (s *stats) merge(o *stats) {
 		a[i].merge(*b[i])
 	}
 	s.Heights += o.Heights
+	s.DirsSeen += o.DirsSeen
+	s.DirsUnreadable += o.DirsUnreadable
+	s.CachedHeights += o.CachedHeights
+	s.Sample = o.Sample
 	s.HeightsWithTxs += o.HeightsWithTxs
 	s.Txs += o.Txs
 	s.TxBytes += o.TxBytes
@@ -148,7 +244,9 @@ func (s *stats) merge(o *stats) {
 }
 
 // spill keeps repeat detection off the heap. A record is a truncated hash, the
-// chain number, height, index and result code. Files are removed on exit.
+// hub number, height, index and result code. Each run writes its own
+// subdirectory so an interrupted run can be repeated without double counting;
+// analyze reads one run or every run under the root.
 type spill struct {
 	mu      sync.Mutex
 	dir     string
@@ -156,13 +254,18 @@ type spill struct {
 	writers [spillBuckets]*bufio.Writer
 }
 
-func newSpill(dir string) (*spill, error) {
-	sp := &spill{dir: dir}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+var hubNumber = map[string]uint8{"cosmoshub-1": 1, "cosmoshub-2": 2, "cosmoshub-3": 3}
+
+func newSpill(root, run string) (*spill, error) {
+	sp := &spill{dir: filepath.Join(root, run)}
+	if err := os.RemoveAll(sp.dir); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(sp.dir, 0o700); err != nil {
 		return nil, err
 	}
 	for i := range sp.files {
-		f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("bucket-%02d", i)), os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+		f, err := os.OpenFile(filepath.Join(sp.dir, fmt.Sprintf("bucket-%02d", i)), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, err
 		}
@@ -184,6 +287,19 @@ func (sp *spill) add(hash [32]byte, chain uint8, height int64, index int, code u
 	sp.mu.Unlock()
 }
 
+func (sp *spill) finish() error {
+	for i, f := range sp.files {
+		if err := sp.writers[i].Flush(); err != nil {
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+	// The marker lets a whole-set analysis ignore a run that was cut short.
+	return os.WriteFile(filepath.Join(sp.dir, "complete"), nil, 0o600)
+}
+
 type inclusion struct {
 	chain  uint8
 	height int64
@@ -191,31 +307,31 @@ type inclusion struct {
 	code   uint32
 }
 
-func (sp *spill) analyze(chains []string) (map[string]counter, error) {
-	out := map[string]counter{}
-	for _, c := range chains {
-		out[c] = counter{}
-	}
-	out["cross-chain"] = counter{}
-	for i := range sp.files {
-		if err := sp.writers[i].Flush(); err != nil {
-			return nil, err
-		}
-		if _, err := sp.files[i].Seek(0, io.SeekStart); err != nil {
-			return nil, err
-		}
+// analyzeRuns counts repeats across the given complete run directories.
+func analyzeRuns(dirs []string) (map[string]counter, error) {
+	out := map[string]counter{"cross-chain": {}}
+	name := func(n uint8) string { return "cosmoshub-" + strconv.Itoa(int(n)) }
+	for bucketNumber := 0; bucketNumber < spillBuckets; bucketNumber++ {
 		seen := map[[16]byte][]inclusion{}
-		reader := bufio.NewReaderSize(sp.files[i], 64<<10)
-		var rec [recordSize]byte
-		for {
-			if _, err := io.ReadFull(reader, rec[:]); err != nil {
-				if err == io.EOF {
-					break
-				}
+		for _, dir := range dirs {
+			f, err := os.Open(filepath.Join(dir, fmt.Sprintf("bucket-%02d", bucketNumber)))
+			if err != nil {
 				return nil, err
 			}
-			key := [16]byte(rec[:16])
-			seen[key] = append(seen[key], inclusion{chain: rec[16], height: int64(binary.BigEndian.Uint64(rec[17:25])), index: int(binary.BigEndian.Uint16(rec[25:27])), code: binary.BigEndian.Uint32(rec[27:31])})
+			reader := bufio.NewReaderSize(f, 64<<10)
+			var rec [recordSize]byte
+			for {
+				if _, err := io.ReadFull(reader, rec[:]); err != nil {
+					if err == io.EOF {
+						break
+					}
+					f.Close()
+					return nil, err
+				}
+				key := [16]byte(rec[:16])
+				seen[key] = append(seen[key], inclusion{chain: rec[16], height: int64(binary.BigEndian.Uint64(rec[17:25])), index: int(binary.BigEndian.Uint16(rec[25:27])), code: binary.BigEndian.Uint32(rec[27:31])})
+			}
+			f.Close()
 		}
 		for _, list := range seen {
 			byChain := map[uint8][]inclusion{}
@@ -226,7 +342,11 @@ func (sp *spill) analyze(chains []string) (map[string]counter, error) {
 				out["cross-chain"].add("hashes included on more than one chain", 1)
 			}
 			for chain, items := range byChain {
-				c := out[chains[chain]]
+				c := out[name(chain)]
+				if c == nil {
+					c = counter{}
+					out[name(chain)] = c
+				}
 				c.add("distinct hashes", 1)
 				if len(items) < 2 {
 					continue
@@ -267,13 +387,20 @@ func (sp *spill) analyze(chains []string) (map[string]counter, error) {
 	return out, nil
 }
 
-func (sp *spill) close() {
-	for _, f := range sp.files {
-		if f != nil {
-			_ = f.Close()
+func completeRuns(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var dirs []string
+	for _, e := range entries {
+		dir := filepath.Join(root, e.Name())
+		if _, err := os.Stat(filepath.Join(dir, "complete")); e.IsDir() && err == nil {
+			dirs = append(dirs, dir)
 		}
 	}
-	_ = os.RemoveAll(sp.dir)
+	sort.Strings(dirs)
+	return dirs, nil
 }
 
 func outcome(code uint32) string {
@@ -467,6 +594,7 @@ func process(j job, opt options, s *stats, sp *spill) {
 		return
 	}
 	raw = nil
+	updateShapes(envelope.Result, s)
 	var results rpc.CustomBlockResults
 	if err := tmjson.Unmarshal(envelope.Result, &results); err != nil {
 		s.ResultErrors.add(safe(err), 1)
@@ -609,6 +737,8 @@ func process(j job, opt options, s *stats, sp *spill) {
 			switch {
 			case m.AminoName == "":
 				name, status = "prefix "+m.Prefix, "opaque (unknown prefix)"
+			case m.Derived == nil && len(m.Signers) > 0:
+				status = "unprojected (share-valued amount, signer known)"
 			case m.Derived == nil:
 				status = "unsupported (known name, no projection)"
 			}
@@ -618,7 +748,7 @@ func process(j job, opt options, s *stats, sp *spill) {
 			}
 			s.MsgStatus.add(name+" | "+status, 1)
 			s.MsgOutcome.add(name+" | in "+outcome(result.Code)+" transaction", 1)
-			expected = append(expected, expectedAction[m.AminoName])
+			expected = append(expected, actionName(j.chain, m.AminoName))
 		}
 		if projected {
 			s.Decode.add("ok and every message projected", 1)
@@ -744,110 +874,36 @@ func printCounter(w io.Writer, title string, c counter) {
 	}
 }
 
-func main() {
-	root := flag.String("root", "/cache", "cache root holding <chain>/<height/10000>/ captures")
-	chainList := flag.String("chains", "cosmoshub-3", "comma separated chain ids")
-	perDir := flag.Int("per-dir", 100, "contiguous heights sampled from each 10000 height directory; 0 reads all")
-	workers := flag.Int("workers", 1, "parallel readers")
-	maxFile := flag.Int64("max-file-bytes", 2<<20, "skip and count heights whose compressed capture is larger")
-	maxBody := flag.Int64("max-body-bytes", 24<<20, "decompressed size limit per capture")
-	spillDir := flag.String("spill-dir", "", "private scratch directory for repeat detection, removed on exit")
-	progress := flag.Int("progress-dirs", 25, "report progress to stderr every N directories")
-	flag.Parse()
-	if *spillDir == "" {
-		fmt.Fprintln(os.Stderr, "spill-dir is required")
-		os.Exit(2)
-	}
-	// A chain may carry its own sample size, for example cosmoshub-2:0.
+// result is what one run emits: aggregate counters only.
+type result struct {
+	Started  time.Time
+	Elapsed  string
+	Workers  int
+	MaxFile  int64
+	Dirs     string
+	Chains   map[string]*stats
+	Repeats  map[string]counter
+	RunCount int
+}
+
+func report(out io.Writer, r *result, repeatScope string) {
+	fmt.Fprintf(out, "legacy census, started %s, %d run(s) merged\nworkers %d, size guard %d bytes compressed\n", r.Started.UTC().Format(time.RFC3339), r.RunCount, r.Workers, r.MaxFile)
 	var chains []string
-	sample := map[string]int{}
-	for _, item := range strings.Split(*chainList, ",") {
-		name, size, found := strings.Cut(item, ":")
-		chains = append(chains, name)
-		sample[name] = *perDir
-		if found {
-			n, err := strconv.Atoi(size)
-			if err != nil || n < 0 {
-				fmt.Fprintln(os.Stderr, "invalid per chain sample size")
-				os.Exit(2)
-			}
-			sample[name] = n
-		}
+	for chain := range r.Chains {
+		chains = append(chains, chain)
 	}
-	sp, err := newSpill(*spillDir)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "cannot create spill directory")
-		os.Exit(1)
-	}
-	defer sp.close()
-	started := time.Now()
-	opt := options{maxFile: *maxFile, maxBody: *maxBody}
-	out := bufio.NewWriter(os.Stdout)
-	defer out.Flush()
-	fmt.Fprintf(out, "legacy census, %s\nworkers %d, size guard %d bytes compressed\n", time.Now().UTC().Format(time.RFC3339), *workers, *maxFile)
-	totals := map[string]*stats{}
-	for number, chain := range chains {
-		entries, err := os.ReadDir(filepath.Join(*root, chain))
-		if err != nil {
-			fmt.Fprintf(out, "\n== %s: no cache directory\n", chain)
-			continue
-		}
-		var dirs []int64
-		for _, e := range entries {
-			if n, err := strconv.ParseInt(e.Name(), 10, 64); err == nil && e.IsDir() {
-				dirs = append(dirs, n)
-			}
-		}
-		sort.Slice(dirs, func(a, b int) bool { return dirs[a] < dirs[b] })
-		jobs := make(chan job, 256)
-		results := make([]*stats, *workers)
-		var wg sync.WaitGroup
-		for w := 0; w < *workers; w++ {
-			results[w] = newStats()
-			wg.Add(1)
-			go func(s *stats) {
-				defer wg.Done()
-				for j := range jobs {
-					process(j, opt, s, sp)
-				}
-			}(results[w])
-		}
-		var cached, incomplete int64
-		for n, dir := range dirs {
-			path := filepath.Join(*root, chain, strconv.FormatInt(dir, 10))
-			heights, err := listDir(path)
-			if err != nil {
-				incomplete++
-				continue
-			}
-			cached += int64(len(heights))
-			if take := sample[chain]; take > 0 && len(heights) > take {
-				start := (len(heights) - take) * int(dir*7919%1000) / 1000
-				heights = heights[start : start+take]
-			}
-			for _, h := range heights {
-				base := filepath.Join(path, strconv.FormatInt(h, 10))
-				jobs <- job{chain: chain, number: uint8(number), dir: dir, height: h, block: base + "-block.raw.gz", result: base + "-block_results.raw.gz"}
-			}
-			if *progress > 0 && (n+1)%*progress == 0 {
-				fmt.Fprintf(os.Stderr, "%s: %d of %d directories queued, %s elapsed\n", chain, n+1, len(dirs), time.Since(started).Round(time.Second))
-			}
-		}
-		close(jobs)
-		wg.Wait()
-		total := newStats()
-		for _, s := range results {
-			total.merge(s)
-		}
-		totals[chain] = total
+	sort.Sort(sort.Reverse(sort.StringSlice(chains)))
+	for _, chain := range chains {
+		total := r.Chains[chain]
 		fmt.Fprintf(out, "\n== %s\n", chain)
-		fmt.Fprintf(out, "  sample: %d contiguous heights per 10000 height directory (0 means every cached height)\n", sample[chain])
-		fmt.Fprintf(out, "  directories with captures: %d (unreadable %d), complete cached heights seen: %d\n", len(dirs), incomplete, cached)
+		fmt.Fprintf(out, "  sample: %d contiguous heights per 10000 height directory (0 means every cached height)\n", total.Sample)
+		fmt.Fprintf(out, "  directories with captures: %d (unreadable %d), complete cached heights seen: %d\n", total.DirsSeen, total.DirsUnreadable, total.CachedHeights)
 		fmt.Fprintf(out, "  heights read: %d, lowest %d (%s), highest %d (%s)\n", total.Heights, total.FirstHeight, total.FirstTime.UTC().Format("2006-01-02"), total.LastHeight, total.LastTime.UTC().Format("2006-01-02"))
 		fmt.Fprintf(out, "  heights with transactions: %d, transactions: %d, transaction bytes: %d, most transactions in one height: %d\n", total.HeightsWithTxs, total.Txs, total.TxBytes, total.MaxTxsInBlock)
 		printCounter(out, "heights skipped", total.Skipped)
 		printCounter(out, "block capture errors", total.BlockErrors)
 		printCounter(out, "result capture errors", total.ResultErrors)
+		printCounter(out, "validator update shapes", total.UpdateShape)
 		printCounter(out, "transaction decode", total.Decode)
 		printCounter(out, "transaction issues from the decoder", total.TxIssues)
 		printCounter(out, "messages by type and decoder status", total.MsgStatus)
@@ -895,16 +951,208 @@ func main() {
 			fmt.Fprintf(out, "    heights %d to %d: %s (%d heights read)\n", numbers[i]*10000, numbers[k-1]*10000+9999, signature(total.Dirs[numbers[i]]), heights)
 			i = k
 		}
-		out.Flush()
 	}
-	repeats, err := sp.analyze(chains)
-	if err != nil {
-		fmt.Fprintln(out, "\nrepeat analysis failed")
-	} else {
-		fmt.Fprintf(out, "\n== repeated transaction hashes (counts only)\n")
-		for _, chain := range append(append([]string{}, chains...), "cross-chain") {
-			printCounter(out, chain, repeats[chain])
+	fmt.Fprintf(out, "\n== repeated transaction hashes (counts only; %s)\n", repeatScope)
+	var names []string
+	for name := range r.Repeats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		printCounter(out, name, r.Repeats[name])
+	}
+	fmt.Fprintf(out, "\nelapsed %s\n", r.Elapsed)
+}
+
+func fail(message string) {
+	fmt.Fprintln(os.Stderr, message)
+	os.Exit(1)
+}
+
+func main() {
+	root := flag.String("root", "/cache", "cache root holding <chain>/<height/10000>/ captures")
+	chainList := flag.String("chains", "cosmoshub-3", "comma separated chain ids, each optionally with :<sample size>")
+	perDir := flag.Int("per-dir", 100, "contiguous heights sampled from each 10000 height directory; 0 reads all")
+	dirRange := flag.String("dirs", "", "only directories in this inclusive range, for example 0-49")
+	workers := flag.Int("workers", 1, "parallel readers")
+	maxFile := flag.Int64("max-file-bytes", 2<<20, "skip and count heights whose compressed capture is larger")
+	maxBody := flag.Int64("max-body-bytes", 24<<20, "decompressed size limit per capture")
+	spillRoot := flag.String("spill-dir", "", "private scratch directory for repeat detection")
+	run := flag.String("run", "run", "name of this run inside the spill directory")
+	asJSON := flag.Bool("json", false, "emit this run's aggregate counters as JSON for a later merge")
+	merge := flag.String("merge", "", "comma separated JSON run files to merge into one report; reads no cache")
+	repeatsFile := flag.String("repeats", "", "with merge: JSON from analyze-all to use for the repeat section")
+	analyzeAll := flag.Bool("analyze-all", false, "count repeats across every complete run in the spill directory and emit JSON; reads no cache")
+	progress := flag.Int("progress-dirs", 25, "report progress to stderr every N directories")
+	flag.Parse()
+	out := bufio.NewWriter(os.Stdout)
+	defer out.Flush()
+
+	if *merge != "" {
+		total := &result{Chains: map[string]*stats{}, Repeats: map[string]counter{}}
+		var elapsed time.Duration
+		for _, path := range strings.Split(*merge, ",") {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				fail("cannot read a run file")
+			}
+			var r result
+			if json.Unmarshal(raw, &r) != nil {
+				fail("run file is not census JSON")
+			}
+			if total.Started.IsZero() || r.Started.Before(total.Started) {
+				total.Started = r.Started
+			}
+			total.Workers, total.MaxFile = r.Workers, r.MaxFile
+			total.RunCount++
+			d, _ := time.ParseDuration(r.Elapsed)
+			elapsed += d
+			for chain, s := range r.Chains {
+				if total.Chains[chain] == nil {
+					total.Chains[chain] = newStats()
+				}
+				total.Chains[chain].merge(s)
+			}
+			for name, c := range r.Repeats {
+				if total.Repeats[name] == nil {
+					total.Repeats[name] = counter{}
+				}
+				total.Repeats[name].merge(c)
+			}
+		}
+		total.Elapsed = elapsed.String()
+		scope := "summed per run, so a repeat that spans two runs is not counted"
+		if *repeatsFile != "" {
+			raw, err := os.ReadFile(*repeatsFile)
+			var repeats map[string]counter
+			if err != nil || json.Unmarshal(raw, &repeats) != nil {
+				fail("cannot read the repeats file")
+			}
+			total.Repeats = repeats
+			scope = "counted across every run together"
+		}
+		report(out, total, scope)
+		return
+	}
+	if *spillRoot == "" {
+		fail("spill-dir is required")
+	}
+	if *analyzeAll {
+		dirs, err := completeRuns(*spillRoot)
+		if err != nil {
+			fail("cannot list the spill directory")
+		}
+		repeats, err := analyzeRuns(dirs)
+		if err != nil {
+			fail("repeat analysis failed")
+		}
+		repeats["runs"] = counter{"complete runs analyzed": int64(len(dirs))}
+		_ = json.NewEncoder(out).Encode(repeats)
+		return
+	}
+
+	first, last := int64(0), int64(1<<62)
+	if *dirRange != "" {
+		lo, hi, ok := strings.Cut(*dirRange, "-")
+		var errLo, errHi error
+		first, errLo = strconv.ParseInt(lo, 10, 64)
+		last, errHi = strconv.ParseInt(hi, 10, 64)
+		if !ok || errLo != nil || errHi != nil || last < first {
+			fail("invalid directory range")
 		}
 	}
-	fmt.Fprintf(out, "\nelapsed %s\n", time.Since(started).Round(time.Second))
+	// A chain may carry its own sample size, for example cosmoshub-2:0.
+	var chains []string
+	sample := map[string]int{}
+	for _, item := range strings.Split(*chainList, ",") {
+		name, size, found := strings.Cut(item, ":")
+		if hubNumber[name] == 0 {
+			fail("unsupported chain")
+		}
+		chains = append(chains, name)
+		sample[name] = *perDir
+		if found {
+			n, err := strconv.Atoi(size)
+			if err != nil || n < 0 {
+				fail("invalid per chain sample size")
+			}
+			sample[name] = n
+		}
+	}
+	sp, err := newSpill(*spillRoot, *run)
+	if err != nil {
+		fail("cannot create spill directory")
+	}
+	started := time.Now()
+	opt := options{maxFile: *maxFile, maxBody: *maxBody}
+	total := &result{Started: started, Workers: *workers, MaxFile: *maxFile, Dirs: *dirRange, Chains: map[string]*stats{}, RunCount: 1}
+	for _, chain := range chains {
+		entries, err := os.ReadDir(filepath.Join(*root, chain))
+		if err != nil {
+			continue
+		}
+		var dirs []int64
+		for _, e := range entries {
+			if n, err := strconv.ParseInt(e.Name(), 10, 64); err == nil && e.IsDir() && n >= first && n <= last {
+				dirs = append(dirs, n)
+			}
+		}
+		sort.Slice(dirs, func(a, b int) bool { return dirs[a] < dirs[b] })
+		jobs := make(chan job, 256)
+		results := make([]*stats, *workers)
+		var wg sync.WaitGroup
+		for w := 0; w < *workers; w++ {
+			results[w] = newStats()
+			wg.Add(1)
+			go func(s *stats) {
+				defer wg.Done()
+				for j := range jobs {
+					process(j, opt, s, sp)
+				}
+			}(results[w])
+		}
+		sum := newStats()
+		sum.Sample = sample[chain]
+		for n, dir := range dirs {
+			path := filepath.Join(*root, chain, strconv.FormatInt(dir, 10))
+			heights, err := listDir(path)
+			sum.DirsSeen++
+			if err != nil {
+				sum.DirsUnreadable++
+				continue
+			}
+			sum.CachedHeights += int64(len(heights))
+			if take := sample[chain]; take > 0 && len(heights) > take {
+				start := (len(heights) - take) * int(dir*7919%1000) / 1000
+				heights = heights[start : start+take]
+			}
+			for _, h := range heights {
+				base := filepath.Join(path, strconv.FormatInt(h, 10))
+				jobs <- job{chain: chain, number: hubNumber[chain], dir: dir, height: h, block: base + "-block.raw.gz", result: base + "-block_results.raw.gz"}
+			}
+			if *progress > 0 && (n+1)%*progress == 0 {
+				fmt.Fprintf(os.Stderr, "%s: %d of %d directories queued, %s elapsed\n", chain, n+1, len(dirs), time.Since(started).Round(time.Second))
+			}
+		}
+		close(jobs)
+		wg.Wait()
+		for _, s := range results {
+			sum.merge(s)
+		}
+		sum.Sample = sample[chain]
+		total.Chains[chain] = sum
+	}
+	if err := sp.finish(); err != nil {
+		fail("cannot finish the spill")
+	}
+	total.Repeats, err = analyzeRuns([]string{sp.dir})
+	if err != nil {
+		fail("repeat analysis failed")
+	}
+	total.Elapsed = time.Since(started).Round(time.Second).String()
+	if *asJSON {
+		_ = json.NewEncoder(out).Encode(total)
+		return
+	}
+	report(out, total, "this run only")
 }

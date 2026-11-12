@@ -64,6 +64,37 @@ func TestLegacyResultsRejectAmbiguityAndCorruption(t *testing.T) {
 	require.Equal(t, int64(12), modern.TxsResults[0].GasUsed)
 }
 
+// A validator leaving the set is written with no power field at all. The key
+// below is thirty-two synthetic bytes.
+func TestLegacyResultsValidatorRemovalWithoutPower(t *testing.T) {
+	key := `{"type":"ed25519","data":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="}`
+	for _, tc := range []struct {
+		end   string
+		power []int64
+	}{
+		{`{"validator_updates":[{"pub_key":` + key + `}]}`, []int64{0}},
+		{`{"validator_updates":[{"pub_key":` + key + `,"power":"0"}]}`, []int64{0}},
+		{`{"validator_updates":[{"pub_key":` + key + `,"power":"12"},{"pub_key":` + key + `}]}`, []int64{12, 0}},
+	} {
+		var result CustomBlockResults
+		require.NoError(t, tmjson.Unmarshal([]byte(`{"height":"9","results":{"deliver_tx":[],"end_block":`+tc.end+`}}`), &result))
+		require.Len(t, result.ValidatorUpdates, len(tc.power))
+		for i, power := range tc.power {
+			require.Equal(t, power, result.ValidatorUpdates[i].Power)
+			require.Len(t, result.ValidatorUpdates[i].PubKey.GetEd25519(), 32)
+		}
+	}
+	for _, end := range []string{
+		`{"validator_updates":[{"pub_key":` + key + `,"power":"-1"}]}`,
+		`{"validator_updates":[{"pub_key":` + key + `,"power":"many"}]}`,
+		`{"validator_updates":[{"power":"3"}]}`,
+		`{"validator_updates":[{"pub_key":{"type":"ed25519","data":"Bwc="},"power":"3"}]}`,
+	} {
+		var result CustomBlockResults
+		require.Error(t, tmjson.Unmarshal([]byte(`{"height":"9","results":{"deliver_tx":[],"end_block":`+end+`}}`), &result))
+	}
+}
+
 // Optional local-only originals verify that sanitization did not hide a codec
 // incompatibility. Never place these files in the repository or log their data.
 func TestLegacyResultsPrivateOriginals(t *testing.T) {

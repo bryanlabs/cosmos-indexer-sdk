@@ -74,6 +74,7 @@ func fixtureCodec(chain string) *codec.LegacyAmino {
 	c.RegisterConcrete(fixtureWithdraw{}, "cosmos-sdk/MsgWithdrawDelegationReward", nil)
 	c.RegisterConcrete(fixtureMulti{}, "cosmos-sdk/MsgMultiSend", nil)
 	c.RegisterConcrete(fixtureUnknown{}, "future/Unknown", nil)
+	registerProjectionFixtures(c, chain)
 	name := "auth/StdTx"
 	if chain == "cosmoshub-3" {
 		name = "cosmos-sdk/StdTx"
@@ -187,7 +188,7 @@ func TestAminoUnknownFieldsAndCorruption(t *testing.T) {
 	// A known message with a future field stays opaque, with its entire bytes.
 	fields, _ := scan(raw[n+4:])
 	msg := append(bytes.Clone(value(fields, 1)), unknown...)
-	decoded, err := decodeMessage(msg)
+	decoded, err := decodeMessage("cosmoshub-3", msg)
 	require.NoError(t, err)
 	require.Nil(t, decoded.Derived)
 	require.NotEmpty(t, decoded.Issue)

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strconv"
 	"unicode/utf8"
@@ -105,14 +106,18 @@ func Decode(chain string, input []byte) (*Tx, error) {
 			if f.Wire != 2 {
 				return nil, fmt.Errorf("invalid Amino message field")
 			}
-			msg, err := decodeMessage(f.Value)
+			msg, err := decodeMessage(chain, f.Value)
 			if err != nil {
 				return nil, err
 			}
 			tx.Messages = append(tx.Messages, msg)
 			if msg.Issue != "" {
 				tx.Issues = append(tx.Issues, msg.Issue)
-				tx.SignersComplete = false
+				// A message can be unprojectable while its signer is still
+				// exact. Only a message with no known signer breaks the union.
+				if len(msg.Signers) == 0 {
+					tx.SignersComplete = false
+				}
 			}
 			for _, addr := range msg.Signers {
 				if !contains(tx.Signers, addr) {
@@ -382,7 +387,7 @@ var messageNames = []string{
 	"cosmos-sdk/MsgDeposit", "cosmos-sdk/MsgVote", "cosmos-sdk/MsgSubmitProposal", "cosmos-sdk/MsgCreateValidator", "cosmos-sdk/MsgEditValidator", "cosmos-sdk/MsgUnjail", "cosmos-sdk/MsgVerifyInvariant",
 }
 
-func decodeMessage(raw []byte) (Message, error) {
+func decodeMessage(chain string, raw []byte) (Message, error) {
 	if len(raw) < 4 {
 		return Message{}, fmt.Errorf("truncated Amino message prefix")
 	}
@@ -405,7 +410,12 @@ func decodeMessage(raw []byte) (Message, error) {
 		return Message{}, err
 	}
 	msg.Fields = fields
-	derived, signers, err := derive(name, fields)
+	derived, signers, err := derive(chain, name, fields)
+	if errors.Is(err, errShareValued) {
+		msg.Issue = shareValuedIssue
+		msg.Signers = signers
+		return msg, nil
+	}
 	if err != nil {
 		msg.Issue = "unsupported or malformed Amino message schema"
 		return msg, nil
@@ -415,7 +425,7 @@ func decodeMessage(raw []byte) (Message, error) {
 	msg.DerivedTypeURL = sdk.MsgTypeURL(derived)
 	return msg, nil
 }
-func derive(name string, f []Field) (sdk.Msg, []sdk.AccAddress, error) {
+func derive(chain, name string, f []Field) (sdk.Msg, []sdk.AccAddress, error) {
 	failure := fmt.Errorf("unsupported Amino message projection")
 	account := func(num uint64) (string, error) {
 		b := value(f, num)
@@ -502,6 +512,20 @@ func derive(name string, f []Field) (sdk.Msg, []sdk.AccAddress, error) {
 		if e != nil {
 			return nil, nil, e
 		}
+		if chain == "cosmoshub-1" && name != "cosmos-sdk/MsgDelegate" {
+			// Hub 1 undelegated and redelegated a share quantity, not coins.
+			// Turning shares into coins needs the validator's exchange rate
+			// at that height, which is state, so no amount is projected.
+			if name == "cosmos-sdk/MsgBeginRedelegate" {
+				if _, e := validator(3); e != nil {
+					return nil, nil, e
+				}
+			}
+			if _, ok := decimal(value(f, amountNum)); !ok {
+				return nil, nil, failure
+			}
+			return nil, []sdk.AccAddress{bytes.Clone(value(f, 1))}, errShareValued
+		}
 		amount, e := coin(value(f, amountNum))
 		if e != nil {
 			return nil, nil, e
@@ -570,7 +594,7 @@ func derive(name string, f []Field) (sdk.Msg, []sdk.AccAddress, error) {
 		derived = &gov.MsgDeposit{ProposalId: uintValue(f, 1), Depositor: depositor, Amount: amount}
 		signers = []sdk.AccAddress{bytes.Clone(value(f, 2))}
 	default:
-		return nil, nil, failure
+		return deriveGoverning(chain, name, f)
 	}
 	return derived, signers, nil
 }
