@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/core"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/capture"
@@ -70,6 +71,7 @@ func main() {
 	out := flag.String("out", "", "write settled failures here as chain/height/index and a verdict")
 	signatures := flag.Bool("signatures", false, "follow each account's sequence through the signatures, one transaction at a time")
 	workers := flag.Int("workers", 4, "parallel readers")
+	every := flag.Duration("progress", 30*time.Second, "time between progress lines of the signature pass")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
 	flag.Parse()
 	if *to < *from || *from <= 0 || *workers <= 0 {
@@ -105,7 +107,7 @@ func main() {
 		}
 	}
 	if *signatures {
-		ledger, heights, faults, unchecked := followSignatures(*root, *chain, *from, *to, *maxBody, *workers, opening, closing)
+		ledger, heights, faults, unchecked := followSignatures(*root, *chain, *from, *to, *maxBody, *workers, *every, opening, closing)
 		complete := heights["read"] == *to-*from+1
 		report := ledger.Close(*whole && complete)
 		fmt.Printf("chain %s heights %d to %d, signatures followed in chain order\n", *chain, *from, *to)

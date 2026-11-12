@@ -55,9 +55,11 @@ Serving configuration, transaction/search paths, and block-event paths remain
 blocked, including empty legacy blocks, until all of:
 
 - Inclusion-scoped database identity, including repeat/cross-chain hashes
-  (prototyped offline in `legacy/store`, not wired in).
-- Per-hub genesis balances, delegations and vesting imports.
-- Terminal-to-next-genesis per-address reconciliation.
+  (the `legacy` schema below; not read by the API).
+- Per-hub genesis balances, delegations and vesting imports
+  (`cmd/legacy-genesis`).
+- Terminal-to-next-genesis per-address reconciliation (`cmd/legacy-close`,
+  Hub 3 only).
 - Failed-fee commitment and era-specific economic event classification.
 - Historical daily balances and report routing.
 
@@ -85,12 +87,13 @@ GOPROXY=off GOMAXPROCS=2 go test -p 1 ./core -run 'TestLegacy' -count=1
 The optional original tests print only schema/coverage metadata. No private
 fixtures may be committed or attached to review output.
 
-`legacy/store` tests need a private throwaway Postgres on loopback and skip
+The Postgres tests (`legacy/schema`, `legacy/genesis`, `legacy/ledger`,
+`legacy/books`) need a private throwaway Postgres on loopback and skip
 without one. They refuse port 15432.
 
 ```
 LEGACY_STORE_TEST_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=postgres sslmode=disable" \
-GOPROXY=off GOMAXPROCS=2 go test -p 1 ./legacy/store -count=1
+GOPROXY=off GOMAXPROCS=2 go test -p 1 ./legacy/... -count=1
 ```
 
 ## Census
@@ -112,25 +115,62 @@ legacy-census --root /cache --chains cosmoshub-3:100,cosmoshub-2:0 --workers 1
 multiples of N, which makes a pass over every transaction about three times
 cheaper. Without it every result is read.
 
-## Offline import
+## Import
 
-`core.LegacyStoreBlock` turns a decoded cosmoshub-3 height into store rows:
-signers, the fee when the chain is known to have charged it, messages, and
-the tax rows the serving classifier gives for them. A height with any
-unresolved transaction is refused whole. `cmd/legacy-import` runs cache,
-decode, classify and store end to end. It accepts only a loopback database
-whose name starts with `legacy_`, refuses port 15432, and prints aggregate
-counts only. Hub 1 and Hub 2 are refused until their tags have a classifier.
+`core.LegacyLedgerBlock` turns a decoded cosmoshub-3 height into what the
+`legacy` schema keeps: the block, every inclusion with its signers and its
+fee verdict, the tax rows the serving classifier gives for each executed
+message, and the block events that say something happened to an account or
+a validator. A height with any unresolved transaction is refused whole.
+Beyond the classifier's rows it adds:
+
+- the address a reward was paid to, in the row's detail as `paid_to`, when
+  the withdraw address is not the delegator (the row still names the
+  delegator);
+- one row per payer of a multi send with several payers (the classifier
+  gives only the rows of the receivers);
+- at the end of a block: a row for each completed unbonding, each refunded
+  governance deposit, each community pool spend, and the commission paid out
+  when a validator with no stake left is removed.
+
+It refuses a message whose reward and commission rows do not add up to what
+the distribution account paid while the message ran.
+
+`cmd/legacy-import` runs cache, decode, classify and store for one explicit
+range of heights through `legacy/ledger`. It refuses a connection that can
+reach anything outside the `legacy` schema, claims its range in
+`legacy.import_ranges` (no two importers on one range, no overlapping
+ranges), checks that each block names the block before it as its parent,
+stores heights in batches, and resumes where it stopped. A stored height is
+never rewritten: a rerun that reads something different from what is stored
+stops. It prints a progress line and aggregate counts only. Hub 1 and Hub 2
+are refused until their tags have a classifier.
 
 ```
-LEGACY_IMPORT_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=legacy_<name> sslmode=disable" \
-legacy-import --cache /path/to/cache --create-schema --from 1000000 --to 1001999
+LEGACY_IMPORT_DSN="host=<host> port=<port> user=legacy_importer password=<password> dbname=<name> sslmode=disable" \
+legacy-import --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200790 --workers 8 --resolutions verdicts.txt
 ```
 
-Pass `--create-schema` once, alone, on an empty private database. Later
-runs, and parallel ranges, only check that the inclusion table and the guard
-are present. `--resolutions <file>` applies fee verdicts written by
-`legacy-seqcheck`.
+`--resolutions <file>` applies fee verdicts written by `legacy-seqcheck`.
+The range is done only when every height in it is stored; a held height
+leaves it failed and the command exits 1.
+
+## Books close
+
+`cmd/legacy-close` checks that the stored history of a chain explains the
+balances the next chain started with (`legacy/books`). For every address it
+takes the spendable balance in the chain's genesis file, applies every
+stored row and every charged fee up to the export height, and compares the
+result with the spendable balance in the next chain's genesis file. Module
+accounts are left out and counted. It prints counts and totals only, and
+with `--record` replaces the chain's `liquid` lines in
+`legacy.reconciliation`, one per address, closed or open. It supports a
+chain whose export paid nothing into balances, which is Hub 3; Hub 1 and
+Hub 2 need their restart payout rows first.
+
+```
+LEGACY_IMPORT_DSN="... user=legacy_importer ..." legacy-close --chain cosmoshub-3 --record
+```
 
 ## Account sequence check
 
@@ -150,7 +190,10 @@ legacy-seqcheck --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200791
 ```
 
 `--signatures` follows each account one transaction at a time instead of
-counting. `Tx.SignDoc` rebuilds the bytes each era signed (sorted Amino JSON
+counting. A signature is checked against the public key in the transaction,
+or against the key the account already has on record when the transaction
+carries none or carries one that is not the signer's (the chain ignored a
+key in the transaction once the account had one). `Tx.SignDoc` rebuilds the bytes each era signed (sorted Amino JSON
 of the chain id, fee, memo, messages, account number and sequence) and
 `VerifySignature` checks them against the public key. A fee paying
 transaction whose signature verifies at a sequence fixes the account there,
@@ -172,8 +215,11 @@ a role that has no right on anything else (`legacy/schema`). Rows are keyed
 by chain first: `legacy.blocks` by (chain_id, height), `legacy.tx_inclusions`
 by (chain_id, height, tx_index) with a hash that may repeat, and
 `legacy.taxable_events` by (chain_id, height, phase, tx_index, msg_index,
-sub_index). What the chain recorded is written once: a trigger refuses any
-update, delete or truncate on those tables, for every role.
+sub_index). `legacy.block_events` keeps the begin and end block events
+later steps need (slashes, completed unbondings and redelegations, proposals
+that ended, duplicate vote evidence). What the chain recorded is written
+once: a trigger refuses any update, delete or truncate on the block,
+inclusion, block event and genesis tables, for every role.
 
 `schema.Confined` reads the catalog and lists every way the connected role
 could reach outside the schema or rewrite a written-once table. Every legacy

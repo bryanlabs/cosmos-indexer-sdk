@@ -32,7 +32,7 @@ var roleName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,40}$`)
 
 // writtenOnce lists the tables that hold what the chain recorded. The
 // importer may add rows to them and nothing more.
-var writtenOnce = []string{"blocks", "tx_inclusions", "taxable_events", "genesis_files", "genesis_accounts",
+var writtenOnce = []string{"blocks", "tx_inclusions", "block_events", "taxable_events", "genesis_files", "genesis_accounts",
 	"genesis_delegations", "genesis_unbondings", "genesis_validators", "genesis_withdraw_addresses"}
 
 // confinedSQL is one query that returns a line for every way the named role

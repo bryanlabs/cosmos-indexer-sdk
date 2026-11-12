@@ -1,37 +1,40 @@
-// Command legacy-import is the offline prototype importer for Cosmos Hub 3.
-// It reads retained block captures, decodes them with the legacy candidate,
-// builds tax rows with the serving classifier and stores them through the
-// inclusion store. It makes no network calls. It only accepts a loopback
-// database whose name starts with "legacy_", and refuses port 15432, so it
-// cannot be pointed at the serving database. Output is aggregate counts only:
-// no addresses, amounts, memos or hashes are printed.
+// Command legacy-import stores one explicit range of Cosmos Hub 3 heights
+// in the legacy schema. It reads retained block captures, decodes them with
+// the legacy decoder, builds tax rows with the serving classifier and writes
+// them through the legacy ledger. It makes no network call other than its
+// database connection.
+//
+// It refuses to write through a connection that can reach anything outside
+// the legacy schema, so it cannot touch a serving table even when pointed at
+// the serving database. Output is counts only: no addresses, amounts, memos
+// or hashes are printed.
 package main
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/core"
-	indexerdb "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/capture"
-	"github.com/DefiantLabs/cosmos-indexer/legacy/store"
-	"github.com/DefiantLabs/cosmos-indexer/tax"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/ledger"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/schema"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
 var (
-	digits      = regexp.MustCompile(`\d+`)
-	privateName = regexp.MustCompile(`^legacy_[a-z0-9_]{1,40}$`)
-	safeText    = regexp.MustCompile(`^[A-Za-z0-9 _.,:/()'-]{1,90}$`)
+	digits   = regexp.MustCompile(`\d+`)
+	safeText = regexp.MustCompile(`^[A-Za-z0-9 _.,:/()'-]{1,110}$`)
 )
 
 func safe(err error) string {
@@ -42,52 +45,9 @@ func safe(err error) string {
 	return text
 }
 
-func openPrivate(dsn string, createSchema bool) (*gorm.DB, error) {
-	fields := map[string]string{}
-	for _, part := range strings.Fields(dsn) {
-		k, v, _ := strings.Cut(part, "=")
-		fields[k] = v
-	}
-	ip := net.ParseIP(fields["host"])
-	if ip == nil || !ip.IsLoopback() || fields["port"] == "" || fields["port"] == "15432" || !privateName.MatchString(fields["dbname"]) {
-		return nil, fmt.Errorf("refusing a database that is not a private loopback database with a legacy_ name")
-	}
-	quiet := &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)}
-	if createSchema {
-		// The name was checked above to be legacy_ plus identifier characters.
-		admin := strings.Replace(dsn, "dbname="+fields["dbname"], "dbname=postgres", 1)
-		if server, err := gorm.Open(postgres.Open(admin), quiet); err == nil {
-			var exists bool
-			server.Raw(`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = ?)`, fields["dbname"]).Scan(&exists)
-			if !exists {
-				server.Exec("CREATE DATABASE " + fields["dbname"])
-			}
-			if sql, err := server.DB(); err == nil {
-				_ = sql.Close()
-			}
-		}
-	}
-	db, err := gorm.Open(postgres.Open(dsn), quiet)
-	if err != nil {
-		return nil, fmt.Errorf("private database unavailable")
-	}
-	if createSchema {
-		if err := indexerdb.MigrateModels(db); err != nil {
-			return nil, err
-		}
-		if err := db.AutoMigrate(&tax.TaxableEvent{}); err != nil {
-			return nil, err
-		}
-	}
-	if createSchema {
-		if err := store.Migrate(db); err != nil {
-			return nil, err
-		}
-		if err := store.InstallCrossChainGuard(db); err != nil {
-			return nil, err
-		}
-	}
-	return db, store.Ready(db)
+func fail(text string) {
+	fmt.Fprintln(os.Stderr, text)
+	os.Exit(2)
 }
 
 type counter map[string]int64
@@ -109,132 +69,228 @@ func (c counter) print(title string) {
 	}
 }
 
+// outcome is what reading one height gave: a block to store, or why not.
+type outcome struct {
+	block    *ledger.Block
+	previous string
+	missing  bool
+	err      error
+	txs      int
+}
+
+func open() (*sql.DB, error) {
+	db, err := gorm.Open(postgres.Open(os.Getenv("LEGACY_IMPORT_DSN")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		return nil, fmt.Errorf("database unavailable")
+	}
+	findings, err := schema.Confined(db)
+	if err != nil {
+		return nil, fmt.Errorf("catalog not readable")
+	}
+	if len(findings) > 0 {
+		for _, finding := range findings {
+			fmt.Fprintln(os.Stderr, finding)
+		}
+		return nil, fmt.Errorf("refusing a connection that is not confined to the legacy schema")
+	}
+	return db.DB()
+}
+
 func main() {
 	root := flag.String("cache", "/cache", "block cache root")
 	chain := flag.String("chain", "cosmoshub-3", "legacy chain to import")
-	from := flag.Int64("from", 0, "first height")
-	to := flag.Int64("to", 0, "last height")
-	createSchema := flag.Bool("create-schema", false, "create the serving schema, the inclusion table and the guard first; run it once, alone, before parallel ranges")
+	from := flag.Int64("from", 0, "first height of this importer's range")
+	to := flag.Int64("to", 0, "last height of this importer's range")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
 	resolutions := flag.String("resolutions", "", "file written by legacy-seqcheck: chain/height/index and a fee verdict per line")
+	workers := flag.Int("workers", 4, "heights decoded at once")
+	batch := flag.Int64("batch", 500, "heights stored per database transaction")
+	every := flag.Duration("progress", 30*time.Second, "time between progress lines")
+	build := flag.String("build", os.Getenv("LEGACY_BUILD"), "build label recorded with the range")
 	flag.Parse()
 	verdicts := map[string]string{}
 	if *resolutions != "" {
 		text, err := os.ReadFile(*resolutions)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "resolutions file unavailable")
-			os.Exit(2)
+			fail("resolutions file unavailable")
 		}
 		for _, line := range strings.Split(strings.TrimSpace(string(text)), "\n") {
 			key, verdict, ok := strings.Cut(line, " ")
 			if !ok || !strings.HasPrefix(key, *chain+"/") || verdicts[key] != "" {
-				fmt.Fprintln(os.Stderr, "resolutions file has a line for another chain, a repeated line or no verdict")
-				os.Exit(2)
+				fail("resolutions file has a line for another chain, a repeated line or no verdict")
 			}
 			verdicts[key] = verdict
 		}
 	}
-	if *from <= 0 || *to < *from {
-		fmt.Fprintln(os.Stderr, "a height range is required")
-		os.Exit(2)
+	if *from <= 0 || *to < *from || *workers < 1 || *batch < 1 {
+		fail("a height range, at least one worker and a batch size are required")
 	}
-	db, err := openPrivate(os.Getenv("LEGACY_IMPORT_DSN"), *createSchema)
+	ctx := context.Background()
+	db, err := open()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, safe(err))
-		os.Exit(2)
+		fail(safe(err))
 	}
-	started := time.Now()
-	heights := counter{}
-	held := counter{}
-	stored := counter{}
-	rows := counter{}
-	fees := counter{}
-	messages := counter{}
-	for height := *from; height <= *to; height++ {
-		block, results, err := capture.Load(*root, *chain, height, *maxBody)
-		if errors.Is(err, os.ErrNotExist) {
-			heights["not in the cache"]++
-			continue
+	claim, progress, err := ledger.Begin(ctx, db, ledger.Range{Chain: *chain, From: *from, To: *to}, *build)
+	if err != nil {
+		fail(safe(err))
+	}
+	defer claim.Release()
+	fmt.Printf("range chain=%s from=%d to=%d resume=%d workers=%d batch=%d\n", *chain, *from, *to, progress.Next, *workers, *batch)
+
+	// The block before the first one read, when it is stored, anchors the
+	// check that each block names the one before it as its parent.
+	parent := ""
+	if progress.Next > 1 {
+		if before, err := ledger.Load(ctx, db, *chain, []int64{progress.Next - 1}); err == nil && len(before) == 1 {
+			parent = before[0].Hash
 		}
-		if err != nil {
-			heights["unreadable"]++
-			held[safe(err)]++
-			continue
+	}
+	started, lastLine := time.Now(), time.Now()
+	first := progress.Next
+	heights, held, messages := counter{}, counter{}, counter{}
+	categories := counter{}
+	var readTxs, readHeights, added, storedRows int64
+	contiguous := true
+	line := func() {
+		seconds := time.Since(started).Seconds()
+		fmt.Printf("progress chain=%s next=%d of=%d heights_read=%d stored=%d held=%d transactions=%d tax_rows=%d heights_per_second=%.1f transactions_per_second=%.1f\n",
+			*chain, progress.Next, *to, readHeights, heights["stored"], progress.Held, readTxs, storedRows, float64(readHeights)/seconds, float64(readTxs)/seconds)
+		lastLine = time.Now()
+	}
+	for start := progress.Next; start <= *to; start += *batch {
+		end := start + *batch - 1
+		if end > *to {
+			end = *to
 		}
-		heights["read"]++
-		items, err := core.DecodeLegacyBlock(block, results)
-		if err == nil {
-			err = core.ResolveLegacyFees(items, verdicts)
-		}
-		if err == nil {
-			var out store.Block
-			if out, err = core.LegacyStoreBlock(block, items); err == nil {
-				if err = store.ImportBlock(db, out); err == nil {
-					heights["stored"]++
-					stored["transactions"] += int64(len(out.Inclusions))
-					if len(out.Inclusions) > 0 {
-						heights["stored with transactions"]++
-					}
-					for _, item := range items {
-						shape := "no fee coins signed"
-						if len(item.Fee.Declared) > 0 {
-							shape = "zero fee signed"
-							if item.Fee.Declared.IsAllPositive() {
-								shape = "positive fee signed"
-							}
-						}
-						fees[item.Fee.Charge+", "+shape]++
-					}
-					for _, inc := range out.Inclusions {
-						if inc.Code == 0 {
-							stored["successful transactions"]++
-						} else {
-							stored["failed transactions"]++
-						}
-						if len(inc.Detail.Fee) > 0 {
-							stored["transactions with a fee charged"]++
-						}
-						for _, m := range inc.Detail.Messages {
-							messages[m.TypeURL]++
-							if inc.Code == 0 && len(m.Rows) == 0 {
-								rows["(executed message with no rows)"]++
-							}
-							for _, r := range m.Rows {
-								rows[r.Category]++
-							}
-						}
-					}
-					continue
+		outcomes := make([]outcome, end-start+1)
+		jobs := make(chan int64)
+		var wait sync.WaitGroup
+		for w := 0; w < *workers; w++ {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				for height := range jobs {
+					outcomes[height-start] = read(*root, *chain, height, *maxBody, verdicts)
 				}
+			}()
+		}
+		for height := start; height <= end; height++ {
+			jobs <- height
+		}
+		close(jobs)
+		wait.Wait()
+
+		var blocks []ledger.Block
+		for i := range outcomes {
+			o := &outcomes[i]
+			readHeights++
+			switch {
+			case o.missing:
+				heights["not in the cache"]++
+				parent = ""
+				continue
+			case o.err == nil && parent != "" && o.previous != parent:
+				o.err = fmt.Errorf("the block does not name the block before it as its parent")
+			}
+			if o.err != nil {
+				heights["held"]++
+				held[safe(o.err)]++
+				parent = ""
+				if o.block != nil {
+					parent = o.block.Hash
+				}
+				o.block = nil
+				continue
+			}
+			parent = o.block.Hash
+			blocks = append(blocks, *o.block)
+		}
+		fresh, err := ledger.Write(ctx, db, blocks)
+		if err != nil {
+			progress.Status = "failed"
+			_ = claim.Record(ctx, progress)
+			if errors.Is(err, ledger.ErrStoredDiffers) {
+				fail(safe(err))
+			}
+			fail("the database refused a run of heights: " + safe(err))
+		}
+		added += int64(fresh)
+		for i := range outcomes {
+			o := &outcomes[i]
+			if o.block == nil {
+				contiguous = false
+				progress.Held++
+				continue
+			}
+			heights["stored"]++
+			readTxs += int64(o.txs)
+			if o.txs > 0 {
+				heights["stored with transactions"]++
+			}
+			storedRows += int64(len(o.block.Rows))
+			for _, row := range o.block.Rows {
+				categories[fmt.Sprintf("phase %d %s (%s)", row.Phase, row.Category, row.Source)]++
+			}
+			for _, event := range o.block.Events {
+				messages[fmt.Sprintf("phase %d %s", event.Phase, event.Type)]++
+			}
+			if contiguous {
+				progress.Next = start + int64(i) + 1
+				progress.Stored++
+				progress.Transactions += int64(o.txs)
+				progress.Rows += int64(len(o.block.Rows))
 			}
 		}
-		heights["held"]++
-		stored["transactions in held heights"] += int64(len(block.Block.Txs))
-		held[safe(err)]++
-	}
-	fmt.Printf("chain %s heights %d to %d in %s\n", *chain, *from, *to, time.Since(started).Round(time.Second))
-	heights.print("heights")
-	stored.print("transactions")
-	fees.print("fee of stored transactions")
-	messages.print("stored messages by type")
-	rows.print("stored tax rows by category")
-	held.print("held heights by reason")
-	scope := ` JOIN tx_inclusions i ON i.tx_id = t.tx_id JOIN chains c ON c.id = i.chain_id WHERE c.chain_id = ?`
-	fmt.Println("stored for this chain in the database:")
-	for _, total := range []struct{ label, sql string }{
-		{"blocks", `SELECT count(*) FROM blocks b JOIN chains c ON c.id = b.chain_id WHERE c.chain_id = ?`},
-		{"inclusions", `SELECT count(*) FROM tx_inclusions i JOIN chains c ON c.id = i.chain_id WHERE c.chain_id = ?`},
-		{"hashes included more than once", `SELECT count(*) FROM (SELECT i.hash FROM tx_inclusions i JOIN chains c ON c.id = i.chain_id WHERE c.chain_id = ? GROUP BY i.hash HAVING count(*) > 1) repeated`},
-		{"signer links", `SELECT count(*) FROM tx_signer_addresses t` + scope},
-		{"fee rows", `SELECT count(*) FROM fees t` + scope},
-		{"messages", `SELECT count(*) FROM messages t` + scope},
-		{"tax rows", `SELECT count(*) FROM taxable_events e JOIN messages t ON t.id = e.message_id` + scope},
-	} {
-		var n int64
-		if err := db.Raw(total.sql, *chain).Scan(&n).Error; err != nil {
-			fmt.Printf("  %-70s unavailable\n", total.label)
-			continue
+		progress.Status = "running"
+		if err := claim.Record(ctx, progress); err != nil {
+			fail("progress could not be recorded: " + safe(err))
 		}
-		fmt.Printf("  %-70s %d\n", total.label, n)
+		if time.Since(lastLine) >= *every {
+			line()
+		}
 	}
+	line()
+	progress.Status = "failed"
+	if progress.Next == *to+1 && progress.Held == 0 {
+		progress.Status = "done"
+	}
+	if err := claim.Record(ctx, progress); err != nil {
+		fail("the result could not be recorded: " + safe(err))
+	}
+	elapsed := time.Since(started)
+	fmt.Printf("chain %s heights %d to %d, read from %d, in %s: range %s\n", *chain, *from, *to, first, elapsed.Round(time.Second), progress.Status)
+	fmt.Printf("heights newly stored %d, already stored and equal %d\n", added, heights["stored"]-added)
+	heights.print("heights")
+	categories.print("tax rows by phase, category and amount source")
+	messages.print("block events kept")
+	held.print("held heights by reason")
+	if progress.Status != "done" {
+		os.Exit(1)
+	}
+}
+
+func read(root, chain string, height, limit int64, verdicts map[string]string) outcome {
+	h, err := capture.LoadHeight(root, chain, height, limit)
+	if errors.Is(err, os.ErrNotExist) {
+		return outcome{missing: true}
+	}
+	if err != nil {
+		return outcome{err: err}
+	}
+	out := outcome{previous: h.Previous, txs: len(h.Block.Block.Txs)}
+	items, err := core.DecodeLegacyBlock(h.Block, h.Results)
+	if err == nil {
+		err = core.ResolveLegacyFees(items, verdicts)
+	}
+	var block ledger.Block
+	if err == nil {
+		block, err = core.LegacyLedgerBlock(h, items)
+	}
+	if err != nil {
+		// The hash still anchors the parent check of the next height.
+		out.block, out.err = &ledger.Block{Hash: h.Hash}, err
+		return out
+	}
+	out.block = &block
+	return out
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/core"
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
@@ -28,14 +29,17 @@ type signedHeight struct {
 }
 
 func loadSigned(root, chain string, height, maxBody int64) signedHeight {
-	block, results, err := capture.Load(root, chain, height, maxBody)
+	h, err := capture.LoadTransactions(root, chain, height, maxBody)
 	if errors.Is(err, os.ErrNotExist) {
 		return signedHeight{state: "not in the cache"}
 	}
 	if err != nil {
 		return signedHeight{state: "unreadable", fault: safe(err)}
 	}
-	items, err := core.DecodeLegacyBlock(block, results)
+	if len(h.Block.Block.Txs) == 0 {
+		return signedHeight{state: "read"}
+	}
+	items, err := core.DecodeLegacyBlock(h.Block, h.Results)
 	if err != nil {
 		return signedHeight{state: "not decoded", fault: safe(err)}
 	}
@@ -73,7 +77,7 @@ func loadSigned(root, chain string, height, maxBody int64) signedHeight {
 // followSignatures reads the range in chain order and follows every account's
 // sequence through the signatures. Heights are decoded in parallel a batch at
 // a time and verified in order.
-func followSignatures(root, chain string, from, to, maxBody int64, workers int, opening, closing *sequence.Genesis) (*sequence.Ledger, map[string]int64, map[string]int64, map[string]int64) {
+func followSignatures(root, chain string, from, to, maxBody int64, workers int, every time.Duration, opening, closing *sequence.Genesis) (*sequence.Ledger, map[string]int64, map[string]int64, map[string]int64) {
 	ledger := sequence.NewLedger(opening, closing)
 	heights, faults, unchecked := map[string]int64{}, map[string]int64{}, map[string]int64{}
 	keys := map[string][]byte{}
@@ -81,7 +85,15 @@ func followSignatures(root, chain string, from, to, maxBody int64, workers int, 
 		ledger.Gap()
 	}
 	const batch = 4000
+	started, lastLine := time.Now(), time.Now()
+	var transactions int64
 	for start := from; start <= to; start += batch {
+		if every > 0 && time.Since(lastLine) >= every {
+			seconds := time.Since(started).Seconds()
+			fmt.Printf("progress chain=%s step=signatures next=%d of=%d heights_read=%d transactions=%d heights_per_second=%.1f transactions_per_second=%.1f\n",
+				chain, start, to, start-from, transactions, float64(start-from)/seconds, float64(transactions)/seconds)
+			lastLine = time.Now()
+		}
 		end := start + batch - 1
 		if end > to {
 			end = to
@@ -112,6 +124,7 @@ func followSignatures(root, chain string, from, to, maxBody int64, workers int, 
 				ledger.Gap()
 				continue
 			}
+			transactions += int64(len(h.txs))
 			for _, tx := range h.txs {
 				signers := make([]sequence.Signed, len(tx.signers))
 				for i, signer := range tx.signers {
@@ -132,7 +145,14 @@ func followSignatures(root, chain string, from, to, maxBody int64, workers int, 
 								reason = "public key absent and not seen before"
 							}
 						case tx.signatures[i].Address.String() != signer:
-							reason = "public key is not the signer's"
+							// The chain checked a signature against the key it had
+							// on record for the account and ignored a key written
+							// in the transaction once one was recorded.
+							if key = keys[signer]; key == nil {
+								reason = "public key is not the signer's and none seen before"
+							} else {
+								unchecked["checked against the recorded key, the one in the transaction is not the signer's"]++
+							}
 						default:
 							keys[signer] = key
 						}

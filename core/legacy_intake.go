@@ -42,6 +42,8 @@ type LegacyFeeEvidence struct {
 	// the payer could not cover the fee. Its fee deduction was discarded. The
 	// signed fee is retained, never converted to zero.
 	Charge string
+	// Evidence says how Charge is known, in words fit to store beside it.
+	Evidence string
 }
 
 // DecodeLegacyBlock is an explicit offline adapter. It does not synthesize a
@@ -90,10 +92,14 @@ func DecodeLegacyBlock(block *coretypes.ResultBlock, results *rpc.CustomBlockRes
 		switch {
 		case len(item.Fee.Payer) == 0:
 			item.Issues = append(item.Issues, "fee payer unresolved")
-		case result.Code == 0 || len(messages) > 0:
-			item.Fee.Charge = "charged"
-		case evidence.AnteOnlyLocation(evidence.OutOfGasLocation(result)), evidence.AnteFeeRejection(result):
-			item.Fee.Charge = "not charged"
+		case result.Code == 0:
+			item.Fee.Charge, item.Fee.Evidence = "charged", "the transaction succeeded"
+		case len(messages) > 0:
+			item.Fee.Charge, item.Fee.Evidence = "charged", "it failed after a message began executing"
+		case evidence.AnteOnlyLocation(evidence.OutOfGasLocation(result)):
+			item.Fee.Charge, item.Fee.Evidence = "not charged", "it ran out of gas before the fee was taken"
+		case evidence.AnteFeeRejection(result):
+			item.Fee.Charge, item.Fee.Evidence = "not charged", "the payer could not cover the fee"
 		default:
 			item.Issues = append(item.Issues, "failed legacy transaction left no execution marker; fee commitment needs gas or state evidence")
 		}

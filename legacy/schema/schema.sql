@@ -98,6 +98,24 @@ CREATE INDEX IF NOT EXISTS taxable_events_from ON legacy.taxable_events (from_ad
 CREATE INDEX IF NOT EXISTS taxable_events_to ON legacy.taxable_events (to_addr);
 CREATE INDEX IF NOT EXISTS taxable_events_time ON legacy.taxable_events ("timestamp");
 
+-- Begin and end block events that say something happened to an account or
+-- a validator: a slash, a completed unbonding, a proposal that ended, and
+-- duplicate vote evidence carried by the block. Most carry no amount, so
+-- they are evidence for rows worked out later, not rows themselves. The
+-- per-validator allocation events of every block are not kept.
+CREATE TABLE IF NOT EXISTS legacy.block_events (
+    chain_id    text NOT NULL,
+    height      bigint NOT NULL,
+    phase       smallint NOT NULL CHECK (phase IN (1, 3)),
+    event_index integer NOT NULL CHECK (event_index >= 0),
+    type        text NOT NULL,
+    -- An array of [key, value] pairs in the order the chain emitted them.
+    attributes  jsonb NOT NULL,
+    PRIMARY KEY (chain_id, height, phase, event_index),
+    FOREIGN KEY (chain_id, height) REFERENCES legacy.blocks (chain_id, height)
+);
+CREATE INDEX IF NOT EXISTS block_events_type ON legacy.block_events (chain_id, type, height);
+
 -- What was loaded from each genesis file, so a rerun can prove it loads the
 -- same file and the row counts can be compared with the file.
 CREATE TABLE IF NOT EXISTS legacy.genesis_files (
@@ -231,7 +249,7 @@ DO $$
 DECLARE
     name text;
 BEGIN
-    FOREACH name IN ARRAY ARRAY['blocks', 'tx_inclusions', 'genesis_files', 'genesis_accounts',
+    FOREACH name IN ARRAY ARRAY['blocks', 'tx_inclusions', 'block_events', 'genesis_files', 'genesis_accounts',
         'genesis_delegations', 'genesis_unbondings', 'genesis_validators', 'genesis_withdraw_addresses']
     LOOP
         IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'written_once_rows'
@@ -261,7 +279,7 @@ END $$;
 
 GRANT USAGE ON SCHEMA legacy TO {{role}};
 GRANT SELECT ON ALL TABLES IN SCHEMA legacy TO {{role}};
-GRANT INSERT ON legacy.blocks, legacy.tx_inclusions, legacy.taxable_events, legacy.genesis_files,
+GRANT INSERT ON legacy.blocks, legacy.tx_inclusions, legacy.block_events, legacy.taxable_events, legacy.genesis_files,
     legacy.genesis_accounts, legacy.genesis_delegations, legacy.genesis_unbondings,
     legacy.genesis_validators, legacy.genesis_withdraw_addresses TO {{role}};
 GRANT INSERT, UPDATE, DELETE ON legacy.reconciliation, legacy.balance_days, legacy.import_ranges TO {{role}};
