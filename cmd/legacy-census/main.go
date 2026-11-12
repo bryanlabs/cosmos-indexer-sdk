@@ -47,6 +47,7 @@ var (
 	safeAction  = regexp.MustCompile(`^[a-z_]{1,40}$`)
 	safeKind    = regexp.MustCompile(`^[a-z0-9_/]{1,40}$`)
 	safeKey     = regexp.MustCompile(`^[a-z_.-]{1,40}$`)
+	gasWanted   = regexp.MustCompile(`gasWanted: (\d{1,18}),`)
 	digits      = regexp.MustCompile(`\d+`)
 )
 
@@ -757,6 +758,12 @@ func process(j job, opt options, s *stats, sp *spill) {
 			s.MessageEvidence.add("failed: out of gas in the ante handler at "+evidence.OutOfGasLocation(result)+", fee not charged", 1)
 		case evidence.OutOfGasLocation(result) != "":
 			s.MessageEvidence.add("failed: no execution marker, out of gas at "+evidence.OutOfGasLocation(result)+", fee charge unknown", 1)
+			wanted := int64(-1)
+			if m := gasWanted.FindStringSubmatch(result.Log); m != nil {
+				wanted, _ = strconv.ParseInt(m[1], 10, 64)
+			}
+			s.MessageEvidence.add(fmt.Sprintf("fee charge unknown: gas wanted up to %s, transaction bytes up to %s, signers up to %s",
+				bucket(wanted, 0, 20000, 50000, 100000, 200000), bucket(int64(len(encoded)*3/4), 300, 600, 1200), bucket(int64(len(tx.Signers)), 1, 2)), 1)
 		default:
 			s.MessageEvidence.add("failed: no execution marker, fee charge unknown, "+code, 1)
 		}
