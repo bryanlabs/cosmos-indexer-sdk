@@ -519,6 +519,9 @@ type job struct {
 
 type options struct {
 	maxFile, maxBody int64
+	// emptyStride above zero reads the result of a height with no
+	// transactions only when the height is a multiple of it.
+	emptyStride int64
 }
 
 func process(j job, opt options, s *stats, sp *spill) {
@@ -559,6 +562,24 @@ func process(j job, opt options, s *stats, sp *spill) {
 	header := block.Result.Block.Header
 	if header.ChainID != j.chain || header.Height != j.height {
 		s.BlockErrors.add("block identity does not match its file", 1)
+		return
+	}
+	if opt.emptyStride > 0 && len(block.Result.Block.Data.Txs) == 0 && j.height%opt.emptyStride != 0 {
+		d := s.Dirs[j.dir]
+		if d == nil {
+			d = &dirStat{Dialects: counter{}}
+			s.Dirs[j.dir] = d
+		}
+		d.Heights++
+		d.Dialects.add("(no transactions, result not read)", 1)
+		s.Heights++
+		if s.FirstHeight == 0 || j.height < s.FirstHeight {
+			s.FirstHeight, s.FirstTime = j.height, header.Time
+		}
+		if j.height > s.LastHeight {
+			s.LastHeight, s.LastTime = j.height, header.Time
+		}
+		s.BlockExtras.add("heights with no transactions whose result was not read", 1)
 		return
 	}
 	raw, err = readCapture(j.result, opt.maxBody)
@@ -1134,6 +1155,7 @@ func main() {
 	workers := flag.Int("workers", 1, "parallel readers")
 	maxFile := flag.Int64("max-file-bytes", 2<<20, "skip and count heights whose compressed capture is larger")
 	maxBody := flag.Int64("max-body-bytes", 24<<20, "decompressed size limit per capture")
+	emptyStride := flag.Int64("empty-stride", 0, "read the result of a height with no transactions only at multiples of this height; 0 reads every result")
 	spillRoot := flag.String("spill-dir", "", "private scratch directory for repeat detection")
 	run := flag.String("run", "run", "name of this run inside the spill directory")
 	asJSON := flag.Bool("json", false, "emit this run's aggregate counters as JSON for a later merge")
@@ -1241,7 +1263,7 @@ func main() {
 		fail("cannot create spill directory")
 	}
 	started := time.Now()
-	opt := options{maxFile: *maxFile, maxBody: *maxBody}
+	opt := options{maxFile: *maxFile, maxBody: *maxBody, emptyStride: *emptyStride}
 	total := &result{Started: started, Workers: *workers, MaxFile: *maxFile, Dirs: *dirRange, Chains: map[string]*stats{}, RunCount: 1}
 	for _, chain := range chains {
 		entries, err := os.ReadDir(filepath.Join(*root, chain))
