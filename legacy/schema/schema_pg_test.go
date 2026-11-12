@@ -7,6 +7,7 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/legacy/schema"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/schema/pgtest"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestSQLRefusesARoleNameThatIsNotAnIdentifier(t *testing.T) {
@@ -136,4 +137,69 @@ func TestImporterRoleCanAddLegacyRowsAndReachNothingElse(t *testing.T) {
 		require.Contains(t, err.Error(), "written once", statement)
 	}
 	pgtest.RequireUntouched(t, before, pgtest.Snapshot(t, db.Owner, "public"))
+}
+
+// Each of these is a way out that a check of whole table grants to the role
+// alone would miss. The check must see it, and stop seeing it once undone.
+func TestConfinedSeesGrantsThatDoNotNameTheRoleOrTheWholeTable(t *testing.T) {
+	db := pgtest.Open(t)
+	clean := func() {
+		t.Helper()
+		findings, err := schema.Confined(db.Importer)
+		require.NoError(t, err)
+		require.Empty(t, findings)
+	}
+	clean()
+	for _, way := range []struct {
+		open, finding, close string
+		everyRole            bool
+	}{
+		{`GRANT SELECT (memo) ON public.txes TO ` + db.Role,
+			"tables and views outside legacy", `REVOKE SELECT (memo) ON public.txes FROM ` + db.Role, false},
+		{`GRANT SELECT ON public.txes TO PUBLIC`,
+			"tables and views outside legacy", `REVOKE SELECT ON public.txes FROM PUBLIC`, true},
+		{`GRANT UPDATE (amount) ON legacy.taxable_events TO ` + db.Role,
+			"written once tables", `REVOKE UPDATE (amount) ON legacy.taxable_events FROM ` + db.Role, false},
+		{`CREATE FUNCTION public.rewrite_codes() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'UPDATE public.txes SET code = 5'`,
+			"functions that run with their owner's rights", `DROP FUNCTION public.rewrite_codes()`, true},
+		{`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO PUBLIC`,
+			"default privileges", `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM PUBLIC`, true},
+		{`ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO ` + db.Role,
+			"default privileges", `ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM ` + db.Role, false},
+	} {
+		require.NoError(t, db.Owner.Exec(way.open).Error, way.open)
+		findings, err := schema.Confined(db.Importer)
+		require.NoError(t, err, way.open)
+		require.Len(t, findings, 1, way.open)
+		require.Contains(t, findings[0], way.finding, way.open)
+
+		// The migration applies the same test before it commits.
+		err = schema.Migrate(db.Owner, db.Role)
+		require.Error(t, err, way.open)
+		require.Contains(t, err.Error(), "is not confined", way.open)
+		if way.everyRole {
+			// A role it would leave unconfined is not created at all.
+			other := db.Role + "_b"
+			err = schema.Migrate(db.Owner, other)
+			require.Error(t, err, way.open)
+			require.Contains(t, err.Error(), "is not confined", way.open)
+			var left int64
+			require.NoError(t, db.Owner.Raw(`SELECT count(*) FROM pg_roles WHERE rolname = ?`, other).Scan(&left).Error)
+			require.Zero(t, left, way.open)
+		}
+
+		require.NoError(t, db.Owner.Exec(way.close).Error, way.close)
+		clean()
+	}
+
+	// A login as the owner that only switched to the importer role can
+	// switch back, so it is not confined.
+	require.NoError(t, db.Owner.Connection(func(tx *gorm.DB) error {
+		require.NoError(t, tx.Exec("SET ROLE "+db.Role).Error)
+		findings, err := schema.Confined(tx)
+		require.NoError(t, err)
+		require.Len(t, findings, 1)
+		require.Contains(t, findings[0], "switched")
+		return tx.Exec("RESET ROLE").Error
+	}))
 }

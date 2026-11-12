@@ -27,6 +27,25 @@ const Denom = "uatom"
 
 var one = new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 
+// TokensFromShares values a delegation the way every one of these chains
+// did when it paid one out (TokensFromShares, then TruncateInt, in the
+// SDK's staking module): shares times the validator's tokens, divided by
+// all its shares with the quotient rounded half to even at 18 decimal
+// places, and only then cut down to whole coins. Shares and all are scaled
+// by 10^18. The 18 place rounding matters: a quotient within half of the
+// last place below a whole coin becomes that whole coin.
+func TokensFromShares(shares, tokens, all *big.Int) *big.Int {
+	quotient := new(big.Int).Mul(shares, tokens)
+	quotient.Mul(quotient, one).Mul(quotient, one)
+	quotient.Quo(quotient, all)
+	rounded, rest := new(big.Int).QuoRem(quotient, one, new(big.Int))
+	half := new(big.Int).Rsh(one, 1)
+	if c := rest.Cmp(half); c > 0 || (c == 0 && rounded.Bit(0) == 1) {
+		rounded.Add(rounded, big.NewInt(1))
+	}
+	return rounded.Quo(rounded, one)
+}
+
 // Account is one account as the file states it, with the totals of its
 // delegations and unbonding entries from the same file.
 type Account struct {
@@ -491,9 +510,7 @@ func Read(r io.Reader) (*File, error) {
 		if validator.Shares.Sign() <= 0 {
 			return nil, fmt.Errorf("genesis delegation to a validator with no shares")
 		}
-		// The chain's own rule: shares times tokens over all shares, rounded down.
-		tokens := new(big.Int).Mul(shares, validator.Tokens)
-		tokens.Quo(tokens, validator.Shares)
+		tokens := TokensFromShares(shares, validator.Tokens, validator.Shares)
 		file.Delegations = append(file.Delegations, Delegation{Delegator: d.Delegator, Validator: d.Validator, Shares: shares, Tokens: tokens})
 		if delegated[d.Validator] == nil {
 			delegated[d.Validator] = new(big.Int)

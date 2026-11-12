@@ -136,14 +136,15 @@ func verify(tx *gorm.DB, f *File, all []*table) (Counts, error) {
 	var stored Counts
 	var header struct {
 		Sha256                                                                             string
+		GenesisTime                                                                        time.Time
 		Accounts, Delegations, UnbondingEntries, Validators, WithdrawAddresses, GenesisTxs int
 	}
-	if err := tx.Raw(`SELECT sha256, accounts, delegations, unbonding_entries, validators, withdraw_addresses, genesis_txs
+	if err := tx.Raw(`SELECT sha256, genesis_time, accounts, delegations, unbonding_entries, validators, withdraw_addresses, genesis_txs
 		FROM legacy.genesis_files WHERE chain_id = ?`, f.Chain).Scan(&header).Error; err != nil {
 		return stored, err
 	}
 	want := f.Counts()
-	if header.Sha256 != f.SHA256 || (Counts{header.Accounts, header.Delegations, header.UnbondingEntries, header.Validators,
+	if header.Sha256 != f.SHA256 || !header.GenesisTime.Equal(f.Time.Truncate(time.Microsecond)) || (Counts{header.Accounts, header.Delegations, header.UnbondingEntries, header.Validators,
 		header.WithdrawAddresses, header.GenesisTxs}) != want {
 		return stored, fmt.Errorf("the database holds another genesis file for this chain")
 	}

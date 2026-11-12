@@ -265,3 +265,16 @@ GRANT INSERT ON legacy.blocks, legacy.tx_inclusions, legacy.taxable_events, lega
     legacy.genesis_accounts, legacy.genesis_delegations, legacy.genesis_unbondings,
     legacy.genesis_validators, legacy.genesis_withdraw_addresses TO {{role}};
 GRANT INSERT, UPDATE, DELETE ON legacy.reconciliation, legacy.balance_days, legacy.import_ranges TO {{role}};
+
+-- Nothing above is kept unless the role it leaves can add legacy rows and
+-- reach nothing else. Any finding fails the migration.
+DO $$
+DECLARE
+    finding text;
+BEGIN
+    FOR finding IN
+        {{confined}}
+    LOOP
+        RAISE EXCEPTION 'role {{role}} is not confined: %', finding;
+    END LOOP;
+END $$;

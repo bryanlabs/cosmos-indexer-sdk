@@ -47,6 +47,12 @@ spec:
             - |
               legacy-schema --print > /work/schema.sql
               sha256sum /work/schema.sql
+              cat > /work/password.sql <<'SQL'
+              \getenv verifier IMPORTER_VERIFIER
+              SET LOCAL log_statement = 'none';
+              SET LOCAL log_min_error_statement = 'panic';
+              ALTER ROLE legacy_importer PASSWORD :'verifier';
+              SQL
           volumeMounts:
             - {name: work, mountPath: /work}
           securityContext:
@@ -56,24 +62,17 @@ spec:
           resources:
             requests: {cpu: 10m, memory: 32Mi}
             limits: {cpu: 100m, memory: 128Mi}
-        # Applies it in one transaction as the database owner, then sets the
-        # importer's password.
+        # Applies it and sets the importer's password in one transaction as
+        # the database owner. The migration's last statement fails if the
+        # role could reach outside the legacy schema, and then nothing is
+        # kept: no schema, no role, no password.
         - name: apply-migration
           image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
           command:
             - /bin/sh
             - -ec
             - |
-              psql -X -q -v ON_ERROR_STOP=1 --single-transaction -f /work/schema.sql
-              psql -X -q -v ON_ERROR_STOP=1 <<'SQL'
-              \getenv verifier IMPORTER_VERIFIER
-              BEGIN;
-              SET LOCAL log_statement='none';
-              SET LOCAL log_min_error_statement='panic';
-              SET LOCAL lock_timeout='5s';
-              ALTER ROLE legacy_importer PASSWORD :'verifier';
-              COMMIT;
-              SQL
+              psql -X -q -v ON_ERROR_STOP=1 --single-transaction -f /work/schema.sql -f /work/password.sql
           env:
             - name: PGHOST
               valueFrom:

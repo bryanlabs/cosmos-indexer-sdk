@@ -2,9 +2,12 @@ package genesis
 
 import (
 	"fmt"
+	"math/big"
+	"math/rand"
 	"strings"
 	"testing"
 
+	sdkmath "cosmossdk.io/math"
 	"github.com/stretchr/testify/require"
 )
 
@@ -95,14 +98,17 @@ func TestReadHubOneAppliesTheGenesisTransactions(t *testing.T) {
 	require.Len(t, file.SHA256, 64)
 }
 
-func TestReadValuesSharesAtTheValidatorRateRoundedDown(t *testing.T) {
+func TestReadValuesSharesTheWayTheChainPaidThemOut(t *testing.T) {
 	file, err := Read(strings.NewReader(hubTwo("33.333333333333333333")))
 	require.NoError(t, err)
 	require.Equal(t, Counts{Accounts: 2, Delegations: 2, Unbondings: 2, Validators: 2, Withdraws: 1}, file.Counts())
-	// 33.333... shares of 100, with 90 tokens behind them, are 29.99... tokens.
-	require.Equal(t, "29", file.Delegations[0].Tokens.String())
+	// 33.333333333333333333 shares of 100, with 90 tokens behind them, are
+	// 29.9999999999999999997 tokens. The chain rounded that quotient at 18
+	// places first, which makes it 30, and then dropped the fraction. Plain
+	// rounding down would say 29.
+	require.Equal(t, "30", file.Delegations[0].Tokens.String())
 	require.Equal(t, "60", file.Delegations[1].Tokens.String())
-	require.Equal(t, "29", file.Accounts[0].Delegated.String())
+	require.Equal(t, "30", file.Accounts[0].Delegated.String())
 	require.Equal(t, "16", file.Accounts[0].Unbonding.String())
 	require.Equal(t, "1000", file.Accounts[0].Liquid.String())
 	require.Equal(t, uint64(7), file.Accounts[0].Sequence)
@@ -165,4 +171,57 @@ func TestChecksumCoversTheWholeStoredFile(t *testing.T) {
 	_, err = Read(other)
 	require.NoError(t, err)
 	require.NotEqual(t, file.SHA256, other.Sum())
+}
+
+// The SDK's decimal type still divides the way it did on these chains
+// (multiply by the precision twice, divide, round half to even at 18
+// places). TokensFromShares must agree with it on every input, including
+// the ones that land on or beside a rounding boundary.
+func TestTokensFromSharesAgreesWithTheSDKDecimal(t *testing.T) {
+	sdk := func(shares, tokens, all *big.Int) string {
+		return sdkmath.LegacyNewDecFromBigIntWithPrec(shares, 18).MulInt(sdkmath.NewIntFromBigInt(tokens)).
+			Quo(sdkmath.LegacyNewDecFromBigIntWithPrec(all, 18)).TruncateInt().String()
+	}
+	n := func(text string) *big.Int {
+		v, ok := new(big.Int).SetString(text, 10)
+		require.True(t, ok)
+		return v
+	}
+	for _, c := range []struct{ shares, tokens, all, want string }{
+		{"33333333333333333333", "90", "100000000000000000000", "30"},
+		{"66666666666666666667", "90", "100000000000000000000", "60"},
+		{"1000000000000000000", "1", "2000000000000000000", "0"},
+		{"1000000000000000000", "999999", "1000000000000000000", "999999"},
+		{"1", "1", "3", "0"},
+		// Exactly half of the last place: 0.5e-18 rounds to even, down here and up below.
+		{"1", "1", "2000000000000000000", "0"},
+		{"999999999999999999", "2", "2000000000000000000", "0"},
+	} {
+		got := TokensFromShares(n(c.shares), n(c.tokens), n(c.all))
+		require.Equal(t, c.want, got.String(), c)
+		require.Equal(t, sdk(n(c.shares), n(c.tokens), n(c.all)), got.String(), c)
+	}
+	random := rand.New(rand.NewSource(814))
+	differsFromPlainRoundingDown := 0
+	for i := 0; i < 200000; i++ {
+		tokens := big.NewInt(1 + random.Int63n(1_000_000_000_000))
+		all := new(big.Int).Mul(big.NewInt(1+random.Int63n(1_000_000_000_000)), big.NewInt(1+random.Int63n(1_000_000_000)))
+		shares := new(big.Int).Rand(random, all)
+		if i%4 == 0 {
+			// A third, a seventh and the like of a slashed validator: the cases that sit beside a whole coin.
+			all = new(big.Int).Mul(big.NewInt(1+random.Int63n(1000)), one)
+			tokens = big.NewInt(1 + random.Int63n(1000))
+			shares = new(big.Int).Quo(new(big.Int).Mul(all, big.NewInt(1+random.Int63n(6))), big.NewInt(7-random.Int63n(5)))
+			if shares.Cmp(all) > 0 {
+				shares.Set(all)
+			}
+		}
+		got := TokensFromShares(shares, tokens, all)
+		require.Equal(t, sdk(shares, tokens, all), got.String(), "shares %s tokens %s all %s", shares, tokens, all)
+		plain := new(big.Int).Mul(shares, tokens)
+		if plain.Quo(plain, all).Cmp(got) != 0 {
+			differsFromPlainRoundingDown++
+		}
+	}
+	require.NotZero(t, differsFromPlainRoundingDown, "no input exercised the 18 place rounding")
 }
