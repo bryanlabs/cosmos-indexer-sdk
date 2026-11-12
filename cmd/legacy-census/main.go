@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/evidence"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	amino "github.com/tendermint/go-amino"
@@ -39,30 +40,10 @@ var (
 	captureName = regexp.MustCompile(`^(\d+)-(block|block_results)\.raw\.gz$`)
 	safeText    = regexp.MustCompile(`^[A-Za-z0-9 _.,:/()'-]{1,90}$`)
 	safeAction  = regexp.MustCompile(`^[a-z_]{1,40}$`)
+	safeKind    = regexp.MustCompile(`^[a-z0-9_/]{1,40}$`)
 	safeKey     = regexp.MustCompile(`^[a-z_.-]{1,40}$`)
 	digits      = regexp.MustCompile(`\d+`)
 )
-
-// expectedAction is the old sdk.Msg Type() each Amino message emitted as its
-// action tag or message.action attribute. Agreement with the stored execution
-// result is independent evidence that the message decode is correct.
-var expectedAction = map[string]string{
-	"cosmos-sdk/MsgSend":                        "send",
-	"cosmos-sdk/MsgMultiSend":                   "multisend",
-	"cosmos-sdk/MsgDelegate":                    "delegate",
-	"cosmos-sdk/MsgUndelegate":                  "begin_unbonding",
-	"cosmos-sdk/MsgBeginRedelegate":             "begin_redelegate",
-	"cosmos-sdk/MsgWithdrawDelegationReward":    "withdraw_delegator_reward",
-	"cosmos-sdk/MsgWithdrawValidatorCommission": "withdraw_validator_commission",
-	"cosmos-sdk/MsgModifyWithdrawAddress":       "set_withdraw_address",
-	"cosmos-sdk/MsgDeposit":                     "deposit",
-	"cosmos-sdk/MsgVote":                        "vote",
-	"cosmos-sdk/MsgSubmitProposal":              "submit_proposal",
-	"cosmos-sdk/MsgCreateValidator":             "create_validator",
-	"cosmos-sdk/MsgEditValidator":               "edit_validator",
-	"cosmos-sdk/MsgUnjail":                      "unjail",
-	"cosmos-sdk/MsgVerifyInvariant":             "verify_invariant",
-}
 
 // updateShapes records how each validator update is written, read from the
 // raw capture so it does not depend on the decoder under test. Only key names,
@@ -129,7 +110,7 @@ func updateShapes(result json.RawMessage, s *stats) {
 			var typ string
 			_ = json.Unmarshal(key["type"], &typ)
 			kind = "(other)"
-			if safeAction.MatchString(typ) {
+			if safeKind.MatchString(strings.ToLower(typ)) {
 				kind = typ
 			}
 			names := make([]string, 0, len(key))
@@ -143,15 +124,6 @@ func updateShapes(result json.RawMessage, s *stats) {
 		}
 		s.UpdateShape.add("fields "+strings.Join(keys, ",")+" | key "+kind+" | power "+power, 1)
 	}
-}
-
-// actionName is the action a successful message recorded in its era. The
-// commission withdrawal was renamed between Hub 2 and Hub 3.
-func actionName(chain, aminoName string) string {
-	if aminoName == "cosmos-sdk/MsgWithdrawValidatorCommission" && chain != "cosmoshub-3" {
-		return "withdraw_validator_rewards_all"
-	}
-	return expectedAction[aminoName]
 }
 
 var keyKinds = func() map[[4]byte]string {
@@ -189,7 +161,7 @@ type stats struct {
 	BeginEventTypes, EndEventTypes, BeginTagKeys         counter
 	EndTagKeys, BlockExtras                              counter
 	FeeDenoms, FeeShape, ActionCheck, SignerCheck        counter
-	FailedEvidence, UpdateShape                          counter
+	FailedEvidence, UpdateShape, MessageEvidence         counter
 	Dirs                                                 map[int64]*dirStat
 	Sample                                               int
 	DirsSeen, DirsUnreadable, CachedHeights              int64
@@ -207,7 +179,7 @@ func (s *stats) counters() []*counter {
 	return []*counter{&s.Skipped, &s.BlockErrors, &s.ResultErrors, &s.Decode, &s.TxIssues, &s.SigIssues, &s.KeyKinds,
 		&s.MsgStatus, &s.MsgShape, &s.MsgOutcome, &s.MsgsPerTx, &s.Codes, &s.CodeEvidence, &s.LogShape, &s.TxEventTypes,
 		&s.TxTagKeys, &s.Actions, &s.BeginEventTypes, &s.EndEventTypes, &s.BeginTagKeys, &s.EndTagKeys, &s.BlockExtras,
-		&s.FeeDenoms, &s.FeeShape, &s.ActionCheck, &s.SignerCheck, &s.FailedEvidence, &s.UpdateShape}
+		&s.FeeDenoms, &s.FeeShape, &s.ActionCheck, &s.SignerCheck, &s.FailedEvidence, &s.UpdateShape, &s.MessageEvidence}
 }
 
 func (s *stats) merge(o *stats) {
@@ -748,7 +720,7 @@ func process(j job, opt options, s *stats, sp *spill) {
 			}
 			s.MsgStatus.add(name+" | "+status, 1)
 			s.MsgOutcome.add(name+" | in "+outcome(result.Code)+" transaction", 1)
-			expected = append(expected, actionName(j.chain, m.AminoName))
+			expected = append(expected, legacy.ActionName(j.chain, m.AminoName))
 		}
 		if projected {
 			s.Decode.add("ok and every message projected", 1)
@@ -764,6 +736,18 @@ func process(j job, opt options, s *stats, sp *spill) {
 			default:
 				s.ActionCheck.add("recorded actions differ from decoded message types", 1)
 			}
+		}
+		messages, err := evidence.For(j.chain, tx, result, tags)
+		switch {
+		case err != nil:
+			s.MessageEvidence.add(outcome(result.Code)+": unattributed, "+safe(err), 1)
+		case result.Code == 0:
+			s.MessageEvidence.add("success: every message has its own evidence", 1)
+		case len(messages) > 0:
+			s.MessageEvidence.add("failed: a message began executing, fee charged, "+code, 1)
+			s.MessageEvidence.add(fmt.Sprintf("failed: stopped at message %s of %s", bucket(int64(len(messages)), 1, 2, 5, 20), bucket(int64(len(tx.Messages)), 1, 2, 5, 20)), 1)
+		default:
+			s.MessageEvidence.add("failed: no execution marker, fee charge unknown, "+code, 1)
 		}
 		switch {
 		case len(tx.Fee) == 0:
@@ -911,6 +895,7 @@ func report(out io.Writer, r *result, repeatScope string) {
 		printCounter(out, "messages by type and transaction outcome", total.MsgOutcome)
 		printCounter(out, "messages per decoded transaction (upper bound of bucket)", total.MsgsPerTx)
 		printCounter(out, "decoded messages against recorded actions (successful transactions)", total.ActionCheck)
+		printCounter(out, "evidence attributed to each message, and fee charge of failed transactions", total.MessageEvidence)
 		printCounter(out, "recorded action values", total.Actions)
 		printCounter(out, "signer cross-check", total.SignerCheck)
 		printCounter(out, "public key kinds", total.KeyKinds)

@@ -299,3 +299,31 @@ func deriveGoverning(chain, name string, f []Field) (sdk.Msg, []sdk.AccAddress, 
 	}
 	return nil, nil, failure
 }
+
+var actionNames = map[string]string{
+	"cosmos-sdk/MsgSend":                        "send",
+	"cosmos-sdk/MsgMultiSend":                   "multisend",
+	"cosmos-sdk/MsgDelegate":                    "delegate",
+	"cosmos-sdk/MsgUndelegate":                  "begin_unbonding",
+	"cosmos-sdk/MsgBeginRedelegate":             "begin_redelegate",
+	"cosmos-sdk/MsgWithdrawDelegationReward":    "withdraw_delegator_reward",
+	"cosmos-sdk/MsgWithdrawValidatorCommission": "withdraw_validator_commission",
+	"cosmos-sdk/MsgModifyWithdrawAddress":       "set_withdraw_address",
+	"cosmos-sdk/MsgDeposit":                     "deposit",
+	"cosmos-sdk/MsgVote":                        "vote",
+	"cosmos-sdk/MsgSubmitProposal":              "submit_proposal",
+	"cosmos-sdk/MsgCreateValidator":             "create_validator",
+	"cosmos-sdk/MsgEditValidator":               "edit_validator",
+	"cosmos-sdk/MsgUnjail":                      "unjail",
+	"cosmos-sdk/MsgVerifyInvariant":             "verify_invariant",
+}
+
+// ActionName is the action the chain recorded when it began executing a
+// message of this Amino name. It is empty for a name this package does not
+// know. The commission withdrawal was renamed between Hub 2 and Hub 3.
+func ActionName(chain, aminoName string) string {
+	if aminoName == "cosmos-sdk/MsgWithdrawValidatorCommission" && chain != "cosmoshub-3" {
+		return "withdraw_validator_rewards_all"
+	}
+	return actionNames[aminoName]
+}

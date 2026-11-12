@@ -89,6 +89,35 @@ func TestLegacyOfflineAdapterFeesExecutionAndDuplicateInclusions(t *testing.T) {
 		})
 	}
 }
+func TestLegacyFailedFeeChargedOnlyWithExecutionMarker(t *testing.T) {
+	for chain, json := range map[string]string{
+		"cosmoshub-2": `{"height":"9","results":{"DeliverTx":[{"tags":[{"key":"YWN0aW9u","value":"c2VuZA=="}]},{"code":10,"tags":[{"key":"YWN0aW9u","value":"c2VuZA=="}]},{"code":12}]}}`,
+		"cosmoshub-3": `{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"},{"code":10,"log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"},{"code":12,"log":"{\"code\":12}"}]}}`,
+	} {
+		t.Run(chain, func(t *testing.T) {
+			raw := intakeRaw(t, chain)
+			input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: chain, Height: 9}, Data: tm.Data{Txs: tm.Txs{raw, raw, raw}}}}
+			var results rpc.CustomBlockResults
+			require.NoError(t, tmjson.Unmarshal([]byte(json), &results))
+			items, err := DecodeLegacyBlock(input, &results)
+			require.NoError(t, err)
+			require.Len(t, items, 3)
+			require.Len(t, items[0].Messages, 1)
+			require.True(t, items[0].Messages[0].Success)
+			require.Equal(t, "charged", items[0].Fee.Charge)
+			require.Len(t, items[1].Messages, 1)
+			require.False(t, items[1].Messages[0].Success)
+			require.Equal(t, "charged", items[1].Fee.Charge)
+			require.Empty(t, items[2].Messages)
+			require.Equal(t, "unknown", items[2].Fee.Charge)
+			for _, issue := range items[0].Issues {
+				require.NotContains(t, issue, "unattributed")
+			}
+			require.Contains(t, items[2].Issues, "failed legacy transaction left no execution marker; fee commitment needs gas or state evidence")
+		})
+	}
+}
+
 func TestLegacyAllServingEntryPointsBlocked(t *testing.T) {
 	for _, chain := range []string{"cosmoshub-1", "cosmoshub-2", "cosmoshub-3"} {
 		cfg := config.IndexConfig{}

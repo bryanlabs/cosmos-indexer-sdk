@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/evidence"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
 	abci "github.com/cometbft/cometbft/abci/types"
 	coretypes "github.com/cometbft/cometbft/rpc/core/types"
@@ -15,12 +16,15 @@ import (
 // Identity is chain/height/index; Hash is evidence, not a uniqueness constraint.
 // Original Amino messages and explicit derived SDK forms coexist in Tx.
 type LegacyInclusion struct {
-	Identity, Hash      string
-	Tx                  *legacy.Tx
-	Result              *abci.ResponseDeliverTx
-	RawResultEnvelope   []byte
-	CodeEvidence        string
-	Tags                []rpc.LegacyTag
+	Identity, Hash    string
+	Tx                *legacy.Tx
+	Result            *abci.ResponseDeliverTx
+	RawResultEnvelope []byte
+	CodeEvidence      string
+	Tags              []rpc.LegacyTag
+	// Messages holds the evidence of each message that began executing, in
+	// order. It is shorter than Tx.Messages when execution stopped early.
+	Messages            []evidence.Message
 	Execution           string
 	Fee                 LegacyFeeEvidence
 	ClassificationReady bool
@@ -29,9 +33,11 @@ type LegacyInclusion struct {
 type LegacyFeeEvidence struct {
 	Declared sdk.Coins
 	Payer    sdk.AccAddress
-	// charged means a successful DeliverTx necessarily committed ante fees.
-	// unknown means ante failure and message failure cannot be distinguished
-	// from code alone. The signed fee is retained, never converted to zero.
+	// charged means the ante handler finished, which commits the fee: either
+	// the transaction succeeded, or it failed after a message began executing.
+	// unknown means a failure that left no execution marker, where an ante
+	// rejection (no fee) and a panic during execution (fee kept) look the
+	// same. The signed fee is retained, never converted to zero.
 	Charge string
 }
 
@@ -73,15 +79,21 @@ func DecodeLegacyBlock(block *coretypes.ResultBlock, results *rpc.CustomBlockRes
 		if tx.SignersComplete && len(tx.Signers) > 0 {
 			item.Fee.Payer = bytes.Clone(tx.Signers[0])
 		}
+		messages, evidenceErr := evidence.For(chain, tx, result, item.Tags)
+		if evidenceErr != nil {
+			item.Issues = append(item.Issues, "legacy message evidence unattributed: "+evidenceErr.Error())
+		}
+		item.Messages = messages
+		switch {
+		case len(item.Fee.Payer) == 0:
+			item.Issues = append(item.Issues, "fee payer unresolved")
+		case result.Code == 0 || len(messages) > 0:
+			item.Fee.Charge = "charged"
+		default:
+			item.Issues = append(item.Issues, "failed legacy transaction left no execution marker; fee commitment needs gas or state evidence")
+		}
 		if result.Code == 0 {
 			item.Execution = "succeeded"
-			if len(item.Fee.Payer) > 0 {
-				item.Fee.Charge = "charged"
-			} else {
-				item.Issues = append(item.Issues, "fee payer unresolved")
-			}
-		} else {
-			item.Issues = append(item.Issues, "failed legacy transaction fee commitment needs ante/state evidence")
 		}
 		// Successful legacy reward and staking messages need era-specific event/tag
 		// reconciliation, not the modern event classifier's empty-output shortcut.
