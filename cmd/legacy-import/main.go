@@ -8,37 +8,25 @@
 package main
 
 import (
-	"bufio"
-	"compress/gzip"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/core"
 	indexerdb "github.com/DefiantLabs/cosmos-indexer/db"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/capture"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/store"
-	"github.com/DefiantLabs/cosmos-indexer/rpc"
 	"github.com/DefiantLabs/cosmos-indexer/tax"
-	tmjson "github.com/cometbft/cometbft/libs/json"
-	coretypes "github.com/cometbft/cometbft/rpc/core/types"
-	tm "github.com/cometbft/cometbft/types"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
-
-const dirSpan = 10000
 
 var (
 	digits      = regexp.MustCompile(`\d+`)
@@ -52,88 +40,6 @@ func safe(err error) string {
 		return "error text withheld"
 	}
 	return text
-}
-
-func readCapture(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	zr, err := gzip.NewReader(bufio.NewReaderSize(f, 64<<10))
-	if err != nil {
-		return nil, fmt.Errorf("capture is not gzip")
-	}
-	body, err := io.ReadAll(io.LimitReader(zr, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("capture gzip stream damaged")
-	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("capture exceeds decompressed limit")
-	}
-	return body, nil
-}
-
-// load reads one cached height into the shapes the decoder takes.
-func load(root, chain string, height int64, limit int64) (*coretypes.ResultBlock, *rpc.CustomBlockResults, error) {
-	base := filepath.Join(root, chain, strconv.FormatInt(height/dirSpan, 10), strconv.FormatInt(height, 10))
-	raw, err := readCapture(base+"-block.raw.gz", limit)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, os.ErrNotExist
-		}
-		return nil, nil, fmt.Errorf("block capture unreadable")
-	}
-	var block struct {
-		Result struct {
-			Block struct {
-				Header struct {
-					ChainID string    `json:"chain_id"`
-					Height  int64     `json:"height,string"`
-					Time    time.Time `json:"time"`
-				} `json:"header"`
-				Data struct {
-					Txs []string `json:"txs"`
-				} `json:"data"`
-			} `json:"block"`
-		} `json:"result"`
-	}
-	if json.Unmarshal(raw, &block) != nil {
-		return nil, nil, fmt.Errorf("block JSON invalid")
-	}
-	header := block.Result.Block.Header
-	if header.ChainID != chain || header.Height != height {
-		return nil, nil, fmt.Errorf("block identity does not match its file")
-	}
-	txs := make(tm.Txs, 0, len(block.Result.Block.Data.Txs))
-	for _, encoded := range block.Result.Block.Data.Txs {
-		bytes, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return nil, nil, fmt.Errorf("transaction is not base64")
-		}
-		txs = append(txs, bytes)
-	}
-	raw, err = readCapture(base+"-block_results.raw.gz", limit)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, os.ErrNotExist
-		}
-		return nil, nil, fmt.Errorf("result capture unreadable")
-	}
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-	}
-	if json.Unmarshal(raw, &envelope) != nil || len(envelope.Result) == 0 {
-		return nil, nil, fmt.Errorf("result envelope invalid")
-	}
-	var results rpc.CustomBlockResults
-	if err := tmjson.Unmarshal(envelope.Result, &results); err != nil {
-		return nil, nil, fmt.Errorf("result JSON invalid")
-	}
-	if results.Height != height {
-		return nil, nil, fmt.Errorf("result height does not match its file")
-	}
-	return &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: chain, Height: height, Time: header.Time}, Data: tm.Data{Txs: txs}}}, &results, nil
 }
 
 func openPrivate(dsn string, createSchema bool) (*gorm.DB, error) {
@@ -173,10 +79,15 @@ func openPrivate(dsn string, createSchema bool) (*gorm.DB, error) {
 			return nil, err
 		}
 	}
-	if err := store.Migrate(db); err != nil {
-		return nil, err
+	if createSchema {
+		if err := store.Migrate(db); err != nil {
+			return nil, err
+		}
+		if err := store.InstallCrossChainGuard(db); err != nil {
+			return nil, err
+		}
 	}
-	return db, store.InstallCrossChainGuard(db)
+	return db, store.Ready(db)
 }
 
 type counter map[string]int64
@@ -203,9 +114,26 @@ func main() {
 	chain := flag.String("chain", "cosmoshub-3", "legacy chain to import")
 	from := flag.Int64("from", 0, "first height")
 	to := flag.Int64("to", 0, "last height")
-	createSchema := flag.Bool("create-schema", false, "create the serving schema in an empty private database first")
+	createSchema := flag.Bool("create-schema", false, "create the serving schema, the inclusion table and the guard first; run it once, alone, before parallel ranges")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
+	resolutions := flag.String("resolutions", "", "file written by legacy-seqcheck: chain/height/index and a fee verdict per line")
 	flag.Parse()
+	verdicts := map[string]string{}
+	if *resolutions != "" {
+		text, err := os.ReadFile(*resolutions)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "resolutions file unavailable")
+			os.Exit(2)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(text)), "\n") {
+			key, verdict, ok := strings.Cut(line, " ")
+			if !ok || !strings.HasPrefix(key, *chain+"/") || verdicts[key] != "" {
+				fmt.Fprintln(os.Stderr, "resolutions file has a line for another chain, a repeated line or no verdict")
+				os.Exit(2)
+			}
+			verdicts[key] = verdict
+		}
+	}
 	if *from <= 0 || *to < *from {
 		fmt.Fprintln(os.Stderr, "a height range is required")
 		os.Exit(2)
@@ -223,7 +151,7 @@ func main() {
 	fees := counter{}
 	messages := counter{}
 	for height := *from; height <= *to; height++ {
-		block, results, err := load(*root, *chain, height, *maxBody)
+		block, results, err := capture.Load(*root, *chain, height, *maxBody)
 		if errors.Is(err, os.ErrNotExist) {
 			heights["not in the cache"]++
 			continue
@@ -235,6 +163,9 @@ func main() {
 		}
 		heights["read"]++
 		items, err := core.DecodeLegacyBlock(block, results)
+		if err == nil {
+			err = core.ResolveLegacyFees(items, verdicts)
+		}
 		if err == nil {
 			var out store.Block
 			if out, err = core.LegacyStoreBlock(block, items); err == nil {

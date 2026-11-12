@@ -155,6 +155,17 @@ func TestLegacyStoreBlockBuildsHubThreeRowsOrHoldsTheHeight(t *testing.T) {
 
 	_, err = LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"module\",\"value\":\"bank\"},{\"key\":\"action\",\"value\":\"send\"}]},{\"type\":\"transfer\",\"attributes\":[{\"key\":\"recipient\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"53uatom\"}]}]}]"},{"code":12,"log":"{\"code\":12}"}]}}`))
 	require.ErrorContains(t, err, "legacy transaction 1 held: fee charge unknown")
+	for verdict, fee := range map[string][]store.Coin{"charged": {{Denom: "uatom", Amount: "7"}}, "not charged": nil} {
+		unproven := decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"module\",\"value\":\"bank\"},{\"key\":\"action\",\"value\":\"send\"}]},{\"type\":\"transfer\",\"attributes\":[{\"key\":\"recipient\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"53uatom\"}]}]}]"},{"code":12,"log":"{\"code\":12}"}]}}`)
+		require.Error(t, ResolveLegacyFees(unproven, map[string]string{"cosmoshub-3/9/1": "maybe"}))
+		require.Error(t, ResolveLegacyFees(unproven, map[string]string{"cosmoshub-3/9/0": "not charged"}), "a proven fee is never overturned")
+		require.NoError(t, ResolveLegacyFees(unproven, map[string]string{"cosmoshub-3/9/0": "charged", "cosmoshub-3/9/1": verdict, "cosmoshub-3/8/0": "charged"}))
+		settled, err := LegacyStoreBlock(input, unproven)
+		require.NoError(t, err)
+		require.Equal(t, uint32(12), settled.Inclusions[1].Code)
+		require.Equal(t, fee, settled.Inclusions[1].Detail.Fee, verdict)
+		require.Equal(t, []store.Message{{TypeURL: "/cosmos.bank.v1beta1.MsgSend"}}, settled.Inclusions[1].Detail.Messages)
+	}
 	_, err = LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"module\",\"value\":\"bank\"},{\"key\":\"action\",\"value\":\"send\"}]},{\"type\":\"transfer\",\"attributes\":[{\"key\":\"recipient\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"53uatom\"}]}]}]"},{"code":10,"log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"}]}}`)[:1])
 	require.ErrorContains(t, err, "do not cover the block")
 	older := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: "cosmoshub-2", Height: 9, Time: when}}}

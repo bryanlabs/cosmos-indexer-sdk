@@ -105,3 +105,31 @@ func LegacyStoreBlock(block *coretypes.ResultBlock, items []LegacyInclusion) (st
 	}
 	return out, nil
 }
+
+// ResolveLegacyFees applies verdicts from the account sequence check to
+// failed transactions whose fee charge the block results could not prove.
+// Verdicts are keyed by inclusion identity; one for another height is
+// ignored. A fee the results already prove is never changed: a verdict that
+// disagrees with it is an error.
+func ResolveLegacyFees(items []LegacyInclusion, verdicts map[string]string) error {
+	for i := range items {
+		verdict, ok := verdicts[items[i].Identity]
+		if !ok {
+			continue
+		}
+		if verdict != "charged" && verdict != "not charged" {
+			return fmt.Errorf("legacy fee verdict not recognized")
+		}
+		switch items[i].Fee.Charge {
+		case "unknown":
+			if len(items[i].Fee.Payer) == 0 {
+				return fmt.Errorf("legacy fee verdict for a transaction without a payer")
+			}
+			items[i].Fee.Charge = verdict
+		case verdict:
+		default:
+			return fmt.Errorf("legacy fee verdict disagrees with the block results")
+		}
+	}
+	return nil
+}
