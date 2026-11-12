@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
@@ -201,5 +202,23 @@ func TestOutOfGasLocationSeparatesAnteOnlyFailures(t *testing.T) {
 	require.True(t, AnteOnlyLocation("ante verify: ed25519"))
 	for _, shared := range []string{"WritePerByte", "ReadFlat", "ValuePerByte", "Has", ""} {
 		require.False(t, AnteOnlyLocation(shared), shared)
+	}
+}
+
+func TestAnteFeeRejectionNeedsTheFeeDeductionError(t *testing.T) {
+	refused := `{"codespace":"sdk","code":5,"message":"insufficient funds to pay for fees; 1uatom < 2uatom"}`
+	require.True(t, AnteFeeRejection(&abci.ResponseDeliverTx{Code: 5, Codespace: "sdk", Log: refused}))
+	for name, result := range map[string]*abci.ResponseDeliverTx{
+		"nil":                nil,
+		"another code":       {Code: 10, Log: refused},
+		"handler array log":  {Code: 5, Log: `[{"msg_index":"0","success":false,"log":` + strconv.Quote(refused) + `}]`},
+		"another message":    {Code: 5, Log: `{"codespace":"sdk","code":5,"message":"insufficient account funds; 1uatom < 2uatom"}`},
+		"words not leading":  {Code: 5, Log: `{"codespace":"sdk","code":5,"message":"x insufficient funds to pay for fees; 1uatom < 2uatom"}`},
+		"another codespace":  {Code: 5, Log: `{"codespace":"bank","code":5,"message":"insufficient funds to pay for fees; 1uatom < 2uatom"}`},
+		"log code disagrees": {Code: 5, Log: `{"codespace":"sdk","code":12,"message":"insufficient funds to pay for fees; 1uatom < 2uatom"}`},
+		"plain text":         {Code: 5, Log: "insufficient funds to pay for fees; 1uatom < 2uatom"},
+		"empty":              {Code: 5},
+	} {
+		require.False(t, AnteFeeRejection(result), name)
 	}
 }

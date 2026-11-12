@@ -198,3 +198,26 @@ func TestLegacyAdapterEvidenceFailsClosed(t *testing.T) {
 	}
 	require.Error(t, LegacyIntakeAdmission())
 }
+
+func TestLegacyFeeNotChargedWhenTheAnteHandlerRefusedTheFee(t *testing.T) {
+	refused := `{\"codespace\":\"sdk\",\"code\":5,\"message\":\"insufficient funds to pay for fees; 1uatom < 2uatom\"}`
+	other := `{\"codespace\":\"sdk\",\"code\":5,\"message\":\"insufficient account funds; 1uatom < 2uatom\"}`
+	for chain, json := range map[string]string{
+		"cosmoshub-1": `{"height":"9","results":{"DeliverTx":[{"code":5,"codespace":"sdk","log":"` + refused + `"},{"code":5,"codespace":"sdk","log":"` + other + `"}]}}`,
+		"cosmoshub-2": `{"height":"9","results":{"DeliverTx":[{"code":5,"codespace":"sdk","log":"` + refused + `"},{"code":5,"codespace":"sdk","log":"` + other + `"}]}}`,
+		"cosmoshub-3": `{"height":"9","results":{"deliver_tx":[{"code":5,"codespace":"sdk","log":"` + refused + `"},{"code":5,"codespace":"sdk","log":"` + other + `"}]}}`,
+	} {
+		t.Run(chain, func(t *testing.T) {
+			raw := intakeRaw(t, chain)
+			input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: chain, Height: 9}, Data: tm.Data{Txs: tm.Txs{raw, raw}}}}
+			var results rpc.CustomBlockResults
+			require.NoError(t, tmjson.Unmarshal([]byte(json), &results))
+			items, err := DecodeLegacyBlock(input, &results)
+			require.NoError(t, err)
+			require.Len(t, items, 2)
+			require.Empty(t, items[0].Messages)
+			require.Equal(t, "not charged", items[0].Fee.Charge)
+			require.Equal(t, "unknown", items[1].Fee.Charge)
+		})
+	}
+}

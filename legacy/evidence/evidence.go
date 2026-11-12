@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
@@ -229,4 +230,26 @@ func OutOfGasLocation(result *abci.ResponseDeliverTx) string {
 // nothing.
 func AnteOnlyLocation(location string) bool {
 	return location == "txSize" || location == "ante verify: secp256k1" || location == "ante verify: ed25519"
+}
+
+// AnteFeeRejection reports whether a failed result is the ante handler
+// refusing the transaction because its payer could not cover the signed fee.
+// All three eras build this error only in the ante handler's fee deduction,
+// with the same code and the same opening words, and return it as a single
+// error object. A failure inside a message handler is recorded as a per
+// message array instead. The ante handler's state is discarded when it
+// refuses, so no fee was charged.
+func AnteFeeRejection(result *abci.ResponseDeliverTx) bool {
+	if result == nil || result.Code != 5 {
+		return false
+	}
+	var failure struct {
+		Codespace string `json:"codespace"`
+		Code      uint32 `json:"code"`
+		Message   string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(result.Log), &failure); err != nil {
+		return false
+	}
+	return failure.Codespace == "sdk" && failure.Code == 5 && strings.HasPrefix(failure.Message, "insufficient funds to pay for fees; ")
 }

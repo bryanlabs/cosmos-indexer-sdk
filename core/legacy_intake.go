@@ -37,9 +37,10 @@ type LegacyFeeEvidence struct {
 	// the transaction succeeded, or it failed after a message began executing.
 	// unknown means a failure that left no execution marker, where an ante
 	// rejection (no fee) and a panic during execution (fee kept) look the
-	// same. not charged means the transaction ran out of gas at a point only
-	// the ante handler reaches, so its fee deduction was discarded. The signed
-	// fee is retained, never converted to zero.
+	// same. not charged means the ante handler provably stopped: it ran out
+	// of gas at a point only it reaches, or it refused the transaction because
+	// the payer could not cover the fee. Its fee deduction was discarded. The
+	// signed fee is retained, never converted to zero.
 	Charge string
 }
 
@@ -91,7 +92,7 @@ func DecodeLegacyBlock(block *coretypes.ResultBlock, results *rpc.CustomBlockRes
 			item.Issues = append(item.Issues, "fee payer unresolved")
 		case result.Code == 0 || len(messages) > 0:
 			item.Fee.Charge = "charged"
-		case evidence.AnteOnlyLocation(evidence.OutOfGasLocation(result)):
+		case evidence.AnteOnlyLocation(evidence.OutOfGasLocation(result)), evidence.AnteFeeRejection(result):
 			item.Fee.Charge = "not charged"
 		default:
 			item.Issues = append(item.Issues, "failed legacy transaction left no execution marker; fee commitment needs gas or state evidence")
