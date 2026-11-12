@@ -145,7 +145,7 @@ only confirms that no account is counted past its closing sequence. It
 prints aggregate counts only.
 
 ```
-legacy-seqcheck --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200790 \
+legacy-seqcheck --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200791 \
   --opening genesis.json --closing genesis.cosmoshub-4.json.gz --whole-hub --out verdicts.txt
 ```
 
@@ -161,6 +161,51 @@ from the order of creation. With `--whole-hub` and every height read it also
 compares every account's last sequence with the next hub's genesis.
 
 ```
-legacy-seqcheck --signatures --workers 16 --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200790 \
+legacy-seqcheck --signatures --workers 16 --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200791 \
   --opening genesis.json --closing genesis.cosmoshub-4.json.gz --whole-hub --out verdicts.txt
+```
+
+## Legacy schema and genesis load
+
+Hub 1 to 3 history is stored in its own Postgres schema, `legacy`, written by
+a role that has no right on anything else (`legacy/schema`). Rows are keyed
+by chain first: `legacy.blocks` by (chain_id, height), `legacy.tx_inclusions`
+by (chain_id, height, tx_index) with a hash that may repeat, and
+`legacy.taxable_events` by (chain_id, height, phase, tx_index, msg_index,
+sub_index). What the chain recorded is written once: a trigger refuses any
+update, delete or truncate on those tables, for every role.
+
+`schema.Confined` reads the catalog and lists every way the connected role
+could reach outside the schema or rewrite a written-once table. Every legacy
+writer calls it before its first write and refuses to run on any finding.
+
+```
+legacy-schema --print                 # the whole migration, for review
+LEGACY_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=legacy_<name> sslmode=disable" \
+legacy-schema --apply                 # private loopback database only
+LEGACY_DSN="... user=legacy_importer ..." legacy-schema --check
+```
+
+The migration creates the role without a password. Set one separately.
+
+`cmd/legacy-genesis` loads the opening state of a hub from its genesis file
+(`legacy/genesis`): accounts with liquid, delegated and unbonding amounts,
+delegations valued at the validator's rate, unbonding entries, validators
+with unpaid rewards and commission, and withdraw addresses. It checks the
+file against a `SHA256SUMS` list, refuses a file whose parts disagree
+(delegations that do not add up to a validator's shares, balances that do
+not add up to the stated supply), loads in one database transaction, then
+reads every stored row back and compares it with the file. A second run
+with the same file writes nothing. It prints counts only.
+
+```
+legacy-genesis --file genesis.cosmoshub-2.json --sums SHA256SUMS --check-only
+LEGACY_DSN="... user=legacy_importer ..." legacy-genesis --file genesis.cosmoshub-2.json --sums SHA256SUMS
+```
+
+The Postgres tests need a private server and skip without one:
+
+```
+LEGACY_STORE_TEST_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=postgres sslmode=disable" \
+go test ./legacy/schema/... ./legacy/genesis/...
 ```
