@@ -376,6 +376,45 @@ func TestAminoStakingAmountByEra(t *testing.T) {
 		require.Equal(t, bech(t, "cosmosvaloper", c), moved.ValidatorDstAddress)
 	}
 
+	// Hub 3 checked only that a staking amount was positive before a
+	// transaction entered a block, so an amount signed with no denom is real
+	// history. It is kept as signed and marked, never given a denom.
+	for _, msg := range []fixtureMsg{fixtureDelegate{a, b, fixtureCoin{"", "40"}}, fixtureUndelegate{a, b, fixtureCoin{"", "40"}}, fixtureRedelegate{a, b, c, fixtureCoin{"", "40"}}} {
+		tx, decoded := one(t, "cosmoshub-3", msg)
+		require.Empty(t, tx.Issues)
+		require.True(t, tx.SignersComplete)
+		require.Equal(t, a, []byte(tx.Signers[0]))
+		require.True(t, decoded.AmountWithoutDenom)
+		require.NotEmpty(t, decoded.DerivedTypeURL)
+		var amount sdk.Coin
+		switch m := decoded.Derived.(type) {
+		case *staking.MsgDelegate:
+			amount = m.Amount
+		case *staking.MsgUndelegate:
+			amount = m.Amount
+		case *staking.MsgBeginRedelegate:
+			amount = m.Amount
+		}
+		require.Empty(t, amount.Denom)
+		require.Equal(t, "40", amount.Amount.String())
+		doc, err := tx.SignDoc("cosmoshub-3")
+		require.NoError(t, err)
+		require.Contains(t, string(doc.Bytes(1, 2)), `"amount":{"amount":"40","denom":""}`)
+
+		// The earlier hubs are not known to have included one, so it stays refused there.
+		tx, decoded = one(t, "cosmoshub-2", msg)
+		require.Nil(t, decoded.Derived)
+		require.False(t, decoded.AmountWithoutDenom)
+		require.False(t, tx.SignersComplete)
+	}
+	_, decoded := one(t, "cosmoshub-3", fixtureDelegate{a, b, fixtureCoin{"uatom", "40"}})
+	require.False(t, decoded.AmountWithoutDenom)
+	for _, amount := range []string{"", "0", "-4", "04", "4.0"} {
+		tx, decoded := one(t, "cosmoshub-3", fixtureDelegate{a, b, fixtureCoin{"", amount}})
+		require.Nil(t, decoded.Derived, amount)
+		require.False(t, tx.SignersComplete, amount)
+	}
+
 	// Hub 1 states shares. The signer is exact, so the fee payer resolves,
 	// but no coin amount is invented and the message stays flagged.
 	for _, msg := range []fixtureMsg{fixtureUndelegateShares{a, b, "40000000000000000000"}, fixtureRedelegateShares{a, b, c, "41000000000000000000"}} {

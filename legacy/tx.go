@@ -45,6 +45,10 @@ type Message struct {
 	DerivedTypeURL string
 	Issue          string
 	Signers        []sdk.AccAddress
+	// AmountWithoutDenom marks a Hub 3 staking message whose amount names no
+	// denom. The chain's handler refused every such message, so it can only
+	// sit in a failed transaction.
+	AmountWithoutDenom bool
 }
 type Signature struct {
 	Raw                     []byte
@@ -284,6 +288,27 @@ func coin(raw []byte) (sdk.Coin, error) {
 	}
 	return sdk.Coin{Denom: denom, Amount: number}, nil
 }
+
+// coinWithoutDenom reads a staking amount that names no denom. The Hub 3
+// staking messages validated only that the amount was positive, so such a
+// message could be signed and included; the handler then refused it because
+// the denom was not the bond denom. The projection keeps the empty denom as
+// signed. See AmountWithoutDenom.
+func coinWithoutDenom(raw []byte) (sdk.Coin, error) {
+	fields, err := scan(raw)
+	if err != nil {
+		return sdk.Coin{}, err
+	}
+	if err = schema(fields, map[uint64]uint64{2: 2}); err != nil || len(fields) != 1 {
+		return sdk.Coin{}, fmt.Errorf("invalid Amino coin")
+	}
+	amount := string(fields[0].Value)
+	number, ok := sdkmath.NewIntFromString(amount)
+	if !ok || number.String() != amount || !number.IsPositive() {
+		return sdk.Coin{}, fmt.Errorf("invalid Amino coin")
+	}
+	return sdk.Coin{Amount: number}, nil
+}
 func coins(fields []Field, num uint64) (sdk.Coins, error) {
 	var result sdk.Coins
 	for _, f := range fields {
@@ -450,6 +475,14 @@ func decodeMessage(chain string, raw []byte) (Message, error) {
 	}
 	msg.Derived = derived
 	msg.Signers = signers
+	switch m := derived.(type) {
+	case *staking.MsgDelegate:
+		msg.AmountWithoutDenom = m.Amount.Denom == ""
+	case *staking.MsgUndelegate:
+		msg.AmountWithoutDenom = m.Amount.Denom == ""
+	case *staking.MsgBeginRedelegate:
+		msg.AmountWithoutDenom = m.Amount.Denom == ""
+	}
 	msg.DerivedTypeURL = sdk.MsgTypeURL(derived)
 	return msg, nil
 }
@@ -555,6 +588,9 @@ func derive(chain, name string, f []Field) (sdk.Msg, []sdk.AccAddress, error) {
 			return nil, []sdk.AccAddress{bytes.Clone(value(f, 1))}, errShareValued
 		}
 		amount, e := coin(value(f, amountNum))
+		if e != nil && chain == "cosmoshub-3" {
+			amount, e = coinWithoutDenom(value(f, amountNum))
+		}
 		if e != nil {
 			return nil, nil, e
 		}

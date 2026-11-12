@@ -173,6 +173,41 @@ func TestLegacyStoreBlockBuildsHubThreeRowsOrHoldsTheHeight(t *testing.T) {
 	require.ErrorContains(t, err, "only built for cosmoshub-3")
 }
 
+type intakeDelegate struct {
+	Delegator, Validator []byte
+	Amount               intakeCoin
+}
+
+func (intakeDelegate) marker() {}
+
+func TestLegacyStoreBlockKeepsAStakingAmountWithoutDenomOnlyInAFailure(t *testing.T) {
+	cdc := amino.NewCodec()
+	cdc.RegisterInterface((*intakeMsg)(nil), nil)
+	cdc.RegisterConcrete(intakeDelegate{}, "cosmos-sdk/MsgDelegate", nil)
+	cdc.RegisterConcrete(intakeTx{}, "cosmos-sdk/StdTx", nil)
+	a, b := bytes.Repeat([]byte{1}, 20), bytes.Repeat([]byte{2}, 20)
+	raw, err := cdc.MarshalBinaryLengthPrefixed(intakeTx{Msgs: []intakeMsg{intakeDelegate{a, b, intakeCoin{Amount: "5"}}}, Fee: intakeFee{Amount: []intakeCoin{{"uatom", "7"}}, Gas: 200000}})
+	require.NoError(t, err)
+	input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: "cosmoshub-3", Height: 9, Time: time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)}, Data: tm.Data{Txs: tm.Txs{raw}}}}
+	decode := func(json string) []LegacyInclusion {
+		var results rpc.CustomBlockResults
+		require.NoError(t, tmjson.Unmarshal([]byte(json), &results))
+		items, err := DecodeLegacyBlock(input, &results)
+		require.NoError(t, err)
+		return items
+	}
+	// The handler refused the denom after the message began, so the fee was kept.
+	block, err := LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":102,"codespace":"staking","log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"delegate\"}]}]}]"}]}}`))
+	require.NoError(t, err)
+	require.Equal(t, uint32(102), block.Inclusions[0].Code)
+	require.Equal(t, []store.Coin{{Denom: "uatom", Amount: "7"}}, block.Inclusions[0].Detail.Fee)
+	require.Equal(t, []store.Message{{TypeURL: "/cosmos.staking.v1beta1.MsgDelegate"}}, block.Inclusions[0].Detail.Messages)
+
+	// The chain could not have executed it, so a success is held, not classified.
+	_, err = LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"delegate\",\"attributes\":[{\"key\":\"validator\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"5\"}]},{\"type\":\"message\",\"attributes\":[{\"key\":\"module\",\"value\":\"staking\"},{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"action\",\"value\":\"delegate\"}]}]}]"}]}}`))
+	require.ErrorContains(t, err, "legacy transaction 0 held: staking amount without a denom in a successful transaction")
+}
+
 func TestLegacyAllServingEntryPointsBlocked(t *testing.T) {
 	for _, chain := range []string{"cosmoshub-1", "cosmoshub-2", "cosmoshub-3"} {
 		cfg := config.IndexConfig{}

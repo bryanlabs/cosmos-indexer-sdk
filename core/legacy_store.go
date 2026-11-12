@@ -71,6 +71,9 @@ func LegacyStoreBlock(block *coretypes.ResultBlock, items []LegacyInclusion) (st
 			if message.Derived == nil || message.DerivedTypeURL == "" {
 				return refuse("message without a projection")
 			}
+			if executed && message.AmountWithoutDenom {
+				return refuse("staking amount without a denom in a successful transaction")
+			}
 			stored := store.Message{TypeURL: message.DerivedTypeURL}
 			if executed {
 				events, err := evidence.TransferSenders(message.AminoName, item.Messages[j].Events)
