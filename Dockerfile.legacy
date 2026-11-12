@@ -1,0 +1,30 @@
+# Builds the tools for Cosmos Hub 1 to 3 history, apart from the serving image:
+#   legacy-schema   - prints the legacy schema migration and checks that a role is confined to it
+#   legacy-genesis  - loads a hub's genesis file into the legacy schema
+#   legacy-import   - cache to database importer
+#   legacy-seqcheck - account sequence and signature check
+#   legacy-census   - aggregate counts over cached heights
+#
+# The image holds no serving binary, so a Job that runs it cannot start the API or the indexer.
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
+WORKDIR /src
+ENV GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS="-p=1"
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod go mod download
+COPY . .
+ARG TARGETARCH=amd64
+# The tests run before the build. Those that need a Postgres server skip here.
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
+    CGO_ENABLED=0 go test -p 1 ./legacy/... && \
+    CGO_ENABLED=0 go test -p 1 ./core -run '^TestLegacy' -count=1 && \
+    for tool in legacy-schema legacy-genesis legacy-import legacy-seqcheck legacy-census; do \
+      CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/$tool ./cmd/$tool || exit 1; \
+    done
+
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+RUN apk add --no-cache ca-certificates && adduser -D -u 1137 tax
+COPY --from=build /out/ /usr/local/bin/
+USER tax
+ENTRYPOINT ["/usr/local/bin/legacy-schema"]
+CMD ["--print"]

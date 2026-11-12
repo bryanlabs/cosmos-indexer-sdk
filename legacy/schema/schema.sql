@@ -254,6 +254,11 @@ BEGIN
     END IF;
 END $$;
 
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO {{role}}', current_database());
+END $$;
+
 GRANT USAGE ON SCHEMA legacy TO {{role}};
 GRANT SELECT ON ALL TABLES IN SCHEMA legacy TO {{role}};
 GRANT INSERT ON legacy.blocks, legacy.tx_inclusions, legacy.taxable_events, legacy.genesis_files,

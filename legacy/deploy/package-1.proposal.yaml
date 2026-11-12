@@ -1,0 +1,210 @@
+# Proposal, not applied anywhere. Two Jobs for the bare-metal repo that put
+# the legacy schema, its importer role and the four genesis files into the
+# tax database. Neither reads or writes a table outside the legacy schema.
+#
+# Before use:
+#   - replace LEGACY_IMAGE with the pushed image built from Dockerfile.legacy,
+#     pinned by digest
+#   - create the Secret cosmos-tax-legacy-importer-pg with the keys PGHOST,
+#     PGPORT, PGDATABASE, PGUSER (legacy_importer), PGPASSWORD and
+#     SCRAM_VERIFIER, the same shape as cosmos-tax-incremental-readonly-pg.
+#     The password must hold no space, quote or backslash.
+#
+# Run the first Job to completion before creating the second.
+#
+# Rollback, while no era has been published: DROP SCHEMA legacy CASCADE and
+# DROP ROLE legacy_importer, as the database owner. Nothing else changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosmos-tax-legacy-schema-20261112
+  namespace: apps
+spec:
+  suspend: false
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: cosmos-tax-sdk-2025-backfill
+        app.kubernetes.io/component: tax-backend
+        app.kubernetes.io/name: cosmos-tax-sdk
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1137
+        runAsGroup: 1137
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        # Writes the migration this image was built with, and its checksum.
+        - name: print-migration
+          image: LEGACY_IMAGE
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              legacy-schema --print > /work/schema.sql
+              sha256sum /work/schema.sql
+          volumeMounts:
+            - {name: work, mountPath: /work}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+        # Applies it in one transaction as the database owner, then sets the
+        # importer's password.
+        - name: apply-migration
+          image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              psql -X -q -v ON_ERROR_STOP=1 --single-transaction -f /work/schema.sql
+              psql -X -q -v ON_ERROR_STOP=1 <<'SQL'
+              \getenv verifier IMPORTER_VERIFIER
+              BEGIN;
+              SET LOCAL log_statement='none';
+              SET LOCAL log_min_error_statement='panic';
+              SET LOCAL lock_timeout='5s';
+              ALTER ROLE legacy_importer PASSWORD :'verifier';
+              COMMIT;
+              SQL
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-incremental-database-v1, key: PGHOST}
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-incremental-database-v1, key: PGPORT}
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-incremental-database-v1, key: PGDATABASE}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-incremental-database-v1, key: PGUSER}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-incremental-database-v1, key: PGPASSWORD}
+            - name: IMPORTER_VERIFIER
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: SCRAM_VERIFIER}
+            - {name: PGCONNECT_TIMEOUT, value: '10'}
+          volumeMounts:
+            - {name: work, mountPath: /work, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+      containers:
+        # Connects as the importer and fails unless that role can add legacy
+        # rows and reach nothing else.
+        - name: check-role
+          image: LEGACY_IMAGE
+          command: [/usr/local/bin/legacy-schema, --check]
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGHOST}
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGPORT}
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGDATABASE}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGUSER}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGPASSWORD}
+            - name: LEGACY_DSN
+              value: host=$(PGHOST) port=$(PGPORT) user=$(PGUSER) password=$(PGPASSWORD) dbname=$(PGDATABASE) sslmode=disable connect_timeout=10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+      volumes:
+        - name: work
+          emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosmos-tax-legacy-genesis-20261112
+  namespace: apps
+spec:
+  suspend: false
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app: cosmos-tax-sdk-2025-backfill
+        app.kubernetes.io/component: tax-backend
+        app.kubernetes.io/name: cosmos-tax-sdk
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1137
+        runAsGroup: 1137
+        fsGroup: 1137
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        # Loads each file in one transaction and reads every row back. A file
+        # already loaded is compared again and nothing is written.
+        - name: load-genesis
+          image: LEGACY_IMAGE
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              for file in genesis.cosmoshub-1.json genesis.cosmoshub-2.json genesis.json genesis.cosmoshub-4.json.gz; do
+                legacy-genesis --file /cache/genesis/$file --sums /cache/genesis/SHA256SUMS
+              done
+          env:
+            - name: PGHOST
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGHOST}
+            - name: PGPORT
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGPORT}
+            - name: PGDATABASE
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGDATABASE}
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGUSER}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: cosmos-tax-legacy-importer-pg, key: PGPASSWORD}
+            - name: LEGACY_DSN
+              value: host=$(PGHOST) port=$(PGPORT) user=$(PGUSER) password=$(PGPASSWORD) dbname=$(PGDATABASE) sslmode=disable connect_timeout=10
+          volumeMounts:
+            - {name: cache, mountPath: /cache, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 100m, memory: 1Gi}
+            limits: {cpu: '1', memory: 2Gi}
+      volumes:
+        # The mount is read only, not the claim: a read only claim remounts
+        # the volume read only for the download Jobs as well.
+        - name: cache
+          persistentVolumeClaim:
+            claimName: cosmos-hub4-archive-cache
