@@ -108,3 +108,59 @@ legacy-census --root /cache --chains cosmoshub-3:100,cosmoshub-2:0 --workers 1
 
 `chain:N` reads N consecutive heights from each 10,000 height directory, and
 0 reads every cached height.
+`--empty-stride N` reads the result of a height with no transactions only at
+multiples of N, which makes a pass over every transaction about three times
+cheaper. Without it every result is read.
+
+## Offline import
+
+`core.LegacyStoreBlock` turns a decoded cosmoshub-3 height into store rows:
+signers, the fee when the chain is known to have charged it, messages, and
+the tax rows the serving classifier gives for them. A height with any
+unresolved transaction is refused whole. `cmd/legacy-import` runs cache,
+decode, classify and store end to end. It accepts only a loopback database
+whose name starts with `legacy_`, refuses port 15432, and prints aggregate
+counts only. Hub 1 and Hub 2 are refused until their tags have a classifier.
+
+```
+LEGACY_IMPORT_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=legacy_<name> sslmode=disable" \
+legacy-import --cache /path/to/cache --create-schema --from 1000000 --to 1001999
+```
+
+Pass `--create-schema` once, alone, on an empty private database. Later
+runs, and parallel ranges, only check that the inclusion table and the guard
+are present. `--resolutions <file>` applies fee verdicts written by
+`legacy-seqcheck`.
+
+## Account sequence check
+
+`cmd/legacy-seqcheck` counts, per signer, the cached transactions that got
+past the fee and signature check, and compares them with the account
+sequences in the hub's genesis file and the next hub's. Over a whole hub
+(`--whole-hub`, every height present) an account with no unproven failure
+must match exactly, and for the others the difference says how many unproven
+failures paid their fee. `--out` writes the settled ones as
+`chain/height/index verdict` lines, with no address. On a partial range it
+only confirms that no account is counted past its closing sequence. It
+prints aggregate counts only.
+
+```
+legacy-seqcheck --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200790 \
+  --opening genesis.json --closing genesis.cosmoshub-4.json.gz --whole-hub --out verdicts.txt
+```
+
+`--signatures` follows each account one transaction at a time instead of
+counting. `Tx.SignDoc` rebuilds the bytes each era signed (sorted Amino JSON
+of the chain id, fee, memo, messages, account number and sequence) and
+`VerifySignature` checks them against the public key. A fee paying
+transaction whose signature verifies at a sequence fixes the account there,
+and an unproven failure between two fixed points is settled by the count
+alone, so `--out` writes verdicts for a partial range too. The range has to
+start at height 1 on Hub 2, where account numbers of new accounts are found
+from the order of creation. With `--whole-hub` and every height read it also
+compares every account's last sequence with the next hub's genesis.
+
+```
+legacy-seqcheck --signatures --workers 16 --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200790 \
+  --opening genesis.json --closing genesis.cosmoshub-4.json.gz --whole-hub --out verdicts.txt
+```

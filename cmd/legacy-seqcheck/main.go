@@ -130,19 +130,21 @@ func main() {
 				"impossible: signed sequences contradict fee charges (must be 0)": int64(report.Impossible),
 			})
 			bad += report.Mismatched
-			if *out != "" {
-				var b strings.Builder
-				for _, key := range report.SortedResolutions() {
-					b.WriteString(key + " " + report.Resolutions[key] + "\n")
-				}
-				if err := os.WriteFile(*out, []byte(b.String()), 0o600); err != nil {
-					fmt.Fprintln(os.Stderr, "resolutions file not written")
-					os.Exit(2)
-				}
-			}
 		} else {
 			show("accounts", map[string]int64{"impossible: signed sequences contradict fee charges (must be 0)": int64(report.Impossible)})
 			fmt.Println("end of hub comparison not run: it needs --whole-hub and every height of the chain read")
+		}
+		// A failure settled between two verified sequences is proven by the
+		// signatures alone, so the file is written for a partial range too.
+		if *out != "" {
+			var b strings.Builder
+			for _, key := range report.SortedResolutions() {
+				b.WriteString(key + " " + report.Resolutions[key] + "\n")
+			}
+			if err := os.WriteFile(*out, []byte(b.String()), 0o600); err != nil {
+				fmt.Fprintln(os.Stderr, "resolutions file not written")
+				os.Exit(2)
+			}
 		}
 		if bad > 0 {
 			os.Exit(1)
