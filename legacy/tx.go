@@ -305,8 +305,36 @@ func decodeFee(raw []byte) (sdk.Coins, uint64, error) {
 	if err = schema(fields, map[uint64]uint64{1: 2, 2: 0}, 1); err != nil {
 		return nil, 0, err
 	}
-	amount, err := coins(fields, 1)
-	return amount, uintValue(fields, 2), err
+	var amount sdk.Coins
+	for _, f := range fields {
+		if f.Number != 1 {
+			continue
+		}
+		c, err := coin(f.Value)
+		if err != nil {
+			if c, err = zeroFeeCoinWithoutDenom(f.Value); err != nil {
+				return nil, 0, err
+			}
+		}
+		amount = append(amount, c)
+	}
+	return amount, uintValue(fields, 2), nil
+}
+
+// zeroFeeCoinWithoutDenom accepts the one malformed fee coin the Hub 1 to 3
+// chains accepted: amount "0" with no denom. Their ante handlers skipped fee
+// deduction, and with it coin validation, whenever every fee coin was zero,
+// so such a transaction ran and paid nothing. Any other malformed coin stays
+// an error.
+func zeroFeeCoinWithoutDenom(raw []byte) (sdk.Coin, error) {
+	fields, err := scan(raw)
+	if err != nil {
+		return sdk.Coin{}, err
+	}
+	if len(fields) != 1 || fields[0].Number != 2 || string(fields[0].Value) != "0" {
+		return sdk.Coin{}, fmt.Errorf("invalid Amino coin")
+	}
+	return sdk.Coin{Amount: sdkmath.ZeroInt()}, nil
 }
 func decodeSignature(raw []byte) (Signature, error) {
 	fields, err := scan(raw)

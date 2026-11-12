@@ -126,6 +126,34 @@ func TestAminoStdTxAllHubEras(t *testing.T) {
 		})
 	}
 }
+func TestAminoZeroFeeCoinWithoutDenom(t *testing.T) {
+	a, b := bytes.Repeat([]byte{1}, 20), bytes.Repeat([]byte{2}, 20)
+	key := &secp256k1.PubKey{Key: bytes.Repeat([]byte{2}, 33)}
+	build := func(chain string, fee []fixtureCoin, send fixtureCoin) []byte {
+		raw, err := fixtureCodec(chain).Amino.MarshalBinaryLengthPrefixed(fixtureTx{Msgs: []fixtureMsg{fixtureSend{a, b, []fixtureCoin{send}}},
+			Fee: fixtureFee{Amount: fee, Gas: 200000}, Signatures: []fixtureSignature{{key, bytes.Repeat([]byte{3}, 64)}}})
+		require.NoError(t, err)
+		return raw
+	}
+	for _, chain := range []string{"cosmoshub-1", "cosmoshub-2", "cosmoshub-3"} {
+		tx, err := Decode(chain, build(chain, []fixtureCoin{{"", "0"}}, fixtureCoin{"uatom", "1"}))
+		require.NoError(t, err)
+		require.Empty(t, tx.Issues)
+		require.Len(t, tx.Fee, 1)
+		require.True(t, tx.Fee.IsZero())
+		require.Empty(t, tx.Fee[0].Denom)
+		// Only the exact shape the chains let through is accepted.
+		for _, fee := range [][]fixtureCoin{{{"", "1"}}, {{"", "00"}}, {{"", ""}}, {{"", "-0"}}} {
+			_, err = Decode(chain, build(chain, fee, fixtureCoin{"uatom", "1"}))
+			require.ErrorContains(t, err, "invalid Amino coin")
+		}
+		tx, err = Decode(chain, build(chain, []fixtureCoin{{"uatom", "5"}}, fixtureCoin{"", "0"}))
+		if err == nil {
+			require.Nil(t, tx.Messages[0].Derived, "a message coin without a denom is still not projected")
+			require.NotEmpty(t, tx.Issues)
+		}
+	}
+}
 func TestAminoMultisigAccountAndAbsentKey(t *testing.T) {
 	member := &ed25519.PubKey{Key: bytes.Repeat([]byte{4}, 32)}
 	key := multisig.NewLegacyAminoPubKey(1, []cryptotypes.PubKey{member})
