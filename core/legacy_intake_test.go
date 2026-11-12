@@ -3,14 +3,17 @@ package core
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/store"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
 	"github.com/DefiantLabs/probe/client"
 	tmjson "github.com/cometbft/cometbft/libs/json"
 	coretypes "github.com/cometbft/cometbft/rpc/core/types"
 	tm "github.com/cometbft/cometbft/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
 	amino "github.com/tendermint/go-amino"
 )
@@ -118,6 +121,45 @@ func TestLegacyFailedFeeChargedOnlyWithExecutionMarker(t *testing.T) {
 			require.Contains(t, items[2].Issues, "failed legacy transaction left no execution marker; fee commitment needs gas or state evidence")
 		})
 	}
+}
+
+func TestLegacyStoreBlockBuildsHubThreeRowsOrHoldsTheHeight(t *testing.T) {
+	raw := intakeRaw(t, "cosmoshub-3")
+	when := time.Date(2020, 3, 1, 12, 0, 0, 0, time.UTC)
+	input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: "cosmoshub-3", Height: 9, Time: when}, Data: tm.Data{Txs: tm.Txs{raw, raw}}}}
+	decode := func(json string) []LegacyInclusion {
+		var results rpc.CustomBlockResults
+		require.NoError(t, tmjson.Unmarshal([]byte(json), &results))
+		items, err := DecodeLegacyBlock(input, &results)
+		require.NoError(t, err)
+		return items
+	}
+	block, err := LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"module\",\"value\":\"bank\"},{\"key\":\"action\",\"value\":\"send\"}]},{\"type\":\"transfer\",\"attributes\":[{\"key\":\"recipient\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"53uatom\"}]}]}]"},{"code":10,"log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"}]}}`))
+	require.NoError(t, err)
+	require.Equal(t, "cosmoshub-3", block.Chain)
+	require.Equal(t, int64(9), block.Height)
+	require.Equal(t, when, block.Time)
+	require.Len(t, block.Inclusions, 2)
+	from := sdk.AccAddress(bytes.Repeat([]byte{1}, 20)).String()
+	to := sdk.AccAddress(bytes.Repeat([]byte{2}, 20)).String()
+	first := block.Inclusions[0]
+	require.Equal(t, block.Inclusions[1].Hash, first.Hash, "both inclusions of the same bytes are kept")
+	require.Equal(t, []string{from}, first.Detail.Signers)
+	require.Equal(t, from, first.Detail.FeePayer)
+	require.Equal(t, []store.Coin{{Denom: "uatom", Amount: "7"}}, first.Detail.Fee)
+	require.Equal(t, []store.Message{{TypeURL: "/cosmos.bank.v1beta1.MsgSend", Rows: []store.Row{{Category: "transfer", Amount: "53", Denom: "uatom", From: from, To: to}}}}, first.Detail.Messages)
+	failed := block.Inclusions[1]
+	require.Equal(t, uint32(10), failed.Code)
+	require.Equal(t, []store.Coin{{Denom: "uatom", Amount: "7"}}, failed.Detail.Fee, "a failure after execution began still paid its fee")
+	require.Equal(t, []store.Message{{TypeURL: "/cosmos.bank.v1beta1.MsgSend"}}, failed.Detail.Messages, "a failed transaction moved nothing")
+
+	_, err = LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"module\",\"value\":\"bank\"},{\"key\":\"action\",\"value\":\"send\"}]},{\"type\":\"transfer\",\"attributes\":[{\"key\":\"recipient\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"53uatom\"}]}]}]"},{"code":12,"log":"{\"code\":12}"}]}}`))
+	require.ErrorContains(t, err, "legacy transaction 1 held: fee charge unknown")
+	_, err = LegacyStoreBlock(input, decode(`{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"sender\",\"value\":\"payer\"},{\"key\":\"module\",\"value\":\"bank\"},{\"key\":\"action\",\"value\":\"send\"}]},{\"type\":\"transfer\",\"attributes\":[{\"key\":\"recipient\",\"value\":\"someone\"},{\"key\":\"amount\",\"value\":\"53uatom\"}]}]}]"},{"code":10,"log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"}]}}`)[:1])
+	require.ErrorContains(t, err, "do not cover the block")
+	older := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: "cosmoshub-2", Height: 9, Time: when}}}
+	_, err = LegacyStoreBlock(older, nil)
+	require.ErrorContains(t, err, "only built for cosmoshub-3")
 }
 
 func TestLegacyAllServingEntryPointsBlocked(t *testing.T) {
