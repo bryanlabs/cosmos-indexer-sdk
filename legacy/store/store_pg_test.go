@@ -306,3 +306,16 @@ func TestGenericHashUpsertRepointsAcrossChainsUnlessGuarded(t *testing.T) {
 func TestStoredDiffersIsDistinguishable(t *testing.T) {
 	require.True(t, errors.Is(fmt.Errorf("wrapped: %w", ErrStoredDiffers), ErrStoredDiffers))
 }
+
+func TestReadyNeedsTheTableAndAnEnabledGuard(t *testing.T) {
+	db := open(t)
+	require.Error(t, Ready(db))
+	require.NoError(t, InstallCrossChainGuard(db))
+	require.NoError(t, Ready(db))
+	require.NoError(t, db.Exec(`ALTER TABLE txes DISABLE TRIGGER txes_block_chain_guard`).Error)
+	require.Error(t, Ready(db))
+	require.NoError(t, db.Exec(`ALTER TABLE txes ENABLE TRIGGER txes_block_chain_guard`).Error)
+	require.NoError(t, Ready(db))
+	require.NoError(t, db.Exec(`DROP TABLE tx_inclusions`).Error)
+	require.Error(t, Ready(db))
+}

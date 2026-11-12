@@ -109,6 +109,23 @@ FOR EACH ROW EXECUTE FUNCTION txes_block_chain_guard()`).Error
 	})
 }
 
+// Ready reports whether Migrate and InstallCrossChainGuard have already run on
+// this database. An importer checks this instead of changing the schema, so a
+// schema change stays its own step and parallel importers never race on it.
+func Ready(db *gorm.DB) error {
+	var table, guard bool
+	if err := db.Raw(`SELECT to_regclass('tx_inclusions') IS NOT NULL`).Scan(&table).Error; err != nil {
+		return err
+	}
+	if err := db.Raw(`SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'txes_block_chain_guard' AND tgrelid = to_regclass('txes') AND NOT tgisinternal AND tgenabled <> 'D')`).Scan(&guard).Error; err != nil {
+		return err
+	}
+	if !table || !guard {
+		return fmt.Errorf("legacy inclusion table or cross chain guard is not installed")
+	}
+	return nil
+}
+
 // ImportBlock stores one legacy block and its inclusions in a single database
 // transaction. It leaves tx_indexed and block_events_indexed false: an
 // inclusion row is not an indexed transaction, and nothing may read these
