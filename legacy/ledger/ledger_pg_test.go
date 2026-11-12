@@ -230,9 +230,24 @@ func TestAReleasedRangeIsFreeForAnotherSession(t *testing.T) {
 }
 
 func TestOverlappingRangesClaimedAtOnceGiveOneImporter(t *testing.T) {
-	db := pgtest.Open(t)
+	for _, isolation := range []string{"read committed", "repeatable read"} {
+		t.Run(isolation, func(t *testing.T) {
+			db := pgtest.Open(t)
+			pool := importer(t, db)
+			// New sessions of the importer start with this default.
+			require.NoError(t, db.Owner.Exec("ALTER ROLE "+db.Role+" SET default_transaction_isolation TO '"+isolation+"'").Error)
+			pool.SetMaxIdleConns(0)
+			pool.SetMaxIdleConns(4)
+			var current string
+			require.NoError(t, pool.QueryRow("SHOW default_transaction_isolation").Scan(&current))
+			require.Equal(t, isolation, current)
+			claimOverlappingRangesAtOnce(t, db, pool)
+		})
+	}
+}
+
+func claimOverlappingRangesAtOnce(t *testing.T, db pgtest.Database, pool *sql.DB) {
 	ctx := context.Background()
-	pool := importer(t, db)
 	for round := int64(0); round < 40; round++ {
 		base := round * 1000
 		ranges := []ledger.Range{{Chain: "cosmoshub-2", From: base + 1, To: base + 100}, {Chain: "cosmoshub-2", From: base + 50, To: base + 150}}

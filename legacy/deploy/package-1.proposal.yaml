@@ -12,6 +12,13 @@
 #
 # Run the first Job to completion before creating the second.
 #
+# The Hub 3 import that follows these two Jobs in production has one rule
+# that is not optional. The fee verdicts (legacy-seqcheck --signatures), the
+# import (legacy-import) and the books-close check (legacy-close) all run
+# from one final image, the same digest as LEGACY_IMAGE here, and the sha256
+# of the production verdict file must equal the sha256 of the verdict file
+# the rehearsal produced. If the two differ, the import does not start.
+#
 # Rollback, while no era has been published: DROP SCHEMA legacy CASCADE and
 # DROP ROLE legacy_importer, as the database owner. Nothing else changes.
 apiVersion: batch/v1

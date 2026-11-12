@@ -104,7 +104,9 @@ WHERE chain_id = $1 AND from_height = $2`, r.Chain, r.From, build); err != nil {
 // so the look for an overlap and the insert run under one lock per chain:
 // the second importer sees the first one's range before it adds its own.
 func record(ctx context.Context, conn *sql.Conn, r Range, build string) error {
-	tx, err := conn.BeginTx(ctx, nil)
+	// Read committed, whatever the server default: the look for an overlap
+	// must see a range committed while this importer waited for the lock.
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
