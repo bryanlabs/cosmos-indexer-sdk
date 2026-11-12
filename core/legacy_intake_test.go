@@ -91,17 +91,19 @@ func TestLegacyOfflineAdapterFeesExecutionAndDuplicateInclusions(t *testing.T) {
 }
 func TestLegacyFailedFeeChargedOnlyWithExecutionMarker(t *testing.T) {
 	for chain, json := range map[string]string{
-		"cosmoshub-2": `{"height":"9","results":{"DeliverTx":[{"tags":[{"key":"YWN0aW9u","value":"c2VuZA=="}]},{"code":10,"tags":[{"key":"YWN0aW9u","value":"c2VuZA=="}]},{"code":12}]}}`,
-		"cosmoshub-3": `{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"},{"code":10,"log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"},{"code":12,"log":"{\"code\":12}"}]}}`,
+		"cosmoshub-2": `{"height":"9","results":{"DeliverTx":[{"tags":[{"key":"YWN0aW9u","value":"c2VuZA=="}]},{"code":10,"tags":[{"key":"YWN0aW9u","value":"c2VuZA=="}]},{"code":12},{"code":12,"log":"{\"codespace\":\"sdk\",\"code\":12,\"message\":\"out of gas in location: txSize; gasWanted: 1, gasUsed: 2\"}"}]}}`,
+		"cosmoshub-3": `{"height":"9","results":{"deliver_tx":[{"code":0,"log":"[{\"msg_index\":0,\"success\":true,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"},{"code":10,"log":"[{\"msg_index\":0,\"success\":false,\"log\":\"\",\"events\":[{\"type\":\"message\",\"attributes\":[{\"key\":\"action\",\"value\":\"send\"}]}]}]"},{"code":12,"log":"{\"code\":12}"},{"code":12,"log":"{\"codespace\":\"sdk\",\"code\":12,\"message\":\"out of gas in location: ante verify: secp256k1; gasWanted: 1, gasUsed: 2\"}"}]}}`,
 	} {
 		t.Run(chain, func(t *testing.T) {
 			raw := intakeRaw(t, chain)
-			input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: chain, Height: 9}, Data: tm.Data{Txs: tm.Txs{raw, raw, raw}}}}
+			input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: chain, Height: 9}, Data: tm.Data{Txs: tm.Txs{raw, raw, raw, raw}}}}
 			var results rpc.CustomBlockResults
 			require.NoError(t, tmjson.Unmarshal([]byte(json), &results))
 			items, err := DecodeLegacyBlock(input, &results)
 			require.NoError(t, err)
-			require.Len(t, items, 3)
+			require.Len(t, items, 4)
+			require.Empty(t, items[3].Messages)
+			require.Equal(t, "not charged", items[3].Fee.Charge)
 			require.Len(t, items[0].Messages, 1)
 			require.True(t, items[0].Messages[0].Success)
 			require.Equal(t, "charged", items[0].Fee.Charge)

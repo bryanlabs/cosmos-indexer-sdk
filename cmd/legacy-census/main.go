@@ -753,6 +753,10 @@ func process(j job, opt options, s *stats, sp *spill) {
 		case len(messages) > 0:
 			s.MessageEvidence.add("failed: a message began executing, fee charged, "+code, 1)
 			s.MessageEvidence.add(fmt.Sprintf("failed: stopped at message %s of %s", bucket(int64(len(messages)), 1, 2, 5, 20), bucket(int64(len(tx.Messages)), 1, 2, 5, 20)), 1)
+		case evidence.AnteOnlyLocation(evidence.OutOfGasLocation(result)):
+			s.MessageEvidence.add("failed: out of gas in the ante handler at "+evidence.OutOfGasLocation(result)+", fee not charged", 1)
+		case evidence.OutOfGasLocation(result) != "":
+			s.MessageEvidence.add("failed: no execution marker, out of gas at "+evidence.OutOfGasLocation(result)+", fee charge unknown", 1)
 		default:
 			s.MessageEvidence.add("failed: no execution marker, fee charge unknown, "+code, 1)
 		}

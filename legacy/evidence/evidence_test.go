@@ -183,3 +183,23 @@ func TestTransferSendersLeavesOthersAloneAndRefusesMismatch(t *testing.T) {
 		require.Nil(t, got, name)
 	}
 }
+
+func TestOutOfGasLocationSeparatesAnteOnlyFailures(t *testing.T) {
+	for log, want := range map[string]string{
+		`{"codespace":"sdk","code":12,"message":"out of gas in location: txSize; gasWanted: 10, gasUsed: 11"}`:                 "txSize",
+		`{"codespace":"sdk","code":12,"message":"out of gas in location: ante verify: secp256k1; gasWanted: 10, gasUsed: 11"}`: "ante verify: secp256k1",
+		`{"codespace":"sdk","code":12,"message":"out of gas in location: WritePerByte; gasWanted: 10, gasUsed: 11"}`:           "WritePerByte",
+		`{"codespace":"sdk","code":12,"message":"out of gas"}`:                                                                 "",
+		``: "",
+	} {
+		require.Equal(t, want, OutOfGasLocation(&abci.ResponseDeliverTx{Code: 12, Log: log}), log)
+	}
+	require.Empty(t, OutOfGasLocation(&abci.ResponseDeliverTx{Code: 10, Log: "out of gas in location: txSize; gasWanted: 1, gasUsed: 2"}))
+	require.Empty(t, OutOfGasLocation(nil))
+	require.True(t, AnteOnlyLocation("txSize"))
+	require.True(t, AnteOnlyLocation("ante verify: secp256k1"))
+	require.True(t, AnteOnlyLocation("ante verify: ed25519"))
+	for _, shared := range []string{"WritePerByte", "ReadFlat", "ValuePerByte", "Has", ""} {
+		require.False(t, AnteOnlyLocation(shared), shared)
+	}
+}

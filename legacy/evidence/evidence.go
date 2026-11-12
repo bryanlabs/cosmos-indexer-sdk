@@ -5,6 +5,7 @@ package evidence
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
@@ -203,4 +204,29 @@ func TransferSenders(aminoName string, events []abci.Event) ([]abci.Event, error
 		out = append(out, paid)
 	}
 	return out, nil
+}
+
+var outOfGas = regexp.MustCompile(`out of gas in location: ([A-Za-z0-9 :]{1,40}); gasWanted: \d+, gasUsed: \d+`)
+
+// OutOfGasLocation returns the gas meter location a result ran out of gas at,
+// or nothing when the result is not an out of gas failure. The location is a
+// constant from the chain's source, never account data.
+func OutOfGasLocation(result *abci.ResponseDeliverTx) string {
+	if result == nil || result.Code != 12 {
+		return ""
+	}
+	found := outOfGas.FindStringSubmatch(result.Log)
+	if found == nil {
+		return ""
+	}
+	return found[1]
+}
+
+// AnteOnlyLocation reports whether only the ante handler charges gas at this
+// location: the transaction size and signature checks. Running out of gas
+// there aborts the ante handler, whose fee deduction is then discarded, so no
+// fee was charged. Store reads and writes happen in both phases and prove
+// nothing.
+func AnteOnlyLocation(location string) bool {
+	return location == "txSize" || location == "ante verify: secp256k1" || location == "ante verify: ed25519"
 }
