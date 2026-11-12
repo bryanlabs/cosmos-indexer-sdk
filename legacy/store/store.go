@@ -1,6 +1,7 @@
 // Package store is the offline prototype of inclusion-scoped persistence for
 // Cosmos Hub 1 to 3. It is additive: one new table, tx_inclusions, and an
-// optional guard trigger. Nothing here is wired into the serving indexer.
+// optional guard trigger. Signers, fees, messages and tax rows go into the
+// existing tables as new rows under the inclusion's own txes row. Nothing here is wired into the serving indexer.
 //
 // The serving schema identifies a transaction by txes.hash alone, and the
 // generic indexer upserts on that hash, overwriting code and block_id. Heights
@@ -55,6 +56,9 @@ type Inclusion struct {
 	Code         uint32
 	Codespace    string
 	CodeEvidence string
+	// Detail is optional. An inclusion stored without it holds identity and
+	// result only.
+	Detail *Detail
 }
 
 // Block is one legacy height with every transaction it included, in order.
@@ -188,6 +192,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (chain_id, height, tx_index) D
 			want.ID = got.ID
 			if got != want {
 				return ErrStoredDiffers
+			}
+			if inc.Detail != nil {
+				if err := importDetail(tx, row.ID, inc.Hash, block.Height, blockTime, *inc.Detail); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
