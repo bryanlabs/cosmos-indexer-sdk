@@ -68,6 +68,7 @@ func main() {
 	closingPath := flag.String("closing", "", "genesis file of the next chain")
 	whole := flag.Bool("whole-hub", false, "the range is every height of the chain, so accounts must match exactly")
 	out := flag.String("out", "", "write settled failures here as chain/height/index and a verdict")
+	signatures := flag.Bool("signatures", false, "follow each account's sequence through the signatures, one transaction at a time")
 	workers := flag.Int("workers", 4, "parallel readers")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
 	flag.Parse()
@@ -90,6 +91,63 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, safe(err))
 		os.Exit(2)
+	}
+
+	show := func(title string, counts map[string]int64) {
+		keys := make([]string, 0, len(counts))
+		for k := range counts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		fmt.Println(title + ":")
+		for _, k := range keys {
+			fmt.Printf("  %-66s %d\n", k, counts[k])
+		}
+	}
+	if *signatures {
+		ledger, heights, faults, unchecked := followSignatures(*root, *chain, *from, *to, *maxBody, *workers, opening, closing)
+		complete := heights["read"] == *to-*from+1
+		report := ledger.Close(*whole && complete)
+		fmt.Printf("chain %s heights %d to %d, signatures followed in chain order\n", *chain, *from, *to)
+		show("heights", heights)
+		show("heights left out by reason", faults)
+		show("signatures", ledger.Signatures)
+		show("signatures not checkable by reason", unchecked)
+		show("signatures checked and not verified by kind", ledger.Unverified)
+		show("failures whose fee the block results cannot prove", map[string]int64{
+			"settled as charged":                             int64(report.SettledCharged),
+			"settled as not charged":                         int64(report.SettledNotCharged),
+			"still unsettled":                                int64(report.Unsettled),
+			"settled differently by two signers (must be 0)": int64(report.Conflicts),
+		})
+		bad := report.Impossible + report.Conflicts
+		if *whole && complete {
+			show("accounts", map[string]int64{
+				"in either genesis file or the range":                             int64(report.Accounts),
+				"exact: ends on its closing sequence":                             int64(report.Exact),
+				"mismatched: ends on another sequence (must be 0)":                int64(report.Mismatched),
+				"not comparable: a fee paying signature did not verify":           int64(report.Loose),
+				"impossible: signed sequences contradict fee charges (must be 0)": int64(report.Impossible),
+			})
+			bad += report.Mismatched
+			if *out != "" {
+				var b strings.Builder
+				for _, key := range report.SortedResolutions() {
+					b.WriteString(key + " " + report.Resolutions[key] + "\n")
+				}
+				if err := os.WriteFile(*out, []byte(b.String()), 0o600); err != nil {
+					fmt.Fprintln(os.Stderr, "resolutions file not written")
+					os.Exit(2)
+				}
+			}
+		} else {
+			show("accounts", map[string]int64{"impossible: signed sequences contradict fee charges (must be 0)": int64(report.Impossible)})
+			fmt.Println("end of hub comparison not run: it needs --whole-hub and every height of the chain read")
+		}
+		if bad > 0 {
+			os.Exit(1)
+		}
+		return
 	}
 
 	jobs := make(chan int64, 1024)
@@ -159,17 +217,6 @@ func main() {
 		}
 		for k, v := range p.faults {
 			faults[k] += v
-		}
-	}
-	show := func(title string, counts map[string]int64) {
-		keys := make([]string, 0, len(counts))
-		for k := range counts {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		fmt.Println(title + ":")
-		for _, k := range keys {
-			fmt.Printf("  %-66s %d\n", k, counts[k])
 		}
 	}
 	fmt.Printf("chain %s heights %d to %d, opening %s (%d accounts, %d genesis transactions), closing %s (%d accounts)\n",

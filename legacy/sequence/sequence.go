@@ -33,6 +33,10 @@ type Genesis struct {
 	// GenesisSigned counts the genesis transactions an account signed. They
 	// ran before height 1 and each raised its signer's sequence by one.
 	GenesisSigned map[string]uint64
+	// Number is each account's account number as written in the file, and
+	// Position its place in the file's account list. A file that writes every
+	// number as zero has the chain number accounts by position.
+	Number, Position map[string]uint64
 }
 
 // ReadGenesis reads the account sequences of a cosmoshub-1, 2, 3 or 4
@@ -71,8 +75,9 @@ func ReadGenesis(r io.Reader) (*Genesis, error) {
 	if doc.ChainID == "" || len(accounts) == 0 {
 		return nil, fmt.Errorf("genesis has no chain id or no accounts")
 	}
-	g := &Genesis{Chain: doc.ChainID, Sequence: make(map[string]uint64, len(accounts)), GenesisSigned: map[string]uint64{}}
-	for _, account := range accounts {
+	g := &Genesis{Chain: doc.ChainID, Sequence: make(map[string]uint64, len(accounts)), GenesisSigned: map[string]uint64{},
+		Number: make(map[string]uint64, len(accounts)), Position: make(map[string]uint64, len(accounts))}
+	for position, account := range accounts {
 		// Vesting and module accounts nest the base account one or two levels down.
 		for depth := 0; depth < 3; depth++ {
 			inner, ok := account["base_vesting_account"]
@@ -102,6 +107,15 @@ func ReadGenesis(r io.Reader) (*Genesis, error) {
 			return nil, fmt.Errorf("genesis lists an account twice")
 		}
 		g.Sequence[address] = sequence
+		g.Position[address] = uint64(position)
+		if field := account["account_number"]; field != nil {
+			if json.Unmarshal(field, &text) != nil {
+				return nil, fmt.Errorf("genesis account number invalid")
+			}
+			if g.Number[address], err = strconv.ParseUint(text, 10, 64); err != nil {
+				return nil, fmt.Errorf("genesis account number is not a number")
+			}
+		}
 	}
 	for _, tx := range doc.AppState.Gentxs {
 		if len(tx.Value.Msg) != 1 || tx.Value.Msg[0].Type != "cosmos-sdk/MsgCreateValidator" || tx.Value.Msg[0].Value.Delegator == "" || len(tx.Value.Signatures) != 1 {
