@@ -7,8 +7,8 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
