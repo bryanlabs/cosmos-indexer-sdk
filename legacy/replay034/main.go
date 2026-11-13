@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	gaia "github.com/cosmos/cosmos-sdk/cmd/gaia/app"
 	"github.com/cosmos/cosmos-sdk/store"
+	storetypes "github.com/cosmos/cosmos-sdk/store/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	abci "github.com/tendermint/tendermint/abci/types"
@@ -34,6 +37,10 @@ import (
 const release = "cosmos-sdk v0.34.10 (gaia), tendermint v0.31.11, iavl v0.12.1"
 
 var address = regexp.MustCompile(`cosmos(valoper|valcons|pub|valoperpub|valconspub)?1[0-9a-z]{38,}`)
+
+// errSignal ends a run that was asked to stop. The state is intact and a
+// later run continues from it.
+var errSignal = errors.New("stopped by signal")
 
 func plain(v interface{}) string {
 	return address.ReplaceAllString(fmt.Sprint(v), "ADDR")
@@ -52,6 +59,9 @@ func main() {
 		err = run(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown mode")
+	}
+	if err == errSignal {
+		os.Exit(3)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stopped:", plain(err))
@@ -99,7 +109,7 @@ func run(args []string) error {
 	home := fs.String("home", "", "working directory, created if absent")
 	to := fs.Int64("to", 0, "last height to run")
 	readers := fs.Int("readers", 2, "cache readers")
-	pruning := fs.String("pruning", "syncable", "state versions to keep")
+	pruning := fs.String("pruning", "recent", "state versions to keep: recent, syncable or nothing")
 	compare := fs.Bool("compare-results", true, "compare each result with the cached one")
 	blockCache := fs.Int("db-cache-mb", 8, "database block cache")
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
@@ -132,7 +142,20 @@ func run(args []string) error {
 		return err
 	}
 	defer db.Close()
-	app := gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, 0, baseapp.SetPruning(store.NewPruningOptionsFromString(*pruning)))
+	// Which old state versions the database keeps does not enter the state
+	// hash, which covers the current state only. "recent" keeps the last 100
+	// versions, enough to reopen after a crash; "syncable" also keeps every
+	// 10,000th.
+	var keep sdk.PruningOptions
+	switch *pruning {
+	case "recent":
+		keep = storetypes.NewPruningOptions(100, 0)
+	case "syncable", "nothing":
+		keep = store.NewPruningOptionsFromString(*pruning)
+	default:
+		return fmt.Errorf("pruning is recent, syncable or nothing")
+	}
+	app := gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, 0, baseapp.SetPruning(keep))
 	vals, err := openValidators(filepath.Join(*home, "validator-updates.jsonl"))
 	if err != nil {
 		return err
@@ -232,7 +255,7 @@ func run(args []string) error {
 		select {
 		case <-stop:
 			report("stopped by signal")
-			return nil
+			return errSignal
 		default:
 		}
 		h, b := c.height, c.block
