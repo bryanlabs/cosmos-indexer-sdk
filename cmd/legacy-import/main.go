@@ -258,9 +258,7 @@ func main() {
 	}
 	line()
 	// A removal verdict that names no message of its height was not used: the
-	// file does not belong to these captures. Heights an earlier run stored
-	// are read again for their verdicts, so a rerun cannot pass a file the
-	// run before it refused.
+	// file does not belong to these captures.
 	expected, earlier := int64(0), map[int64]bool{}
 	for key := range removals {
 		parts := strings.Split(key, "/")
@@ -273,8 +271,43 @@ func main() {
 			}
 		}
 	}
+	for key := range verdicts {
+		parts := strings.Split(key, "/")
+		if height, err := strconv.ParseInt(parts[min(1, len(parts)-1)], 10, 64); err == nil && height >= *from && height < first {
+			earlier[height] = true
+		}
+	}
+	// Heights an earlier run stored were not read by this one. Those a
+	// verdict file names are read again and compared with what is stored, so
+	// a rerun with other verdict files cannot pass rows the files no longer
+	// support, nor a file the run before it refused.
+	stop := func(text string) {
+		progress.Status = "failed"
+		_ = claim.Record(ctx, progress)
+		fail(text)
+	}
+	again := make([]int64, 0, len(earlier))
 	for height := range earlier {
-		attached += int64(read(*root, *chain, height, *maxBody, verdicts, removals).removals)
+		again = append(again, height)
+	}
+	sort.Slice(again, func(a, b int) bool { return again[a] < again[b] })
+	var reread []ledger.Block
+	for _, height := range again {
+		o := read(*root, *chain, height, *maxBody, verdicts, removals)
+		if o.missing || o.err != nil {
+			stop("a height stored by an earlier run cannot be built again with these verdict files")
+		}
+		attached += int64(o.removals)
+		reread = append(reread, *o.block)
+	}
+	for start := 0; start < len(reread); start += int(*batch) {
+		fresh, err := ledger.Write(ctx, db, reread[start:min(start+int(*batch), len(reread))])
+		if errors.Is(err, ledger.ErrStoredDiffers) {
+			stop(safe(err))
+		}
+		if err != nil || fresh != 0 {
+			stop("the heights stored by an earlier run could not be compared with these verdict files")
+		}
 	}
 	// Every stored message that could have removed a validator needs a
 	// verdict. Without one its payout was read as a reward on the count of
@@ -301,6 +334,7 @@ func main() {
 	fmt.Printf("heights newly stored %d, already stored and equal %d\n", added, heights["stored"]-added)
 	fmt.Printf("removal verdicts in the file %d, for this range %d, matched to a message %d\n", len(removals), expected, attached)
 	fmt.Printf("stored messages that could have removed a validator %d, without a removal verdict %d\n", len(leaves), unproven)
+	fmt.Printf("heights of an earlier run named in a verdict file, read again and equal to what is stored %d\n", len(again))
 	heights.print("heights")
 	categories.print("tax rows by phase, category and amount source")
 	messages.print("block events kept")
