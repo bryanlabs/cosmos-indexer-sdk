@@ -9,6 +9,7 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/auth"
+	"github.com/cosmos/cosmos-sdk/x/gov"
 	abci "github.com/tendermint/tendermint/abci/types"
 	tmtypes "github.com/tendermint/tendermint/types"
 )
@@ -49,6 +50,8 @@ type observer struct {
 	blockBefore          balances
 	handlers             int
 	handlerFailure       bool
+	deposits             []gov.Deposit
+	anteCalled           bool
 }
 
 // SetRecorder enables optional accounting before a block or export. It may not
@@ -181,7 +184,13 @@ func (app *GaiaApp) observedBeginBlocker(ctx sdk.Context, req abci.RequestBeginB
 	return
 }
 func (app *GaiaApp) observedEndBlocker(ctx sdk.Context, req abci.RequestEndBlock) (res abci.ResponseEndBlock) {
+	if app.observer.active {
+		app.observer.deposits = app.governanceDeposits(ctx)
+	}
 	app.phase(ctx, "end_block", func() { res = app.EndBlocker(ctx, req) })
+	if len(app.observer.deposits) != 0 {
+		app.fail()
+	}
 	return
 }
 func (app *GaiaApp) observeHandler(h sdk.Handler) sdk.Handler {
@@ -201,7 +210,11 @@ func (app *GaiaApp) observeHandler(h sdk.Handler) sdk.Handler {
 		previous := o.label
 		o.label = msg.Route() + "/" + msg.Type()
 		defer func() { o.label = previous }()
+		restore := app.messageCause(msg)
+		defer restore()
+		principal := app.principal(ctx, msg)
 		app.phase(ctx, "message", func() { res = h(ctx, msg) })
+		principal(res.IsOK())
 		returned = true
 		if len(o.pending) > 0 {
 			o.pending[len(o.pending)-1].Code = uint32(res.Code)
@@ -215,33 +228,41 @@ func (app *GaiaApp) observeAnte(h sdk.AnteHandler) sdk.AnteHandler {
 		if !o.active || ctx.IsCheckTx() || sim {
 			return h(ctx, tx, sim)
 		}
+		o.anteCalled = true
 		before := app.snapshot(ctx)
 		start := len(o.pending)
-		newCtx, res, abort = h(ctx, tx, sim)
-		afterCtx := ctx
-		if !newCtx.IsZero() {
-			afterCtx = newCtx
-		}
-		after := app.snapshot(afterCtx)
-		// auth v0.34.10 writes the payer directly, not through bank. Independently
-		// expect its signed fee only, and reconcile against the complete account set.
-		std, ok := tx.(auth.StdTx)
-		if ok && len(std.GetSigners()) > 0 {
-			payer := std.GetSigners()[0].String()
-			for _, c := range std.Fee.Amount {
-				k := balanceKey{payer, c.Denom}
-				if !abort || amount(after, k).Equal(amount(before, k).Sub(c.Amount)) {
-					o.pending = append(o.pending, Record{Kind: "movement", Height: o.height, Tx: o.tx, Message: -1, Phase: "ante", Label: "ante_fee", Address: payer, Denom: c.Denom, Amount: c.Amount.Neg().String()})
+		returned := false
+		defer func() {
+			if !returned {
+				abort = true
+			}
+			afterCtx := ctx
+			if !newCtx.IsZero() {
+				afterCtx = newCtx
+			}
+			after := app.snapshot(afterCtx)
+			// auth v0.34.10 writes the payer directly, not through bank. Independently
+			// expect its signed fee only, and reconcile against the complete account set.
+			std, ok := tx.(auth.StdTx)
+			if ok && len(std.GetSigners()) > 0 {
+				payer := std.GetSigners()[0].String()
+				for _, c := range std.Fee.Amount {
+					k := balanceKey{payer, c.Denom}
+					if !abort || amount(after, k).Equal(amount(before, k).Sub(c.Amount)) {
+						o.pending = append(o.pending, Record{Kind: "movement", Height: o.height, Tx: o.tx, Message: -1, Phase: "ante", Label: "ante_fee", Address: payer, Denom: c.Denom, Amount: c.Amount.Neg().String()})
+					}
 				}
 			}
-		}
-		app.reconcile(before, after, o.pending[start:])
-		app.marker("accounting", "ante", uint32(res.Code))
-		if abort {
-			for i := start; i < len(o.pending); i++ {
-				o.pending[i].Status = "aborted"
+			app.reconcile(before, after, o.pending[start:])
+			app.marker("accounting", "ante", uint32(res.Code))
+			if abort {
+				for i := start; i < len(o.pending); i++ {
+					o.pending[i].Status = "aborted"
+				}
 			}
-		}
+		}()
+		newCtx, res, abort = h(ctx, tx, sim)
+		returned = true
 		return
 	}
 }
@@ -274,10 +295,14 @@ func (app *GaiaApp) DeliverTx(tx []byte) abci.ResponseDeliverTx {
 	o.tx++
 	o.message = -1
 	o.handlers, o.handlerFailure = 0, false
+	o.anteCalled = false
 	ctx := app.NewContext(false, abci.Header{Height: o.height})
 	before := app.snapshot(ctx)
 	start := len(o.pending)
 	res := app.BaseApp.DeliverTx(tx)
+	if !o.anteCalled {
+		o.pending = append(o.pending, Record{Kind: "accounting", Height: o.height, Tx: o.tx, Message: -1, Phase: "ante", Label: "ante_not_invoked", Status: "aborted", Code: res.Code})
+	}
 	// BaseApp may return a deferred gas error after writing the message cache.
 	// Net-zero movements cannot disambiguate that case. Never classify them
 	// as aborted merely because the final response failed.

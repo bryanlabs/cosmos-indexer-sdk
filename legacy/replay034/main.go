@@ -129,6 +129,7 @@ func run(args []string) error {
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
 	coinRecords := fs.String("coin-records", "", "optional private movement evidence file, must not already exist")
+	verifyTarget := fs.Bool("verify-target-next-header", false, "prove final committed target using the next cached header, without executing that block")
 	fs.Parse(args)
 	if *profile != "" {
 		f, err := os.Create(*profile)
@@ -251,6 +252,9 @@ func run(args []string) error {
 	}
 	state.From, state.Height, state.HashVerified = height+1, height, height-1
 	if *to == height {
+		if *verifyTarget {
+			return fmt.Errorf("target already exists; use independent offline checkpoint proof instead of rewriting its original replay status")
+		}
 		fmt.Printf("already at the target height %d\n", height)
 		return nil
 	}
@@ -401,6 +405,15 @@ func run(args []string) error {
 		if time.Since(window) >= 30*time.Second {
 			report("")
 		}
+	}
+	if *verifyTarget {
+		next := load(*cache, *chain, height+1, false)
+		if err := verifyFinalHeader(next, height, appHash, lastHash, lastResults, vals.current, vals.next); err != nil {
+			return fail(height+1, "%v", err)
+		}
+		state.HashVerified = height
+		report("target state verified by next cached header; next block was not executed")
+		return nil
 	}
 	report(fmt.Sprintf("reached the target; the state after height %d is checked by the next header only", height))
 	return nil

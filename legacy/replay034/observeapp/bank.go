@@ -11,7 +11,8 @@ import (
 // phase reconciliation catches writes bypassing these calls, not residuals.
 type observedBank struct {
 	bank.Keeper
-	app *GaiaApp
+	app    *GaiaApp
+	module string
 }
 
 func (k observedBank) watch(ctx sdk.Context, method string, addresses ...sdk.AccAddress) func() {
@@ -33,6 +34,9 @@ func (k observedBank) watch(ctx sdk.Context, method string, addresses ...sdk.Acc
 	if label == "" {
 		label = o.phase
 	}
+	if k.module != "" && o.phase != "zero_height_export" {
+		label = k.module + "/" + label
+	}
 	return func() { k.app.recordDelta(before, snapshot(), label+"/bank."+method) }
 }
 func (k observedBank) SetCoins(ctx sdk.Context, a sdk.AccAddress, c sdk.Coins) sdk.Error {
@@ -48,6 +52,9 @@ func (k observedBank) SubtractCoins(ctx sdk.Context, a sdk.AccAddress, c sdk.Coi
 	return k.Keeper.SubtractCoins(ctx, a, c)
 }
 func (k observedBank) SendCoins(ctx sdk.Context, a, b sdk.AccAddress, c sdk.Coins) (sdk.Tags, sdk.Error) {
+	if k.module == "gov" {
+		defer k.app.governanceSend(a, b, c)()
+	}
 	defer k.watch(ctx, "send", a, b)()
 	return k.Keeper.SendCoins(ctx, a, b, c)
 }

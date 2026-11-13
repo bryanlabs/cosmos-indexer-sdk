@@ -85,6 +85,11 @@ panic can have zero code; the transaction marker carries the recovered response.
   and `amount` a signed arbitrary-precision integer string. No float conversion.
   Export payouts additionally contain `validator` and, for delegation rewards,
   `delegator`. Owner and withdrawal destination are not conflated.
+* `kind=principal`: the actual source-validator token debit around a successful
+  undelegation/redelegation keeper handler. `label` is `undelegate` or
+  `redelegate`, `validator` is the source, and `delegator`/`address` the owner.
+  The integer amount can be zero. This is staking principal, not wallet income,
+  and is never added to bank reconciliation or counted as an additional payout.
 * `kind=accounting`: scope reconciliation completed. Covers begin/end block,
   every invoked ante/message, every DeliverTx including decoding failures, each
   actual export withdrawal, and the whole successful export. No arithmetic.
@@ -93,8 +98,8 @@ panic can have zero code; the transaction marker carries the recovered response.
 * `kind=export_completed`: successful full zero-height export, including one with
   no payouts. No arithmetic.
 
-Only movement records participate in reconciliation. Marker address/denom/amount
-fields are empty strings. Ordering is deterministic; within a bank call movements
+Only movement records participate in bank reconciliation. Accounting and completion
+marker address/denom/amount fields are empty strings. Ordering is deterministic; within a bank call movements
 are ordered by account then denomination.
 
 `status=committed` means retained in a committed block, `aborted` means attempted
@@ -111,6 +116,38 @@ cannot provide atomic output or fsync. The caller must use a private exclusive
 file, fsync after commit, check RecorderError, and stop on error. A partial final
 batch must not be accepted as complete without its final completion marker.
 Export output failure similarly returns no export artifact and a latched error.
+
+## Hub2 causal importer instrumentation after signed 545be31
+
+Bank calls from staking, distribution, governance and crisis carry a module
+prefix. Distribution hooks scope each actual automatic reward withdrawal by its
+validator/delegator, and each removal commission by validator/operator. Explicit
+withdraw messages use the same causal identities. This distinguishes both
+validators' rewards in a redelegation and preserves an overridden withdrawal
+address separately from the income owner. Zero-height export labels remain
+unchanged and are not given a module prefix.
+
+`causes.go` contains the pinned staking EndBlocker sequence from
+`x/staking/handler.go`, with metadata scopes around the unchanged actual
+CompleteUnbonding calls. `governance.go` reads the exact inactive/active proposal
+and deposit iterator ordering using quiet contexts before the unchanged gov
+EndBlocker. Each actual escrow send is checked against that deposit's amount
+and recipient, then labeled `gov/deposit_refund/bank.send` or
+`gov/deposit_burn/bank.send` with the original depositor. It is not inferred
+from a residual escrow balance.
+
+`principal.go` reads source-validator tokens with independent gas around the
+actual successful undelegate/redelegate handler. The resulting debit is the
+keeper's actual rounded principal, not the requested signed amount. A zero
+principal record proves a zero-token operation and must not become a tax row.
+Ante panics now retain an explicit aborted accounting scope while propagating
+the original panic to BaseApp. A DeliverTx rejected before invoking ante emits
+an aborted `ante_not_invoked` scope. Neither path invents a committed fee.
+
+The rehearsal importer requires these causal labels and principal records.
+Older operation/message-only recorder files are held when they cannot establish
+the cause. Regenerate evidence with this implementation rather than relabeling
+or estimating old records. Original evidence files remain retained.
 
 ## Verification
 

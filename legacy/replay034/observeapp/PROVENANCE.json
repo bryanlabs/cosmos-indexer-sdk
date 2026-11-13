@@ -9,7 +9,7 @@
       "path": "app.go",
       "upstream_path": "cmd/gaia/app/app.go",
       "upstream_sha256": "6aad17e700fbc41c2c9467f3c1d06c96eb01fae324825ceb27599cda790a92be",
-      "derived_sha256": "9d15660937d7e036568ca3a07307c61ef178801e65d19fe9b9ebd66f2a1f9190"
+      "derived_sha256": "6e2814797e5d8a77a1eed9f8e60dbc7aeedd2b379e97f50ca6fb7ded1df6d830"
     },
     {
       "path": "export.go",
@@ -68,11 +68,30 @@
       "sha256": "b284f4ccbd6e94b23702e6ba2c7ca66e9e24bf3c264ec5f03e901f69b9a2855e"
     }
   ],
+  "causal_instrumentation": {
+    "reviewed_parent_commit": "545be312f55aebc381e6ce43da3fb32c5cff5498",
+    "files_sha256": {
+      "bank.go": "11b4f5fb0f7b37184a477db77dde9347687beb1b6a7865917445fea2f8e1b06b",
+      "observer.go": "3fa70d0fc6503592359682b405017c58b2c0325dd574bbe6c028aff3c748eae4",
+      "causes.go": "9c1656aeadcccd16a8ad3004f00737c156096e1490594c5d66485461f9dd225c",
+      "governance.go": "569a00611c9d1ccebaded1e4b8b1a6f4fc8b7ce2ba42927e6d7c55e3922775c7",
+      "principal.go": "bb3435d43fa7d481e0e71ebbd0de8a388f5199184c0bc405d6c06e5873552386"
+    },
+    "consulted_upstream_sha256": {
+      "x/staking/handler.go": "ab69fad96f80bc71753dc79f7b90b02571b46124341e1215ef9c2b3845c2721a",
+      "x/staking/keeper/delegation.go": "8589e401ff498f540bfffc1db7f71dbda1ee5642ba84fbcee2de6479afacc715",
+      "x/distribution/keeper/hooks.go": "7e6419c43ae99a9fff3e2755fdcf3d16e04766f1d9442b7a3fedcd4244a3a4e0",
+      "x/gov/keeper.go": "bebd73acd4707f092fe704fc6e27d3595d949334cb99565b68ed83fdd0780646",
+      "x/gov/endblocker.go": "e1e2a960ceb6196fa192c03617cf5b624f4218cfb430cc844f9e16d3f6f10000"
+    }
+  },
   "modifications": {
     "app.go": [
       "package renamed",
       "observer field and bank wrapper wiring",
-      "message/ante/phase handler wrappers"
+      "message/ante/phase handler wrappers",
+      "module-scoped bank keepers and causal distribution hooks",
+      "pinned staking EndBlocker sequence with scoped actual unbonding completions"
     ],
     "export.go": [
       "package renamed",

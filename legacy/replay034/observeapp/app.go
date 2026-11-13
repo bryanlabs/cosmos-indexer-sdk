@@ -124,7 +124,7 @@ func NewGaiaApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest b
 	stakingKeeper := staking.NewKeeper(
 		app.cdc,
 		app.keyStaking, app.tkeyStaking,
-		app.bankKeeper, app.paramsKeeper.Subspace(staking.DefaultParamspace),
+		observedBank{Keeper: app.bankKeeper.(observedBank).Keeper, app: app, module: "staking"}, app.paramsKeeper.Subspace(staking.DefaultParamspace),
 		staking.DefaultCodespace,
 	)
 	app.mintKeeper = mint.NewKeeper(app.cdc, app.keyMint,
@@ -135,7 +135,7 @@ func NewGaiaApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest b
 		app.cdc,
 		app.keyDistr,
 		app.paramsKeeper.Subspace(distr.DefaultParamspace),
-		app.bankKeeper, &stakingKeeper, app.feeCollectionKeeper,
+		observedBank{Keeper: app.bankKeeper.(observedBank).Keeper, app: app, module: "distribution"}, &stakingKeeper, app.feeCollectionKeeper,
 		distr.DefaultCodespace,
 	)
 	app.slashingKeeper = slashing.NewKeeper(
@@ -147,13 +147,13 @@ func NewGaiaApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest b
 	app.govKeeper = gov.NewKeeper(
 		app.cdc,
 		app.keyGov,
-		app.paramsKeeper, app.paramsKeeper.Subspace(gov.DefaultParamspace), app.bankKeeper, &stakingKeeper,
+		app.paramsKeeper, app.paramsKeeper.Subspace(gov.DefaultParamspace), observedBank{Keeper: app.bankKeeper.(observedBank).Keeper, app: app, module: "gov"}, &stakingKeeper,
 		gov.DefaultCodespace,
 	)
 	app.crisisKeeper = crisis.NewKeeper(
 		app.paramsKeeper.Subspace(crisis.DefaultParamspace),
 		app.distrKeeper,
-		app.bankKeeper,
+		observedBank{Keeper: app.bankKeeper.(observedBank).Keeper, app: app, module: "crisis"},
 		app.feeCollectionKeeper,
 	)
 
@@ -161,7 +161,7 @@ func NewGaiaApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest b
 	// NOTE: The stakingKeeper above is passed by reference, so that it can be
 	// modified like below:
 	app.stakingKeeper = *stakingKeeper.SetHooks(
-		NewStakingHooks(app.distrKeeper.Hooks(), app.slashingKeeper.Hooks()),
+		NewStakingHooks(distributionHooks{StakingHooks: app.distrKeeper.Hooks(), app: app}, app.slashingKeeper.Hooks()),
 	)
 
 	// register the crisis routes
@@ -245,7 +245,7 @@ func (app *GaiaApp) BeginBlocker(ctx sdk.Context, req abci.RequestBeginBlock) ab
 // nolint: unparam
 func (app *GaiaApp) EndBlocker(ctx sdk.Context, req abci.RequestEndBlock) abci.ResponseEndBlock {
 	tags := gov.EndBlocker(ctx, app.govKeeper)
-	validatorUpdates, endBlockerTags := staking.EndBlocker(ctx, app.stakingKeeper)
+	validatorUpdates, endBlockerTags := app.stakingEndBlock(ctx)
 	tags = append(tags, endBlockerTags...)
 
 	if app.invCheckPeriod != 0 && ctx.BlockHeight()%int64(app.invCheckPeriod) == 0 {
@@ -359,11 +359,11 @@ var _ sdk.StakingHooks = StakingHooks{}
 // StakingHooks contains combined distribution and slashing hooks needed for the
 // staking module.
 type StakingHooks struct {
-	dh distr.Hooks
+	dh sdk.StakingHooks
 	sh slashing.Hooks
 }
 
-func NewStakingHooks(dh distr.Hooks, sh slashing.Hooks) StakingHooks {
+func NewStakingHooks(dh sdk.StakingHooks, sh slashing.Hooks) StakingHooks {
 	return StakingHooks{dh, sh}
 }
 
