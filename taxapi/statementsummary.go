@@ -41,9 +41,9 @@ import (
 //     read the old value is waited out the same way, and only then is a
 //     month built and built_before raised. So no change to a built month can
 //     go unmarked.
-//   - The trigger never fails the write. If the mark cannot be written, the
-//     sequence statement_log_failures is bumped instead, and the summary is
-//     not used until a rebuild acknowledges that value.
+//   - A failed mark falls back to the durable failure sequence, then to
+//     atomic withdrawal in statement_state. Only if all durable paths fail
+//     is the accounting write rolled back, never silently committed stale.
 //   - The API checks in its snapshot that the four triggers are present and
 //     enabled on the same table the summary was built from; if not it reads
 //     live rows only.
@@ -56,9 +56,6 @@ const (
 	statementStateTable      = "statement_state"
 	statementFailuresSeq     = "statement_log_failures"
 	statementLogFunction     = "statement_log_change"
-
-	// statementAllValidators marks the whole summary as changed (TRUNCATE).
-	statementAllValidators = "*"
 
 	statementTriggerCount = 4
 
@@ -104,9 +101,11 @@ func statementSummaryObjects(schema string) []string {
 	built_before timestamptz,
 	claim_horizon text,
 	base_table oid,
+	metadata_fingerprint text,
 	failures_acked bigint NOT NULL DEFAULT 0,
 	updated_at timestamptz NOT NULL DEFAULT now()
 )`),
+		q(`ALTER TABLE {s}.statement_state ADD COLUMN IF NOT EXISTS metadata_fingerprint text`),
 		q(`ALTER TABLE {s}.statement_state SET (vacuum_truncate = false)`),
 		q(`INSERT INTO {s}.statement_state (id) VALUES (true) ON CONFLICT DO NOTHING`),
 		q(`CREATE SEQUENCE IF NOT EXISTS {s}.statement_log_failures`),
@@ -124,8 +123,9 @@ func statementSummaryObjects(schema string) []string {
 		//
 		// Everything runs inside the inner block, so any error (a missing
 		// table, a lock not granted within two seconds, a full disk) is
-		// caught: the write to taxable_events goes through, and the failure
-		// counter is bumped so the summary is not trusted until it is rebuilt.
+		// caught: the write to taxable_events goes through when a durable
+		// counter increment or atomic withdrawal can be recorded. If neither
+		// is possible the write fails closed, preserving accounting correctness.
 		// A sequence is used for that because it takes no row lock and keeps
 		// its value even if the writing transaction later rolls back.
 		q(`CREATE OR REPLACE FUNCTION {s}.statement_log_change() RETURNS trigger
@@ -180,7 +180,12 @@ BEGIN
 		BEGIN
 			PERFORM nextval('{s}.statement_log_failures'::regclass);
 		EXCEPTION WHEN OTHERS THEN
-			NULL;
+			-- If even the sequence is unavailable, atomically withdraw the
+			-- summary with this write. If neither durable path works, fail
+			-- closed rather than commit an unmarked accounting change.
+			IF to_regclass('{s}.statement_state') IS NOT NULL THEN
+				UPDATE {s}.statement_state SET built_before = NULL, metadata_fingerprint = NULL, updated_at = now();
+			END IF;
 		END;
 		RAISE WARNING 'validator statement change log failed (%): %', SQLSTATE, SQLERRM;
 	END;
@@ -247,24 +252,17 @@ func InstallStatementSummary(ctx context.Context, db *gorm.DB, lockTimeout time.
 					return e
 				}
 			}
-			// A summary built from another table (taxable_events was replaced
-			// since), or one whose triggers were missing or switched off until
-			// this install, may have missed changes: it has to be built again.
-			if e := tx.Exec(`UPDATE statement_state SET built_before = NULL, updated_at = now()
-				WHERE built_before IS NOT NULL AND (base_table IS DISTINCT FROM 'taxable_events'::regclass::oid
-					OR (SELECT count(*) FROM pg_trigger t WHERE t.tgrelid = 'taxable_events'::regclass AND NOT t.tgisinternal AND t.tgenabled = 'A'
-						AND t.tgname IN ('statement_log_insert','statement_log_update','statement_log_delete','statement_log_truncate')) <> ?)`, statementTriggerCount).Error; e != nil {
-				return e
-			}
-			if e := tx.Exec(`UPDATE statement_state SET base_table = 'taxable_events'::regclass::oid`).Error; e != nil {
-				return e
-			}
 			for _, ddl := range statementSummaryTriggers(schema) {
 				if e := tx.Exec(ddl).Error; e != nil {
 					return e
 				}
 			}
-			return nil
+			if e := installStatementDDLGuard(tx, schema); e != nil {
+				return e
+			}
+			// Reinstallation can restore missing or replaced guards. Always
+			// withdraw old data rather than certify continuity across repairs.
+			return tx.Exec("UPDATE " + schema + ".statement_state SET built_before = NULL, metadata_fingerprint = NULL, base_table = 'taxable_events'::regclass::oid, updated_at = now()").Error
 		})
 		if err == nil {
 			return nil
@@ -323,15 +321,18 @@ func DropStatementSummary(ctx context.Context, db *gorm.DB, lockTimeout time.Dur
 // summaryTrust is what decides, inside one snapshot, whether the summary may
 // stand in for taxable_events.
 type summaryTrust struct {
-	Installed   bool
-	LogBefore   *time.Time
-	BuiltBefore *time.Time
-	SameTable   bool
-	PlainTable  bool
-	Triggers    int
-	Failures    int64
-	Acked       int64
-	AllDirty    bool
+	Installed       bool
+	LogBefore       *time.Time
+	BuiltBefore     *time.Time
+	SameTable       bool
+	PlainTable      bool
+	Triggers        int
+	DDLGuard        bool
+	Failures        int64
+	Acked           int64
+	AllDirty        bool
+	MetadataSame    bool
+	CounterReadable bool
 }
 
 // Reason is empty when the summary may be used, else why not.
@@ -347,6 +348,12 @@ func (t summaryTrust) Reason() string {
 		return "taxable_events is partitioned or has child tables"
 	case t.Triggers != statementTriggerCount:
 		return fmt.Sprintf("%d of %d change triggers are present and enabled", t.Triggers, statementTriggerCount)
+	case !t.DDLGuard:
+		return "statement DDL guard is missing or not enabled ALWAYS with the expected definition"
+	case !t.CounterReadable:
+		return "the change-log failure counter is not readable"
+	case !t.MetadataSame:
+		return "statement metadata changed since the summary was built"
 	case t.Failures != t.Acked:
 		return fmt.Sprintf("the change log failed %d time(s) since the last build", t.Failures-t.Acked)
 	case t.AllDirty:
@@ -355,12 +362,79 @@ func (t summaryTrust) Reason() string {
 	return ""
 }
 
+// Catalog tuple xmin records intervening ALTER operations, including a
+// disable/enable cycle restored to the same definition. Relevant column
+// metadata catches accounting-changing USING rewrites without rejecting
+// data-preserving VACUUM FULL or CLUSTER. Object OIDs catch replacements.
+// Inheritance can leave those xmins unchanged, so a durable DDL guard also
+// withdraws state. Its function and event versions are part of continuity.
+const summaryFingerprintSQL = `SELECT md5(concat_ws('|',
+ (SELECT string_agg(c.oid::text, ',' ORDER BY c.relname) FROM pg_class c WHERE c.oid IN
+  (to_regclass('taxable_events'),to_regclass('statement_days'),to_regclass('statement_delegators'),to_regclass('statement_dirty'),to_regclass('statement_state'),to_regclass('statement_log_failures'))),
+ (SELECT string_agg(a.attrelid::text || ':' || a.attnum::text || ':' || a.xmin::text || ':' || a.atttypid::text || ':' || a.atttypmod::text, ',' ORDER BY a.attrelid,a.attnum)
+  FROM pg_attribute a WHERE a.attnum > 0 AND NOT a.attisdropped AND
+  ((a.attrelid = to_regclass('taxable_events') AND a.attname IN ('id','validator_address','category','amount','denom','to_addr','timestamp')) OR
+   a.attrelid IN (to_regclass('statement_days'),to_regclass('statement_delegators'),to_regclass('statement_dirty'),to_regclass('statement_state')))),
+ (SELECT string_agg(t.oid::text || ':' || t.xmin::text || ':' || pg_get_triggerdef(t.oid), ',' ORDER BY t.tgname)
+  FROM pg_trigger t WHERE t.tgrelid = to_regclass('taxable_events') AND t.tgname IN ('statement_log_insert','statement_log_update','statement_log_delete','statement_log_truncate')),
+ (SELECT p.oid::text || ':' || p.xmin::text || ':' || pg_get_functiondef(p.oid) FROM pg_proc p WHERE p.oid = to_regprocedure('statement_log_change()')),
+ ` + summaryDDLGuardFingerprintSQL + `
+))`
+
+// Validate against this binary's logger, not whatever definitions happen
+// to exist when rebuilding. A fingerprint is continuity, not authorization
+// to certify a replaced no-op logger as a new baseline.
+func statementLoggerMatches(tx *gorm.DB) (bool, error) {
+	schema, err := summarySchema(tx)
+	if err != nil {
+		return false, err
+	}
+	var body string
+	for _, ddl := range statementSummaryObjects(schema) {
+		if strings.Contains(ddl, "CREATE OR REPLACE FUNCTION") {
+			parts := strings.Split(ddl, "$fn$")
+			if len(parts) == 3 {
+				body = parts[1]
+			}
+		}
+	}
+	var functionOK bool
+	if err := tx.Raw(`SELECT COALESCE((SELECT p.prosrc = ? AND p.prosecdef
+		AND p.prolang = (SELECT oid FROM pg_language WHERE lanname='plpgsql')
+		AND p.proconfig @> ARRAY['search_path=pg_catalog, pg_temp','lock_timeout=2s']::text[]
+		AND cardinality(p.proconfig)=2 FROM pg_proc p WHERE p.oid=to_regprocedure('statement_log_change()')), false)`, body).Row().Scan(&functionOK); err != nil {
+		return false, err
+	}
+	if !functionOK {
+		return false, nil
+	}
+	var correct int
+	err = tx.Raw(`SELECT count(*) FROM pg_trigger t WHERE t.tgrelid='taxable_events'::regclass
+		AND NOT t.tgisinternal AND t.tgenabled='A' AND t.tgfoid=to_regprocedure('statement_log_change()')
+		AND t.tgnargs=0 AND t.tgattr::text='' AND t.tgqual IS NULL AND (
+		(t.tgname='statement_log_insert' AND t.tgtype=4 AND t.tgoldtable IS NULL AND t.tgnewtable='new_rows') OR
+		(t.tgname='statement_log_update' AND t.tgtype=16 AND t.tgoldtable='old_rows' AND t.tgnewtable='new_rows') OR
+		(t.tgname='statement_log_delete' AND t.tgtype=8 AND t.tgoldtable='old_rows' AND t.tgnewtable IS NULL) OR
+		(t.tgname='statement_log_truncate' AND t.tgtype=32 AND t.tgoldtable IS NULL AND t.tgnewtable IS NULL))`).Row().Scan(&correct)
+	return correct == statementTriggerCount, err
+}
+
+func currentSummaryFingerprint(tx *gorm.DB) (string, error) {
+	var fingerprint string
+	err := tx.Raw(summaryFingerprintSQL).Row().Scan(&fingerprint)
+	return fingerprint, err
+}
+
 const summaryTrustSQL = `SELECT st.log_before, st.built_before,
 	COALESCE(st.base_table = c.oid, false) AS same_table,
-	(c.relkind = 'r' AND NOT c.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = c.oid)) AS plain_table,
+	(c.relkind = 'r' AND NOT c.relispartition AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhparent = c.oid OR i.inhrelid = c.oid)) AS plain_table,
 	(SELECT count(*) FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgenabled = 'A'
 		AND t.tgname IN ('statement_log_insert','statement_log_update','statement_log_delete','statement_log_truncate')) AS triggers,
-	COALESCE(pg_sequence_last_value('statement_log_failures'::regclass), 0) AS failures,
+	CASE WHEN has_sequence_privilege('statement_log_failures', 'SELECT')
+		THEN COALESCE(pg_sequence_last_value('statement_log_failures'::regclass), 0) ELSE 0 END AS failures,
+	has_sequence_privilege('statement_log_failures', 'SELECT') AS counter_readable,
+	st.metadata_fingerprint = (` + summaryFingerprintSQL + `) AS metadata_same,
+	` + summaryDDLGuardPresenceSQL + ` AS ddl_guard,
 	st.failures_acked AS acked,
 	EXISTS (SELECT 1 FROM statement_dirty d WHERE d.validator_address = '*') AS all_dirty
 FROM statement_state st, pg_class c
@@ -377,14 +451,17 @@ func readSummaryTrust(tx *gorm.DB) (summaryTrust, error) {
 		return t, nil
 	}
 	var row struct {
-		LogBefore   *time.Time
-		BuiltBefore *time.Time
-		SameTable   bool
-		PlainTable  bool
-		Triggers    int
-		Failures    int64
-		Acked       int64
-		AllDirty    bool
+		LogBefore       *time.Time
+		BuiltBefore     *time.Time
+		SameTable       bool
+		PlainTable      bool
+		Triggers        int
+		DDLGuard        bool
+		Failures        int64
+		Acked           int64
+		AllDirty        bool
+		MetadataSame    bool
+		CounterReadable bool
 	}
 	res := tx.Raw(summaryTrustSQL).Scan(&row)
 	if res.Error != nil {
@@ -396,6 +473,7 @@ func readSummaryTrust(tx *gorm.DB) (summaryTrust, error) {
 	}
 	t.LogBefore, t.BuiltBefore, t.SameTable, t.PlainTable = row.LogBefore, row.BuiltBefore, row.SameTable, row.PlainTable
 	t.Triggers, t.Failures, t.Acked, t.AllDirty = row.Triggers, row.Failures, row.Acked, row.AllDirty
+	t.MetadataSame, t.CounterReadable, t.DDLGuard = row.MetadataSame, row.CounterReadable, row.DDLGuard
 	return t, nil
 }
 
@@ -534,7 +612,7 @@ func (p statementReadPlan) statementSummarySQL(val string) (string, []any) {
 	var args []any
 	sqlText := `WITH ev AS MATERIALIZED (
 	SELECT date_trunc('day', timestamp) AS day, category, denom, amount, to_addr
-	FROM taxable_events
+	FROM ONLY taxable_events
 	WHERE ` + liveCond + `
 ), pairs AS MATERIALIZED (
 	SELECT date_trunc('month', day) AS month, to_addr
@@ -576,7 +654,11 @@ func (p statementReadPlan) liveRowEstimate(tx *gorm.DB, val string) (int64, erro
 	}
 	cond, args := p.liveCondition(val)
 	var plan string
-	if err := tx.Raw("EXPLAIN (FORMAT JSON) SELECT 1 FROM taxable_events WHERE "+cond, args...).Row().Scan(&plan); err != nil {
+	source := "taxable_events"
+	if p.Summary {
+		source = "ONLY taxable_events"
+	}
+	if err := tx.Raw("EXPLAIN (FORMAT JSON) SELECT 1 FROM "+source+" WHERE "+cond, args...).Row().Scan(&plan); err != nil {
 		return 0, err
 	}
 	return planRows(plan)

@@ -82,7 +82,16 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `TAX_STATEMENT_TIMEOUT` (default 90s, under the 120s edge) or when the
   caller goes away, answering 504. At most three statements are read at a
   time. `validatorstatement_pg_test.go` keeps the three former queries word
-  for word and pins the single read to them.
+  for word and pins the single read to them. Stage 2
+  (`taxapi/statementsummary*.go`, `taxstatement/`) requires explicit production
+  approval: a Job installs/fills derived day totals and monthly
+  recipient sets with statement-level invalidation triggers. The API never
+  installs or writes them; it mixes trusted, unmarked whole months with live
+  rows in one snapshot and counts unique recipients across their union.
+  `TAX_STATEMENT_SUMMARY=off` forces live-only reads without deleting anything.
+  Preserve the 12M live-row default and all coverage gates. Real-copy proofs
+  are opt-in, use newly retained schemas and never rewrite the preserved base.
+  DELETE-shaped fixture proofs must roll back.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message

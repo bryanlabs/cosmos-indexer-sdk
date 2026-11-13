@@ -54,10 +54,8 @@ func statementPGServer(t *testing.T) *Server {
 	connection.SetMaxOpenConns(1)
 	connection.SetMaxIdleConns(1)
 	schema := fmt.Sprintf("validator_statement_test_%d", time.Now().UnixNano())
-	t.Cleanup(func() {
-		_ = database.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE").Error
-		_ = connection.Close()
-	})
+	t.Logf("retained fixture schema: %s", schema)
+	t.Cleanup(func() { _ = connection.Close() })
 	for _, sql := range []string{
 		"CREATE SCHEMA " + schema,
 		"SET search_path = " + schema,

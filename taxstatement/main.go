@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"os"
@@ -38,6 +39,10 @@ func env(k, d string) string {
 }
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	install := flag.Bool("install", false, "create the summary tables and attach the change triggers")
 	fill := flag.Bool("fill", false, "build every finished month")
 	rebuild := flag.Bool("rebuild", false, "with -fill: empty a built summary and build it again")
@@ -54,7 +59,7 @@ func main() {
 	flag.Parse()
 	if !*install && !*fill && !*refresh && *check < 0 && !*status && !*drop {
 		flag.Usage()
-		os.Exit(2)
+		return 2
 	}
 
 	db, err := indexerDB.PostgresDbConnect(
@@ -67,21 +72,27 @@ func main() {
 		"jit=off",
 	)
 	if err != nil {
-		log.Fatalf("db connect: %v", err)
+		log.Printf("db connect: %v", err)
+		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	opts := taxapi.StatementSummaryOptions{DrainTimeout: *drain, Logf: log.Printf}
 	if *asOf != "" {
 		day, err := time.Parse("2006-01-02", *asOf)
 		if err != nil || day.After(time.Now()) {
-			log.Fatalf("-as-of must be a past day as YYYY-MM-DD, got %q", *asOf)
+			log.Printf("-as-of must be a past day as YYYY-MM-DD, got %q", *asOf)
+			return 2
 		}
 		opts.Now = func() time.Time { return day }
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	failed := false
 	fail := func(what string, err error) {
+		if (what == "refresh" || what == "check") && errors.Is(err, taxapi.ErrStatementSummaryBusy) {
+			log.Printf("statement-summary %s waiting: %v", what, err)
+			return
+		}
 		failed = true
 		log.Printf("statement-summary %s FAILED: %v", what, err)
 	}
@@ -140,6 +151,7 @@ func main() {
 		}
 	}
 	if failed {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

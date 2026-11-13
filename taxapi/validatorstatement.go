@@ -70,7 +70,7 @@ const (
 	// summary holds are not read from the heap and do not count.
 	// TAX_STATEMENT_MAX_ROWS overrides it; a negative value turns the check
 	// off.
-	defaultStatementMaxRows = 10_500_000
+	defaultStatementMaxRows = 12_000_000
 	// The edge gives up at 120 seconds. The database work is cancelled
 	// before that so an abandoned request does not keep scanning.
 	defaultStatementTimeout = 90 * time.Second
@@ -268,6 +268,11 @@ func (s *Server) readStatement(ctx context.Context, val string, start, end time.
 	var out statementRead
 	run := func(useSummary bool) error {
 		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// Hold the table identity/schema stable between catalog trust and
+			// the aggregate read. This does not block ordinary DML writers.
+			if err := tx.Exec("LOCK TABLE taxable_events IN ACCESS SHARE MODE").Error; err != nil {
+				return err
+			}
 			if err := statementReadSettings(tx); err != nil {
 				return err
 			}

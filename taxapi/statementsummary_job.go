@@ -88,10 +88,9 @@ func withSummaryLock(ctx context.Context, db *gorm.DB, fn func(conn *gorm.DB) er
 // the whole table, with days and months in UTC.
 func summaryBuildSettings(tx *gorm.DB) error {
 	for _, setting := range []string{
+		"LOCK TABLE taxable_events IN ACCESS SHARE MODE",
 		"SET LOCAL plan_cache_mode = force_custom_plan",
 		"SET LOCAL work_mem = '64MB'",
-		"SET LOCAL enable_seqscan = off",
-		"SET LOCAL enable_indexscan = off",
 		"SET LOCAL effective_io_concurrency = 128",
 		"SET LOCAL jit = off",
 		"SET LOCAL TimeZone = 'UTC'",
@@ -103,9 +102,12 @@ func summaryBuildSettings(tx *gorm.DB) error {
 	return nil
 }
 
+// Derive only the physical table that the change triggers cover. A child
+// attached temporarily during a build must never become phantom income
+// after detachment. Current children still make API summaries untrusted.
 const summaryBuildSQL = `WITH ev AS MATERIALIZED (
 	SELECT (timestamp AT TIME ZONE 'UTC')::date AS day, category, denom, amount, to_addr
-	FROM taxable_events
+	FROM ONLY taxable_events
 	WHERE validator_address = @validator AND category IN ('reward','commission') AND timestamp >= @from AND timestamp < @to
 ), d AS (
 	INSERT INTO statement_days (validator_address, day, category, denom, amount, events)
@@ -137,9 +139,9 @@ func summaryRebuildRange(tx *gorm.DB, val string, from, to time.Time) (days, pai
 func summaryValidators(conn *gorm.DB) ([]string, error) {
 	var out []string
 	rows, err := conn.Raw(`WITH RECURSIVE v AS (
-		(SELECT validator_address FROM taxable_events WHERE validator_address <> '' ORDER BY validator_address LIMIT 1)
+		(SELECT validator_address FROM ONLY taxable_events WHERE validator_address <> '' ORDER BY validator_address LIMIT 1)
 		UNION ALL
-		SELECT (SELECT t.validator_address FROM taxable_events t WHERE t.validator_address > v.validator_address AND t.validator_address <> '' ORDER BY t.validator_address LIMIT 1)
+		SELECT (SELECT t.validator_address FROM ONLY taxable_events t WHERE t.validator_address > v.validator_address AND t.validator_address <> '' ORDER BY t.validator_address LIMIT 1)
 		FROM v WHERE v.validator_address IS NOT NULL
 	) SELECT validator_address FROM v WHERE validator_address IS NOT NULL`).Rows()
 	if err != nil {
@@ -159,8 +161,8 @@ func summaryValidators(conn *gorm.DB) ([]string, error) {
 func summaryFirstRow(conn *gorm.DB, val string) (*time.Time, error) {
 	var first *time.Time
 	err := conn.Raw(`SELECT LEAST(
-		(SELECT min(timestamp) FROM taxable_events WHERE validator_address = @validator AND category = 'reward'),
-		(SELECT min(timestamp) FROM taxable_events WHERE validator_address = @validator AND category = 'commission'))`,
+		(SELECT min(timestamp) FROM ONLY taxable_events WHERE validator_address = @validator AND category = 'reward'),
+		(SELECT min(timestamp) FROM ONLY taxable_events WHERE validator_address = @validator AND category = 'commission'))`,
 		sql.Named("validator", val)).Row().Scan(&first)
 	return first, err
 }
@@ -225,6 +227,13 @@ func summaryHorizon(ctx context.Context, conn *gorm.DB) (string, error) {
 // this wait too. It returns nil when drained, and a description of who is
 // still open when the wait ran out.
 func summaryDrain(ctx context.Context, conn *gorm.DB, horizon string, opts StatementSummaryOptions) (waiting string, err error) {
+	var visible bool
+	if err := conn.WithContext(ctx).Raw(`SELECT rolsuper OR pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') FROM pg_roles WHERE rolname = current_user`).Row().Scan(&visible); err != nil {
+		return "", err
+	}
+	if !visible {
+		return "", errors.New("cannot drain safely: job role needs pg_read_all_stats or superuser visibility of other writers")
+	}
 	deadline := time.Now().Add(opts.drainTimeout())
 	for {
 		var sessions, prepared int64
@@ -321,12 +330,41 @@ func FillStatementSummary(ctx context.Context, db *gorm.DB, rebuild bool, opts S
 		if trust.Triggers != statementTriggerCount {
 			return fmt.Errorf("statement summary cannot be built: %d of %d change triggers are present and enabled; run the install first", trust.Triggers, statementTriggerCount)
 		}
+		fingerprint, err := currentSummaryFingerprint(conn.WithContext(ctx))
+		if err != nil {
+			return err
+		}
+		loggerOK, err := statementLoggerMatches(conn.WithContext(ctx))
+		if err != nil {
+			return err
+		}
+		if !loggerOK {
+			return errors.New("statement logger definition differs from this implementation; reinstall before rebuilding")
+		}
+		guardOK, err := statementDDLGuardMatches(conn.WithContext(ctx))
+		if err != nil {
+			return err
+		}
+		if !guardOK {
+			return errors.New("statement DDL guard definition differs from this implementation; reinstall before rebuilding")
+		}
+		// Carry this validated fingerprint unchanged through the whole build.
+		// A logger or DDL guard swap during validation must not become a new baseline.
+		confirmed, err := currentSummaryFingerprint(conn.WithContext(ctx))
+		if err != nil {
+			return err
+		}
+		if confirmed != fingerprint {
+			return errors.New("statement logger or DDL guard metadata changed while validating; reinstall or retry")
+		}
 		// Failures and a truncation seen up to here are covered by the build
 		// that follows; any later one keeps the summary untrusted.
 		acked := trust.Failures
 		if err := conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("UPDATE statement_state SET built_before = NULL, claim_horizon = NULL, base_table = 'taxable_events'::regclass::oid, metadata_fingerprint = ?, updated_at = now()", fingerprint).Error; err != nil {
+				return err
+			}
 			for _, stmt := range []string{
-				"UPDATE statement_state SET built_before = NULL, claim_horizon = NULL, base_table = 'taxable_events'::regclass::oid, updated_at = now()",
 				"DELETE FROM statement_dirty",
 				"DELETE FROM statement_days",
 				"DELETE FROM statement_delegators",
@@ -371,8 +409,15 @@ func FillStatementSummary(ctx context.Context, db *gorm.DB, rebuild bool, opts S
 			res.Pairs += pairs
 			opts.logf("statement-summary fill %d/%d %s: %d day rows, %d delegator months, %s", i+1, len(validators), val, days, pairs, time.Since(began).Round(time.Millisecond))
 		}
-		if err := conn.WithContext(ctx).Exec("UPDATE statement_state SET built_before = ?, failures_acked = ?, updated_at = now()", target, acked).Error; err != nil {
-			return err
+		if summaryPublishHook != nil {
+			summaryPublishHook()
+		}
+		published := conn.WithContext(ctx).Exec("UPDATE statement_state SET built_before = ?, failures_acked = ?, updated_at = now() WHERE metadata_fingerprint = ?", target, acked, fingerprint)
+		if published.Error != nil {
+			return published.Error
+		}
+		if published.RowsAffected != 1 {
+			return errors.New("statement summary was invalidated while filling; nothing was published")
 		}
 		res.BuiltBefore = target
 		// Fresh statistics, and a visibility map so recipient counts can be
@@ -503,8 +548,15 @@ func RefreshStatementSummary(ctx context.Context, db *gorm.DB, opts StatementSum
 				return fmt.Errorf("%s: %w", val, err)
 			}
 		}
-		if err := conn.WithContext(ctx).Exec("UPDATE statement_state SET built_before = ?, updated_at = now()", target).Error; err != nil {
-			return err
+		if summaryPublishHook != nil {
+			summaryPublishHook()
+		}
+		published := conn.WithContext(ctx).Exec("UPDATE statement_state SET built_before = ?, updated_at = now() WHERE metadata_fingerprint IS NOT NULL", target)
+		if published.Error != nil {
+			return published.Error
+		}
+		if published.RowsAffected != 1 {
+			return errors.New("statement summary was invalidated while advancing; nothing was published")
 		}
 		res.Advanced, res.BuiltBefore = true, target
 		opts.logf("statement-summary refresh: built %s to %s for %d validators", built.Format(apiMonthLayout), target.AddDate(0, -1, 0).Format(apiMonthLayout), len(validators))
@@ -516,6 +568,9 @@ func RefreshStatementSummary(ctx context.Context, db *gorm.DB, opts StatementSum
 // summaryRefreshHook, when set by a test, runs after a validator's changed
 // months are recomputed and before their marks are removed.
 var summaryRefreshHook func()
+
+// summaryPublishHook lets tests race invalidation with actual publication.
+var summaryPublishHook func()
 
 // summaryRefreshValidator recomputes the claimed months of val and removes
 // their claimed marks, in one transaction and one snapshot.
@@ -641,7 +696,7 @@ type StatementSummaryCheckResult struct {
 
 const summaryCompareSQL = `WITH ev AS MATERIALIZED (
 	SELECT (timestamp AT TIME ZONE 'UTC')::date AS day, category, denom, amount, to_addr
-	FROM taxable_events
+	FROM ONLY taxable_events
 	WHERE validator_address = @validator AND category IN ('reward','commission') AND timestamp >= @from AND timestamp < @to
 ), b_days AS (
 	SELECT day, category, denom, SUM(amount::numeric) AS amount, COUNT(*) AS events FROM ev GROUP BY day, category, denom
@@ -666,6 +721,25 @@ func summaryCompare(tx *gorm.DB, val string, from, to time.Time) (days, pairs in
 	return days, pairs, err
 }
 
+// withdrawStatementSummary uses a fresh pooled connection and context. The
+// nontransactional counter survives caller cancellation, a blocked state row,
+// or a builder that already passed its initial trust check. Clearing the
+// fingerprint is an independent durable fallback and cannot be republished.
+func withdrawStatementSummary(db *gorm.DB, schema string) error {
+	counterCtx, cancelCounter := context.WithTimeout(context.Background(), 5*time.Second)
+	counterErr := db.WithContext(counterCtx).Exec("SELECT nextval(?::regclass)", schema+"."+statementFailuresSeq).Error
+	cancelCounter()
+	stateCtx, cancelState := context.WithTimeout(context.Background(), 5*time.Second)
+	stateErr := db.WithContext(stateCtx).Exec("UPDATE " + schema + ".statement_state SET built_before = NULL, metadata_fingerprint = NULL, updated_at = now()").Error
+	cancelState()
+	if counterErr == nil || stateErr == nil {
+		return nil
+	}
+	return fmt.Errorf("both integrity counter and state withdrawal failed: %v; %w", counterErr, stateErr)
+}
+
+var summaryCompareHook func()
+
 // CheckStatementSummary compares the summary with taxable_events for
 // (validator, month) cells, each in one read-only snapshot that also proves
 // the cell was not marked changed. With cells <= 0 it compares every month
@@ -674,6 +748,16 @@ func summaryCompare(tx *gorm.DB, val string, from, to time.Time) (days, pairs in
 // the summary is missing altogether is found too.
 func CheckStatementSummary(ctx context.Context, db *gorm.DB, cells int, seed int64, opts StatementSummaryOptions) (StatementSummaryCheckResult, error) {
 	var res StatementSummaryCheckResult
+	err := withSummaryLock(ctx, db, func(conn *gorm.DB) error {
+		var err error
+		res, err = checkStatementSummaryLocked(ctx, conn, db, cells, seed, opts)
+		return err
+	})
+	return res, err
+}
+
+func checkStatementSummaryLocked(ctx context.Context, db, withdrawalDB *gorm.DB, cells int, seed int64, opts StatementSummaryOptions) (StatementSummaryCheckResult, error) {
+	var res StatementSummaryCheckResult
 	trust, err := readSummaryTrust(db.WithContext(ctx))
 	if err != nil {
 		return res, err
@@ -681,11 +765,32 @@ func CheckStatementSummary(ctx context.Context, db *gorm.DB, cells int, seed int
 	if reason := trust.Reason(); reason != "" {
 		return res, fmt.Errorf("statement summary is not in use (%s)", reason)
 	}
+	schema, err := summarySchema(db.WithContext(ctx))
+	if err != nil {
+		return res, err
+	}
 	built := monthFloor(*trust.BuiltBefore)
 	validators, err := summaryValidators(db.WithContext(ctx))
 	if err != nil {
 		return res, err
 	}
+	// Stored-only validators and months matter too: a missing base validator
+	// must not hide orphaned summary amounts or recipients from a full check.
+	var stored []string
+	if err := db.WithContext(ctx).Raw(`SELECT validator_address FROM statement_days UNION SELECT validator_address FROM statement_delegators`).Scan(&stored).Error; err != nil {
+		return res, err
+	}
+	seen := make(map[string]bool, len(validators)+len(stored))
+	for _, val := range validators {
+		seen[val] = true
+	}
+	for _, val := range stored {
+		if !seen[val] {
+			validators = append(validators, val)
+			seen[val] = true
+		}
+	}
+	sort.Strings(validators)
 	type cell struct {
 		val      string
 		from, to time.Time
@@ -703,7 +808,7 @@ func CheckStatementSummary(ctx context.Context, db *gorm.DB, cells int, seed int
 			}
 			// Summary rows from before the validator's first row would be wrong too.
 			var earliest *time.Time
-			if err := db.WithContext(ctx).Raw("SELECT min(day)::timestamp FROM statement_days WHERE validator_address = ?", val).Row().Scan(&earliest); err != nil {
+			if err := db.WithContext(ctx).Raw("SELECT LEAST((SELECT min(day)::timestamp FROM statement_days WHERE validator_address = ?), (SELECT min(month)::timestamp FROM statement_delegators WHERE validator_address = ?))", val, val).Row().Scan(&earliest); err != nil {
 				return res, err
 			}
 			if earliest != nil && monthFloor(*earliest).Before(from) {
@@ -715,8 +820,10 @@ func CheckStatementSummary(ctx context.Context, db *gorm.DB, cells int, seed int
 		}
 	} else {
 		rng := rand.New(rand.NewSource(seed)) //nolint:gosec // sampling, not security
-		rows, err := db.WithContext(ctx).Raw(`SELECT validator_address, date_trunc('month', day::timestamp)::timestamp FROM statement_days
-			GROUP BY 1, 2 ORDER BY md5(validator_address || date_trunc('month', day::timestamp)::text || ?::text) LIMIT ?`, seed, (cells+1)/2).Rows()
+		rows, err := db.WithContext(ctx).Raw(`SELECT validator_address, month FROM (
+			SELECT validator_address, date_trunc('month', day::timestamp)::timestamp AS month FROM statement_days
+			UNION SELECT validator_address, month::timestamp FROM statement_delegators
+		) cells ORDER BY md5(validator_address || month::text || ?::text) LIMIT ?`, seed, (cells+1)/2).Rows()
 		if err != nil {
 			return res, err
 		}
@@ -780,18 +887,31 @@ func CheckStatementSummary(ctx context.Context, db *gorm.DB, cells int, seed int
 				return nil
 			}
 			days, pairs, err = summaryCompare(tx, c.val, c.from, c.to)
+			if err == nil && summaryCompareHook != nil {
+				summaryCompareHook()
+			}
 			return err
 		}, statementReadOnly())
+		if !skipped && (days != 0 || pairs != 0) {
+			res.Checked++
+			res.Mismatches = append(res.Mismatches, StatementSummaryMismatch{Validator: c.val, Month: c.from.Format(apiMonthLayout), DayRows: days, DelegatorMonth: pairs})
+			// Withdraw even if read-only transaction completion was cancelled
+			// after returning a mismatch. A durable counter/fingerprint marker
+			// cannot be undone by a builder if cancellation retired this session.
+			if withdrawErr := withdrawStatementSummary(withdrawalDB, schema); withdrawErr != nil {
+				return res, fmt.Errorf("summary mismatched and could not be withdrawn: %w", withdrawErr)
+			}
+			opts.logf("statement-summary check MISMATCH %s %s: %d day row(s), %d delegator entr(ies) differ", c.val, c.from.Format(apiMonthLayout), days, pairs)
+			if err != nil {
+				return res, err
+			}
+			return res, ctx.Err()
+		}
 		if err != nil {
 			return res, fmt.Errorf("%s %s: %w", c.val, c.from.Format(apiMonthLayout), err)
 		}
-		if skipped {
-			continue
-		}
-		res.Checked++
-		if days != 0 || pairs != 0 {
-			res.Mismatches = append(res.Mismatches, StatementSummaryMismatch{Validator: c.val, Month: c.from.Format(apiMonthLayout), DayRows: days, DelegatorMonth: pairs})
-			opts.logf("statement-summary check MISMATCH %s %s: %d day row(s), %d delegator entr(ies) differ", c.val, c.from.Format(apiMonthLayout), days, pairs)
+		if !skipped {
+			res.Checked++
 		}
 	}
 	return res, nil

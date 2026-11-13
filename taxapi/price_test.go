@@ -1,9 +1,13 @@
 package taxapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBankMetaFallbackResolvesAndCaches(t *testing.T) {
@@ -52,7 +56,7 @@ func TestPriceAtCachesFoundIndefinitely(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
 		w.Header().Set(apiContentType, apiJSONContentType)
-		_, _ = w.Write([]byte(`{"usd":1.95,"found":true}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{"usd": 1.95, "found": true, "date": r.URL.Query().Get(apiDate)})
 	}))
 	defer srv.Close()
 
@@ -63,6 +67,83 @@ func TestPriceAtCachesFoundIndefinitely(t *testing.T) {
 	}
 	if _, _ = o.PriceAt(apiMainnet, apiUatom, apiTestPeriodStart); hits != 1 {
 		t.Fatalf("want 1 http call (second lookup cached), got %d", hits)
+	}
+}
+
+const (
+	priceTestOldDay       = "2025-01-01"
+	priceTestRequestedDay = "2025-01-02"
+	priceTestPeg          = "peg"
+	priceTestFallback     = "fallback"
+)
+
+func TestPriceSettled(t *testing.T) {
+	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, requested, returned string
+		want                      bool
+	}{
+		{"old exact", "2026-11-05", "2026-11-05", true},
+		{"recent exact", "2026-11-06", "2026-11-06", false},
+		{priceTestFallback, priceTestRequestedDay, priceTestOldDay, false},
+		{"missing date", priceTestRequestedDay, "", false},
+		{"invalid", "bad", "bad", false},
+		{"empty", "", "", false},
+		{"future", "2027-01-01", "2027-01-01", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) { require.Equal(t, tc.want, priceSettled(tc.requested, tc.returned, now)) })
+	}
+}
+
+func TestPriceAtRefetchesUnsettled(t *testing.T) {
+	for _, kind := range []string{"recent", priceTestFallback, priceTestPeg, "miss", "settled"} {
+		t.Run(kind, func(t *testing.T) {
+			hits := 0
+			date, returned := priceTestRequestedDay, priceTestRequestedDay
+			denom := apiUatom
+			switch kind {
+			case "recent":
+				date = time.Now().UTC().Format(apiDateLayout)
+				returned = date
+			case priceTestFallback:
+				returned = priceTestOldDay
+			case priceTestPeg:
+				denom = cosmosHubNobleUSDCDenom
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits++
+				w.Header().Set(apiContentType, apiJSONContentType)
+				if hits == 1 && (kind == priceTestPeg || kind == "miss") {
+					_, _ = w.Write([]byte(`{"found":false}`))
+					return
+				}
+				price := "1.95"
+				if hits > 1 {
+					price = "2.25"
+				}
+				_, _ = w.Write([]byte(`{"usd":` + price + `,"found":true,"date":"` + returned + `"}`))
+			}))
+			defer srv.Close()
+			o := NewOracle(srv.URL, "")
+			_, _ = o.PriceAt(apiMainnet, denom, date)
+			_, _ = o.PriceAt(apiMainnet, denom, date)
+			require.Equal(t, 1, hits)
+			key := apiMainnet + "|" + denom + "|" + date
+			o.mu.Lock()
+			e := o.prices[key]
+			e.cached = time.Now().Add(-priceUnsettledTTL - time.Second)
+			o.prices[key] = e
+			o.mu.Unlock()
+			usd, found := o.PriceAt(apiMainnet, denom, date)
+			require.True(t, found)
+			if kind == "settled" {
+				require.Equal(t, 1, hits)
+				require.Equal(t, 1.95, usd)
+			} else {
+				require.Equal(t, 2, hits)
+				require.Equal(t, 2.25, usd)
+			}
+		})
 	}
 }
 

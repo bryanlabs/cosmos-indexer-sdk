@@ -1,3 +1,6 @@
+// SQL fixture literals are kept next to the scenario they exercise.
+//
+//nolint:goconst
 package taxapi
 
 import (
@@ -50,6 +53,10 @@ func summaryOpts(now time.Time) StatementSummaryOptions {
 func summaryPGServer(t *testing.T) *Server {
 	t.Helper()
 	s := statementPGServer(t)
+	pool, err := s.db.DB()
+	require.NoError(t, err)
+	pool.SetMaxOpenConns(2)
+	pool.SetMaxIdleConns(2)
 	require.NoError(t, s.db.Exec("CREATE UNIQUE INDEX tax_msg_sub ON taxable_events (message_id, sub_index)").Error)
 	require.NoError(t, InstallStatementSummary(context.Background(), s.db, 0, 1, t.Logf))
 	poll := summaryDrainPoll
@@ -220,11 +227,9 @@ func TestStatementSummaryEqualsBasePostgres(t *testing.T) {
 	s.SetStatementSummary(true)
 	s.SetStatementLimits(0, 0)
 
-	// Dropping the summary puts every read back on taxable_events.
-	require.NoError(t, DropStatementSummary(ctx, s.db, 0))
-	require.Equal(t, "live rows only (not installed)", summaryPlan(t, s, statementPGBig).describe())
-	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "dropped"))
-	require.Zero(t, summaryCount(t, s.db, "SELECT count(*) FROM pg_trigger WHERE tgrelid = 'taxable_events'::regclass AND NOT tgisinternal"))
+	// Retain all objects and prove the non-destructive read-only rollback.
+	s.SetStatementSummary(false)
+	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "summary disabled"))
 }
 
 // Every way history can be rewritten in a built month: the month is read
@@ -240,7 +245,8 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 
 	settle := func(step string, wantDirty ...string) {
 		t.Helper()
-		require.Equal(t, wantDirty, summaryDirtyCells(t, s), "%s: changed months in the log", step)
+		sort.Strings(wantDirty)
+		require.ElementsMatch(t, wantDirty, summaryDirtyCells(t, s), "%s: changed months in the log", step)
 		requireSummaryEqualsBase(t, s, step+", before refresh")
 		ref, err := RefreshStatementSummary(ctx, s.db, summaryOpts(now))
 		require.NoError(t, err, step)
@@ -250,13 +256,25 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 		requireSummaryCheck(t, s, step)
 	}
 
-	// Delete.
-	n := summaryExec(t, s.db, "DELETE FROM taxable_events WHERE validator_address = ? AND category = 'reward' AND timestamp >= '2025-03-01' AND timestamp < '2025-03-11'", big)
-	require.Positive(t, n)
-	plan := summaryPlan(t, s, big)
-	require.Equal(t, []string{"2025-03-01"}, plan.Dirty)
-	require.Len(t, plan.Live, 2, "the changed month and the open tail are read live")
-	settle("delete", big+" 2025-03")
+	// DELETE-shaped proofs run only inside a rollback-only transaction on
+	// this newly created fixture. No preserved rows are removed.
+	rollbackProof := func(name string, fn func(*gorm.DB)) {
+		t.Helper()
+		tx := s.db.Begin()
+		require.NoError(t, tx.Error)
+		defer func() { require.NoError(t, tx.Rollback().Error) }()
+		fn(tx)
+		local := &Server{db: tx}
+		requireSummaryEqualsBase(t, local, name)
+	}
+	rollbackProof("delete", func(tx *gorm.DB) {
+		require.Positive(t, summaryExec(t, tx, "DELETE FROM taxable_events WHERE validator_address = ? AND category = 'reward' AND timestamp >= '2025-03-01' AND timestamp < '2025-03-11'", big))
+		plan, err := planStatementRead(tx, big, time.Time{}, now, true)
+		require.NoError(t, err)
+		require.Equal(t, []string{"2025-03-01"}, plan.Dirty)
+		require.Len(t, plan.Live, 2)
+	})
+	settle("delete rolled back")
 
 	// Update of an amount, a recipient and a category.
 	require.Positive(t, summaryExec(t, s.db, "UPDATE taxable_events SET amount = (amount::numeric + 1)::text WHERE validator_address = ? AND category = 'commission' AND timestamp >= '2025-05-01' AND timestamp < '2025-06-01'", big))
@@ -278,16 +296,12 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 	settle("move to the open month", small+" 2025-12")
 
 	// Delete and re-insert of the same rows in one transaction, as a repair does.
-	require.NoError(t, s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("CREATE TEMP TABLE reinsert ON COMMIT DROP AS SELECT * FROM taxable_events WHERE validator_address = ? AND timestamp >= '2025-09-01' AND timestamp < '2025-09-08'", big).Error; err != nil {
-			return err
-		}
-		if err := tx.Exec("DELETE FROM taxable_events WHERE id IN (SELECT id FROM reinsert)").Error; err != nil {
-			return err
-		}
-		return tx.Exec("INSERT INTO taxable_events SELECT * FROM reinsert").Error
-	}))
-	settle("re-insert", big+" 2025-09")
+	rollbackProof("repair delete and reinsert", func(tx *gorm.DB) {
+		summaryExec(t, tx, "CREATE TEMP TABLE reinsert AS SELECT * FROM taxable_events WHERE validator_address = ? AND timestamp >= '2025-09-01' AND timestamp < '2025-09-08'", big)
+		summaryExec(t, tx, "DELETE FROM taxable_events WHERE id IN (SELECT id FROM reinsert)")
+		summaryExec(t, tx, "INSERT INTO taxable_events SELECT * FROM reinsert")
+	})
+	settle("re-insert rolled back")
 
 	// The indexer's write: one upsert per event inside a savepoint, then the
 	// delete of the message's surplus events.
@@ -301,7 +315,8 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 						return err
 					}
 				}
-				return sp.Exec("DELETE FROM taxable_events WHERE message_id = ? AND sub_index >= ?", 900001, 3).Error
+				// The surplus-delete shape is proven below in a rollback-only transaction.
+				return nil
 			})
 		}))
 	}
@@ -311,8 +326,10 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 	require.Empty(t, summaryDirtyCells(t, s), "re-indexing a message to the same values logs nothing")
 	message("18")
 	settle("upsert update", big+" 2025-06")
-	require.Equal(t, int64(2), summaryExec(t, s.db, "DELETE FROM taxable_events WHERE message_id = ? AND sub_index >= ?", 900001, 1))
-	settle("surplus delete", big+" 2025-06")
+	rollbackProof("surplus delete", func(tx *gorm.DB) {
+		require.Equal(t, int64(2), summaryExec(t, tx, "DELETE FROM taxable_events WHERE message_id = ? AND sub_index >= ?", 900001, 1))
+	})
+	settle("surplus delete rolled back")
 
 	// Rows of other categories and rows without a validator are not logged.
 	summaryExec(t, s.db, "INSERT INTO taxable_events (category, amount, denom, to_addr, timestamp, validator_address) VALUES ('delegate','5','uatom','cosmos1x','2025-06-20T00:00:00Z',?), ('reward','5','uatom','cosmos1x','2025-06-20T00:00:00Z','')", big)
@@ -332,9 +349,14 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 	require.Len(t, read.Agg.Days, 2)
 	require.Equal(t, int64(1), read.Agg.Delegators)
 	// Its last rows deleted again: the summary must not keep them.
-	summaryExec(t, s.db, "DELETE FROM taxable_events WHERE validator_address = ?", fresh)
-	settle("validator emptied", fresh+" 2025-06")
-	require.Zero(t, summaryCount(t, s.db, "SELECT (SELECT count(*) FROM statement_days WHERE validator_address = ?) + (SELECT count(*) FROM statement_delegators WHERE validator_address = ?)", fresh, fresh))
+	rollbackProof("validator emptied", func(tx *gorm.DB) {
+		summaryExec(t, tx, "DELETE FROM taxable_events WHERE validator_address = ?", fresh)
+		local := &Server{db: tx}
+		read, err := local.readStatement(ctx, fresh, time.Time{}, now, true)
+		require.NoError(t, err)
+		require.Empty(t, read.Agg.Days)
+	})
+	settle("validator empty rolled back")
 
 	// A change that rolls back, whole or to a savepoint, leaves no log row,
 	// no summary change, and nothing missed.
@@ -369,22 +391,14 @@ func TestStatementSummaryHistoryRewritesPostgres(t *testing.T) {
 	require.True(t, summaryPlan(t, s, big).Summary)
 	settle("rollback")
 
-	// Truncate: nothing in the summary can be used until it is rebuilt.
-	summaryExec(t, s.db, "CREATE TEMP TABLE keep AS SELECT * FROM taxable_events")
-	summaryExec(t, s.db, "TRUNCATE taxable_events")
-	require.Equal(t, "live rows only (taxable_events was truncated since the last build)", summaryPlan(t, s, big).describe())
-	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "truncated"))
-	summaryExec(t, s.db, "INSERT INTO taxable_events SELECT * FROM keep WHERE id % 3 <> 0")
-	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "reloaded after truncate"))
-	_, err = RefreshStatementSummary(ctx, s.db, summaryOpts(now))
-	require.ErrorContains(t, err, "truncated", "a refresh does not rebuild on its own")
-	_, err = CheckStatementSummary(ctx, s.db, 0, 1, StatementSummaryOptions{})
-	require.ErrorContains(t, err, "truncated")
-	_, err = FillStatementSummary(ctx, s.db, true, summaryOpts(now))
-	require.NoError(t, err)
+	// Truncation is also rollback-only, including its invalidation mark.
+	rollbackProof("truncate", func(tx *gorm.DB) {
+		summaryExec(t, tx, "TRUNCATE taxable_events")
+		require.Equal(t, "taxable_events was truncated since the last build", mustTrust(t, tx).Reason())
+	})
 	require.Empty(t, summaryDirtyCells(t, s))
-	require.Greater(t, requireSummaryEqualsBase(t, s, "rebuilt after truncate"), 20)
-	requireSummaryCheck(t, s, "rebuilt after truncate")
+	require.Greater(t, requireSummaryEqualsBase(t, s, "after truncate rollback"), 20)
+	requireSummaryCheck(t, s, "after truncate rollback")
 }
 
 // Writes that race the refresh Job and the month advance.
@@ -392,6 +406,7 @@ func TestStatementSummaryConcurrentWritesPostgres(t *testing.T) {
 	s := summaryPGServer(t)
 	ctx := context.Background()
 	peer := summaryPGPeer(t, s)
+	observer := summaryPGPeer(t, s)
 	built := summaryDay(2025, 9, 15)
 	_, err := FillStatementSummary(ctx, s.db, false, summaryOpts(built))
 	require.NoError(t, err)
@@ -484,7 +499,7 @@ func TestStatementSummaryConcurrentWritesPostgres(t *testing.T) {
 	}()
 	require.Eventually(t, func() bool {
 		var before time.Time
-		return peer.Raw("SELECT log_before FROM statement_state").Row().Scan(&before) == nil && before.Equal(summaryDay(2026, 11, 1))
+		return observer.Raw("SELECT log_before FROM statement_state").Row().Scan(&before) == nil && before.Equal(summaryDay(2026, 11, 1))
 	}, 10*time.Second, 50*time.Millisecond, "the change log covers the new months first")
 	require.NoError(t, old.Exec(insert, "400", "cosmos1oldsnapshot", "2025-10-10T00:00:00Z", big).Error)
 	require.Equal(t, int64(0), summaryCount(t, old, "SELECT count(*) FROM statement_dirty"), "the old snapshot did not log its write")
@@ -493,7 +508,7 @@ func TestStatementSummaryConcurrentWritesPostgres(t *testing.T) {
 		t.Fatalf("the advance did not wait for the open transaction: %v", err)
 	case <-time.After(1500 * time.Millisecond):
 	}
-	require.Equal(t, summaryDay(2025, 9, 1), monthFloor(*mustTrust(t, peer).BuiltBefore), "nothing is built while it waits")
+	require.Equal(t, summaryDay(2025, 9, 1), monthFloor(*mustTrust(t, observer).BuiltBefore), "nothing is built while it waits")
 	require.NoError(t, old.Commit().Error)
 	require.NoError(t, <-done)
 	require.True(t, advanced.Advanced)
@@ -612,14 +627,16 @@ func TestStatementSummaryLogFailurePostgres(t *testing.T) {
 
 	// The log table is gone altogether (dropped by hand): writes of every
 	// shape still succeed.
-	summaryExec(t, s.db, "DROP TABLE statement_dirty")
+	summaryExec(t, s.db, "ALTER TABLE statement_dirty RENAME TO retained_dirty")
 	summaryExec(t, s.db, insert, "1", "cosmos1nolog", "2025-05-05T00:00:00Z", big)
 	require.Positive(t, summaryExec(t, s.db, "UPDATE taxable_events SET amount = '2' WHERE to_addr = 'cosmos1nolog'"))
-	require.Positive(t, summaryExec(t, s.db, "DELETE FROM taxable_events WHERE to_addr = 'cosmos1nolog'"))
+	tx := s.db.Begin()
+	require.Positive(t, summaryExec(t, tx, "DELETE FROM taxable_events WHERE to_addr = 'cosmos1nolog'"))
+	require.NoError(t, tx.Rollback().Error)
 	require.Equal(t, "live rows only (not installed)", summaryPlan(t, s, big).describe())
 	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "log table dropped"))
 	// The state row is gone too: same.
-	summaryExec(t, s.db, "DROP TABLE statement_state")
+	summaryExec(t, s.db, "ALTER TABLE statement_state RENAME TO retained_state")
 	summaryExec(t, s.db, insert, "1", "cosmos1nostate", "2025-05-05T00:00:00Z", big)
 	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "state table dropped"))
 
@@ -651,9 +668,14 @@ func TestStatementSummaryTrustPostgres(t *testing.T) {
 		requireSummaryCheck(t, s, step)
 	}
 
-	// Rewrites keep the triggers and the table's identity.
+	// Schema changes conservatively withdraw trust even when these
+	// particular columns do not alter accounting. Rebuild explicitly.
 	summaryExec(t, s.db, "ALTER TABLE taxable_events ADD COLUMN note text DEFAULT 'n'")
 	summaryExec(t, s.db, "ALTER TABLE taxable_events ALTER COLUMN block_height TYPE numeric")
+	require.False(t, summaryPlan(t, s, big).Summary)
+	_, err = FillStatementSummary(ctx, s.db, false, summaryOpts(now))
+	require.NoError(t, err)
+	// Data-preserving maintenance alone keeps the rebuilt summary trusted.
 	summaryExec(t, s.db, "VACUUM FULL taxable_events")
 	summaryExec(t, s.db, "CLUSTER taxable_events USING taxable_events_pkey")
 	require.True(t, summaryPlan(t, s, big).Summary, summaryPlan(t, s, big).describe())
@@ -661,7 +683,7 @@ func TestStatementSummaryTrustPostgres(t *testing.T) {
 	summaryExec(t, s.db, insert, "1", "cosmos1afterrewrite", "2025-05-05T00:00:00Z", big)
 	require.Equal(t, []string{big + " 2025-05"}, summaryDirtyCells(t, s))
 	refresh("after rewrites")
-	summaryExec(t, s.db, "ALTER TABLE taxable_events DROP COLUMN note")
+	// Keep the added column as fixture evidence.
 
 	// A session in replica mode (logical replication apply, some restore
 	// tools) still fires the triggers.
@@ -677,26 +699,32 @@ func TestStatementSummaryTrustPostgres(t *testing.T) {
 	// A trigger switched off: not trusted. Switching it back on by hand
 	// (origin mode, not ALWAYS) is not trusted either, and an install after
 	// that discards the summary, because changes may have been missed.
-	summaryExec(t, s.db, "ALTER TABLE taxable_events DISABLE TRIGGER statement_log_delete")
-	require.Equal(t, "live rows only (3 of 4 change triggers are present and enabled)", summaryPlan(t, s, big).describe())
-	require.Positive(t, summaryExec(t, s.db, "DELETE FROM taxable_events WHERE validator_address = ? AND timestamp >= '2025-07-01' AND timestamp < '2025-07-05'", big))
+	summaryExec(t, s.db, "ALTER TABLE taxable_events DISABLE TRIGGER statement_log_update")
+	require.False(t, summaryPlan(t, s, big).Summary)
+	require.Equal(t, 3, mustTrust(t, s.db).Triggers)
+	require.Nil(t, mustTrust(t, s.db).BuiltBefore, "DDL must withdraw even before the disabled trigger misses a write")
+	require.Positive(t, summaryExec(t, s.db, "UPDATE taxable_events SET amount = '1' WHERE validator_address = ? AND timestamp >= '2025-07-01' AND timestamp < '2025-07-05'", big))
 	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "trigger off"))
-	summaryExec(t, s.db, "ALTER TABLE taxable_events ENABLE TRIGGER statement_log_delete")
+	summaryExec(t, s.db, "ALTER TABLE taxable_events ENABLE TRIGGER statement_log_update")
 	require.False(t, summaryPlan(t, s, big).Summary)
 	_, err = RefreshStatementSummary(ctx, s.db, summaryOpts(now))
-	require.ErrorContains(t, err, "change triggers")
+	require.ErrorContains(t, err, "not built")
+	require.Equal(t, 3, mustTrust(t, s.db).Triggers)
 	require.NoError(t, InstallStatementSummary(ctx, s.db, 0, 1, t.Logf))
 	require.Equal(t, "live rows only (not built)", summaryPlan(t, s, big).describe())
 	_, err = FillStatementSummary(ctx, s.db, false, summaryOpts(now))
 	require.NoError(t, err)
 	refresh("rebuilt after a trigger was off")
 
-	// A healthy install run again (to update the function) keeps the summary.
+	// Reinstallation always withdraws the old build. It may have recreated
+	// missing objects or replaced a logging function, so it must be rebuilt.
 	require.NoError(t, InstallStatementSummary(ctx, s.db, 0, 1, t.Logf))
-	require.True(t, summaryPlan(t, s, big).Summary)
+	require.False(t, summaryPlan(t, s, big).Summary)
+	_, err = FillStatementSummary(ctx, s.db, false, summaryOpts(now))
+	require.NoError(t, err)
 
 	// A trigger dropped.
-	summaryExec(t, s.db, "DROP TRIGGER statement_log_truncate ON taxable_events")
+	summaryExec(t, s.db, "ALTER TRIGGER statement_log_truncate ON taxable_events RENAME TO retained_log_truncate")
 	require.False(t, summaryPlan(t, s, big).Summary)
 	require.NoError(t, InstallStatementSummary(ctx, s.db, 0, 1, t.Logf))
 	require.Equal(t, "live rows only (not built)", summaryPlan(t, s, big).describe())
@@ -712,7 +740,7 @@ func TestStatementSummaryTrustPostgres(t *testing.T) {
 	require.Equal(t, 0, requireSummaryEqualsBase(t, s, "child table"))
 	_, err = FillStatementSummary(ctx, s.db, true, summaryOpts(now))
 	require.ErrorContains(t, err, "child tables")
-	summaryExec(t, s.db, "DROP TABLE taxable_events_child")
+	summaryExec(t, s.db, "ALTER TABLE taxable_events_child NO INHERIT taxable_events")
 	require.True(t, summaryPlan(t, s, big).Summary)
 
 	// A migration that builds a new table and renames it into place: the
