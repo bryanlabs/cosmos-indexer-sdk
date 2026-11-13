@@ -120,6 +120,8 @@ type flowEvent struct {
 	SrcValidator string
 	Trigger      string
 	Detail       string
+	// Lot names the NFT a reserve auction bid, refund or settlement is for.
+	Lot string
 }
 
 // flowHoldings is a wallet's native coin at the end of a day, in base units.
@@ -260,10 +262,23 @@ type flowPools struct {
 	staked    map[string]*flowPool
 	unbonding map[string]*flowPool
 	locked    *flowPool
+	// bids holds each open reserve auction bid by lot, with the origins of
+	// the coins it escrowed, so a refund or settlement moves exactly those.
+	bids map[string]*flowPool
 }
 
 func newFlowPools(rule int) *flowPools {
-	return &flowPools{liquid: &flowPool{rule: rule}, staked: map[string]*flowPool{}, unbonding: map[string]*flowPool{}, locked: &flowPool{rule: rule}}
+	return &flowPools{liquid: &flowPool{rule: rule}, staked: map[string]*flowPool{}, unbonding: map[string]*flowPool{}, locked: &flowPool{rule: rule}, bids: map[string]*flowPool{}}
+}
+
+// escrowed is everything the bank no longer holds for the wallet: deposits
+// and open auction bids.
+func (p *flowPools) escrowed() decimal.Decimal {
+	t := p.locked.total()
+	for _, b := range p.bids {
+		t = t.Add(b.total())
+	}
+	return t
 }
 
 func (p *flowPools) bucket(m map[string]*flowPool, validator string, rule int) *flowPool {
@@ -276,7 +291,7 @@ func (p *flowPools) bucket(m map[string]*flowPool, validator string, rule int) *
 }
 
 func (p *flowPools) total() decimal.Decimal {
-	t := p.liquid.total().Add(p.locked.total())
+	t := p.liquid.total().Add(p.escrowed())
 	for _, b := range p.staked {
 		t = t.Add(b.total())
 	}
@@ -293,9 +308,6 @@ type flowWallet struct {
 	Known    bool
 	pools    [flowRules]*flowPools
 	Overdraw [flowRules]decimal.Decimal
-	// bids is how much of the locked coins each auction contract holds as
-	// this wallet's open bids, so a settlement pays only from its own bid.
-	bids map[string]decimal.Decimal
 }
 
 // FlowFateKey is one line of a validator's result: coins of one commission
@@ -551,13 +563,17 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 			t.each(w, func(r int, p *flowPools) { p.liquid.add([]flowPart{{Amount: amt}}) })
 			return nil
 		}
-		if e.Trigger == flowAuctionBid {
-			w.addBid(e.To, amt)
+		if e.Trigger == flowAuctionBid && e.Lot != "" {
+			t.each(w, func(r int, p *flowPools) { p.bucket(p.bids, e.Lot, r).add(t.takeFrom(w, r, p.liquid, amt, true)) })
+			return nil
 		}
 		t.each(w, func(r int, p *flowPools) { p.locked.add(t.takeFrom(w, r, p.liquid, amt, true)) })
 	case flowCatProtocolWithdrawal, flowCatGovRefund:
-		if e.Trigger == flowAuctionRefund {
-			w.takeBid(e.From, amt)
+		if e.Trigger == flowAuctionRefund && e.Lot != "" {
+			// A refund larger than the bid the trace saw returns the rest as
+			// other coins, as any other withdrawal does.
+			t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeBid(w, r, p, e.Lot, amt)) })
+			return nil
 		}
 		t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeFrom(w, r, p.locked, amt, false)) })
 	case flowCatGovBurn:
@@ -580,14 +596,23 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 			t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.liquid, amt, true), flowSpent, e.Category) })
 			return nil
 		}
-		// A reserve auction's winner pays with its bid, escrowed with that
-		// contract as a protocol_deposit, so the price leaves the locked coins
-		// up to that bid. A buy-now escrows nothing and pays from the wallet.
-		fromBid := w.takeBid(detailValue(e.Detail, "contract"), amt)
+		// A reserve auction's winner pays with the bid it escrowed for that
+		// NFT, so the price leaves that bid. A buy-now escrows nothing and
+		// pays from the wallet.
 		t.each(w, func(r int, p *flowPools) {
-			fromLocked := decimal.Min(fromBid, p.locked.total())
-			parts := t.takeFrom(w, r, p.locked, fromLocked, false)
-			if rest := amt.Sub(fromLocked); rest.IsPositive() {
+			b := p.bids[e.Lot]
+			fromBid := decimal.Zero
+			if b != nil {
+				fromBid = decimal.Min(amt, b.total())
+			}
+			var parts []flowPart
+			if fromBid.IsPositive() {
+				parts = t.takeFrom(w, r, b, fromBid, false)
+				if b.total().IsZero() {
+					delete(p.bids, e.Lot)
+				}
+			}
+			if rest := amt.Sub(fromBid); rest.IsPositive() {
 				parts = append(parts, t.takeFrom(w, r, p.liquid, rest, true)...)
 			}
 			t.record(r, parts, flowSpent, e.Category)
@@ -614,21 +639,34 @@ const (
 	flowAuctionRefund = "auction_refund"
 )
 
-func (w *flowWallet) addBid(contract string, amt decimal.Decimal) {
-	if w.bids == nil {
-		w.bids = map[string]decimal.Decimal{}
+// takeBid removes amt from the bid on lot; past the bid it is coins of other
+// origin, as takeFrom counts any shortfall.
+func (t *flowTrace) takeBid(w *flowWallet, r int, p *flowPools, lot string, amt decimal.Decimal) []flowPart {
+	parts := t.takeFrom(w, r, p.bucket(p.bids, lot, r), amt, false)
+	if p.bids[lot].total().IsZero() {
+		delete(p.bids, lot)
 	}
-	w.bids[contract] = w.bids[contract].Add(amt)
+	return parts
 }
 
-// takeBid removes up to amt of w's open bids with contract and returns how
-// much there was.
-func (w *flowWallet) takeBid(contract string, amt decimal.Decimal) decimal.Decimal {
-	got := decimal.Min(amt, w.bids[contract])
-	if got.IsPositive() {
-		w.bids[contract] = w.bids[contract].Sub(got)
+// flowBidLot names the NFT an auction row is about: the contract plus the
+// collection and token, from the bid's detail or the sale's asset.
+func flowBidLot(e tax.TaxableEvent) string {
+	contract := detailValue(e.Detail, "contract")
+	if contract == "" {
+		return ""
 	}
-	return decimal.Max(got, decimal.Zero)
+	if e.Category == apiNFTSale {
+		if e.Asset == "" {
+			return ""
+		}
+		return contract + "/" + e.Asset
+	}
+	coll, tok := detailValue(e.Detail, "collection"), detailValue(e.Detail, "token_id")
+	if coll == "" || tok == "" {
+		return ""
+	}
+	return contract + "/" + coll + "/" + tok
 }
 
 // flowEscrowedBid reports whether an nft_sale settled a Stargaze reserve
@@ -709,6 +747,9 @@ func (t *flowTrace) settle() {
 			}
 			t.record(r, p.liquid.parts, held, detail)
 			t.record(r, p.locked.parts, locked, detail)
+			for _, lot := range sortedPoolKeys(p.bids) {
+				t.record(r, p.bids[lot].parts, locked, detail)
+			}
 			for _, v := range sortedPoolKeys(p.staked) {
 				class, d := staked, detail
 				if w.Hop == 0 && v != t.Validator {
@@ -737,5 +778,5 @@ func sortedPoolKeys(m map[string]*flowPool) []string {
 // holds for w.
 func (w *flowWallet) simulated() decimal.Decimal {
 	p := w.pools[flowRuleFIFO]
-	return p.total().Sub(p.locked.total())
+	return p.total().Sub(p.escrowed())
 }

@@ -327,6 +327,9 @@ func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool)
 		Category: e.Category, Dir: dir, Amount: v,
 		From: e.FromAddr, To: e.ToAddr, Validator: e.ValidatorAddress, Trigger: e.RewardTrigger, Detail: e.Detail,
 	}
+	if e.RewardTrigger == flowAuctionBid || e.RewardTrigger == flowAuctionRefund || (e.Category == apiNFTSale && flowEscrowedBid(e.Detail)) {
+		fe.Lot = flowBidLot(e)
+	}
 	switch e.Category {
 	case flowCatRedelegate:
 		fe.SrcValidator = detailValue(e.Detail, "source_validator")

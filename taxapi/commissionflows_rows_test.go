@@ -113,6 +113,32 @@ func withTrigger(e tax.TaxableEvent, trigger string) tax.TaxableEvent {
 	return e
 }
 
+const flowRowsCollection = "stars1cccccccccccccccccccccccccccccccccccccccccccccccccccccccollect"
+
+// auctionBid and auctionRefund are the protocol rows the parser writes for a
+// reserve auction bid on a token and an outbid refund of it.
+func auctionBid(day, minute int, wallet, amount, token string) tax.TaxableEvent {
+	e := flowRow(day, minute, string(tax.CategoryProtocolDeposit), wallet, flowRowsAuction, amount, "uatom", auctionLotDetail(token))
+	return withTrigger(e, flowAuctionBid)
+}
+
+func auctionRefund(day, minute int, wallet, amount, token string) tax.TaxableEvent {
+	e := flowRow(day, minute, string(tax.CategoryProtocolWithdrawal), flowRowsAuction, wallet, amount, "uatom", auctionLotDetail(token))
+	return withTrigger(e, flowAuctionRefund)
+}
+
+func auctionLotDetail(token string) string {
+	return `{"collection":"` + flowRowsCollection + `","contract":"` + flowRowsAuction + `","name":"Stargaze reserve auction","protocol":"Stargaze","token_id":"` + token + `"}`
+}
+
+// auctionSale is the nft_sale row for a token sold through the auction
+// contract, by settlement or buy-now.
+func auctionSale(day, minute int, buyer, amount, token string) tax.TaxableEvent {
+	e := flowRow(day, minute, apiNFTSale, flowRowsSeller, buyer, amount, "uatom", flowRowsAuctionDetail)
+	e.Asset = flowRowsCollection + "/" + token
+	return e
+}
+
 // A reserve auction winner's bid is escrowed with the auction contract as a
 // protocol_deposit when it is placed, so settlement pays from that bid; an
 // outbid refund leaves the escrow; a buy-now pays from the wallet, never from
@@ -121,24 +147,61 @@ func TestFlowRowsAuctionSettlesFromEscrowedBid(t *testing.T) {
 	gov := "cosmos1" + strings.Repeat("g", 35) + "govmod"
 	l := ledgerFromRows(t, map[string][]tax.TaxableEvent{flowRowsBuyer: {
 		flowRow(2, 0, string(tax.CategoryGovDeposit), flowRowsBuyer, gov, "15000000", "uatom", ""),
-		withTrigger(flowRow(2, 1, string(tax.CategoryProtocolDeposit), flowRowsBuyer, flowRowsAuction, "10000000", "uatom", ""), flowAuctionBid),
-		withTrigger(flowRow(3, 0, string(tax.CategoryProtocolWithdrawal), flowRowsAuction, flowRowsBuyer, "10000000", "uatom", ""), flowAuctionRefund),
-		withTrigger(flowRow(3, 1, string(tax.CategoryProtocolDeposit), flowRowsBuyer, flowRowsAuction, "30000000", "uatom", ""), flowAuctionBid),
-		flowRow(4, 0, apiNFTSale, flowRowsSeller, flowRowsBuyer, "30000000", "uatom", flowRowsAuctionDetail),
-		flowRow(5, 0, apiNFTSale, flowRowsSeller, flowRowsBuyer, "20000000", "uatom", flowRowsAuctionDetail),
+		auctionBid(2, 1, flowRowsBuyer, "10000000", "1"),
+		auctionRefund(3, 0, flowRowsBuyer, "10000000", "1"),
+		auctionBid(3, 1, flowRowsBuyer, "30000000", "2"),
+		auctionSale(4, 0, flowRowsBuyer, "30000000", "2"),
+		auctionSale(5, 0, flowRowsBuyer, "20000000", "3"),
 	}})
 	l.commission(flowAt(1, 0), flowRowsBuyer, 100000000)
 	tr := runFlowTest(t, l, flowRowsBuyer)
 
 	// Chain: 100 - 15 gov deposit - 30 winning bid - 20 buy-now = 35 ATOM
-	// liquid, 15 still in the governance deposit, no open bid.
+	// in the bank, 15 still in the governance deposit, no open bid.
 	w := tr.Wallets[flowRowsBuyer]
 	require.Equal(t, "35000000", w.simulated().String())
-	require.True(t, w.bids[flowRowsAuction].IsZero())
 	for r := 0; r < flowRules; r++ {
+		require.Empty(t, w.pools[r].bids, flowRuleNames[r])
 		require.Equal(t, "15000000", w.pools[r].locked.total().String(), flowRuleNames[r])
 		require.Equal(t, "50000000", fate(tr, r, "2025-01", flowSpent, apiNFTSale, false))
 		require.True(t, w.Overdraw[r].IsZero())
+	}
+}
+
+// A buy-now on one token through the same contract that holds an open bid
+// on another token pays from the wallet and leaves that bid open.
+func TestFlowRowsAuctionBuyNowLeavesOtherBidOpen(t *testing.T) {
+	l := ledgerFromRows(t, map[string][]tax.TaxableEvent{flowRowsBuyer: {
+		auctionBid(2, 0, flowRowsBuyer, "10000000", "1"),
+		auctionSale(3, 0, flowRowsBuyer, "10000000", "2"),
+	}})
+	l.commission(flowAt(1, 0), flowRowsBuyer, 50000000)
+	tr := runFlowTest(t, l, flowRowsBuyer)
+
+	w := tr.Wallets[flowRowsBuyer]
+	require.Equal(t, "30000000", w.simulated().String())
+	for r := 0; r < flowRules; r++ {
+		require.Len(t, w.pools[r].bids, 1, flowRuleNames[r])
+		require.Equal(t, "10000000", fate(tr, r, "2025-01", flowLocked, "", false))
+	}
+}
+
+// A settlement pays with the coins its own bid escrowed, not with commission
+// that sits in an unrelated governance deposit.
+func TestFlowRowsAuctionSettlementKeepsBidOrigin(t *testing.T) {
+	gov := "cosmos1" + strings.Repeat("g", 35) + "govmod"
+	l := ledgerFromRows(t, map[string][]tax.TaxableEvent{flowRowsBuyer: {
+		flowRow(2, 0, string(tax.CategoryGovDeposit), flowRowsBuyer, gov, "10000000", "uatom", ""),
+		flowRow(3, 0, string(tax.CategoryIBCIn), "osmo1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsender", flowRowsBuyer, "10000000", "uatom", ""),
+		auctionBid(4, 0, flowRowsBuyer, "10000000", "1"),
+		auctionSale(5, 0, flowRowsBuyer, "10000000", "1"),
+	}})
+	l.commission(flowAt(1, 0), flowRowsBuyer, 10000000)
+	tr := runFlowTest(t, l, flowRowsBuyer)
+
+	for r := 0; r < flowRules; r++ {
+		require.Equal(t, "10000000", fate(tr, r, "2025-01", flowLocked, "", false), flowRuleNames[r])
+		require.Equal(t, "0", base(fate(tr, r, "2025-01", flowSpent, apiNFTSale, false)).String(), flowRuleNames[r])
 	}
 }
 
