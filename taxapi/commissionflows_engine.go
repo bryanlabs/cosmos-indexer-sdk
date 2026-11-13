@@ -293,6 +293,9 @@ type flowWallet struct {
 	Known    bool
 	pools    [flowRules]*flowPools
 	Overdraw [flowRules]decimal.Decimal
+	// bids is how much of the locked coins each auction contract holds as
+	// this wallet's open bids, so a settlement pays only from its own bid.
+	bids map[string]decimal.Decimal
 }
 
 // FlowFateKey is one line of a validator's result: coins of one commission
@@ -548,8 +551,14 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 			t.each(w, func(r int, p *flowPools) { p.liquid.add([]flowPart{{Amount: amt}}) })
 			return nil
 		}
+		if e.Trigger == flowAuctionBid {
+			w.addBid(e.To, amt)
+		}
 		t.each(w, func(r int, p *flowPools) { p.locked.add(t.takeFrom(w, r, p.liquid, amt, true)) })
 	case flowCatProtocolWithdrawal, flowCatGovRefund:
+		if e.Trigger == flowAuctionRefund {
+			w.takeBid(e.From, amt)
+		}
 		t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeFrom(w, r, p.locked, amt, false)) })
 	case flowCatGovBurn:
 		t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.locked, amt, false), flowBurned, "") })
@@ -562,6 +571,27 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 		t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.liquid, amt, true), flowIBCOut, dest) })
 	case apiFee:
 		t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.liquid, amt, true), flowFees, "") })
+	case apiNFTSale:
+		if in {
+			t.each(w, func(r int, p *flowPools) { p.liquid.add([]flowPart{{Amount: amt}}) })
+			return nil
+		}
+		if !flowEscrowedBid(e.Detail) {
+			t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.liquid, amt, true), flowSpent, e.Category) })
+			return nil
+		}
+		// A reserve auction's winner pays with its bid, escrowed with that
+		// contract as a protocol_deposit, so the price leaves the locked coins
+		// up to that bid. A buy-now escrows nothing and pays from the wallet.
+		fromBid := w.takeBid(detailValue(e.Detail, "contract"), amt)
+		t.each(w, func(r int, p *flowPools) {
+			fromLocked := decimal.Min(fromBid, p.locked.total())
+			parts := t.takeFrom(w, r, p.locked, fromLocked, false)
+			if rest := amt.Sub(fromLocked); rest.IsPositive() {
+				parts = append(parts, t.takeFrom(w, r, p.liquid, rest, true)...)
+			}
+			t.record(r, parts, flowSpent, e.Category)
+		})
 	default:
 		// Rewards, IBC receipts, income and the bought side of a swap add
 		// coins of other origin; any other outflow is a spend.
@@ -576,6 +606,36 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 		t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.liquid, amt, true), class, e.Category) })
 	}
 	return nil
+}
+
+// Reward triggers the parser gives auction bids and outbid refunds.
+const (
+	flowAuctionBid    = "auction_bid"
+	flowAuctionRefund = "auction_refund"
+)
+
+func (w *flowWallet) addBid(contract string, amt decimal.Decimal) {
+	if w.bids == nil {
+		w.bids = map[string]decimal.Decimal{}
+	}
+	w.bids[contract] = w.bids[contract].Add(amt)
+}
+
+// takeBid removes up to amt of w's open bids with contract and returns how
+// much there was.
+func (w *flowWallet) takeBid(contract string, amt decimal.Decimal) decimal.Decimal {
+	got := decimal.Min(amt, w.bids[contract])
+	if got.IsPositive() {
+		w.bids[contract] = w.bids[contract].Sub(got)
+	}
+	return decimal.Max(got, decimal.Zero)
+}
+
+// flowEscrowedBid reports whether an nft_sale settled a Stargaze reserve
+// auction, whose bids the parser records as protocol_deposit rows
+// (auction_bid); a settled bid is paid from that escrow.
+func flowEscrowedBid(detail string) bool {
+	return detailValue(detail, "sale") == "auction" && detailValue(detail, "protocol") == "Stargaze"
 }
 
 // route sends the coins w paid out in a transfer to their receiver: into a
@@ -672,5 +732,10 @@ func sortedPoolKeys(m map[string]*flowPool) []string {
 	return out
 }
 
-// simulated is the native coin the trace holds for w at the as-of.
-func (w *flowWallet) simulated() decimal.Decimal { return w.pools[flowRuleFIFO].total() }
+// simulated is what the chain's balance of w should show: everything but the
+// coins locked in a protocol or governance deposit, which the bank no longer
+// holds for w.
+func (w *flowWallet) simulated() decimal.Decimal {
+	p := w.pools[flowRuleFIFO]
+	return p.total().Sub(p.locked.total())
+}

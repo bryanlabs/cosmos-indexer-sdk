@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
@@ -262,31 +263,9 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 	rows := input.Wallets[0]
 	out := make([]flowEvent, 0, len(rows.Events)+len(rows.Fees))
 	for _, e := range rows.Events {
-		denom, amount := e.Denom, e.Amount
-		if bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail); isShare {
-			denom, amount = bonded, bondedAmount
+		if fe, ok := flowEventFromRow(e, addr, s.native.Denom); ok {
+			out = append(out, fe)
 		}
-		if denom != s.native.Denom {
-			continue
-		}
-		v, err := decimal.NewFromString(amount)
-		if err != nil {
-			continue
-		}
-		fe := flowEvent{
-			Key:      flowKey{Time: e.Timestamp.UTC(), Height: e.BlockHeight, Message: e.MessageID, Sub: e.SubIndex},
-			Category: e.Category, Dir: eventDirection(e, addr), Amount: v,
-			From: e.FromAddr, To: e.ToAddr, Validator: e.ValidatorAddress, Trigger: e.RewardTrigger, Detail: e.Detail,
-		}
-		switch e.Category {
-		case flowCatRedelegate:
-			fe.SrcValidator = detailValue(e.Detail, "source_validator")
-		case flowCatTokenize, flowCatRedeem:
-			if fe.Validator == "" {
-				fe.Validator, _, _ = strings.Cut(e.Denom, "/")
-			}
-		}
-		out = append(out, fe)
 	}
 	for _, f := range rows.Fees {
 		if f.Denom != s.native.Denom {
@@ -300,6 +279,63 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key.before(out[j].Key) })
 	return out, nil
+}
+
+// flowEventFromRow reads one ledger row as the movement of addr's native coin
+// it caused, or false when it moved none. Rows are classified for the tax
+// report, so a few carry their amount in a different sense:
+//   - nft_sale names the seller as From and the buyer as To with the price as
+//     Amount: the NFT moves from seller to buyer, the coin the other way.
+//   - nft_mint names the owner as To and carries the mint cost the owner paid.
+//   - ibc_in of a single-hop trace of the native denom
+//     ("transfer/channel-N/uatom") is native coin coming home: the chain
+//     releases it from escrow as the native denom. Longer traces are vouchers
+//     on this chain, not native coin.
+func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool) {
+	denom, amount := e.Denom, e.Amount
+	if bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail); isShare {
+		denom, amount = bonded, bondedAmount
+	}
+	if e.Category == string(tax.CategoryIBCIn) && strings.Count(denom, "/") == 2 {
+		if base, ok := ibcBaseDenom(denom); ok && base == native {
+			denom = native
+		}
+	}
+	if denom != native {
+		return flowEvent{}, false
+	}
+	v, err := decimal.NewFromString(amount)
+	if err != nil {
+		return flowEvent{}, false
+	}
+	dir := eventDirection(e, addr)
+	switch e.Category {
+	case apiNFTSale:
+		if e.FromAddr == e.ToAddr {
+			return flowEvent{}, false
+		}
+		if dir == apiOut {
+			dir = "in"
+		} else {
+			dir = apiOut
+		}
+	case apiNFTMint:
+		dir = apiOut
+	}
+	fe := flowEvent{
+		Key:      flowKey{Time: e.Timestamp.UTC(), Height: e.BlockHeight, Message: e.MessageID, Sub: e.SubIndex},
+		Category: e.Category, Dir: dir, Amount: v,
+		From: e.FromAddr, To: e.ToAddr, Validator: e.ValidatorAddress, Trigger: e.RewardTrigger, Detail: e.Detail,
+	}
+	switch e.Category {
+	case flowCatRedelegate:
+		fe.SrcValidator = detailValue(e.Detail, "source_validator")
+	case flowCatTokenize, flowCatRedeem:
+		if fe.Validator == "" {
+			fe.Validator, _, _ = strings.Cut(e.Denom, "/")
+		}
+	}
+	return fe, true
 }
 
 func detailValue(detail, key string) string {

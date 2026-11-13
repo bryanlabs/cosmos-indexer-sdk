@@ -364,7 +364,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
 		Where("timestamp >= ? AND timestamp < ?", start, end).
-		Order("timestamp asc").
+		Order("timestamp asc, taxable_events.id asc").
 		Find(&events).Error; err != nil {
 		return walletRows{}, err
 	}
@@ -400,6 +400,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		Joins("JOIN chains ON chains.id = blocks.chain_id").
 		Where("chains.chain_id IN ?", chainIDs(chain)).
 		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
+		Order("blocks.time_stamp asc, fees.id asc").
 		Scan(&fees).Error; err != nil {
 		return walletRows{}, err
 	}
