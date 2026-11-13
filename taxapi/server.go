@@ -42,6 +42,9 @@ type Server struct {
 	coverageScanner *indexCoverageScanner
 
 	ledgerCov ledgerCoverage
+
+	flowExpMu sync.Mutex
+	flowExp   map[string]*flowExpected
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {

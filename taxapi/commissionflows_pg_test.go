@@ -278,8 +278,56 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 	require.NoError(t, s.saveCommissionFlows(flowPGRun(flowPGOther, flowStatusReconciled, `{"2025-02":"300000"}`), flowPGRows(flowPGOther,
 		[3]string{flowPGFeb, flowExchange, "300000"})))
 	var hub CommissionFlowsHub
+	chain := chainParam("cosmoshub")
+
+	// Until the list of validators that ever withdrew commission is known,
+	// and while any of them has no run, the Hub shows coverage, not totals.
+	s.flowExp = map[string]*flowExpected{chain: {loading: true}}
 	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.False(t, hub.Complete)
+	require.Equal(t, 0, hub.Expected)
+	require.Empty(t, hub.Months)
+	require.True(t, hub.Total.Withdrawn.IsZero())
+	flowPGExpect(s, chain, flowPGValidator, flowPGOther, "cosmosvaloper1untraced")
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.False(t, hub.Complete)
+	require.Equal(t, 2, hub.Traced)
+	require.Equal(t, 3, hub.Expected)
+	require.Empty(t, hub.Months, "two of three validators is not a Hub figure")
+
+	// The daily trace stores a run for every validator that ever withdrew
+	// commission, including one with none since the trace start, so a full
+	// run completes the set.
+	require.NoError(t, s.saveCommissionFlows(flowPGRun("cosmosvaloper1untraced", flowStatusOK, "{}"), nil))
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.True(t, hub.Complete, "a run with no commission in the window still counts as traced")
+	require.Equal(t, 3, hub.Traced)
 	require.Equal(t, "2.8", hub.Months[1].Withdrawn.String())
+	require.NoError(t, s.db.Where("validator = ?", "cosmosvaloper1untraced").Delete(&CommissionFlowRun{}).Error)
+
+	flowPGExpect(s, chain, flowPGValidator, flowPGOther)
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.True(t, hub.Complete)
+	require.Equal(t, 2, hub.Traced)
+	require.Equal(t, "2.8", hub.Months[1].Withdrawn.String())
+	require.Equal(t, 0, hub.Unreconciled.Validators)
+
+	// A run whose rebuilt balances do not match the chain is left out of both
+	// sides and counted as left out, with the commission it withdrew.
+	drift := flowPGRun(flowPGOther, flowStatusDrift, `{"2025-02":"300000"}`)
+	require.NoError(t, s.saveCommissionFlows(drift, flowPGRows(flowPGOther, [3]string{flowPGFeb, flowExchange, "300000"})))
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.True(t, hub.Complete)
+	require.Equal(t, "2.5", hub.Months[1].Withdrawn.String())
+	require.Equal(t, "0.3", hub.Unreconciled.Withdrawn.String())
+	require.Equal(t, 1, hub.Unreconciled.Validators)
+	for _, l := range hub.Months[1].Flows {
+		require.NotEqual(t, flowExchange, l.Class, "only the drifted validator sent February commission to an exchange")
+	}
 
 	failed := flowPGRun(flowPGOther, flowStatusError, "{}")
 	failed.Reason = "node unreachable"
@@ -305,4 +353,12 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 	for _, l := range hub.Months[1].Flows {
 		require.NotEqual(t, flowExchange, l.Class, "only the failed validator sent February commission to an exchange")
 	}
+}
+
+func flowPGExpect(s *Server, chain string, validators ...string) {
+	set := map[string]bool{}
+	for _, v := range validators {
+		set[v] = true
+	}
+	s.flowExp = map[string]*flowExpected{chain: {set: set, at: time.Now()}}
 }

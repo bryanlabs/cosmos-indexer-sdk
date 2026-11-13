@@ -388,20 +388,97 @@ func (s *Server) handleValidatorCommissionFlows(w http.ResponseWriter, r *http.R
 	writeJSON(w, out)
 }
 
+// FlowLeftOut is what the Hub totals leave out because a validator's rebuilt
+// balances did not match the chain: how many validators and how much
+// commission they withdrew in the period.
+type FlowLeftOut struct {
+	Validators int             `json:"validators"`
+	Withdrawn  decimal.Decimal `json:"withdrawn"`
+}
+
+// flowHubLeftOut are the run statuses the Hub view leaves out of both its
+// withdrawn and its flow totals.
+var flowHubLeftOut = []string{flowStatusError, flowStatusDrift}
+
+// flowExpectedTTL is how long the list of validators that ever withdrew
+// commission is reused before it is read again in the background.
+const flowExpectedTTL = 6 * time.Hour
+
+type flowExpected struct {
+	set     map[string]bool
+	at      time.Time
+	loading bool
+}
+
+// flowExpectedValidators returns the validators the daily trace covers on
+// chain, and false until that list has been read once. Reading it takes tens
+// of seconds, so it never runs on the request path: a missing or stale list
+// is refreshed in the background and the last one is served meanwhile.
+func (s *Server) flowExpectedValidators(chain string) (map[string]bool, bool) {
+	s.flowExpMu.Lock()
+	defer s.flowExpMu.Unlock()
+	if s.flowExp == nil {
+		s.flowExp = map[string]*flowExpected{}
+	}
+	e := s.flowExp[chain]
+	if e == nil {
+		e = &flowExpected{}
+		s.flowExp[chain] = e
+	}
+	if !e.loading && (e.set == nil || time.Since(e.at) > flowExpectedTTL) {
+		e.loading = true
+		// A failed read leaves the list unknown and the next request retries.
+		go func() { _ = s.refreshFlowExpected(chain) }()
+	}
+	return e.set, e.set != nil
+}
+
+func (s *Server) refreshFlowExpected(chain string) error {
+	validators, err := s.commissionValidators(chain)
+	s.flowExpMu.Lock()
+	defer s.flowExpMu.Unlock()
+	if s.flowExp == nil {
+		s.flowExp = map[string]*flowExpected{}
+	}
+	e := s.flowExp[chain]
+	if e == nil {
+		e = &flowExpected{}
+		s.flowExp[chain] = e
+	}
+	e.loading = false
+	if err != nil {
+		return err
+	}
+	set := make(map[string]bool, len(validators))
+	for _, v := range validators {
+		set[v] = true
+	}
+	e.set, e.at = set, time.Now()
+	return nil
+}
+
 // CommissionFlowsHub is the Hub-wide response: every traced validator's
 // commission summed by month, with no per-validator breakdown.
 type CommissionFlowsHub struct {
-	Chain      string            `json:"chain"`
-	Rule       string            `json:"rule"`
-	Rules      []string          `json:"rules"`
-	Validators int               `json:"validators"`
-	Statuses   map[string]int    `json:"statuses"`
-	AsOf       string            `json:"as_of,omitempty"`
-	Months     []FlowMonth       `json:"months"`
-	Total      FlowMonth         `json:"total"`
-	Classes    map[string]string `json:"classes"`
-	Method     string            `json:"method"`
-	Symbol     string            `json:"symbol"`
+	Chain      string         `json:"chain"`
+	Rule       string         `json:"rule"`
+	Rules      []string       `json:"rules"`
+	Validators int            `json:"validators"`
+	Statuses   map[string]int `json:"statuses"`
+	// Traced of Expected validators have a stored run. Expected is every
+	// validator that ever withdrew commission, the set the daily trace
+	// covers; 0 while that list is still being read. Months and Total stay
+	// empty until Complete: a partial set is not a Hub figure.
+	Traced       int               `json:"traced"`
+	Expected     int               `json:"expected"`
+	Complete     bool              `json:"complete"`
+	Unreconciled FlowLeftOut       `json:"unreconciled"`
+	AsOf         string            `json:"as_of,omitempty"`
+	Months       []FlowMonth       `json:"months"`
+	Total        FlowMonth         `json:"total"`
+	Classes      map[string]string `json:"classes"`
+	Method       string            `json:"method"`
+	Symbol       string            `json:"symbol"`
 }
 
 func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request) {
@@ -414,13 +491,14 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// A failed run keeps its last good flows for its own page, but the Hub
-	// leaves that validator out of both sides so shares stay whole.
+	// A failed run keeps its last good flows for its own page, and a run whose
+	// rebuilt balances do not match the chain keeps its flows there too, but
+	// the Hub leaves both out of both sides so shares stay whole.
 	var flows []CommissionFlow
 	if err := s.db.Table(CommissionFlow{}.TableName()).
 		Select("month, class, detail, via_unbonding, SUM(amount_base)::text AS amount_base").
 		Where("chain = ? AND rule = ?", chain, rule).
-		Where("validator NOT IN (?)", s.db.Table(CommissionFlowRun{}.TableName()).Select(apiValidator).Where("chain = ? AND status = ?", chain, flowStatusError)).
+		Where("validator NOT IN (?)", s.db.Table(CommissionFlowRun{}.TableName()).Select(apiValidator).Where("chain = ? AND status IN ?", chain, flowHubLeftOut)).
 		Group("month, class, detail, via_unbonding").Scan(&flows).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -431,11 +509,16 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := CommissionFlowsHub{Chain: chain, Rule: rule, Rules: flowRuleNames[:], Statuses: map[string]int{}, Classes: FlowClassNotes, Method: FlowMethod, Symbol: s.native.Symbol}
+	expected, known := s.flowExpectedValidators(chain)
 	withdrawn := map[string]decimal.Decimal{}
+	unreconciled := decimal.Zero
 	var asOf time.Time
 	for _, run := range runs {
 		out.Validators++
 		out.Statuses[run.Status]++
+		if expected[run.Validator] {
+			out.Traced++
+		}
 		if run.AsOf.After(asOf) {
 			asOf = run.AsOf
 		}
@@ -443,13 +526,27 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		for m, v := range decodeFlowAmounts(run.Commission) {
-			if inFlowMonths(m, start, end) {
-				withdrawn[m] = withdrawn[m].Add(v)
+			if !inFlowMonths(m, start, end) {
+				continue
 			}
+			if run.Status == flowStatusDrift {
+				unreconciled = unreconciled.Add(v)
+				continue
+			}
+			withdrawn[m] = withdrawn[m].Add(v)
+		}
+		if run.Status == flowStatusDrift {
+			out.Unreconciled.Validators++
 		}
 	}
+	out.Unreconciled.Withdrawn = s.displayAmount(unreconciled)
 	if !asOf.IsZero() {
 		out.AsOf = asOf.Format(apiDateLayout)
+	}
+	out.Expected = len(expected)
+	out.Complete = known && len(expected) > 0 && out.Traced == len(expected)
+	if !out.Complete {
+		flows, withdrawn = nil, map[string]decimal.Decimal{}
 	}
 	kept := flows[:0]
 	for _, f := range flows {
