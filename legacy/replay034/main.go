@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay034/observeapp"
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	gaia "github.com/cosmos/cosmos-sdk/cmd/gaia/app"
 	"github.com/cosmos/cosmos-sdk/store"
@@ -48,7 +49,7 @@ func plain(v interface{}) string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: replay034 scan|run [flags]")
+		fmt.Fprintln(os.Stderr, "usage: replay034 scan|run|export-zero [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -57,6 +58,8 @@ func main() {
 		err = scan(os.Args[2:])
 	case "run":
 		err = run(os.Args[2:])
+	case "export-zero":
+		err = exportZero(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown mode")
 	}
@@ -101,6 +104,17 @@ func writeJSON(path string, v interface{}) {
 	}
 }
 
+// replayApp preserves the uninstrumented upstream path unless recording is requested.
+type replayApp interface {
+	InitChain(abci.RequestInitChain) abci.ResponseInitChain
+	BeginBlock(abci.RequestBeginBlock) abci.ResponseBeginBlock
+	DeliverTx([]byte) abci.ResponseDeliverTx
+	EndBlock(abci.RequestEndBlock) abci.ResponseEndBlock
+	Commit() abci.ResponseCommit
+	LastBlockHeight() int64
+	LastCommitID() sdk.CommitID
+}
+
 func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cache := fs.String("cache", "/cache", "cache root")
@@ -114,6 +128,7 @@ func run(args []string) error {
 	blockCache := fs.Int("db-cache-mb", 8, "database block cache")
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
+	coinRecords := fs.String("coin-records", "", "optional private movement evidence file, must not already exist")
 	fs.Parse(args)
 	if *profile != "" {
 		f, err := os.Create(*profile)
@@ -155,7 +170,22 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("pruning is recent, syncable or nothing")
 	}
-	app := gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, 0, baseapp.SetPruning(keep))
+	var app replayApp
+	var observed *observeapp.GaiaApp
+	var movementFile *os.File
+	if *coinRecords != "" {
+		records, err := createPrivateEvidence(*coinRecords)
+		if err != nil {
+			return err
+		}
+		defer records.Close()
+		movementFile = records
+		observed = observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true, 0, baseapp.SetPruning(keep))
+		observed.SetRecorder(records)
+		app = observed
+	} else {
+		app = gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, 0, baseapp.SetPruning(keep))
+	}
 	vals, err := openValidators(filepath.Join(*home, "validator-updates.jsonl"))
 	if err != nil {
 		return err
@@ -337,10 +367,21 @@ func run(args []string) error {
 				failure = fmt.Errorf("the application changed consensus parameters, which this tool does not track")
 				return
 			}
+			if observed != nil {
+				if failure = observed.RecorderError(); failure != nil {
+					return
+				}
+			}
 			if failure = vals.record(h, end.ValidatorUpdates); failure != nil {
 				return
 			}
 			appHash = app.Commit().Data
+			if observed != nil {
+				failure = observed.RecorderError()
+				if failure == nil && movementFile.Sync() != nil {
+					failure = fmt.Errorf("cannot sync committed movement evidence")
+				}
+			}
 		}()
 		if failure != nil {
 			return fail(h, "%v", failure)

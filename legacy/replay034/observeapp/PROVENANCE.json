@@ -1,0 +1,89 @@
+{
+  "upstream_module": "github.com/cosmos/cosmos-sdk",
+  "version": "v0.34.10",
+  "source": "https://github.com/cosmos/cosmos-sdk/tree/v0.34.10/cmd/gaia/app",
+  "license": "Apache-2.0",
+  "license_sha256": "3639b42a823599af3368a2de17e80d0350e9bc3ee7107104b49d190d4b30d80f",
+  "production_files": [
+    {
+      "path": "app.go",
+      "upstream_path": "cmd/gaia/app/app.go",
+      "upstream_sha256": "6aad17e700fbc41c2c9467f3c1d06c96eb01fae324825ceb27599cda790a92be",
+      "derived_sha256": "9d15660937d7e036568ca3a07307c61ef178801e65d19fe9b9ebd66f2a1f9190"
+    },
+    {
+      "path": "export.go",
+      "upstream_path": "cmd/gaia/app/export.go",
+      "upstream_sha256": "c8113decedc5017a80605ea2d3a4858af17671aeb2da39556d6c78adfc056510",
+      "derived_sha256": "2d1de062310923da89f0e3840aff19c3e0acefd3c7c3ec213849c01c9fb437b9"
+    },
+    {
+      "path": "genesis.go",
+      "upstream_path": "cmd/gaia/app/genesis.go",
+      "upstream_sha256": "be55306bc7ef114124542143377b6ec90789c90c7d415201215d36729c40de0c",
+      "derived_sha256": "497439b3bd74c5067a50d154d5317ca5761bcd2604580b95220d9cb2b4845d57"
+    },
+    {
+      "path": "invariants.go",
+      "upstream_path": "cmd/gaia/app/invariants.go",
+      "upstream_sha256": "dd064295860b9b80d7713c67e17154df9d925c93637e418bdabdd37a7512ba92",
+      "derived_sha256": "3b6f34c18e771e68a6db7c86db20974f2b9012f9855a2b7528f6be08e208598b"
+    }
+  ],
+  "cache_semantics_sources": [
+    {
+      "path": "baseapp/baseapp.go",
+      "sha256": "6e361560c4fe478fe0bd38aa0273b8988de1f3193a425208ab7116246c2d43e0"
+    },
+    {
+      "path": "baseapp/helpers.go",
+      "sha256": "abde9de8b05a56820f8b1f05f145533065be3db511d7910bf63bdb423b58c249"
+    },
+    {
+      "path": "store/cachemulti/store.go",
+      "sha256": "f04c5fd9e667f1a85085a0417ece563077c7bc27a7d1e6534b0b55066a29fb8d"
+    },
+    {
+      "path": "x/auth/ante.go",
+      "sha256": "e2af504608152af2d5c78e7178fc8aba8791568f4aa61520d275107dab88029d"
+    },
+    {
+      "path": "x/bank/keeper.go",
+      "sha256": "cda3dd43006cdf6ee1b70cc32df3cf56a6edb8aa414bf790e779df5a7b3f453c"
+    },
+    {
+      "path": "x/crisis/handler.go",
+      "sha256": "0ed606153f2dbe196dd1b180cd23345fc4dbef13d6d8ba36ba843f87288a8a80"
+    },
+    {
+      "path": "x/distribution/keeper/invariants.go",
+      "sha256": "457284649e4b38d87dd349753f8652601f0e627a2ef3d0d7447ea64f32016311"
+    },
+    {
+      "path": "x/distribution/keeper/keeper.go",
+      "sha256": "b114bdc534b502c5bf07fed0256c129959357ccbba9cceb3cdc0cfb8ef8a190b"
+    },
+    {
+      "path": "x/distribution/keeper/delegation.go",
+      "sha256": "b284f4ccbd6e94b23702e6ba2c7ca66e9e24bf3c264ec5f03e901f69b9a2855e"
+    }
+  ],
+  "modifications": {
+    "app.go": [
+      "package renamed",
+      "observer field and bank wrapper wiring",
+      "message/ante/phase handler wrappers"
+    ],
+    "export.go": [
+      "package renamed",
+      "out-of-store payout labels and identities",
+      "actual withdrawal accounting scopes"
+    ],
+    "genesis.go": [
+      "package renamed"
+    ],
+    "invariants.go": [
+      "package renamed"
+    ]
+  }
+}
