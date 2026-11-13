@@ -261,8 +261,15 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 		return nil, err
 	}
 	rows := input.Wallets[0]
+	credited, err := s.flowReturnCredits(addr, rows.Events)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]flowEvent, 0, len(rows.Events)+len(rows.Fees))
 	for _, e := range rows.Events {
+		if flowSingleHopNative(e, s.native.Denom) && !credited[flowCredit{e.MessageID, e.Amount + s.native.Denom}] {
+			continue
+		}
 		if fe, ok := flowEventFromRow(e, addr, s.native.Denom); ok {
 			out = append(out, fe)
 		}
@@ -281,6 +288,68 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 	return out, nil
 }
 
+// flowSingleHopNative reports whether e is an ibc_in row of the native denom
+// under a one-hop trace, which the chain releases from escrow as native coin.
+func flowSingleHopNative(e tax.TaxableEvent, native string) bool {
+	if e.Category != string(tax.CategoryIBCIn) || strings.Count(e.Denom, "/") != 2 {
+		return false
+	}
+	base, ok := ibcBaseDenom(e.Denom)
+	return ok && base == native
+}
+
+type flowCredit struct {
+	message uint
+	coin    string
+}
+
+// flowReturnCredits finds the native coin the chain credited to addr in the
+// messages of its single-hop ibc_in rows. The ledger also records a receive
+// whose acknowledgement was an error (a bad receiver, a failed forward), where
+// no coin moved, so a returning row counts only when its message credited
+// addr exactly that amount.
+func (s *Server) flowReturnCredits(addr string, events []tax.TaxableEvent) (map[flowCredit]bool, error) {
+	var ids []uint
+	for _, e := range events {
+		if flowSingleHopNative(e, s.native.Denom) && e.ToAddr == addr {
+			ids = append(ids, e.MessageID)
+		}
+	}
+	out := map[flowCredit]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []struct {
+		MessageID uint
+		Value     string
+	}
+	for start := 0; start < len(ids); start += 5000 {
+		chunk := ids[start:min(start+5000, len(ids))]
+		var part []struct {
+			MessageID uint
+			Value     string
+		}
+		if err := s.db.Raw(`
+SELECT me.message_id, a2.value
+FROM message_events me
+JOIN message_event_types mt ON mt.id = me.message_event_type_id AND mt.type = 'coin_received'
+JOIN message_event_attributes a1 ON a1.message_event_id = me.id
+JOIN message_event_attribute_keys k1 ON k1.id = a1.message_event_attribute_key_id AND k1.key = 'receiver'
+JOIN message_event_attributes a2 ON a2.message_event_id = me.id
+JOIN message_event_attribute_keys k2 ON k2.id = a2.message_event_attribute_key_id AND k2.key = 'amount'
+WHERE me.message_id IN ? AND a1.value = ?`, chunk, addr).Scan(&part).Error; err != nil {
+			return nil, err
+		}
+		rows = append(rows, part...)
+	}
+	for _, r := range rows {
+		for _, coin := range strings.Split(r.Value, ",") {
+			out[flowCredit{r.MessageID, strings.TrimSpace(coin)}] = true
+		}
+	}
+	return out, nil
+}
+
 // flowEventFromRow reads one ledger row as the movement of addr's native coin
 // it caused, or false when it moved none. Rows are classified for the tax
 // report, so a few carry their amount in a different sense:
@@ -289,8 +358,9 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 //   - nft_mint names the owner as To and carries the mint cost the owner paid.
 //   - ibc_in of a single-hop trace of the native denom
 //     ("transfer/channel-N/uatom") is native coin coming home: the chain
-//     releases it from escrow as the native denom. Longer traces are vouchers
-//     on this chain, not native coin.
+//     releases it from escrow as the native denom. flowEvents keeps such a
+//     row only when the chain credited it (flowReturnCredits). Longer traces
+//     are vouchers on this chain, not native coin.
 func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool) {
 	denom, amount := e.Denom, e.Amount
 	if bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail); isShare {

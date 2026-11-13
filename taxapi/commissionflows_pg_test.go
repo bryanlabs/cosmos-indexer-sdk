@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -361,4 +362,44 @@ func flowPGExpect(s *Server, chain string, validators ...string) {
 		set[v] = true
 	}
 	s.flowExp = map[string]*flowExpected{chain: {set: set, at: time.Now()}}
+}
+
+// A returning one-hop ATOM row counts only when its message credited the
+// wallet that exact native amount. Failed receives (an error acknowledgement
+// emits its coin events under another type) and credits to another account
+// do not.
+func TestFlowReturnCreditsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	holder := flowPGReceiver1
+	for _, sql := range []string{
+		"CREATE TABLE message_event_types (id bigint, type text)",
+		"CREATE TABLE message_events (id bigint, message_id bigint, message_event_type_id bigint, index bigint)",
+		"CREATE TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TABLE message_event_attributes (id bigint, message_event_id bigint, message_event_attribute_key_id bigint, value text, index bigint)",
+		"INSERT INTO message_event_types VALUES (1,'coin_received'),(2,'ibccallbackerror-coin_received')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'receiver'),(2,'amount')",
+		// Message 501: credited. 502: error ack. 503: credited to someone else.
+		// 504: credited in a list of coins.
+		"INSERT INTO message_events VALUES (1,501,1,0),(2,502,2,0),(3,503,1,0),(4,504,1,0)",
+		"INSERT INTO message_event_attributes VALUES " +
+			"(1,1,1,'" + holder + "',0),(2,1,2,'26560000uatom',1)," +
+			"(3,2,1,'" + holder + "',0),(4,2,2,'1000000uatom',1)," +
+			"(5,3,1,'" + flowPGReceiver2 + "',0),(6,3,2,'7000000uatom',1)," +
+			"(7,4,1,'" + holder + "',0),(8,4,2,'5ibc/ABC,9000000uatom',1)",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	row := func(msg uint, amount string) tax.TaxableEvent {
+		return tax.TaxableEvent{MessageID: msg, Category: string(tax.CategoryIBCIn), Amount: amount, Denom: "transfer/channel-1/uatom", ToAddr: holder}
+	}
+	rows := []tax.TaxableEvent{row(501, "26560000"), row(502, "1000000"), row(503, "7000000"), row(504, "9000000")}
+	got, err := s.flowReturnCredits(holder, rows)
+	require.NoError(t, err)
+	var kept []uint
+	for _, e := range rows {
+		if got[flowCredit{e.MessageID, e.Amount + "uatom"}] {
+			kept = append(kept, e.MessageID)
+		}
+	}
+	require.Equal(t, []uint{501, 504}, kept)
 }
