@@ -151,6 +151,44 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	stop, err = loader.stop(flowPGDeposit)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowExchangeLike, Detail: flowMemoHeuristic}, stop)
+	// Workers share one loader: lookups run while the memo heuristic stores
+	// a new label. Run under -race.
+	shared := &dbFlowLoader{s: s, chain: apiMainnet, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}}
+	for _, l := range labels {
+		shared.labels[l.Address] = l
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				got, err := shared.stop(op)
+				if err == nil && got.Class != flowExchange {
+					err = fmt.Errorf("labelled address stopped as %s", got.Class)
+				}
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}()
+		go func() {
+			defer wg.Done()
+			got, err := shared.stop(flowPGDeposit)
+			if err == nil && got.Class != flowExchangeLike {
+				err = fmt.Errorf("deposit address stopped as %s", got.Class)
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 	var inferred AddressLabel
 	require.NoError(t, s.db.Where("chain = ? AND address = ?", apiMainnet, flowPGDeposit).First(&inferred).Error)
 	require.Equal(t, labelExchangeLike, inferred.Kind, "the inferred label is stored with its evidence")

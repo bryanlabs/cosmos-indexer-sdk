@@ -315,7 +315,10 @@ func detailValue(detail, key string) string {
 }
 
 func (l *dbFlowLoader) stop(addr string) (flowStop, error) {
-	if lab, ok := l.labels[addr]; ok && lab.Kind != labelValidatorOperator {
+	l.mu.Lock()
+	lab, ok := l.labels[addr]
+	l.mu.Unlock()
+	if ok && lab.Kind != labelValidatorOperator {
 		switch {
 		case lab.Kind == labelModule && lab.Name == "distribution":
 			return flowStop{Class: flowCommunityPool}, nil

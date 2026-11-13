@@ -18,8 +18,12 @@ import (
 )
 
 // PostgresDbConnect connects to the database according to the passed in parameters
-func PostgresDbConnect(host string, port string, database string, user string, password string, level string) (*gorm.DB, error) {
+// and sends each runtime setting ("jit=off") as a session parameter.
+func PostgresDbConnect(host string, port string, database string, user string, password string, level string, runtime ...string) (*gorm.DB, error) {
 	dsn := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=disable", host, port, database, user, password)
+	for _, r := range runtime {
+		dsn += " " + r
+	}
 	gormLogLevel := logger.Silent
 
 	if level == "info" {

@@ -60,6 +60,13 @@ func main() {
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
 
+	// The commission trace runs thousands of small per-wallet queries whose
+	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
+	// of work. Session-only, so other jobs and the API keep their settings.
+	var runtime []string
+	if *flows {
+		runtime = append(runtime, "jit=off")
+	}
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
@@ -67,6 +74,7 @@ func main() {
 		env("DB_USER", "postgres"),
 		env("DB_PASS", "postgres"),
 		env("DB_LOG_LEVEL", "warn"),
+		runtime...,
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
