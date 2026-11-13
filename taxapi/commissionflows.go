@@ -139,7 +139,7 @@ const flowEscrowChannels = 2000
 
 // seedAddressLabels stores the labels the index can derive itself. It never
 // overwrites a label from another source.
-func (s *Server) seedAddressLabels(chain string, validators []string) error {
+func derivedFlowLabels(chain string, validators []string) []AddressLabel {
 	now := nowUTC()
 	var rows []AddressLabel
 	for _, m := range hubModuleNames {
@@ -154,7 +154,11 @@ func (s *Server) seedAddressLabels(chain string, validators []string) error {
 			rows = append(rows, AddressLabel{Chain: chain, Address: a, Name: v, Kind: labelValidatorOperator, Source: "derived:operator-account", Evidence: "account bytes of " + v, CreatedAt: now})
 		}
 	}
-	return s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, 500).Error
+	return rows
+}
+
+func (s *Server) seedAddressLabels(chain string, validators []string) error {
+	return s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(derivedFlowLabels(chain, validators), 500).Error
 }
 
 // Memo-deposit heuristic: an exchange's deposit address receives from many
@@ -207,16 +211,32 @@ const (
 
 // dbFlowLoader reads a trace's wallets from the index.
 type dbFlowLoader struct {
-	s      *Server
-	chain  string
-	node   *ledgerNode
-	labels map[string]AddressLabel
-	mu     *sync.Mutex
-	chans  map[string]string
+	s       *Server
+	chain   string
+	node    *ledgerNode
+	labels  map[string]AddressLabel
+	mu      *sync.Mutex
+	chans   map[string]string
+	private bool
+	archive *flowArchive
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
-	return l.s.flowHoldingsAt(l.chain, addr, day)
+	return l.holdingsAt(addr, day)
+}
+
+func (l *dbFlowLoader) holdingsAt(addr string, day time.Time) (flowHoldings, bool, error) {
+	if l.archive != nil && l.chain == apiMainnet {
+		if h, ok := l.archive.cachedHoldings(addr, day); ok {
+			return h, true, nil
+		}
+	}
+	h, known, err := l.s.flowHoldingsAt(l.chain, addr, day)
+	if err != nil || known || l.archive == nil {
+		return h, known, err
+	}
+	h, err = l.archive.holdingsAt(l.s, l.chain, addr, day)
+	return h, err == nil, err
 }
 
 func (s *Server) flowHoldingsAt(chain, addr string, day time.Time) (flowHoldings, bool, error) {
@@ -362,6 +382,12 @@ WHERE me.message_id IN ? AND a1.value = ?`, chunk, addr).Scan(&part).Error; err 
 //     row only when the chain credited it (flowReturnCredits). Longer traces
 //     are vouchers on this chain, not native coin.
 func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool) {
+	// A tokenize row names the delegator as From and the share-record owner
+	// as To. Only the delegator's native stake leaves its pool. Receiving the
+	// record does not spend the recipient's stake or credit liquid ATOM.
+	if e.Category == flowCatTokenize && e.FromAddr != addr {
+		return flowEvent{}, false
+	}
 	denom, amount := e.Denom, e.Amount
 	if bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail); isShare {
 		denom, amount = bonded, bondedAmount
@@ -454,8 +480,10 @@ func (l *dbFlowLoader) stop(addr string) (flowStop, error) {
 			Chain: l.chain, Address: addr, Name: "deposit-style address", Kind: labelExchangeLike, Source: flowMemoHeuristic,
 			Evidence: fmt.Sprintf("%d distinct senders with deposit-style memos in a sample of %d receipts", n, flowMemoSample), CreatedAt: nowUTC(),
 		}
-		if err := l.s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&lab).Error; err != nil {
-			return flowStop{}, err
+		if !l.private {
+			if err := l.s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&lab).Error; err != nil {
+				return flowStop{}, err
+			}
 		}
 		l.mu.Lock()
 		l.labels[addr] = lab
@@ -515,7 +543,9 @@ func (l *dbFlowLoader) channelChain(port, channel string) string {
 		}
 		if err := l.node.rest.GetJSON("/ibc/core/channel/v1/channels/"+channel+"/ports/"+port+"/client_state", nil, &body); err == nil && body.Identified.ClientState.ChainID != "" {
 			v = body.Identified.ClientState.ChainID
-			_ = l.s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&IBCChannel{Chain: l.chain, Port: port, Channel: channel, ClientID: body.Identified.ClientID, ChainID: v, FetchedAt: nowUTC()}).Error
+			if !l.private {
+				_ = l.s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&IBCChannel{Chain: l.chain, Port: port, Channel: channel, ClientID: body.Identified.ClientID, ChainID: v, FetchedAt: nowUTC()}).Error
+			}
 		}
 	}
 	l.mu.Lock()
@@ -583,16 +613,42 @@ func (s *Server) commissionValidators(chain string) ([]string, error) {
 
 // BuildCommissionFlows traces every validator's commission (or those named)
 // from from through the end of yesterday and stores the result.
-func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.Time, only []string, workers int, logf func(string, ...any)) error {
-	if err := CommissionFlowsMigrate(s.db); err != nil {
+func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.Time, only []string, workers int, logf func(string, ...any), options ...CommissionFlowBuildOptions) error {
+	asOf := flowDay(nowUTC())
+	var loader *dbFlowLoader
+	save := func(run CommissionFlowRun, rows []CommissionFlow, _ CommissionFlowEvidence) error {
+		return s.saveCommissionFlows(run, rows)
+	}
+	if len(options) > 1 {
+		return fmt.Errorf("only one commission output version is allowed")
+	}
+	if len(options) == 1 {
+		o := options[0]
+		if err := o.validate(); err != nil {
+			return err
+		}
+		if !from.Before(o.AsOf) || o.AsOf.After(asOf) {
+			return fmt.Errorf("invalid commission trace date range")
+		}
+		if err := CommissionFlowVersionsMigrate(s.db); err != nil {
+			return err
+		}
+		asOf = o.AsOf
+		save = func(run CommissionFlowRun, rows []CommissionFlow, evidence CommissionFlowEvidence) error {
+			return s.saveCommissionFlowVersion(o, run, rows, evidence)
+		}
+	} else if err := CommissionFlowsMigrate(s.db); err != nil {
 		return err
 	}
 	validators, err := s.commissionValidators(chain)
 	if err != nil {
 		return err
 	}
-	if err := s.seedAddressLabels(chain, validators); err != nil {
-		return err
+	derived := derivedFlowLabels(chain, validators)
+	if len(options) == 0 {
+		if err := s.seedAddressLabels(chain, validators); err != nil {
+			return err
+		}
 	}
 	if len(only) > 0 {
 		validators = only
@@ -601,11 +657,27 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 	if err := s.db.Where("chain = ?", chain).Find(&labels).Error; err != nil {
 		return err
 	}
-	loader := &dbFlowLoader{s: s, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}}
+	reader := s
+	if len(options) == 1 {
+		reader = NewServer(s.db, s.oracle, s.native)
+		reader.readOnlyLedger = true
+	}
+	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
+	if len(options) == 1 && options[0].ArchiveRPC != "" {
+		var err error
+		loader.archive, err = newFlowArchive(options[0].ArchiveRPC)
+		if err != nil {
+			return err
+		}
+	}
 	for _, l := range labels {
 		loader.labels[l.Address] = l
 	}
-	asOf := flowDay(nowUTC())
+	for _, l := range derived {
+		if _, exists := loader.labels[l.Address]; !exists {
+			loader.labels[l.Address] = l
+		}
+	}
 	if workers < 1 {
 		workers = 1
 	}
@@ -618,8 +690,22 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		go func() {
 			defer wg.Done()
 			for v := range jobs {
+				if len(options) == 1 {
+					exists, err := s.reuseCommissionFlowVersion(options[0], chain, v, from)
+					if err != nil {
+						failMu.Lock()
+						failed++
+						failMu.Unlock()
+						logf("commission flows: immutable output cannot be reused: %v", err)
+						continue
+					}
+					if exists {
+						logf("commission flows: %s immutable output retained", v)
+						continue
+					}
+				}
 				started := time.Now()
-				run, err := s.traceCommission(chain, loader, v, from, asOf)
+				run, err := reader.traceCommissionSaved(chain, loader, v, from, asOf, save)
 				if err != nil {
 					failMu.Lock()
 					failed++
@@ -654,14 +740,22 @@ const (
 // rewards are not in a rebuilt balance, and slashing is not yet an event.
 var flowDriftTolerance = decimal.NewFromInt(1000000)
 
-func (s *Server) traceCommission(chain string, loader *dbFlowLoader, validator string, from, asOf time.Time) (CommissionFlowRun, error) {
+func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, validator string, from, asOf time.Time, save func(CommissionFlowRun, []CommissionFlow, CommissionFlowEvidence) error) (CommissionFlowRun, error) {
 	run := CommissionFlowRun{Chain: chain, Validator: validator, FromDay: from, AsOf: asOf.AddDate(0, 0, -1), ComputedAt: nowUTC(), Overdraw: "{}", Commission: "{}", Untracked: "{}", DriftBase: "0"}
+	tr := newFlowTrace(validator, from, asOf, loader)
+	tr.strict = loader.private
 	fail := func(err error) (CommissionFlowRun, error) {
 		run.Status, run.Reason = flowStatusError, err.Error()
 		if errors.Is(err, errAwaitingCorrection) {
 			run.Reason = "a receiving wallet has rows awaiting a methodology correction"
 		}
-		_ = s.saveCommissionFlows(run, nil)
+		evidence := loader.evidence()
+		if loader.archive != nil {
+			evidence.Archive = loader.archive.evidence(tr.attempted)
+		}
+		if saveErr := save(run, nil, evidence); saveErr != nil {
+			return run, errors.Join(err, saveErr)
+		}
 		return run, err
 	}
 	receivers, err := s.commissionReceivers(chain, validator)
@@ -680,9 +774,11 @@ func (s *Server) traceCommission(chain string, loader *dbFlowLoader, validator s
 		group = append(group, op)
 	}
 	run.Receivers = len(receivers)
-	tr := newFlowTrace(validator, from, asOf, loader)
 	if err := tr.run(group); err != nil {
 		return fail(err)
+	}
+	if loader.private && len(tr.Unresolved) > 0 {
+		return fail(fmt.Errorf("commission destinations remain unresolved"))
 	}
 	overdraw := map[string]string{}
 	var total [flowRules]decimal.Decimal
@@ -692,12 +788,18 @@ func (s *Server) traceCommission(chain string, loader *dbFlowLoader, validator s
 		run.Wallets++
 		if !w.Known {
 			run.OpeningUnknown++
+			if loader.private {
+				return fail(fmt.Errorf("commission opening requires exact archive state"))
+			}
 		}
 		for r := 0; r < flowRules; r++ {
 			total[r] = total[r].Add(w.Overdraw[r])
 		}
-		actual, known, err := s.flowHoldingsAt(chain, w.Addr, asOfDay)
+		actual, known, err := loader.holdingsAt(w.Addr, asOfDay)
 		if err != nil || !known {
+			if loader.private {
+				return fail(fmt.Errorf("commission closing requires exact archive state"))
+			}
 			continue
 		}
 		drift = drift.Add(w.simulated().Sub(actual.total()).Abs())
@@ -736,7 +838,11 @@ func (s *Server) traceCommission(chain string, loader *dbFlowLoader, validator s
 		}
 		rows = append(rows, CommissionFlow{Chain: chain, Validator: validator, Rule: flowRuleNames[k.Rule], Month: k.Month, Class: k.Class, Detail: k.Detail, ViaUnbonding: k.ViaUnbonding, AmountBase: v.String()})
 	}
-	return run, s.saveCommissionFlows(run, rows)
+	evidence := loader.evidence()
+	if loader.archive != nil {
+		evidence.Archive = loader.archive.evidence(tr.attempted)
+	}
+	return run, save(run, rows, evidence)
 }
 
 // saveCommissionFlows replaces a validator's stored result. A failed run

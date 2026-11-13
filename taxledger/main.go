@@ -30,6 +30,7 @@ import (
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
+	"github.com/spf13/viper"
 	"gorm.io/gorm"
 )
 
@@ -57,6 +58,10 @@ func main() {
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
 	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
+	flowsVersion := flag.String("commission-output-version", "", "required immutable output version, leaves existing serving rows untouched")
+	flowsBuild := flag.String("commission-build", "", "required image digest or source build for this output version")
+	flowsAsOf := flag.String("commission-as-of", "", "required exclusive end date (YYYY-MM-DD UTC) for this output version")
+	flowsArchive := flag.String("commission-archive-config", "", "optional Secret-mounted probe.toml containing exact historical archive RPC")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
 
@@ -80,7 +85,7 @@ func main() {
 		log.Fatalf("db connect: %v", err)
 	}
 	if *flows {
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers)
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive)
 		return
 	}
 	if *daysAppend {
@@ -158,7 +163,14 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string) {
+	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
+		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
+	}
+	asOf, err := time.Parse(time.DateOnly, asOfText)
+	if err != nil {
+		log.Fatalf("-commission-as-of: %v", err)
+	}
 	from, err := time.Parse(time.DateOnly, fromText)
 	if err != nil {
 		log.Fatalf("-commission-flows-from: %v", err)
@@ -175,7 +187,19 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
 			validators = append(validators, v)
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf); err != nil {
+	archiveRPC := ""
+	if archiveConfig != "" {
+		config := viper.New()
+		config.SetConfigFile(archiveConfig)
+		if err := config.ReadInConfig(); err != nil {
+			log.Fatal("cannot read commission archive configuration")
+		}
+		archiveRPC = config.GetString("probe.rpc")
+		if archiveRPC == "" {
+			log.Fatal("commission archive configuration has no RPC endpoint")
+		}
+	}
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
 }

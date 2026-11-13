@@ -904,8 +904,10 @@ func (s *Server) resolveFailedFees(rows []ledgerFeeRow, node *ledgerNode) map[ui
 			if !ok {
 				continue
 			}
-			if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&FailedTxFee{TxID: r.TxID, Charged: charged}).Error; err != nil {
-				continue
+			if !s.readOnlyLedger {
+				if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&FailedTxFee{TxID: r.TxID, Charged: charged}).Error; err != nil {
+					continue
+				}
 			}
 			out[r.TxID] = charged
 		}

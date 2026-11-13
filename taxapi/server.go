@@ -34,6 +34,8 @@ type Server struct {
 	db     *gorm.DB
 	oracle *Oracle
 	native NativeAsset
+	// Private trace readers may derive fee outcomes but never persist ledger data.
+	readOnlyLedger bool
 
 	attestOnce sync.Once
 	attest     *attestationCache

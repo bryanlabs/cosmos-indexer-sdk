@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"container/heap"
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -352,6 +353,8 @@ type flowTrace struct {
 	From      time.Time
 	AsOf      time.Time // exclusive
 	load      flowLoader
+	strict    bool
+	attempted map[string]bool
 
 	Wallets    map[string]*flowWallet
 	order      []*flowWallet
@@ -366,7 +369,7 @@ type flowTrace struct {
 func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flowTrace {
 	return &flowTrace{
 		Validator: validator, From: from, AsOf: asOf, load: load,
-		Wallets: map[string]*flowWallet{}, stops: map[string]flowStop{},
+		Wallets: map[string]*flowWallet{}, stops: map[string]flowStop{}, attempted: map[string]bool{},
 		Fates: map[FlowFateKey]decimal.Decimal{}, Commission: map[string]decimal.Decimal{},
 	}
 }
@@ -398,6 +401,7 @@ func flowDay(at time.Time) time.Time {
 // validator had reached it yet, so they only set how much other coin it
 // holds. A nil cursor queues every event.
 func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey) error {
+	t.attempted[addr] = true
 	start := flowDay(at)
 	w := &flowWallet{Addr: addr, Hop: hop, Since: start}
 	for r := 0; r < flowRules; r++ {
@@ -407,6 +411,9 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 	h, known, err := t.load.opening(addr, start.AddDate(0, 0, -1))
 	if err != nil {
 		return err
+	}
+	if t.strict && !known {
+		return fmt.Errorf("commission opening requires exact archive state")
 	}
 	w.Known = known
 	if known {
@@ -697,6 +704,9 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 		stop = flowStop{Class: flowBeyondHops}
 	}
 	if stop.Class != "" {
+		if t.strict && stop.Class == flowUnresolved {
+			return fmt.Errorf("commission destination is unresolved")
+		}
 		for r := 0; r < flowRules; r++ {
 			t.record(r, parts[r], stop.Class, stop.Detail)
 		}
@@ -704,6 +714,9 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 	}
 	cursor := e.Key
 	if err := t.discover(e.To, w.Hop+1, e.Key.Time, &cursor); err != nil {
+		if t.strict {
+			return err
+		}
 		t.Unresolved = append(t.Unresolved, e.To)
 		delete(t.Wallets, e.To)
 		for r := 0; r < flowRules; r++ {
