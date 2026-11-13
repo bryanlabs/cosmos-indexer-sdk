@@ -159,16 +159,18 @@ WHERE chain_id = 'cosmoshub-3' AND component = 'liquid' ORDER BY address`).Scan(
 	require.NoError(t, db.Owner.Raw(`SELECT concat_ws(' ', height, phase, tx_index, msg_index, sub_index, category, amount, denom, 'from=' || from_addr, 'to=' || to_addr,
 amount_source, to_char("timestamp" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), (detail::json) ->> 'review', (detail::json) ->> 'community_pool',
 coalesce((detail::json) ->> 'recovery_address', (detail::json) ->> 'source_address'), (detail::json) -> 'evidence' ->> 'sha256' = '0c0c',
-(detail::json) -> 'evidence' ->> 'community_pool_total', (detail::json) -> 'evidence' ->> 'next_genesis_sha256' = ?)
+(detail::json) -> 'evidence' ->> 'community_pool_total', (detail::json) -> 'evidence' ->> 'next_genesis_sha256' = ?,
+(detail::json) ->> 'effective_chain_id', (detail::json) ->> 'made_by' = 'the genesis file of cosmoshub-4, not a transaction',
+(detail::json) ->> 'dated_at' = 'the last block of cosmoshub-3, height 1')
 FROM legacy.taxable_events WHERE chain_id = 'cosmoshub-3' AND phase = 4 ORDER BY sub_index`, next).Scan(&stored).Error)
 	// Dated at the block of the export height, not at the genesis time the
 	// next genesis file carries.
 	const when = "genesis 2020-01-02 03:04:05 needs review"
 	require.Equal(t, []string{
-		"1 4 0 0 0 " + books.Prop29Category + " 1000 uatom from=source1 to= " + when + " 100 recovery1 t 152 t",
-		"1 4 0 0 1 " + books.Prop29Category + " 900 uatom from= to=recovery1 " + when + " 100 source1 t 152 t",
-		"1 4 0 0 2 " + books.Prop29Category + " 520 uatom from=source2 to= " + when + " 52 recovery2 t 152 t",
-		"1 4 0 0 3 " + books.Prop29Category + " 468 uatom from= to=recovery2 " + when + " 52 source2 t 152 t",
+		"1 4 0 0 0 " + books.Prop29Category + " 1000 uatom from=source1 to= " + when + " 100 recovery1 t 152 t cosmoshub-4 t t",
+		"1 4 0 0 1 " + books.Prop29Category + " 900 uatom from= to=recovery1 " + when + " 100 source1 t 152 t cosmoshub-4 t t",
+		"1 4 0 0 2 " + books.Prop29Category + " 520 uatom from=source2 to= " + when + " 52 recovery2 t 152 t cosmoshub-4 t t",
+		"1 4 0 0 3 " + books.Prop29Category + " 468 uatom from= to=recovery2 " + when + " 52 source2 t 152 t cosmoshub-4 t t",
 	}, stored)
 
 	// The rows are stored once and move nothing: the same close gives the

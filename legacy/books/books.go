@@ -179,7 +179,7 @@ func Close(ctx context.Context, db *sql.DB, chain string) (*Result, error) {
 // exactly. Refused, the result is the one a close without the list gives.
 // No wallet outside the list is affected either way.
 func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisChange) (*Result, error) {
-	if change != nil && change.Chain != chain {
+	if change != nil && change.chain != chain {
 		return nil, fmt.Errorf("the genesis change belongs to another chain")
 	}
 	out := &Result{Chain: chain, Short: new(big.Int), Over: new(big.Int), OpenByCause: map[string]int{},
@@ -214,7 +214,7 @@ func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisCha
 		if err := db.QueryRowContext(ctx, `SELECT sha256 FROM legacy.genesis_files WHERE chain_id = $1`, out.Next).Scan(&next); err != nil {
 			return nil, err
 		}
-		if next != change.NextGenesisSHA256 || change.pool == nil {
+		if next != change.nextGenesis || change.pool == nil {
 			return nil, fmt.Errorf("the genesis file loaded for the chain after this one is not the one the genesis change was proven against")
 		}
 	}

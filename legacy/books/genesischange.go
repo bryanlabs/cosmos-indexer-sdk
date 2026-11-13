@@ -62,17 +62,32 @@ type Recovery struct {
 }
 
 // GenesisChange is the whole list with where it came from. Only LoadProp29
-// makes one: the list, the community pool remainder and the genesis file the
-// remainder was proven against cannot be set or changed from outside this
-// package.
+// makes one, and nothing of it can be set or changed from outside this
+// package: not the list, not the chain it belongs to, not the community pool
+// remainder and not the genesis file the remainder was proven against.
 type GenesisChange struct {
-	Chain, Name             string
-	Repo, Tag, Path, SHA256 string
-	// PoolStateSHA256 and NextGenesisSHA256 name the evidence of the
-	// community pool remainder.
-	PoolStateSHA256, NextGenesisSHA256 string
-	recoveries                         []Recovery
-	pool                               *big.Int
+	chain, name             string
+	repo, tag, path, sha256 string
+	// poolState and nextGenesis name the evidence of the community pool
+	// remainder by sha256.
+	poolState, nextGenesis string
+	recoveries             []Recovery
+	pool                   *big.Int
+}
+
+// Name is the name the change is reported under.
+func (c *GenesisChange) Name() string { return c.name }
+
+// Source says where the list was read from: repository, tag, path and the
+// sha256 of the file.
+func (c *GenesisChange) Source() (repo, tag, path, sha256 string) {
+	return c.repo, c.tag, c.path, c.sha256
+}
+
+// PoolEvidence gives the sha256 of the fee pool answer after the export
+// height and of the next genesis file the remainder was read from.
+func (c *GenesisChange) PoolEvidence() (poolState, nextGenesis string) {
+	return c.poolState, c.nextGenesis
 }
 
 // Listed is the number of recoveries in the list.
@@ -107,9 +122,9 @@ func LoadProp29(source []byte) (*GenesisChange, error) {
 	if !ok {
 		return nil, fmt.Errorf("the recorded community pool remainder is not a number")
 	}
-	return &GenesisChange{Chain: Prop29Chain, Name: Prop29Name,
-		Repo: Prop29Repo, Tag: Prop29Tag, Path: Prop29Path, SHA256: Prop29SHA256,
-		PoolStateSHA256: Prop29PoolStateSHA256, NextGenesisSHA256: Prop29NextGenesisSHA256, recoveries: recoveries, pool: pool}, nil
+	return &GenesisChange{chain: Prop29Chain, name: Prop29Name,
+		repo: Prop29Repo, tag: Prop29Tag, path: Prop29Path, sha256: Prop29SHA256,
+		poolState: Prop29PoolStateSHA256, nextGenesis: Prop29NextGenesisSHA256, recoveries: recoveries, pool: pool}, nil
 }
 
 // parseRecoveries reads every donor function of the file. Each must name one
@@ -165,6 +180,9 @@ func (c *GenesisChange) listed(address string) (entry *Recovery, source bool) {
 
 type changeDetail struct {
 	Change          string         `json:"change"`
+	MadeBy          string         `json:"made_by"`
+	EffectiveChain  string         `json:"effective_chain_id"`
+	DatedAt         string         `json:"dated_at"`
 	RecoveryAddress string         `json:"recovery_address,omitempty"`
 	Recovered       string         `json:"recovered,omitempty"`
 	SourceAddress   string         `json:"source_address,omitempty"`
@@ -203,15 +221,19 @@ func changeRows(result *Result) ([]changeRow, error) {
 			return nil, fmt.Errorf("a source wallet of the genesis change was not accepted by the close")
 		}
 		pool := new(big.Int).Sub(whole, entry.Amount)
-		evidence := changeEvidence{Repo: change.Repo, Tag: change.Tag, Path: change.Path, SHA256: change.SHA256,
-			PoolTotal: change.pool.String(), PoolStateSHA256: change.PoolStateSHA256, NextGenesisSHA256: change.NextGenesisSHA256}
-		out, err := json.Marshal(changeDetail{Change: change.Name, RecoveryAddress: entry.Recovery, Recovered: entry.Amount.String(),
+		evidence := changeEvidence{Repo: change.repo, Tag: change.tag, Path: change.path, SHA256: change.sha256,
+			PoolTotal: change.pool.String(), PoolStateSHA256: change.poolState, NextGenesisSHA256: change.nextGenesis}
+		madeBy := "the genesis file of " + result.Next + ", not a transaction"
+		datedAt := fmt.Sprintf("the last block of %s, height %d", result.Chain, result.Through)
+		out, err := json.Marshal(changeDetail{Change: change.name, MadeBy: madeBy, EffectiveChain: result.Next, DatedAt: datedAt,
+			RecoveryAddress: entry.Recovery, Recovered: entry.Amount.String(),
 			CommunityPool: pool.String(), AmountBasis: "the whole balance the stored history gives at the export height; the next genesis file holds zero",
 			Review: "needs review", Evidence: evidence})
 		if err != nil {
 			return nil, err
 		}
-		in, err := json.Marshal(changeDetail{Change: change.Name, SourceAddress: entry.Source, SourceBalance: whole.String(),
+		in, err := json.Marshal(changeDetail{Change: change.name, MadeBy: madeBy, EffectiveChain: result.Next, DatedAt: datedAt,
+			SourceAddress: entry.Source, SourceBalance: whole.String(),
 			CommunityPool: pool.String(), AmountBasis: "the amount the genesis change file states", Review: "needs review", Evidence: evidence})
 		if err != nil {
 			return nil, err

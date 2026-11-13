@@ -209,7 +209,9 @@ genesis time, not a start time of its own), category
 row out for its whole balance, a recovery wallet one row in for the listed
 amount. Neither is classified as income or as a sale, both say they need
 review, and each names the other wallet, the part left to the community
-pool and the evidence. The rows move no balance in the close itself.
+pool and the evidence, and says that the movement was made by the genesis
+file of cosmoshub-4 and took effect on that chain. The rows move no balance
+in the close itself.
 
 ```
 LEGACY_IMPORT_DSN="... user=legacy_importer ..." legacy-close --chain cosmoshub-3 --genesis-change prop29.go --record

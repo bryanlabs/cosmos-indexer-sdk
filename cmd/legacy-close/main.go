@@ -113,19 +113,21 @@ func main() {
 	fmt.Printf("addresses compared %d\n", result.Addresses)
 	fmt.Printf("addresses that close exactly %d\n", result.Closed)
 	if change != nil {
-		listed := change.Listed()
-		fmt.Printf("addresses that close with the %s %d\n", change.Name, result.ClosedWithChange)
+		listed, name := change.Listed(), change.Name()
+		repo, tag, path, sum := change.Source()
+		poolState, nextGenesis := change.PoolEvidence()
+		fmt.Printf("addresses that close with the %s %d\n", name, result.ClosedWithChange)
 		fmt.Printf("%s: source wallets that pass their test %d of %d, recovery wallets %d of %d\n",
-			change.Name, result.ChangeSources, listed, result.ChangeRecoveries, listed)
+			name, result.ChangeSources, listed, result.ChangeRecoveries, listed)
 		fmt.Printf("%s: uatom out of the source wallets %s, into the recovery wallets %s, left to the community pool %s\n",
-			change.Name, result.ChangeOut, result.ChangeIn, result.ChangePool)
+			name, result.ChangeOut, result.ChangeIn, result.ChangePool)
 		fmt.Printf("%s: community pool change recorded from the chain state %s, equal to what the list leaves %t\n",
-			change.Name, change.Pool(), result.ChangePoolExact)
-		fmt.Printf("%s: list read from %s %s %s sha256 %s\n", change.Name, change.Repo, change.Tag, change.Path, change.SHA256)
+			name, change.Pool(), result.ChangePoolExact)
+		fmt.Printf("%s: list read from %s %s %s sha256 %s\n", name, repo, tag, path, sum)
 		fmt.Printf("%s: pool evidence, fee pool answer after the export height sha256 %s, next genesis file sha256 %s\n",
-			change.Name, change.PoolStateSHA256, change.NextGenesisSHA256)
+			name, poolState, nextGenesis)
 		if !result.ChangeWhole {
-			fmt.Printf("%s: list refused as a whole; every listed wallet is counted as a close without the list counts it\n", change.Name)
+			fmt.Printf("%s: list refused as a whole; every listed wallet is counted as a close without the list counts it\n", name)
 		}
 	}
 	if result.ChangeRows != 0 {
