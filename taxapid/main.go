@@ -118,6 +118,7 @@ func main() {
 	srv.SetStatementLimits(statementRows, statementTimeout)
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
+	srv.WarmCommissionFlows("mainnet")
 	// Per-year block coverage for /index-coverage and the coverage warning
 	// on reports. TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true counts a block only
 	// once its block events are indexed too; reports read transactions only,
