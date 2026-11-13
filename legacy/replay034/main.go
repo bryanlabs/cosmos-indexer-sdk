@@ -125,6 +125,7 @@ func run(args []string) error {
 	readers := fs.Int("readers", 2, "cache readers")
 	pruning := fs.String("pruning", "recent", "state versions to keep: recent, syncable or nothing")
 	compare := fs.Bool("compare-results", true, "compare each result with the cached one")
+	gasDetails := fs.String("gas-difference-details", "", "optional private gas discrepancy evidence, exclusive new file; requires compare-results")
 	blockCache := fs.Int("db-cache-mb", 8, "database block cache")
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
@@ -134,6 +135,24 @@ func run(args []string) error {
 	fs.Parse(args)
 	if *sparseChecks && *coinRecords == "" {
 		return fmt.Errorf("sparse-account-checks requires coin-records")
+	}
+	if *gasDetails != "" && !*compare {
+		return fmt.Errorf("gas-difference-details requires compare-results")
+	}
+	if *genesis == "" || *home == "" || *to < 1 {
+		return fmt.Errorf("genesis, home and to are required")
+	}
+	var gasFile *os.File
+	if *gasDetails != "" {
+		if err := validateGasDestination(*gasDetails, *home, *profile, *coinRecords); err != nil {
+			return err
+		}
+		var err error
+		gasFile, err = os.OpenFile(*gasDetails, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("cannot create exclusive private gas diagnostic evidence")
+		}
+		defer gasFile.Close()
 	}
 	if *profile != "" {
 		f, err := os.Create(*profile)
@@ -145,9 +164,6 @@ func run(args []string) error {
 			return err
 		}
 		defer pprof.StopCPUProfile()
-	}
-	if *genesis == "" || *home == "" || *to < 1 {
-		return fmt.Errorf("genesis, home and to are required")
 	}
 	if err := os.MkdirAll(*home, 0o700); err != nil {
 		return err
@@ -401,6 +417,14 @@ func run(args []string) error {
 		lastHash, lastResults = c.metaID, types.NewResults(deliver).Hash()
 		height = h
 		state.Transactions += int64(len(deliver))
+		if gasFile != nil {
+			if err := writeGasDifferences(gasFile, h, b.Data.Txs, c.results, deliver); err != nil {
+				return fail(h, "%v", err)
+			}
+			if gasFile.Sync() != nil {
+				return fail(h, "cannot sync private gas diagnostic evidence")
+			}
+		}
 		if c.results != nil {
 			if what := differ(c.results, begin, deliver, end); what != "" {
 				state.ResultDiffs++
