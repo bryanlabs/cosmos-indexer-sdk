@@ -129,8 +129,12 @@ func run(args []string) error {
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
 	coinRecords := fs.String("coin-records", "", "optional private movement evidence file, must not already exist")
+	sparseChecks := fs.Bool("sparse-account-checks", false, "use exact affected-account checks instead of full snapshots; requires coin-records")
 	verifyTarget := fs.Bool("verify-target-next-header", false, "prove final committed target using the next cached header, without executing that block")
 	fs.Parse(args)
+	if *sparseChecks && *coinRecords == "" {
+		return fmt.Errorf("sparse-account-checks requires coin-records")
+	}
 	if *profile != "" {
 		f, err := os.Create(*profile)
 		if err != nil {
@@ -182,6 +186,7 @@ func run(args []string) error {
 		defer records.Close()
 		movementFile = records
 		observed = observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true, 0, baseapp.SetPruning(keep))
+		observed.SetSparseAccounting(*sparseChecks)
 		observed.SetRecorder(records)
 		app = observed
 	} else {

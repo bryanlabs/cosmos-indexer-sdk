@@ -1,0 +1,63 @@
+{
+  "integration": "opt-in exact sparse account reconciliation",
+  "causal_baseline_commit": "9d3cd16d23d0560b4d5199d7f3e6df210fc7a921",
+  "finalprep_source_commit": "1c2b8d23f28c553e15ed8daf5bade1308ffd5322",
+  "cli_and_documentation_sha256": {
+    "../main.go": "d6fe0fed4411a44f5fb4aba01e4a83233fe64af12d78c480c3d42f851cee55b6",
+    "../export.go": "dc1d296a722d36e7026874bcdb656bcc9ba601390b4d0e7815e38740a3b5ed51",
+    "../sparse_flags_test.go": "8a2b95466587b422fbb5169128c0586dc9b48da28ef34722ea91fc52f4280210",
+    "../RECORDER.md": "fc72130da708ac6c75f0d6f9af6b74e18026428c297eec6f6407ad4de950d621",
+    "SPARSE-ACCOUNTING.md": "cefa1fe5e257c1120be9e647cc1a048ce1e3b5bdd538b9547377de47f91419ad",
+    "accounttrack/README.md": "4e759e4509fb10294f00209a1dc1dbf801c528f19398c05260523666134b6396"
+  },
+  "tracker_tests_sha256": {
+    "accounttrack/epoch_test.go": "0ab27306c7f2ec8b085e07dd81fb4ff1fd7f30e0db4acbc8dbcb8eb0e68d2620",
+    "accounttrack/gas_test.go": "8a5723c263707798f069e0ed469db764470183a812569725f18c9a4f7bbcc1ea",
+    "accounttrack/lifecycle_test.go": "e7f55d3d5b518e71e81582bd7e4c9ddaf6e5f67d060b467519aaa1d7f0962a2a",
+    "accounttrack/sparse_test.go": "ae416671aa832ee3b68af49f520c0dd275eb4840a7e83c45e9510b64eb7ff032",
+    "accounttrack/tracker_test.go": "d5f9fbb229da2a3780cc842e335fb0557903362b8a2f92bc0c24ba8e7dd60300"
+  },
+  "baseline_provenance": {
+    "path": "PROVENANCE.json",
+    "sha256": "019dcaff023c996ccbb7545b8b46d313fb4723e26a9430be9df0a291191f80ea",
+    "note": "Retained unchanged. Its derived and causal file hashes identify the historical causal baseline, not the sparse derivative. Upstream source hashes and causal identity remain authoritative."
+  },
+  "production_derivatives": [
+    {
+      "path": "app.go",
+      "upstream_path": "cmd/gaia/app/app.go",
+      "upstream_sha256": "6aad17e700fbc41c2c9467f3c1d06c96eb01fae324825ceb27599cda790a92be",
+      "causal_baseline_sha256": "6e2814797e5d8a77a1eed9f8e60dbc7aeedd2b379e97f50ca6fb7ded1df6d830",
+      "derived_sha256": "63ac9b9318948206027fb7f52e08aa5e62fe7b4f9a8e0afe6cee12520d305b59",
+      "changes": ["first-option permanent CMS decorator", "reject caller CMS replacement", "bind exact mounted account key before load"]
+    },
+    {
+      "path": "observer.go",
+      "causal_baseline_sha256": "3fa70d0fc6503592359682b405017c58b2c0325dd574bbe6c028aff3c748eae4",
+      "derived_sha256": "0db669ddb9db9d97e38fc149e4adfddff725ceeced1fbe027c7806201641d5c4",
+      "changes": ["SetSparseAccounting opt-in with full snapshot default", "exact-view phase/ante/transaction/block/export fences", "independent movement-key union including signed ante fee candidates", "codec account identity and all-denomination validation", "private tracker failure latch", "out-of-store snapshot/decode counters"]
+    }
+  ],
+  "unchanged_causal_files_sha256": {
+    "bank.go": "11b4f5fb0f7b37184a477db77dde9347687beb1b6a7865917445fea2f8e1b06b",
+    "export.go": "2d1de062310923da89f0e3840aff19c3e0acefd3c7c3ec213849c01c9fb437b9",
+    "causes.go": "9c1656aeadcccd16a8ad3004f00737c156096e1490594c5d66485461f9dd225c",
+    "governance.go": "569a00611c9d1ccebaded1e4b8b1a6f4fc8b7ce2ba42927e6d7c55e3922775c7",
+    "principal.go": "bb3435d43fa7d481e0e71ebbd0de8a388f5199184c0bc405d6c06e5873552386"
+  },
+  "tracker_primitives_sha256": {
+    "accounttrack/tracker.go": "6e1cfb906535b63efe1ca09b30907e8ba5311c2e79e9d23bf1d40adb45f6dc22",
+    "accounttrack/stores.go": "79b07571c59dc46a135c9a202be7d0dadd355c0a44123adffc1ba2d2b3906f81"
+  },
+  "integration_tests_sha256": {
+    "sparse_integration_test.go": "5a1f12c6390cb0d40f43e242feec87441e7dbdee3d39f8819b54879cc7b7ec11",
+    "sparse_edge_integration_test.go": "4bd7e1723a8a2a84b7ba66ff2060484eeefc59e8b365dfe080edf703ce7a831a",
+    "sparse_failure_integration_test.go": "bbf13c58ae64380020144dbd27b04a79d8ca1f308a9a7156839adbd302b654af"
+  },
+  "additional_consulted_upstream_sha256": {
+    "baseapp/options.go": "1cbed18c1efdc65b134987eca50b7db69134969a5a4c60661a60241749a76db5",
+    "x/auth/keeper.go": "6c4ca03047085112396e30586decebe97233e42e68de3144b60f7e8488ea6bf7",
+    "store/types/store.go": "1d7b4c6cbc1e97d4ef4f3eeb2caa8042bcfeaba9e74ffc0f40441740954292f2"
+  },
+  "limits": ["synthetic integration verification only", "historical private-stream differential and throughput not measured", "optional CLI sparse-account-checks defaults false and requires coin-records", "no deployment or production action", "serial-use pinned SDK", "unknown disabled pending cache flush fails closed"]
+}

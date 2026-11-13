@@ -7,6 +7,8 @@ import (
 	"io"
 	"sort"
 
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay034/observeapp/accounttrack"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/auth"
 	"github.com/cosmos/cosmos-sdk/x/gov"
@@ -47,7 +49,10 @@ type observer struct {
 	tx, message          int
 	pending              []Record
 	store                sdk.KVStore
-	blockBefore          balances
+	blockFence           *accountingFence
+	sparse               bool
+	sparseDecoded        uint64
+	fullSnapshots        uint64
 	handlers             int
 	handlerFailure       bool
 	deposits             []gov.Deposit
@@ -65,7 +70,23 @@ func (app *GaiaApp) SetRecorder(w io.Writer) {
 	}
 	o.writer = w
 }
-func (app *GaiaApp) RecorderError() error { return app.observer.err }
+
+// SetSparseAccounting selects exact affected-key reconciliation. Full snapshots
+// remain the default oracle. Mode changes are allowed only between observations.
+func (app *GaiaApp) SetSparseAccounting(enabled bool) {
+	o := &app.observer
+	if o.active || len(o.pending) != 0 || o.err != nil {
+		app.fail()
+		return
+	}
+	o.sparse = enabled
+}
+func (app *GaiaApp) RecorderError() error {
+	if app.observer.sparse && app.accountTracker.Error() != nil {
+		app.fail()
+	}
+	return app.observer.err
+}
 func (app *GaiaApp) marker(kind, phase string, code uint32) {
 	o := &app.observer
 	o.pending = append(o.pending, Record{Kind: kind, Validator: o.validator, Delegator: o.delegator, Height: o.height, Tx: o.tx, Message: o.message, Phase: phase, Label: o.label, Code: code})
@@ -79,6 +100,7 @@ func quiet(ctx sdk.Context) sdk.Context {
 	return ctx.WithGasMeter(sdk.NewInfiniteGasMeter()).WithBlockGasMeter(sdk.NewInfiniteGasMeter())
 }
 func (app *GaiaApp) snapshot(ctx sdk.Context) balances {
+	app.observer.fullSnapshots++
 	out := balances{}
 	app.accountKeeper.IterateAccounts(quiet(ctx), func(a auth.Account) bool {
 		for _, c := range a.GetCoins() {
@@ -89,6 +111,91 @@ func (app *GaiaApp) snapshot(ctx sdk.Context) balances {
 		return false
 	})
 	return out
+}
+
+// accountingFence retains the full-snapshot oracle or one exact raw view.
+// Store candidates never create movements. The independently recorded ledger
+// supplies additional keys, including keys with no store mutation at all.
+type accountingFence struct {
+	ctx    sdk.Context
+	before balances
+	raw    *accounttrack.Fence
+}
+
+func (app *GaiaApp) openAccounting(ctx sdk.Context) *accountingFence {
+	f := &accountingFence{ctx: ctx}
+	if !app.observer.sparse {
+		f.before = app.snapshot(ctx)
+		return f
+	}
+	var err error
+	f.raw, err = app.accountTracker.OpenFence(ctx.MultiStore().GetKVStore(app.keyAccount))
+	if err != nil {
+		app.fail()
+	}
+	return f
+}
+func (app *GaiaApp) closeAccounting(f *accountingFence, records []Record) (before, after balances) {
+	if f == nil {
+		app.fail()
+		return balances{}, balances{}
+	}
+	if !app.observer.sparse {
+		return f.before, app.snapshot(f.ctx)
+	}
+	var keys [][]byte
+	for _, r := range records {
+		if r.Kind != "movement" {
+			continue
+		}
+		a, err := sdk.AccAddressFromBech32(r.Address)
+		if err != nil || len(a) != 20 || a.String() != r.Address {
+			app.fail()
+			continue
+		}
+		if _, ok := sdk.NewIntFromString(r.Amount); !ok {
+			app.fail()
+		}
+		keys = append(keys, auth.AddressStoreKey(a))
+	}
+	b, a, err := f.raw.CloseFence(keys)
+	if err != nil {
+		app.fail()
+	}
+	before, after = app.decodeAccounting(b), app.decodeAccounting(a)
+	if app.accountTracker.Error() != nil {
+		app.fail()
+	}
+	return
+}
+func (app *GaiaApp) decodeAccounting(values accounttrack.Values) (out balances) {
+	out = balances{}
+	defer func() {
+		if recover() != nil {
+			app.fail()
+		}
+	}()
+	for key, value := range values {
+		if value == nil {
+			continue
+		}
+		app.observer.sparseDecoded++
+		var a auth.Account
+		if len(key) != 21 || key[0] != 1 || app.cdc.UnmarshalBinaryBare(value, &a) != nil || a == nil {
+			app.fail()
+			continue
+		}
+		if !bytes.Equal([]byte(key)[1:], a.GetAddress()) || !a.GetCoins().IsValid() {
+			app.fail()
+			continue
+		}
+		for _, c := range a.GetCoins() {
+			if !c.Amount.IsZero() {
+				out[balanceKey{a.GetAddress().String(), c.Denom}] = c.Amount
+			}
+		}
+	}
+	return
 }
 func amount(b balances, k balanceKey) sdk.Int {
 	if n, ok := b[k]; ok {
@@ -167,10 +274,11 @@ func (app *GaiaApp) phase(ctx sdk.Context, name string, fn func()) {
 	}
 	previous, previousStore := o.phase, o.store
 	o.phase, o.store = name, ctx.MultiStore().GetKVStore(app.keyAccount)
-	before := app.snapshot(ctx)
+	fence := app.openAccounting(ctx)
 	start := len(o.pending)
 	defer func() {
-		app.reconcile(before, app.snapshot(ctx), o.pending[start:])
+		before, after := app.closeAccounting(fence, o.pending[start:])
+		app.reconcile(before, after, o.pending[start:])
 		app.marker("accounting", name, 0)
 		o.phase, o.store = previous, previousStore
 	}()
@@ -178,7 +286,7 @@ func (app *GaiaApp) phase(ctx sdk.Context, name string, fn func()) {
 }
 func (app *GaiaApp) observedBeginBlocker(ctx sdk.Context, req abci.RequestBeginBlock) (res abci.ResponseBeginBlock) {
 	if app.observer.active {
-		app.observer.blockBefore = app.snapshot(ctx)
+		app.observer.blockFence = app.openAccounting(ctx)
 	}
 	app.phase(ctx, "begin_block", func() { res = app.BeginBlocker(ctx, req) })
 	return
@@ -229,7 +337,7 @@ func (app *GaiaApp) observeAnte(h sdk.AnteHandler) sdk.AnteHandler {
 			return h(ctx, tx, sim)
 		}
 		o.anteCalled = true
-		before := app.snapshot(ctx)
+		fence := app.openAccounting(ctx)
 		start := len(o.pending)
 		returned := false
 		defer func() {
@@ -240,7 +348,24 @@ func (app *GaiaApp) observeAnte(h sdk.AnteHandler) sdk.AnteHandler {
 			if !newCtx.IsZero() {
 				afterCtx = newCtx
 			}
-			after := app.snapshot(afterCtx)
+			inputs := o.pending[start:]
+			if o.sparse {
+				if afterCtx.MultiStore().GetKVStore(app.keyAccount) != ctx.MultiStore().GetKVStore(app.keyAccount) {
+					app.fail()
+				}
+				// Fee expectations must enter the candidate union even if auth never
+				// wrote the payer. They are not movements until the existing abort rule.
+				inputs = append([]Record(nil), inputs...)
+				if std, ok := tx.(auth.StdTx); ok && len(std.GetSigners()) > 0 {
+					for _, c := range std.Fee.Amount {
+						inputs = append(inputs, Record{Kind: "movement", Address: std.GetSigners()[0].String(), Denom: c.Denom, Amount: "0"})
+					}
+				}
+			} else {
+				// Preserve the original full oracle's returned-context snapshot.
+				fence.ctx = afterCtx
+			}
+			before, after := app.closeAccounting(fence, inputs)
 			// auth v0.34.10 writes the payer directly, not through bank. Independently
 			// expect its signed fee only, and reconcile against the complete account set.
 			std, ok := tx.(auth.StdTx)
@@ -297,7 +422,7 @@ func (app *GaiaApp) DeliverTx(tx []byte) abci.ResponseDeliverTx {
 	o.handlers, o.handlerFailure = 0, false
 	o.anteCalled = false
 	ctx := app.NewContext(false, abci.Header{Height: o.height})
-	before := app.snapshot(ctx)
+	fence := app.openAccounting(ctx)
 	start := len(o.pending)
 	res := app.BaseApp.DeliverTx(tx)
 	if !o.anteCalled {
@@ -321,7 +446,8 @@ func (app *GaiaApp) DeliverTx(tx []byte) abci.ResponseDeliverTx {
 		}
 		retained = append(retained, *r)
 	}
-	app.reconcile(before, app.snapshot(ctx), retained)
+	before, after := app.closeAccounting(fence, retained)
+	app.reconcile(before, after, retained)
 	o.message = -1
 	app.marker("accounting", "transaction", res.Code)
 	return res
@@ -339,7 +465,7 @@ func (app *GaiaApp) EndBlock(req abci.RequestEndBlock) abci.ResponseEndBlock {
 // stop, never continue with an incomplete evidence stream.
 func (app *GaiaApp) Commit() abci.ResponseCommit {
 	o := &app.observer
-	if o.err != nil {
+	if app.RecorderError() != nil {
 		return abci.ResponseCommit{}
 	}
 	if o.active {
@@ -349,7 +475,9 @@ func (app *GaiaApp) Commit() abci.ResponseCommit {
 				retained = append(retained, r)
 			}
 		}
-		app.reconcile(o.blockBefore, app.snapshot(app.NewContext(false, abci.Header{Height: o.height})), retained)
+		before, after := app.closeAccounting(o.blockFence, retained)
+		o.blockFence = nil
+		app.reconcile(before, after, retained)
 		if o.err != nil {
 			return abci.ResponseCommit{}
 		}
@@ -417,16 +545,24 @@ func (app *GaiaApp) ExportObserved() (state json.RawMessage, vals []tmtypes.Gene
 	}
 	ctx := app.NewContext(true, abci.Header{Height: app.LastBlockHeight()})
 	o.store = ctx.MultiStore().GetKVStore(app.keyAccount)
-	var before balances
+	var fence *accountingFence
 	if o.active {
-		before = app.snapshot(ctx)
+		fence = app.openAccounting(ctx)
 	}
+	// Close even on export failure or panic, before the view is abandoned.
+	defer func() {
+		if fence != nil {
+			app.closeAccounting(fence, o.pending)
+		}
+	}()
 	state, vals, err = app.ExportAppStateAndValidators(true, nil)
 	if err != nil {
 		app.fail()
 	}
-	if o.active && o.err == nil {
-		app.reconcile(before, app.snapshot(ctx), o.pending)
+	if o.active {
+		before, after := app.closeAccounting(fence, o.pending)
+		fence = nil
+		app.reconcile(before, after, o.pending)
 	}
 	if o.err != nil {
 		return nil, nil, o.err

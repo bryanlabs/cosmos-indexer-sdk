@@ -61,8 +61,12 @@ func exportZero(args []string) (failure error) {
 	home := fs.String("home", "", "offline application checkpoint directory")
 	out := fs.String("out", "", "private zero-height export artifact, must not exist")
 	recordsPath := fs.String("coin-records", "", "private observed export movement evidence, must not exist")
+	sparseChecks := fs.Bool("sparse-account-checks", false, "use exact affected-account checks instead of full snapshots; requires coin-records")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("invalid export flags")
+	}
+	if *sparseChecks && *recordsPath == "" {
+		return fmt.Errorf("sparse-account-checks requires coin-records")
 	}
 	if *home == "" || *out == "" || *recordsPath == "" || *out == *recordsPath {
 		return fmt.Errorf("home, out and distinct coin-records are required")
@@ -92,6 +96,7 @@ func exportZero(args []string) (failure error) {
 		return err
 	}
 	defer artifact.Close()
+	app.SetSparseAccounting(*sparseChecks)
 	app.SetRecorder(records)
 	state, validators, err := app.ExportObserved()
 	if err != nil {

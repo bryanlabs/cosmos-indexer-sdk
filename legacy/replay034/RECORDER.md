@@ -31,6 +31,19 @@ claim that segment complete; retain it and rerun from an independent earlier
 checkpoint into a new working directory and evidence file. No automatic rollback
 or checkpoint deletion is attempted.
 
+## Optional sparse account checks
+
+FULL account snapshots remain the default oracle. Both `run` and `export-zero`
+accept `-sparse-account-checks=true` to enable exact affected-account
+reconciliation. The flag requires `-coin-records` and is selected before the
+recorder is attached. Omitted or explicit `-sparse-account-checks=false` retains
+FULL behavior; without recording, `run` still uses upstream Gaia unchanged.
+Sparse mode preserves all causal, gas, late-error and final-header guards.
+Use independent replay homes and new private evidence files for FULL/SPARSE
+historical comparisons, comparing every record and byte and the export bundle.
+This candidate does not gate the separate signed `9d3cd16` FULL sample.
+See `observeapp/SPARSE-ACCOUNTING.md` and its supplementary provenance manifest.
+
 ## Zero-height chain export
 
 `export-zero -home <offline-checkpoint> -out <new-private-export> -coin-records <new-private-file>`

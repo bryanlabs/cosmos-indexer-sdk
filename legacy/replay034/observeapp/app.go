@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"sort"
+
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay034/observeapp/accounttrack"
 
 	abci "github.com/tendermint/tendermint/abci/types"
 	cmn "github.com/tendermint/tendermint/libs/common"
@@ -13,6 +16,7 @@ import (
 
 	bam "github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/store"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/auth"
 	"github.com/cosmos/cosmos-sdk/x/bank"
@@ -40,8 +44,9 @@ var (
 // Extended ABCI application
 type GaiaApp struct {
 	*bam.BaseApp
-	cdc      *codec.Codec
-	observer observer
+	cdc            *codec.Codec
+	observer       observer
+	accountTracker *accounttrack.Tracker
 
 	invCheckPeriod uint
 
@@ -79,11 +84,25 @@ func NewGaiaApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest b
 
 	cdc := MakeCodec()
 
-	bApp := bam.NewBaseApp(appName, logger, db, auth.DefaultTxDecoder(cdc), baseAppOptions...)
+	tracker := accounttrack.NewTracker()
+	cms := tracker.WrapCommitMultiStore(store.NewCommitMultiStore(db))
+	options := make([]func(*bam.BaseApp), 0, len(baseAppOptions)+2)
+	options = append(options, func(b *bam.BaseApp) { b.SetCMS(cms) })
+	options = append(options, baseAppOptions...)
+	// The pinned SDK has no CMS getter. Compare identity without exposing its
+	// private interface or using unsafe. Caller options may configure, not replace.
+	options = append(options, func(b *bam.BaseApp) {
+		v := reflect.ValueOf(b).Elem().FieldByName("cms")
+		if !v.IsValid() || v.IsNil() || v.Elem().Type() != reflect.TypeOf(cms) || v.Elem().Pointer() != reflect.ValueOf(cms).Pointer() {
+			panic("private replay accounting requires its permanent store decorator")
+		}
+	})
+	bApp := bam.NewBaseApp(appName, logger, db, auth.DefaultTxDecoder(cdc), options...)
 	bApp.SetCommitMultiStoreTracer(traceStore)
 
 	var app = &GaiaApp{
 		BaseApp:          bApp,
+		accountTracker:   tracker,
 		cdc:              cdc,
 		invCheckPeriod:   invCheckPeriod,
 		keyMain:          sdk.NewKVStoreKey(bam.MainStoreKey),
@@ -98,6 +117,10 @@ func NewGaiaApp(logger log.Logger, db dbm.DB, traceStore io.Writer, loadLatest b
 		keyFeeCollection: sdk.NewKVStoreKey(auth.FeeStoreKey),
 		keyParams:        sdk.NewKVStoreKey(params.StoreKey),
 		tkeyParams:       sdk.NewTransientStoreKey(params.TStoreKey),
+	}
+
+	if tracker.Bind(app.keyAccount) != nil {
+		panic("private replay accounting store binding failed")
 	}
 
 	app.paramsKeeper = params.NewKeeper(app.cdc, app.keyParams, app.tkeyParams)
