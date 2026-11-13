@@ -45,6 +45,9 @@ type Server struct {
 
 	flowExpMu sync.Mutex
 	flowExp   map[string]*flowExpected
+
+	statementMaxRows int64
+	statementTimeout time.Duration
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {

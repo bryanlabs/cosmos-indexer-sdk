@@ -110,6 +110,12 @@ func main() {
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
+	// Validator statements: the largest period (in planner-estimated rows) read
+	// on request, and how long one may run before it is stopped. Unset keeps
+	// the defaults in taxapi; a negative row limit turns the size check off.
+	statementRows, _ := strconv.ParseInt(os.Getenv("TAX_STATEMENT_MAX_ROWS"), 10, 64)
+	statementTimeout, _ := time.ParseDuration(os.Getenv("TAX_STATEMENT_TIMEOUT"))
+	srv.SetStatementLimits(statementRows, statementTimeout)
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
 	// Per-year block coverage for /index-coverage and the coverage warning

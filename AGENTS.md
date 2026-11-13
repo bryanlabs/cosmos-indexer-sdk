@@ -72,6 +72,17 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   oracle key); never read `q.Get("chain")` raw. `/events?preview=1` emits the preview
   columns the website parses. A Gaia release that changes event shapes gets a
   review entry in `tax/gaia_versions.go`, not a silent parser change.
+- `taxapi/validatorstatement.go`: `/validator-statement` reads the validator's
+  reward and commission rows once (`readStatementAggregates`, a bitmap scan
+  with read-ahead, one snapshot) for the day sums and the distinct
+  recipients. No index holds the amount or the recipient, so cost grows with
+  the rows read, about 4 seconds per million on production. A period the
+  planner sizes above `TAX_STATEMENT_MAX_ROWS` (default 12 million) is
+  refused with 422 before any row is read; the database work is cancelled at
+  `TAX_STATEMENT_TIMEOUT` (default 90s, under the 120s edge) or when the
+  caller goes away, answering 504. At most three statements are read at a
+  time. `validatorstatement_pg_test.go` keeps the three former queries word
+  for word and pins the single read to them.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message

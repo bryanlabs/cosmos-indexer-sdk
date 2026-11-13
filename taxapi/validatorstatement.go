@@ -1,16 +1,23 @@
 package taxapi
 
 import (
+	"context"
+	"database/sql"
 	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 // ValidatorStatementMonth is one month of a validator operator's statement:
@@ -36,12 +43,185 @@ type ValidatorStatementMonth struct {
 }
 
 type validatorDayAgg struct {
-	Day        time.Time
-	Category   string
-	Denom      string
-	Amount     string
-	Events     int64
-	Recipients int64
+	Day      time.Time
+	Category string
+	Denom    string
+	Amount   string
+	Events   int64
+}
+
+// statementAggregates is everything a statement reads from taxable_events:
+// the per-day sums, the distinct reward recipients per month, and the
+// distinct reward recipients over the whole period.
+type statementAggregates struct {
+	Days              []validatorDayAgg
+	DelegatorsByMonth map[string]int64
+	Delegators        int64
+}
+
+const (
+	// A statement reads every reward and commission row of the validator in
+	// the period from the table heap, because no index holds the amount or
+	// the recipient. That measured about 4 seconds per million rows on
+	// production (4.4 million rows in 17 seconds). Above this many rows (the
+	// planner's estimate) it cannot finish inside the time limit with room
+	// for a busy database, so the request is refused at once instead of
+	// scanning for minutes. TAX_STATEMENT_MAX_ROWS overrides it; a negative
+	// value turns the check off.
+	defaultStatementMaxRows = 12_000_000
+	// The edge gives up at 120 seconds. The database work is cancelled
+	// before that so an abandoned request does not keep scanning.
+	defaultStatementTimeout = 90 * time.Second
+	statementBuildSlots     = 3
+
+	statementPartDay   = 0
+	statementPartMonth = 1
+	statementPartTotal = 2
+)
+
+// statementSlots bounds how many statements read the heap at once. The
+// endpoint is public and one large statement is a multi-gigabyte read.
+var statementSlots = make(chan struct{}, statementBuildSlots)
+
+// statementTooLarge is returned when the planner expects more rows than a
+// statement can summarise on request.
+type statementTooLarge struct {
+	Rows  int64
+	Limit int64
+}
+
+func (e statementTooLarge) Error() string {
+	return fmt.Sprintf("This validator has about %s reward and commission records in the chosen period, more than a statement can summarise on request (limit %s). Choose a shorter period, such as one year or one month.",
+		approxCount(e.Rows), approxCount(e.Limit))
+}
+
+func approxCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return decimal.NewFromInt(n).Div(decimal.NewFromInt(1_000_000)).Round(1).String() + " million"
+	case n >= 1_000:
+		return decimal.NewFromInt(n).Div(decimal.NewFromInt(1_000)).Round(0).String() + " thousand"
+	}
+	return decimal.NewFromInt(n).String()
+}
+
+// SetStatementLimits overrides the statement row limit and time limit. A
+// zero value keeps the default; a negative maxRows turns the row check off.
+func (s *Server) SetStatementLimits(maxRows int64, timeout time.Duration) {
+	s.statementMaxRows, s.statementTimeout = maxRows, timeout
+}
+
+func (s *Server) statementRowLimit() int64 {
+	if s.statementMaxRows != 0 {
+		return s.statementMaxRows
+	}
+	return defaultStatementMaxRows
+}
+
+func (s *Server) statementTimeLimit() time.Duration {
+	if s.statementTimeout > 0 {
+		return s.statementTimeout
+	}
+	return defaultStatementTimeout
+}
+
+const statementScope = "validator_address = @validator AND category IN ('reward','commission') AND timestamp >= @start AND timestamp < @end"
+
+// statementRowEstimate asks the planner how many rows the statement would
+// read. It costs a few milliseconds and no table access; validators large
+// enough to matter are in the column statistics, so the estimate is close.
+// EXPLAIN plans with the bound values, so no cached generic plan is involved.
+func statementRowEstimate(tx *gorm.DB, val string, start, end time.Time) (int64, error) {
+	var plan string
+	if err := tx.Raw("EXPLAIN (FORMAT JSON) SELECT 1 FROM taxable_events WHERE "+statementScope,
+		sql.Named("validator", val), sql.Named("start", start), sql.Named("end", end)).Row().Scan(&plan); err != nil {
+		return 0, err
+	}
+	var parsed []struct {
+		Plan struct {
+			Rows float64 `json:"Plan Rows"`
+		} `json:"Plan"`
+	}
+	if err := json.Unmarshal([]byte(plan), &parsed); err != nil || len(parsed) == 0 {
+		return 0, fmt.Errorf("unreadable statement plan: %w", err)
+	}
+	return int64(parsed[0].Plan.Rows), nil
+}
+
+// The three results a statement needs used to be three queries, each
+// reading the validator's rows from the heap again. They are the same three
+// aggregates here, over one read of those rows and one snapshot. The
+// recipient counts go through one de-duplicated (month, recipient) set
+// instead of two sorts of every row; a NULL recipient is not counted, as
+// COUNT(DISTINCT to_addr) did not count it.
+const statementAggregateSQL = `WITH ev AS MATERIALIZED (
+	SELECT date_trunc('day', timestamp) AS day, category, denom, amount, to_addr
+	FROM taxable_events
+	WHERE ` + statementScope + `
+), pairs AS MATERIALIZED (
+	SELECT date_trunc('month', day) AS month, to_addr
+	FROM ev WHERE category = 'reward' GROUP BY 1, 2
+)
+SELECT 0 AS part, day, '' AS month, category, denom, SUM(amount::numeric)::text AS amount, COUNT(*) AS events, 0::bigint AS delegators
+FROM ev GROUP BY day, category, denom
+UNION ALL
+SELECT 1, NULL, to_char(month, 'YYYY-MM'), '', '', '', 0, COUNT(to_addr)
+FROM pairs GROUP BY month
+UNION ALL
+SELECT 2, NULL, '', '', '', '', 0, COUNT(*)
+FROM (SELECT to_addr FROM pairs WHERE to_addr IS NOT NULL GROUP BY to_addr) d
+ORDER BY 1, 2`
+
+// readStatementAggregates reads the aggregates in one statement. Cancelling
+// ctx cancels the query.
+func (s *Server) readStatementAggregates(ctx context.Context, val string, start, end time.Time) (statementAggregates, error) {
+	agg := statementAggregates{DelegatorsByMonth: map[string]int64{}}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The driver caches prepared statements; a generic plan cannot see
+		// the validator or the period and would plan the read badly.
+		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
+			return err
+		}
+		if err := tx.Exec("SET LOCAL work_mem = '64MB'").Error; err != nil {
+			return err
+		}
+		// The rows are spread over the whole table. A bitmap scan reads them
+		// in page order with read-ahead and parallel workers; a plain index
+		// scan fetches one page at a time and measured four times slower.
+		for _, setting := range []string{"SET LOCAL enable_indexscan = off", "SET LOCAL effective_io_concurrency = 128"} {
+			if err := tx.Exec(setting).Error; err != nil {
+				return err
+			}
+		}
+		var rows []struct {
+			Part       int
+			Day        *time.Time
+			Month      string
+			Category   string
+			Denom      string
+			Amount     string
+			Events     int64
+			Delegators int64
+		}
+		if err := tx.Raw(statementAggregateSQL, sql.Named("validator", val), sql.Named("start", start), sql.Named("end", end)).Scan(&rows).Error; err != nil {
+			return err
+		}
+		for _, r := range rows {
+			switch r.Part {
+			case statementPartDay:
+				if r.Day == nil {
+					return errors.New("statement day row without a day")
+				}
+				agg.Days = append(agg.Days, validatorDayAgg{Day: *r.Day, Category: r.Category, Denom: r.Denom, Amount: r.Amount, Events: r.Events})
+			case statementPartMonth:
+				agg.DelegatorsByMonth[r.Month] = r.Delegators
+			case statementPartTotal:
+				agg.Delegators = r.Delegators
+			}
+		}
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	return agg, err
 }
 
 // statementCoverage tells the reader how much of history the statement can
@@ -119,10 +299,12 @@ func (s *Server) statementNote(c statementCoverage) string {
 
 // GET /validator-statement?validator=cosmosvaloper...&chain=&start=&end=&format=csv|json
 //
-// Aggregated in the database by day, category and denom over the
-// (validator_address, category, timestamp) index, so a large validator's
-// hundreds of thousands of reward withdrawals cost one indexed query plus a
-// per-month distinct count.
+// Aggregated in the database by day, category and denom, with the distinct
+// reward recipients per month and overall, in one statement that reads the
+// validator's rows once (readStatementAggregates). A period too large to
+// read on request is refused with 422 before any row is read, and the
+// database work is cancelled when the time limit passes or the caller goes
+// away (504).
 func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	val := strings.TrimSpace(q.Get(apiValidator))
@@ -137,50 +319,80 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	chain := chainParam(q.Get(apiChain))
 	start := dateParam(q.Get(apiStart), time.Time{})
 	end := dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
+	began := time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), s.statementTimeLimit())
+	defer cancel()
 
-	if err := s.requireClassificationReady(chain, []string{val}, start, end); err != nil {
+	// The gate's queries run on a DB-only facade bound to the request, so
+	// they stop with it too (see withReadSnapshot for the facade).
+	if err := (&Server{db: s.db.WithContext(ctx)}).requireClassificationReady(chain, []string{val}, start, end); err != nil {
+		if ctx.Err() != nil {
+			writeStatementError(ctx, w, val, s.statementTimeLimit(), err)
+			return
+		}
 		writeTaxError(w, err)
 		return
 	}
+	readyTook := time.Since(began)
 	monikers := s.oracle.ValidatorMonikers()
 	moniker, known := monikers[val]
 	if !known {
 		// Not a current validator. It may still be a past one with rows, so the
 		// database has the final say; an address with neither is a 404 rather
 		// than an empty statement that looks like a quiet validator.
-		var n int64
-		_ = s.db.Table(apiTaxableEvents).Where("validator_address = ?", val).Limit(1).Count(&n).Error
-		if n == 0 {
+		var found bool
+		if err := s.db.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM taxable_events WHERE validator_address = ? AND validator_address <> '')", val).Row().Scan(&found); err != nil {
+			writeStatementError(ctx, w, val, s.statementTimeLimit(), err)
+			return
+		}
+		if !found {
 			http.Error(w, "no validator with this operator address on the chain, now or in the indexed history", http.StatusNotFound)
 			return
 		}
 	}
 
-	var aggs []validatorDayAgg
-	if err := s.db.Table(apiTaxableEvents).
-		Select("date_trunc('day', timestamp) AS day, category, denom, SUM(amount::numeric)::text AS amount, COUNT(*) AS events, COUNT(DISTINCT to_addr) AS recipients").
-		Where("validator_address = ? AND category IN ('reward','commission') AND timestamp >= ? AND timestamp < ?", val, start, end).
-		Group("day, category, denom").Order("day").Scan(&aggs).Error; err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Size the read before taking a slot, so a period that is too large is
+	// refused at once even while other statements are being built.
+	estimate, err := statementRowEstimate(s.db.WithContext(ctx), val, start, end)
+	if err == nil {
+		if limit := s.statementRowLimit(); limit > 0 && estimate > limit {
+			err = statementTooLarge{Rows: estimate, Limit: limit}
+		}
+	}
+	if err != nil {
+		writeStatementError(ctx, w, val, s.statementTimeLimit(), err)
 		return
 	}
-	// Unique delegators per month need a second pass (distinct across days).
-	type monthDelegators struct {
-		Month      string
-		Delegators int64
-	}
-	var md []monthDelegators
-	if err := s.db.Table(apiTaxableEvents).
-		Select("to_char(date_trunc('month', timestamp), 'YYYY-MM') AS month, COUNT(DISTINCT to_addr) AS delegators").
-		Where("validator_address = ? AND category = 'reward' AND timestamp >= ? AND timestamp < ?", val, start, end).
-		Group("month").Scan(&md).Error; err != nil {
-		http.Error(w, "could not query monthly validator delegators", http.StatusInternalServerError)
+	select {
+	case statementSlots <- struct{}{}:
+	case <-ctx.Done():
+		writeStatementError(ctx, w, val, s.statementTimeLimit(), ctx.Err())
 		return
 	}
-	delegatorsByMonth := map[string]int64{}
-	for _, m := range md {
-		delegatorsByMonth[m.Month] = m.Delegators
+	queryBegan := time.Now()
+	agg, err := s.readStatementAggregates(ctx, val, start, end)
+	<-statementSlots
+	if err != nil {
+		writeStatementError(ctx, w, val, s.statementTimeLimit(), err)
+		return
 	}
+	queryTook := time.Since(queryBegan)
+	aggs, delegatorsByMonth := agg.Days, agg.DelegatorsByMonth
+
+	// One oracle call per day and denom not yet cached; fetch them together
+	// so a long period on a fresh process does not make them one at a time.
+	priced := make([]tax.TaxableEvent, 0, len(aggs))
+	for _, a := range aggs {
+		priced = append(priced, tax.TaxableEvent{Category: a.Category, Denom: a.Denom, Timestamp: a.Day})
+	}
+	priceBegan := time.Now()
+	s.prewarmPrices(chain, priced, nil)
+	defer func() {
+		//nolint:gosec // val passed the bech32 checksum, so it carries no control characters
+		log.Printf("validator-statement %s %s..%s: about %d rows, %d day groups, readiness %s, query %s, prices %s, total %s",
+			val, start.Format(apiDateLayout), end.Format(apiDateLayout), estimate, len(aggs),
+			readyTook.Round(time.Millisecond), queryTook.Round(time.Millisecond), time.Since(priceBegan).Round(time.Millisecond), time.Since(began).Round(time.Millisecond))
+	}()
 
 	cov := s.statementCoverage()
 	cov.Note = s.statementNote(cov)
@@ -244,11 +456,7 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		out = append(out, *months[k])
 	}
 	totals := statementTotals(out, period, s.native.Symbol)
-	var allDelegators int64
-	_ = s.db.Table(apiTaxableEvents).
-		Where("validator_address = ? AND category = 'reward' AND timestamp >= ? AND timestamp < ?", val, start, end).
-		Distinct("to_addr").Count(&allDelegators).Error
-	totals.UniqueDelegators = allDelegators
+	totals.UniqueDelegators = agg.Delegators
 
 	if q.Get(apiFormat) == apiCSV {
 		w.Header().Set(apiContentType, apiCSVContentType)
@@ -276,6 +484,23 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		"months":              out,
 		apiTotal:              totals,
 	})
+}
+
+// writeStatementError answers a failed statement read: 422 for a period too
+// large to read on request, 504 when the time limit passed or the caller
+// went away, 500 otherwise.
+func writeStatementError(ctx context.Context, w http.ResponseWriter, val string, limit time.Duration, err error) {
+	var tooLarge statementTooLarge
+	switch {
+	case errors.As(err, &tooLarge):
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+	case ctx.Err() != nil:
+		log.Printf("validator-statement %s: stopped after the %s limit: %v", val, limit, err) //nolint:gosec // val passed the bech32 checksum
+		http.Error(w, fmt.Sprintf("The statement did not finish within %d seconds and was stopped. Choose a shorter period, such as one year or one month.", int(limit.Seconds())), http.StatusGatewayTimeout)
+	default:
+		log.Printf("validator-statement %s: %v", val, err) //nolint:gosec // val passed the bech32 checksum
+		http.Error(w, "could not read the validator statement", http.StatusInternalServerError)
+	}
 }
 
 // statementTotals sums the month rows. A month entirely inside an index gap
