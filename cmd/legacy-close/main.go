@@ -7,6 +7,12 @@
 // It reads the legacy schema through a connection confined to it. With
 // --record it replaces the chain's lines in legacy.reconciliation. Output is
 // counts and totals only: no address is printed.
+//
+// --genesis-change names a copy of the public source file with which the
+// next genesis rewrote balances in code (for cosmoshub-3, the Proposal 29
+// fund recovery). Only the file with the recorded sha256 is accepted. The
+// wallets it lists are counted on their own line, never as closing exactly,
+// and with --record the tax rows of the change are stored once.
 package main
 
 import (
@@ -76,13 +82,24 @@ func main() {
 	chain := flag.String("chain", "cosmoshub-3", "legacy chain to close against the genesis file of the chain after it")
 	record := flag.Bool("record", false, "replace the chain's lines in legacy.reconciliation with this result")
 	groups := flag.Int("groups", 40, "largest number of cause groups printed")
+	changeFile := flag.String("genesis-change", "", "copy of the public source file of the balances the next genesis changed in code")
 	flag.Parse()
 	ctx := context.Background()
+	var change *books.GenesisChange
+	if *changeFile != "" {
+		source, err := os.ReadFile(*changeFile)
+		if err != nil {
+			fail("close not run: the genesis change file is not readable")
+		}
+		if change, err = books.LoadProp29(source); err != nil {
+			fail("close not run: " + err.Error())
+		}
+	}
 	db, err := open()
 	if err != nil {
 		fail(err.Error())
 	}
-	result, err := books.Close(ctx, db, *chain)
+	result, err := books.CloseWith(ctx, db, *chain, change)
 	if err != nil {
 		fail("close not run: " + err.Error())
 	}
@@ -95,6 +112,20 @@ func main() {
 	fmt.Printf("module accounts left out %d\n", result.ModuleAccounts)
 	fmt.Printf("addresses compared %d\n", result.Addresses)
 	fmt.Printf("addresses that close exactly %d\n", result.Closed)
+	if change != nil {
+		listed := len(change.Recoveries)
+		fmt.Printf("addresses that close with the %s %d (source wallets %d of %d, recovery wallets %d of %d)\n",
+			change.Name, result.ClosedWithChange, result.ChangeSources, listed, result.ChangeRecoveries, listed)
+		fmt.Printf("%s: uatom out of the source wallets %s, into the recovery wallets %s, left to the community pool %s\n",
+			change.Name, result.ChangeOut, result.ChangeIn, result.ChangePool)
+		fmt.Printf("%s: list read from %s %s %s sha256 %s\n", change.Name, change.Repo, change.Tag, change.Path, change.SHA256)
+		if !result.ChangeWhole {
+			fmt.Printf("%s: not every listed wallet was accepted; the ones that were not are counted with the addresses that do not close or that close exactly\n", change.Name)
+		}
+	}
+	if result.ChangeRows != 0 {
+		fmt.Printf("stored rows of the genesis change %d (they move no balance in this check)\n", result.ChangeRows)
+	}
 	fmt.Printf("addresses that do not close %d\n", result.Open)
 	fmt.Printf("uatom the next genesis holds above the history %s, below it %s\n", result.Short, result.Over)
 	table("addresses that do not close, by size of the difference", result.OpenBySize, 0)
@@ -109,8 +140,23 @@ func main() {
 			fail("not recorded: " + err.Error())
 		}
 		fmt.Printf("recorded %d lines in legacy.reconciliation\n", len(result.Lines))
+		switch {
+		case change == nil:
+		case !result.ChangeWhole:
+			fmt.Println("rows of the genesis change not recorded: the close did not accept every listed wallet")
+		default:
+			added, err := books.RecordChange(ctx, db, result)
+			if err != nil {
+				fail("genesis change not recorded: " + err.Error())
+			}
+			if added == 0 {
+				fmt.Println("rows of the genesis change already stored and equal to this close")
+			} else {
+				fmt.Printf("recorded %d rows of the genesis change in legacy.taxable_events\n", added)
+			}
+		}
 	}
-	if !result.Complete || result.Open != 0 {
+	if !result.Complete || result.Open != 0 || (change != nil && !result.ChangeWhole) {
 		os.Exit(1)
 	}
 }

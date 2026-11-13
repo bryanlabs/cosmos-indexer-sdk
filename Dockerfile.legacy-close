@@ -1,0 +1,26 @@
+# Builds an image whose only new binary is legacy-close. Every other tool is
+# copied, byte for byte, out of the image the full Hub 3 rehearsal pass ran
+# on, so the importer and the provers are the ones that were rehearsed.
+ARG REHEARSED=ghcr.io/bryanlabs/cosmos-tax-sdk:ed76405-legacy@sha256:fc3598203a0561398d5ae4a96af381e9dc6ad016aaa83c235eeebff5b32d6761
+FROM ${REHEARSED} AS rehearsed
+
+FROM golang:1.27.3-bookworm@sha256:dc0963f32053e4bc451d24d87e3892d42d01021b61f093e98eb95c0352bb84b0 AS build
+WORKDIR /src
+ENV GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS="-p=1"
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod go mod download
+COPY . .
+ARG TARGETARCH=amd64
+# The tests run before the build. Those that need a Postgres server skip here.
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
+    CGO_ENABLED=0 go test -p 1 ./legacy/... && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/legacy-close ./cmd/legacy-close
+
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+RUN apk add --no-cache ca-certificates && adduser -D -u 1137 tax
+COPY --from=rehearsed /usr/local/bin/ /usr/local/bin/
+COPY --from=build /out/legacy-close /usr/local/bin/legacy-close
+USER tax
+ENTRYPOINT ["/usr/local/bin/legacy-schema"]
+CMD ["--print"]

@@ -172,6 +172,37 @@ Hub 2 need their restart payout rows first.
 LEGACY_IMPORT_DSN="... user=legacy_importer ..." legacy-close --chain cosmoshub-3 --record
 ```
 
+The Hub 4 genesis file was not a plain copy of the Hub 3 state: the program
+that wrote it carried out governance proposal 29. It emptied seven
+fundraiser wallets, credited seven recovery wallets with a fixed amount each
+and left the rest in the community pool. No Hub 3 transaction exists for
+any of it, so without help those fourteen wallets never close.
+`--genesis-change <file>` names a copy of the public source file that made
+the change (`github.com/cosmos/gaia` `v4.0.0` `app/prop29.go`). Only the
+file with the sha256 recorded in `legacy/books/genesischange.go` is
+accepted, and no wallet or amount of the list is written in this
+repository. The list is closed: a source wallet is accepted only if the
+next genesis holds nothing for it and the history gives more than nothing,
+a recovery wallet only if its difference equals the listed amount exactly.
+Accepted wallets are counted as closing with the Proposal 29 genesis
+change, on their own line and with their own status in
+`legacy.reconciliation`, never as closing exactly. A listed wallet that
+fails its test stays open, and the command exits 1 unless all fourteen are
+accepted.
+
+With `--record` and all fourteen accepted, the change is also stored as
+fourteen rows in `legacy.taxable_events`, once: at the export height, in
+the phase of the state export, dated at the Hub 4 genesis time, category
+`prop29_genesis_recovery`, amount source `genesis`. A source wallet gets one
+row out for its whole balance, a recovery wallet one row in for the listed
+amount. Neither is classified as income or as a sale, both say they need
+review, and each names the other wallet, the part left to the community
+pool and the source file. The rows move no balance in the close itself.
+
+```
+LEGACY_IMPORT_DSN="... user=legacy_importer ..." legacy-close --chain cosmoshub-3 --genesis-change prop29.go --record
+```
+
 ## Account sequence check
 
 `cmd/legacy-seqcheck` counts, per signer, the cached transactions that got

@@ -4,8 +4,9 @@
 // coin movement and every charged fee up to the export height, and compares
 // the result with the spendable balance in the next chain's genesis file.
 //
-// It reads only the legacy schema and prints nothing itself. The only table
-// it can write is legacy.reconciliation.
+// It reads only the legacy schema and prints nothing itself. It writes
+// legacy.reconciliation, and once, when a close accepted a genesis change in
+// full, the rows of that change in legacy.taxable_events.
 package books
 
 import (
@@ -76,13 +77,39 @@ type Result struct {
 	// difference in uatom.
 	OpenBySize map[string]int
 	Lines      []Line
+
+	// Change is the genesis change the close was given, if any. The fields
+	// below are all zero without one.
+	Change *GenesisChange
+	// ClosedWithChange counts the addresses that close only with the genesis
+	// change. They are in neither Closed nor Open, and in neither total.
+	ClosedWithChange int
+	// ChangeSources and ChangeRecoveries count the accepted wallets of each
+	// side. ChangeWhole says every listed wallet was accepted and no source
+	// held less than its recovery was given.
+	ChangeSources, ChangeRecoveries int
+	ChangeWhole                     bool
+	// ChangeOut is what left the accepted source wallets, ChangeIn what the
+	// accepted recovery wallets were given, ChangePool the rest.
+	ChangeOut, ChangeIn, ChangePool *big.Int
+	// ChangeRows counts the stored rows of the genesis change. They move no
+	// balance in this check.
+	ChangeRows          int64
+	changeSourceBalance map[string]*big.Int
 }
 
 // Line is one address of the close.
 type Line struct {
 	Address            string
 	Expected, Computed *big.Int
+	// Status is closed, open, or StatusChange.
+	Status string
 }
+
+const (
+	statusClosed = "closed"
+	statusOpen   = "open"
+)
 
 type account struct {
 	opening, closing *big.Int
@@ -124,8 +151,24 @@ func (b book) move(address string, sign int, amount *big.Int, kind string) {
 // balances; one whose export paid out pending rewards needs those payout
 // rows stored first.
 func Close(ctx context.Context, db *sql.DB, chain string) (*Result, error) {
+	return CloseWith(ctx, db, chain, nil)
+}
+
+// CloseWith is Close with the balances the next genesis file changed in
+// code. A wallet the change lists is accepted only when its difference is
+// exactly what the change says: a source wallet when the next genesis holds
+// nothing and the history gives it a balance, a recovery wallet when the
+// next genesis holds exactly the listed amount more than the history gives.
+// An accepted wallet is counted as closing with the change, never as closing
+// exactly. A listed wallet that fails its test stays one that does not
+// close, and no other wallet is affected.
+func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisChange) (*Result, error) {
+	if change != nil && change.Chain != chain {
+		return nil, fmt.Errorf("the genesis change belongs to another chain")
+	}
 	out := &Result{Chain: chain, Short: new(big.Int), Over: new(big.Int), OpenByCause: map[string]int{},
-		Touched: map[string]int{}, TouchedOpen: map[string]int{}, OpenBySize: map[string]int{}}
+		Touched: map[string]int{}, TouchedOpen: map[string]int{}, OpenBySize: map[string]int{},
+		Change: change, ChangeOut: new(big.Int), ChangeIn: new(big.Int), ChangePool: new(big.Int), changeSourceBalance: map[string]*big.Int{}}
 	var era int
 	var through sql.NullInt64
 	var paid bool
@@ -202,6 +245,12 @@ WHERE chain_id = $1 AND height <= $2`, chain, out.Through)
 		if err := rows.Scan(&category, &amount, &unit, &from, &to, &detail); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		// The rows of the genesis change record what the next genesis did.
+		// They move nothing here, so they can never make a wallet close.
+		if category == Prop29Category {
+			out.ChangeRows++
+			continue
 		}
 		rule, known := liquidRule[category]
 		if !known {
@@ -285,7 +334,8 @@ WHERE chain_id = $1 AND height <= $2 AND fee_charged AND fee <> '' GROUP BY fee,
 			continue
 		}
 		out.Addresses++
-		out.Lines = append(out.Lines, Line{Address: address, Expected: a.closing, Computed: a.balance})
+		out.Lines = append(out.Lines, Line{Address: address, Expected: a.closing, Computed: a.balance, Status: statusOpen})
+		line := &out.Lines[len(out.Lines)-1]
 		kinds := make([]string, 0, len(a.touched)+3)
 		for kind := range a.touched {
 			kinds = append(kinds, kind)
@@ -309,7 +359,25 @@ WHERE chain_id = $1 AND height <= $2 AND fee_charged AND fee <> '' GROUP BY fee,
 		difference := new(big.Int).Sub(a.closing, a.balance)
 		if difference.Sign() == 0 {
 			out.Closed++
+			line.Status = statusClosed
 			continue
+		}
+		if entry, source := change.listed(address); entry != nil {
+			switch {
+			case source && a.closing.Sign() == 0 && a.balance.Sign() > 0:
+				out.ChangeSources++
+				out.ChangeOut.Add(out.ChangeOut, a.balance)
+				out.changeSourceBalance[address] = new(big.Int).Set(a.balance)
+				line.Status = StatusChange
+			case !source && difference.Cmp(entry.Amount) == 0:
+				out.ChangeRecoveries++
+				out.ChangeIn.Add(out.ChangeIn, entry.Amount)
+				line.Status = StatusChange
+			}
+			if line.Status == StatusChange {
+				out.ClosedWithChange++
+				continue
+			}
 		}
 		out.Open++
 		side := "the next genesis holds more"
@@ -324,6 +392,15 @@ WHERE chain_id = $1 AND height <= $2 AND fee_charged AND fee <> '' GROUP BY fee,
 		}
 		out.OpenByCause[side+": "+strings.Join(kinds, ", ")]++
 		out.OpenBySize[size(difference)]++
+	}
+	if change != nil {
+		out.ChangePool.Sub(out.ChangeOut, out.ChangeIn)
+		out.ChangeWhole = out.ChangeSources == len(change.Recoveries) && out.ChangeRecoveries == len(change.Recoveries)
+		for _, entry := range change.Recoveries {
+			if whole := out.changeSourceBalance[entry.Source]; whole != nil && whole.Cmp(entry.Amount) < 0 {
+				out.ChangeWhole = false
+			}
+		}
 	}
 	return out, nil
 }
@@ -371,16 +448,21 @@ func Record(ctx context.Context, db *sql.DB, result *Result) error {
 		if end > len(result.Lines) {
 			end = len(result.Lines)
 		}
-		addresses, expected, computed := make([]string, 0, batch), make([]string, 0, batch), make([]string, 0, batch)
+		addresses, expected, computed, statuses := make([]string, 0, batch), make([]string, 0, batch), make([]string, 0, batch), make([]string, 0, batch)
 		for _, line := range result.Lines[start:end] {
+			equal := line.Expected.Cmp(line.Computed) == 0
+			if (line.Status == statusClosed) != equal || (line.Status != statusClosed && line.Status != statusOpen && line.Status != StatusChange) {
+				return fmt.Errorf("a line of the close carries a status its amounts do not support")
+			}
 			addresses = append(addresses, line.Address)
 			expected = append(expected, line.Expected.String())
 			computed = append(computed, line.Computed.String())
+			statuses = append(statuses, line.Status)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO legacy.reconciliation (chain_id, address, component, expected, computed, difference, status)
-SELECT $1, a, $2, e::numeric, c::numeric, e::numeric - c::numeric, CASE WHEN e = c THEN 'closed' ELSE 'open' END
-FROM unnest(string_to_array($3, ','), string_to_array($4, ','), string_to_array($5, ',')) AS t(a, e, c)`,
-			result.Chain, Component, strings.Join(addresses, ","), strings.Join(expected, ","), strings.Join(computed, ",")); err != nil {
+SELECT $1, a, $2, e::numeric, c::numeric, e::numeric - c::numeric, s
+FROM unnest(string_to_array($3, ','), string_to_array($4, ','), string_to_array($5, ','), string_to_array($6, ',')) AS t(a, e, c, s)`,
+			result.Chain, Component, strings.Join(addresses, ","), strings.Join(expected, ","), strings.Join(computed, ","), strings.Join(statuses, ",")); err != nil {
 			return err
 		}
 	}
