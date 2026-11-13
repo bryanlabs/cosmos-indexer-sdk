@@ -19,6 +19,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,7 @@ type outcome struct {
 	missing  bool
 	err      error
 	txs      int
+	removals int
 }
 
 func open() (*sql.DB, error) {
@@ -103,23 +105,27 @@ func main() {
 	to := flag.Int64("to", 0, "last height of this importer's range")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
 	resolutions := flag.String("resolutions", "", "file written by legacy-seqcheck: chain/height/index and a fee verdict per line")
+	removed := flag.String("removals", "", "file written by legacy-removals: chain/height/index/message and a removal verdict per line")
 	workers := flag.Int("workers", 4, "heights decoded at once")
 	batch := flag.Int64("batch", 500, "heights stored per database transaction")
 	every := flag.Duration("progress", 30*time.Second, "time between progress lines")
 	build := flag.String("build", os.Getenv("LEGACY_BUILD"), "build label recorded with the range")
 	flag.Parse()
-	verdicts := map[string]string{}
-	if *resolutions != "" {
-		text, err := os.ReadFile(*resolutions)
+	verdicts, removals := map[string]string{}, map[string]string{}
+	for path, into := range map[string]map[string]string{*resolutions: verdicts, *removed: removals} {
+		if path == "" {
+			continue
+		}
+		text, err := os.ReadFile(path)
 		if err != nil {
-			fail("resolutions file unavailable")
+			fail("verdict file unavailable")
 		}
 		for _, line := range strings.Split(strings.TrimSpace(string(text)), "\n") {
 			key, verdict, ok := strings.Cut(line, " ")
-			if !ok || !strings.HasPrefix(key, *chain+"/") || verdicts[key] != "" {
-				fail("resolutions file has a line for another chain, a repeated line or no verdict")
+			if !ok || !strings.HasPrefix(key, *chain+"/") || into[key] != "" {
+				fail("a verdict file has a line for another chain, a repeated line or no verdict")
 			}
-			verdicts[key] = verdict
+			into[key] = verdict
 		}
 	}
 	if *from <= 0 || *to < *from || *workers < 1 || *batch < 1 {
@@ -149,7 +155,7 @@ func main() {
 	first := progress.Next
 	heights, held, messages := counter{}, counter{}, counter{}
 	categories := counter{}
-	var readTxs, readHeights, added, storedRows int64
+	var readTxs, readHeights, added, storedRows, attached int64
 	contiguous := true
 	line := func() {
 		seconds := time.Since(started).Seconds()
@@ -170,7 +176,7 @@ func main() {
 			go func() {
 				defer wait.Done()
 				for height := range jobs {
-					outcomes[height-start] = read(*root, *chain, height, *maxBody, verdicts)
+					outcomes[height-start] = read(*root, *chain, height, *maxBody, verdicts, removals)
 				}
 			}()
 		}
@@ -184,6 +190,7 @@ func main() {
 		for i := range outcomes {
 			o := &outcomes[i]
 			readHeights++
+			attached += int64(o.removals)
 			switch {
 			case o.missing:
 				heights["not in the cache"]++
@@ -250,8 +257,21 @@ func main() {
 		}
 	}
 	line()
+	// A removal verdict that named no message of a height read here was not
+	// used. On a read of the whole range that means the file does not belong
+	// to these captures.
+	expected := int64(0)
+	for key := range removals {
+		parts := strings.Split(key, "/")
+		if height, err := strconv.ParseInt(parts[min(1, len(parts)-1)], 10, 64); err != nil || len(parts) != 4 {
+			fail("a removal verdict is not keyed by chain, height, transaction and message")
+		} else if height >= *from && height <= *to {
+			expected++
+		}
+	}
+	unused := first == *from && attached != expected
 	progress.Status = "failed"
-	if progress.Next == *to+1 && progress.Held == 0 {
+	if progress.Next == *to+1 && progress.Held == 0 && !unused {
 		progress.Status = "done"
 	}
 	if err := claim.Record(ctx, progress); err != nil {
@@ -260,6 +280,7 @@ func main() {
 	elapsed := time.Since(started)
 	fmt.Printf("chain %s heights %d to %d, read from %d, in %s: range %s\n", *chain, *from, *to, first, elapsed.Round(time.Second), progress.Status)
 	fmt.Printf("heights newly stored %d, already stored and equal %d\n", added, heights["stored"]-added)
+	fmt.Printf("removal verdicts in the file %d, for this range %d, matched to a message read %d\n", len(removals), expected, attached)
 	heights.print("heights")
 	categories.print("tax rows by phase, category and amount source")
 	messages.print("block events kept")
@@ -269,7 +290,7 @@ func main() {
 	}
 }
 
-func read(root, chain string, height, limit int64, verdicts map[string]string) outcome {
+func read(root, chain string, height, limit int64, verdicts, removals map[string]string) outcome {
 	h, err := capture.LoadHeight(root, chain, height, limit)
 	if errors.Is(err, os.ErrNotExist) {
 		return outcome{missing: true}
@@ -281,6 +302,9 @@ func read(root, chain string, height, limit int64, verdicts map[string]string) o
 	items, err := core.DecodeLegacyBlock(h.Block, h.Results)
 	if err == nil {
 		err = core.ResolveLegacyFees(items, verdicts)
+	}
+	if err == nil {
+		out.removals, err = core.ResolveLegacyRemovals(items, removals)
 	}
 	var block ledger.Block
 	if err == nil {

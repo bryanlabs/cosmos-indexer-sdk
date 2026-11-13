@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	sdkmath "cosmossdk.io/math"
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -16,6 +17,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
 // Hub 3 module accounts. Coins the chain moves between two of them at the
@@ -52,9 +54,10 @@ var (
 // A height is all or nothing. If any transaction in it has a decoder issue,
 // a message without a projection, evidence that does not line up, a fee
 // whose charge is unknown, a row without an amount, reward rows that do not
-// add up to what the distribution account paid, or a block level coin
-// movement that is not recognized, the whole height is refused, so a stored
-// height is never partly classified. Messages of a failed transaction
+// add up to what the distribution account paid, a payout that may be the
+// commission of a validator the message removed and has no removal verdict,
+// or a block level coin movement that is not recognized, the whole height is
+// refused, so a stored height is never partly classified. Messages of a failed transaction
 // changed no state and get no rows. Hub 1 and Hub 2 are refused: their tags
 // need their own classifier.
 func LegacyLedgerBlock(h *capture.Height, items []LegacyInclusion) (ledger.Block, error) {
@@ -112,6 +115,11 @@ func LegacyLedgerBlock(h *capture.Height, items []LegacyInclusion) (ledger.Block
 			if err != nil {
 				return refuse(err.Error())
 			}
+			verdict, checked := item.Removals[j]
+			events, commission, err := legacyRemovalCommission(message.Derived, events, verdict, checked)
+			if err != nil {
+				return refuse(err.Error())
+			}
 			log := &indexertx.LogMessage{MessageIndex: j}
 			for _, e := range events {
 				event := indexertx.LogMessageEvent{Type: e.Type}
@@ -164,11 +172,18 @@ func LegacyLedgerBlock(h *capture.Height, items []LegacyInclusion) (ledger.Block
 			if income.String() != paid.String() {
 				return refuse("reward and commission rows differ from what the distribution account paid")
 			}
+			sub := len(rows)
+			if commission != nil {
+				out.Rows = append(out.Rows, ledger.Row{Phase: ledger.PhaseTx, TxIndex: i, MsgIndex: j, SubIndex: sub,
+					Category: string(tax.CategoryCommission), Amount: commission.coin.Amount.String(), Denom: commission.coin.Denom,
+					To: commission.operator, Validator: commission.validator, Trigger: "commission",
+					Detail: `{"cause":"validator_removed"}`, TxHash: item.Hash, Source: "event"})
+				sub++
+			}
 			// The serving classifier gives a multi send with several payers
 			// rows for what each address received and none for what each
 			// payer paid. Add one row per payer so every address has its side.
 			if multi, ok := message.Derived.(*banktypes.MsgMultiSend); ok && len(multi.Inputs) > 1 {
-				sub := len(rows)
 				for _, input := range multi.Inputs {
 					for _, coin := range input.Coins {
 						if !coin.IsPositive() {
@@ -205,12 +220,136 @@ func LegacyLedgerBlock(h *capture.Height, items []LegacyInclusion) (ledger.Block
 	return out, nil
 }
 
+// LegacyRemoval is the verdict of the chain state on one message that took
+// stake away from a validator: whether the validator's record was there
+// before the block and gone after it, and the commission it had accumulated
+// before the block, in whole coins as the chain paid it.
+type LegacyRemoval struct {
+	Removed    bool
+	Commission sdk.Coins
+}
+
+// LegacyValidatorLeft names the validator a projected message takes stake
+// away from: the validator of an undelegation, the source of a redelegation.
+// It is empty for every other message.
+func LegacyValidatorLeft(derived any) string {
+	switch m := derived.(type) {
+	case *stakingtypes.MsgUndelegate:
+		return m.ValidatorAddress
+	case *stakingtypes.MsgBeginRedelegate:
+		return m.ValidatorSrcAddress
+	}
+	return ""
+}
+
+type legacyCommission struct {
+	coin                sdk.Coin
+	operator, validator string
+}
+
+// legacyRemovalCommission separates the commission of a validator that an
+// undelegation or a redelegation removed from the reward the same message
+// paid. Hub 3 removed a validator that was already unbonded inside the
+// message that took its last stake, and paid its accumulated commission to
+// the operator's account with a transfer no event tells from a reward. Only
+// the chain state proves the removal, so nothing is read as commission
+// without a verdict that says the validator was removed.
+//
+// With such a verdict, the commission is the distribution account's payment
+// of exactly the amount the state held, to the account of the operator of
+// the validator the message left: the last such payment of an undelegation
+// (the reward is paid first), the only one of a redelegation. That payment
+// is taken out of the events the classifier reads and returned. Anything
+// that does not fit is refused: a payment that is not there, one to another
+// address or of another amount, or more payments left than a message
+// without a removal makes. A message that pays more often than its rewards
+// explain and has no verdict is refused too.
+func legacyRemovalCommission(derived any, events []abci.Event, verdict LegacyRemoval, checked bool) ([]abci.Event, *legacyCommission, error) {
+	left, rewards := LegacyValidatorLeft(derived), 1
+	if left == "" {
+		if checked {
+			return nil, nil, fmt.Errorf("removal verdict for a message that leaves no validator")
+		}
+		return events, nil, nil
+	}
+	if _, moved := derived.(*stakingtypes.MsgBeginRedelegate); moved {
+		rewards = 2
+	}
+	type payment struct {
+		event, attribute int
+		recipient        string
+		coins            sdk.Coins
+	}
+	var payments []payment
+	for i, e := range events {
+		if e.Type != "transfer" {
+			continue
+		}
+		recipient, sender, at := "", "", -1
+		for k, a := range e.Attributes {
+			switch a.Key {
+			case "recipient":
+				recipient, sender, at = a.Value, "", k
+			case "sender":
+				sender = a.Value
+			case "amount":
+				if sender != legacyDistributionAccount {
+					continue
+				}
+				coins, err := sdk.ParseCoinsNormalized(a.Value)
+				if err != nil || recipient == "" || at != k-2 {
+					return nil, nil, fmt.Errorf("distribution payout unreadable")
+				}
+				payments = append(payments, payment{event: i, attribute: at, recipient: recipient, coins: coins})
+			}
+		}
+	}
+	if !checked || !verdict.Removed || verdict.Commission.IsZero() {
+		if len(payments) > rewards {
+			return nil, nil, fmt.Errorf("the distribution account paid more often than the rewards of the message and no removal verdict explains it")
+		}
+		return events, nil, nil
+	}
+	address, err := sdk.ValAddressFromBech32(left)
+	if err != nil || len(verdict.Commission) != 1 {
+		return nil, nil, fmt.Errorf("removal verdict not usable for this message")
+	}
+	operator := sdk.AccAddress(address).String()
+	found := -1
+	for k, p := range payments {
+		if p.recipient != operator || p.coins.String() != verdict.Commission.String() {
+			continue
+		}
+		if found >= 0 && rewards > 1 {
+			return nil, nil, fmt.Errorf("two payments of a redelegation fit the commission of the removed validator")
+		}
+		found = k
+	}
+	if found < 0 || (rewards == 1 && found != len(payments)-1) || len(payments)-1 > rewards {
+		return nil, nil, fmt.Errorf("the removal verdict does not match what the distribution account paid")
+	}
+	out := make([]abci.Event, 0, len(events))
+	for i, e := range events {
+		if i != payments[found].event {
+			out = append(out, e)
+			continue
+		}
+		rest := abci.Event{Type: e.Type}
+		rest.Attributes = append(rest.Attributes, e.Attributes[:payments[found].attribute]...)
+		rest.Attributes = append(rest.Attributes, e.Attributes[payments[found].attribute+3:]...)
+		if len(rest.Attributes) > 0 {
+			out = append(out, rest)
+		}
+	}
+	return out, &legacyCommission{coin: verdict.Commission[0], operator: operator, validator: left}, nil
+}
+
 // legacyDistributionPayout sums what the distribution account paid while one
 // message ran and names the address it paid. The events carry the payer on
 // each transfer. One message pays one address: the withdraw address of its
-// delegator or of its validator. A second address means the message also
-// removed a validator and paid out its commission, which the classifier
-// cannot tell from a reward, so it is refused.
+// delegator or of its validator. The commission of a validator the message
+// removed has been taken out before this runs. A second address is a payout
+// nothing explains, so it is refused.
 func legacyDistributionPayout(events []abci.Event) (sdk.Coins, string, error) {
 	paid, payee := sdk.NewCoins(), ""
 	for _, e := range events {
@@ -268,15 +407,24 @@ func legacyBlockPhase(phase int, events []abci.Event) ([]ledger.Event, []ledger.
 		}
 		if phase == ledger.PhaseEnd && events[i].Type == "complete_unbonding" {
 			var amount, delegator, validator string
+			stated := false
 			for _, a := range events[i].Attributes {
 				switch a.Key {
 				case "amount":
-					amount = a.Value
+					amount, stated = a.Value, true
 				case "delegator":
 					delegator = a.Value
 				case "validator":
 					validator = a.Value
 				}
+			}
+			// An unbonding entry whose balance was zero (a very small
+			// undelegation that rounded down to nothing, or one slashed
+			// away) completes with an amount the chain wrote as empty. It
+			// returned nothing, so it has no row. The event is kept.
+			if stated && amount == "" && delegator != "" && validator != "" {
+				keep(i)
+				continue
 			}
 			coins, err := sdk.ParseCoinsNormalized(amount)
 			if err != nil || delegator == "" || validator == "" || len(coins) != 1 || !coins[0].IsPositive() {
@@ -349,6 +497,46 @@ func legacyBlockPhase(phase int, events []abci.Event) ([]ledger.Event, []ledger.
 		i++
 	}
 	return kept, rows, nil
+}
+
+var legacyRemovalVerdict = regexp.MustCompile(`^(not removed|removed with no commission|removed with commission ([1-9][0-9]{0,30}uatom)), (one archive|two archives)$`)
+
+// ResolveLegacyRemovals attaches removal verdicts from the chain state check
+// to the messages they name. A verdict is keyed by inclusion identity and
+// message index; one for another height is ignored. It returns how many
+// verdicts it attached, so a caller can tell every verdict of a height found
+// its message.
+func ResolveLegacyRemovals(items []LegacyInclusion, verdicts map[string]string) (int, error) {
+	attached := 0
+	for i := range items {
+		if items[i].Tx == nil {
+			continue
+		}
+		for j := range items[i].Tx.Messages {
+			text, ok := verdicts[fmt.Sprintf("%s/%d", items[i].Identity, j)]
+			if !ok {
+				continue
+			}
+			parts := legacyRemovalVerdict.FindStringSubmatch(text)
+			if parts == nil {
+				return 0, fmt.Errorf("legacy removal verdict not recognized")
+			}
+			verdict := LegacyRemoval{Removed: parts[1] != "not removed"}
+			if parts[2] != "" {
+				coins, err := sdk.ParseCoinsNormalized(parts[2])
+				if err != nil || len(coins) != 1 {
+					return 0, fmt.Errorf("legacy removal verdict not recognized")
+				}
+				verdict.Commission = coins
+			}
+			if items[i].Removals == nil {
+				items[i].Removals = map[int]LegacyRemoval{}
+			}
+			items[i].Removals[j] = verdict
+			attached++
+		}
+	}
+	return attached, nil
 }
 
 // ResolveLegacyFees applies verdicts from the account sequence check to

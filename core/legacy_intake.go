@@ -24,9 +24,13 @@ type LegacyInclusion struct {
 	Tags              []rpc.LegacyTag
 	// Messages holds the evidence of each message that began executing, in
 	// order. It is shorter than Tx.Messages when execution stopped early.
-	Messages            []evidence.Message
-	Execution           string
-	Fee                 LegacyFeeEvidence
+	Messages  []evidence.Message
+	Execution string
+	Fee       LegacyFeeEvidence
+	// Removals holds, by message index, what the chain state says about a
+	// message that took stake away from a validator. It is empty until
+	// ResolveLegacyRemovals fills it.
+	Removals            map[int]LegacyRemoval
 	ClassificationReady bool
 	Issues              []string
 }

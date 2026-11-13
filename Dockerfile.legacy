@@ -3,6 +3,7 @@
 #   legacy-genesis  - loads a hub's genesis file into the legacy schema
 #   legacy-import   - cache to database importer
 #   legacy-seqcheck - account sequence and signature check
+#   legacy-removals - asks archive nodes whether a message removed its validator
 #   legacy-close    - books close of a chain against the next genesis file
 #   legacy-census   - aggregate counts over cached heights
 #
@@ -19,7 +20,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
     CGO_ENABLED=0 go test -p 1 ./legacy/... && \
     CGO_ENABLED=0 go test -p 1 ./core -run '^TestLegacy' -count=1 && \
-    for tool in legacy-schema legacy-genesis legacy-import legacy-seqcheck legacy-close legacy-census; do \
+    CGO_ENABLED=0 go test -p 1 ./cmd/legacy-removals -count=1 && \
+    for tool in legacy-schema legacy-genesis legacy-import legacy-seqcheck legacy-removals legacy-close legacy-census; do \
       CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/$tool ./cmd/$tool || exit 1; \
     done
 

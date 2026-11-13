@@ -19,6 +19,15 @@
 # of the production verdict file must equal the sha256 of the verdict file
 # the rehearsal produced. If the two differ, the import does not start.
 #
+# The same holds for the removal verdicts. legacy-removals, from the same
+# image, asks both archive nodes about the candidate messages recorded with
+# the rehearsal and writes the file legacy-import reads with --removals. It
+# is the only step that reaches the network; it gets the two archive
+# addresses and no database access. The sha256 of the file it writes in
+# production must equal the sha256 of the rehearsal's removal verdict file,
+# or the import does not start. The import must end with no height held and
+# every removal verdict matched to a message.
+#
 # Rollback, while no era has been published: DROP SCHEMA legacy CASCADE and
 # DROP ROLE legacy_importer, as the database owner. Nothing else changes.
 apiVersion: batch/v1

@@ -10,6 +10,7 @@ import (
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
+	"github.com/DefiantLabs/cosmos-indexer/legacy"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/capture"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/ledger"
 	"github.com/DefiantLabs/cosmos-indexer/rpc"
@@ -248,6 +249,21 @@ func TestLegacyLedgerBlockReadsBlockLevelMovements(t *testing.T) {
 	h.Results.EndBlockEvents = []abci.Event{event("complete_unbonding", "validator", "v", "delegator", someone)}
 	_, err = LegacyLedgerBlock(h, nil)
 	require.ErrorContains(t, err, "unbonding completion without one amount")
+	// An unbonding that returned nothing has an empty amount. It gets no
+	// row, its event is kept, and it does not hold the height.
+	h.Results.EndBlockEvents = []abci.Event{event("complete_unbonding", "amount", "", "validator", "v", "delegator", someone),
+		event("complete_unbonding", "amount", "7uatom", "validator", "v", "delegator", someone)}
+	block, err = LegacyLedgerBlock(h, nil)
+	require.NoError(t, err)
+	require.Equal(t, []ledger.Row{{Phase: ledger.PhaseEnd, SubIndex: 0, Category: "unbonding_complete", Amount: "7", Denom: "uatom", To: someone, Validator: "v", Source: "event"}}, block.Rows)
+	require.Equal(t, "3/0 complete_unbonding", fmt.Sprintf("%d/%d %s", block.Events[2].Phase, block.Events[2].Index, block.Events[2].Type))
+	require.Equal(t, [][2]string{{"amount", ""}, {"validator", "v"}, {"delegator", someone}}, block.Events[2].Attributes)
+	for _, broken := range [][]string{{"amount", "", "validator", "v"}, {"amount", "", "delegator", someone}, {"amount", "0uatom", "validator", "v", "delegator", someone},
+		{"amount", "1uatom,2stake", "validator", "v", "delegator", someone}} {
+		h.Results.EndBlockEvents = []abci.Event{event("complete_unbonding", broken...)}
+		_, err = LegacyLedgerBlock(h, nil)
+		require.ErrorContains(t, err, "unbonding completion without one amount")
+	}
 	h.Results.EndBlockEvents = []abci.Event{event("transfer", "recipient", someone, "amount", "9uatom")}
 	_, err = LegacyLedgerBlock(h, nil)
 	require.ErrorContains(t, err, "without a recipient or its sender")
@@ -375,6 +391,198 @@ func TestLegacyLedgerBlockAccountsForEveryCoinAMessageMoved(t *testing.T) {
 	block, err = LegacyLedgerBlock(build(one, event("message", "action", "multisend")))
 	require.NoError(t, err)
 	require.Equal(t, []string{`transfer 4 from "` + delegator + `" to "` + third + `" `}, categories(block))
+}
+
+type intakeUndelegate struct {
+	Delegator, Validator []byte
+	Amount               intakeCoin
+}
+
+func (intakeUndelegate) marker() {}
+
+type intakeRedelegate struct {
+	Delegator, Source, Destination []byte
+	Amount                         intakeCoin
+}
+
+func (intakeRedelegate) marker() {}
+
+// Hub 3 removed an unbonded validator inside the message that took its last
+// stake and paid its commission to the operator's account, with a transfer
+// that looks like a reward. Only a verdict from the chain state lets that
+// payment be stored as commission. Without one, or when the verdict and the
+// payments disagree, the height is held.
+func TestLegacyLedgerBlockSplitsTheCommissionOfARemovedValidator(t *testing.T) {
+	cdc := amino.NewCodec()
+	cdc.RegisterInterface((*intakeMsg)(nil), nil)
+	cdc.RegisterConcrete(intakeDelegate{}, "cosmos-sdk/MsgDelegate", nil)
+	cdc.RegisterConcrete(intakeUndelegate{}, "cosmos-sdk/MsgUndelegate", nil)
+	cdc.RegisterConcrete(intakeRedelegate{}, "cosmos-sdk/MsgBeginRedelegate", nil)
+	cdc.RegisterConcrete(intakeTx{}, "cosmos-sdk/StdTx", nil)
+	a, b, c := bytes.Repeat([]byte{1}, 20), bytes.Repeat([]byte{2}, 20), bytes.Repeat([]byte{3}, 20)
+	delegator, operator, third := sdk.AccAddress(a).String(), sdk.AccAddress(b).String(), sdk.AccAddress(c).String()
+	validator, destination := sdk.ValAddress(b).String(), sdk.ValAddress(c).String()
+	pool := authtypes.NewModuleAddress("distribution").String()
+	type attribute struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	}
+	type logEvent struct {
+		Type       string      `json:"type"`
+		Attributes []attribute `json:"attributes"`
+	}
+	event := func(kind string, pairs ...string) logEvent {
+		e := logEvent{Type: kind}
+		for i := 0; i < len(pairs); i += 2 {
+			e.Attributes = append(e.Attributes, attribute{pairs[i], pairs[i+1]})
+		}
+		return e
+	}
+	// The chain wrote the events of one message merged by type: every bank
+	// payer in one message event before the handler's own, every payment in
+	// one transfer event.
+	run := func(msg intakeMsg, verdict, action string, staking logEvent, payments ...string) ([]string, error) {
+		raw, err := cdc.MarshalBinaryLengthPrefixed(intakeTx{Msgs: []intakeMsg{msg}, Fee: intakeFee{Amount: []intakeCoin{{"uatom", "7"}}, Gas: 200000}})
+		require.NoError(t, err)
+		input := &coretypes.ResultBlock{Block: &tm.Block{Header: tm.Header{ChainID: "cosmoshub-3", Height: 9, Time: time.Date(2020, 1, 2, 0, 0, 0, 0, time.UTC)}, Data: tm.Data{Txs: tm.Txs{raw}}}}
+		var senders, transfers []string
+		for i := 0; i < len(payments); i += 2 {
+			senders = append(senders, "sender", pool)
+			transfers = append(transfers, "recipient", payments[i], "amount", payments[i+1])
+		}
+		events := []logEvent{event("message", append(senders, "module", "staking", "sender", delegator, "action", action)...)}
+		if len(transfers) > 0 {
+			events = append(events, event("transfer", transfers...))
+		}
+		log, err := json.Marshal([]map[string]any{{"msg_index": 0, "success": true, "log": "", "events": append(events, staking)}})
+		require.NoError(t, err)
+		body, err := json.Marshal(map[string]any{"height": "9", "results": map[string]any{"deliver_tx": []map[string]any{{"code": 0, "log": string(log)}}}})
+		require.NoError(t, err)
+		var results rpc.CustomBlockResults
+		require.NoError(t, tmjson.Unmarshal(body, &results))
+		items, err := DecodeLegacyBlock(input, &results)
+		require.NoError(t, err)
+		if verdict != "" {
+			attached, err := ResolveLegacyRemovals(items, map[string]string{"cosmoshub-3/9/0/0": verdict, "cosmoshub-3/8/0/0": "not removed, two archives"})
+			if err != nil {
+				return nil, err
+			}
+			require.Equal(t, 1, attached)
+		}
+		block, err := LegacyLedgerBlock(&capture.Height{Block: input, Results: &results, Hash: strings.Repeat("AB", 32), Proposer: "AA11"}, items)
+		var out []string
+		for _, row := range block.Rows {
+			out = append(out, fmt.Sprintf("%d %s %s to %q validator %q %s %s", row.SubIndex, row.Category, row.Amount, row.To, row.Validator, row.Trigger, row.Detail))
+		}
+		return out, err
+	}
+	unbond := event("unbond", "validator", validator, "amount", "5", "completion_time", "2020-01-23T00:00:00Z")
+	leave := intakeUndelegate{a, b, intakeCoin{"uatom", "5"}}
+	own := intakeUndelegate{b, b, intakeCoin{"uatom", "5"}}
+	removed := "removed with commission 8uatom, two archives"
+	commission := ` commission 8 to "` + operator + `" validator "` + validator + `" commission {"cause":"validator_removed"}`
+	principal := func(sub int, who string) string {
+		return fmt.Sprintf(`%d undelegate 5 to %q validator %q  {"completion_time":"2020-01-23T00:00:00Z"}`, sub, who, validator)
+	}
+
+	// A delegator takes the last stake: the reward is the delegator's, the
+	// second payment is the operator's commission.
+	rows, err := run(leave, removed, "begin_unbonding", unbond, delegator, "3uatom", operator, "8uatom")
+	require.NoError(t, err)
+	require.Equal(t, []string{`0 reward 3 to "` + delegator + `" validator "` + validator + `" undelegate `, principal(1, delegator), "2" + commission}, rows)
+	// The same on one archive only is stored the same way.
+	_, err = run(leave, "removed with commission 8uatom, one archive", "begin_unbonding", unbond, delegator, "3uatom", operator, "8uatom")
+	require.NoError(t, err)
+
+	// The operator takes its own last stake: both payments go to one address.
+	rows, err = run(own, removed, "begin_unbonding", unbond, operator, "3uatom", operator, "8uatom")
+	require.NoError(t, err)
+	require.Equal(t, []string{`0 reward 3 to "` + operator + `" validator "` + validator + `" undelegate `, principal(1, operator), "2" + commission}, rows)
+	// With no reward due, the only payment is the commission.
+	rows, err = run(own, removed, "begin_unbonding", unbond, operator, "8uatom")
+	require.NoError(t, err)
+	require.Equal(t, []string{principal(0, operator), "1" + commission}, rows)
+	// A removed validator that had no commission pays only the reward.
+	rows, err = run(own, "removed with no commission, two archives", "begin_unbonding", unbond, operator, "3uatom")
+	require.NoError(t, err)
+	require.Equal(t, []string{`0 reward 3 to "` + operator + `" validator "` + validator + `" undelegate `, principal(1, operator)}, rows)
+	rows, err = run(own, "not removed, two archives", "begin_unbonding", unbond, operator, "3uatom")
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	// A redelegation pays the reward of the validator it leaves, the
+	// commission, then the reward of the validator it joins.
+	move := intakeRedelegate{a, b, c, intakeCoin{"uatom", "5"}}
+	moved := event("redelegate", "source_validator", validator, "destination_validator", destination, "amount", "5", "completion_time", "2020-01-23T00:00:00Z")
+	rows, err = run(move, removed, "begin_redelegate", moved, delegator, "3uatom", operator, "8uatom", delegator, "2uatom")
+	require.NoError(t, err)
+	require.Len(t, rows, 4)
+	require.Equal(t, []string{`0 reward 3 to "` + delegator + `" validator "` + validator + `" redelegate `,
+		`1 reward 2 to "` + delegator + `" validator "` + destination + `" redelegate `, "3" + commission}, []string{rows[0], rows[1], rows[3]})
+	require.Contains(t, rows[2], "2 redelegate 5 to ")
+
+	// Held: no verdict, a verdict that says the validator stayed, a second
+	// payee that is not the operator, another amount, a commission that is
+	// not the last payment of an undelegation, a payment too many, two
+	// payments of a redelegation that both fit.
+	unexplained, mismatch := "the distribution account paid more often than the rewards of the message", "the removal verdict does not match what the distribution account paid"
+	for _, refused := range []struct {
+		name, want string
+		rows       []string
+		err        error
+	}{
+		{name: "no verdict", want: unexplained},
+		{name: "no verdict, one address", want: unexplained},
+		{name: "no verdict, redelegation", want: unexplained},
+		{name: "not removed", want: unexplained},
+		{name: "no commission", want: unexplained},
+		{name: "another payee", want: mismatch},
+		{name: "another amount", want: mismatch},
+		{name: "commission not last", want: mismatch},
+		{name: "a payment too many", want: mismatch},
+		{name: "commission missing", want: mismatch},
+		{name: "two fit", want: "two payments of a redelegation fit the commission"},
+	} {
+		switch refused.name {
+		case "no verdict":
+			refused.rows, refused.err = run(leave, "", "begin_unbonding", unbond, delegator, "3uatom", operator, "8uatom")
+		case "no verdict, one address":
+			refused.rows, refused.err = run(own, "", "begin_unbonding", unbond, operator, "3uatom", operator, "8uatom")
+		case "no verdict, redelegation":
+			refused.rows, refused.err = run(move, "", "begin_redelegate", moved, delegator, "3uatom", operator, "8uatom", delegator, "2uatom")
+		case "not removed":
+			refused.rows, refused.err = run(leave, "not removed, two archives", "begin_unbonding", unbond, delegator, "3uatom", operator, "8uatom")
+		case "no commission":
+			refused.rows, refused.err = run(own, "removed with no commission, two archives", "begin_unbonding", unbond, operator, "3uatom", operator, "8uatom")
+		case "another payee":
+			refused.rows, refused.err = run(leave, removed, "begin_unbonding", unbond, delegator, "3uatom", third, "8uatom")
+		case "another amount":
+			refused.rows, refused.err = run(leave, removed, "begin_unbonding", unbond, delegator, "3uatom", operator, "9uatom")
+		case "commission not last":
+			refused.rows, refused.err = run(own, removed, "begin_unbonding", unbond, operator, "8uatom", operator, "3uatom")
+		case "a payment too many":
+			refused.rows, refused.err = run(leave, removed, "begin_unbonding", unbond, delegator, "3uatom", delegator, "1uatom", operator, "8uatom")
+		case "commission missing":
+			refused.rows, refused.err = run(leave, removed, "begin_unbonding", unbond, delegator, "3uatom")
+		case "two fit":
+			refused.rows, refused.err = run(intakeRedelegate{b, b, c, intakeCoin{"uatom", "5"}}, removed, "begin_redelegate", moved, operator, "8uatom", operator, "8uatom")
+		}
+		require.ErrorContains(t, refused.err, "held: "+refused.want, refused.name)
+		require.Empty(t, refused.rows, refused.name)
+	}
+	// A message that pays two addresses and leaves no validator is held as
+	// before, and a verdict cannot be attached to it.
+	stake := intakeDelegate{a, b, intakeCoin{"uatom", "5"}}
+	staked := event("delegate", "validator", validator, "amount", "5")
+	_, err = run(stake, "", "delegate", staked, delegator, "3uatom", operator, "8uatom")
+	require.ErrorContains(t, err, "the distribution account paid two addresses in one message")
+	_, err = run(stake, removed, "delegate", staked, delegator, "3uatom", operator, "8uatom")
+	require.ErrorContains(t, err, "removal verdict for a message that leaves no validator")
+	for _, text := range []string{"removed", "removed with commission 8uatom", "removed with commission 0uatom, two archives", "removed with commission 8stake, two archives",
+		"removed with commission 8uatom,1uatom, two archives", "not removed, three archives", ""} {
+		_, err := ResolveLegacyRemovals([]LegacyInclusion{{Identity: "cosmoshub-3/9/0", Tx: &legacy.Tx{Messages: make([]legacy.Message, 1)}}}, map[string]string{"cosmoshub-3/9/0/0": text})
+		require.ErrorContains(t, err, "legacy removal verdict not recognized", text)
+	}
 }
 
 func TestLegacyAllServingEntryPointsBlocked(t *testing.T) {
