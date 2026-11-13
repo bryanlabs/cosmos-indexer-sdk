@@ -26,9 +26,10 @@ import (
 
 // Phases order the rows of one height.
 const (
-	PhaseBegin = 1
-	PhaseTx    = 2
-	PhaseEnd   = 3
+	PhaseBegin  = 1
+	PhaseTx     = 2
+	PhaseEnd    = 3
+	PhaseExport = 4
 )
 
 // Block is one height with everything the ledger keeps for it.
@@ -85,10 +86,10 @@ var ErrStoredDiffers = errors.New("a stored legacy height differs from this impo
 var (
 	upperHash   = regexp.MustCompile(`^[0-9A-F]{64}$`)
 	wholeNumber = regexp.MustCompile(`^[0-9]{1,78}$`)
-	// importerSources are the amount sources this writer stores and compares.
-	// Rows worked out later from state or from a window carry other sources
-	// and are left alone.
-	importerSources = map[string]bool{"message": true, "event": true, "tag": true}
+	// importerSources are the sources this writer can own. State and export
+	// sources are admitted and compared only for Hub2 replay. Later Hub3 state
+	// rows and window allocations remain outside this writer's ownership.
+	importerSources = map[string]bool{"message": true, "event": true, "tag": true, "state": true, "export_payout": true}
 )
 
 // Text makes a byte string safe for a text column: invalid UTF-8 becomes the
@@ -142,12 +143,24 @@ func (b *Block) prepare() error {
 			if row.TxIndex < 0 || row.TxIndex >= len(b.Inclusions) || row.MsgIndex < 0 || row.SubIndex < 0 {
 				return fmt.Errorf("legacy tax row names a transaction the block does not hold")
 			}
-		case row.Phase == PhaseBegin || row.Phase == PhaseEnd:
+		case row.Phase == PhaseBegin || row.Phase == PhaseEnd || row.Phase == PhaseExport:
 			if row.TxIndex != 0 || row.MsgIndex != 0 || row.SubIndex < 0 {
 				return fmt.Errorf("legacy block tax row carries a transaction position")
 			}
 		default:
 			return fmt.Errorf("legacy tax row phase is not one the importer writes")
+		}
+		if (row.Source == "state" || row.Source == "export_payout" || row.Phase == PhaseExport) && b.Chain != "cosmoshub-2" {
+			return fmt.Errorf("replay sources and export phase require Hub2")
+		}
+		if (row.Phase == PhaseExport) != (row.Source == "export_payout") {
+			return fmt.Errorf("export payout source requires export phase exclusively")
+		}
+		if row.Source == "state" && row.Phase != PhaseTx && row.Phase != PhaseEnd {
+			return fmt.Errorf("replay state source requires transaction or end phase")
+		}
+		if row.Source == "export_payout" && (row.Category != "reward" && row.Category != "commission" || row.Validator == "" || row.To == "" || row.Trigger != "zero_height_export") {
+			return fmt.Errorf("export payout requires actual reward or commission identity")
 		}
 		if row.Category == "" || row.Denom == "" || !wholeNumber.MatchString(row.Amount) || !importerSources[row.Source] {
 			return fmt.Errorf("legacy tax row without a category, denom, whole amount or importer source")
@@ -267,7 +280,7 @@ WHERE chain_id = $1 AND height = ANY($2::bigint[]) ORDER BY height, tx_index`, c
 	}
 	rows, err = db.QueryContext(ctx, `SELECT height, phase, tx_index, msg_index, sub_index, category, amount, denom, asset, from_addr, to_addr,
 validator_address, reward_trigger, detail, tx_hash, amount_source FROM legacy.taxable_events
-WHERE chain_id = $1 AND height = ANY($2::bigint[]) AND amount_source IN ('message', 'event', 'tag')
+WHERE chain_id = $1 AND height = ANY($2::bigint[]) AND (amount_source IN ('message', 'event', 'tag') OR (chain_id = 'cosmoshub-2' AND amount_source IN ('state', 'export_payout')))
 ORDER BY height, phase, tx_index, msg_index, sub_index`, chain, heights)
 	if err != nil {
 		return nil, err
@@ -330,11 +343,17 @@ func closeRows(rows *sql.Rows) error {
 	return err
 }
 
+// TransactionBeginner accepts either a pool or a dedicated session. Callers
+// relying on session-scoped admission must supply their pinned *sql.Conn.
+type TransactionBeginner interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
 // Write stores a run of heights of one chain in a single database
 // transaction and returns how many of them were new. A height that is
 // already stored is compared instead; ErrStoredDiffers names the first one
 // that disagrees and nothing in the run is stored.
-func Write(ctx context.Context, db *sql.DB, blocks []Block) (int, error) {
+func Write(ctx context.Context, db TransactionBeginner, blocks []Block) (int, error) {
 	if len(blocks) == 0 {
 		return 0, nil
 	}

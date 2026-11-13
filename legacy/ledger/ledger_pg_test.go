@@ -42,7 +42,7 @@ func importer(t *testing.T, db pgtest.Database) *sql.DB {
 }
 
 func TestWriteStoresHeightsAsTheImporterAndNeverRewritesThem(t *testing.T) {
-	db := pgtest.Open(t)
+	db := pgtest.OpenRetained(t)
 	ctx := context.Background()
 	conn := importer(t, db)
 	before := pgtest.Snapshot(t, db.Owner, "public")
@@ -119,7 +119,7 @@ VALUES ('cosmoshub-3', 9, 3, 0, 0, 1, 'unbonding_complete', '5', 'uatom', now(),
 }
 
 func TestWriteRefusesWhatTheLedgerDoesNotHold(t *testing.T) {
-	db := pgtest.Open(t)
+	db := pgtest.OpenRetained(t)
 	ctx := context.Background()
 	conn := importer(t, db)
 	bad := map[string]func(*ledger.Block){
@@ -159,7 +159,7 @@ func TestWriteRefusesWhatTheLedgerDoesNotHold(t *testing.T) {
 }
 
 func TestARangeBelongsToOneImporterAndResumesWhereItStopped(t *testing.T) {
-	db := pgtest.Open(t)
+	db := pgtest.OpenRetained(t)
 	ctx := context.Background()
 	conn := importer(t, db)
 	r := ledger.Range{Chain: "cosmoshub-3", From: 1, To: 100}
@@ -226,7 +226,7 @@ func TestARangeBelongsToOneImporterAndResumesWhereItStopped(t *testing.T) {
 }
 
 func TestAReleasedRangeIsFreeForAnotherSession(t *testing.T) {
-	db := pgtest.Open(t)
+	db := pgtest.OpenRetained(t)
 	ctx := context.Background()
 	pool := importer(t, db)
 	r := ledger.Range{Chain: "cosmoshub-3", From: 1, To: 100}
@@ -254,7 +254,7 @@ func TestAReleasedRangeIsFreeForAnotherSession(t *testing.T) {
 func TestOverlappingRangesClaimedAtOnceGiveOneImporter(t *testing.T) {
 	for _, isolation := range []string{"read committed", "repeatable read"} {
 		t.Run(isolation, func(t *testing.T) {
-			db := pgtest.Open(t)
+			db := pgtest.OpenRetained(t)
 			pool := importer(t, db)
 			// New sessions of the importer start with this default.
 			require.NoError(t, db.Owner.Exec("ALTER ROLE "+db.Role+" SET default_transaction_isolation TO '"+isolation+"'").Error)
@@ -312,7 +312,7 @@ func moved(chain string, height int64, rows ...ledger.Row) ledger.Block {
 }
 
 func TestLastLeavesListsEveryMessageThatCouldHaveRemovedAValidator(t *testing.T) {
-	db := pgtest.Open(t)
+	db := pgtest.OpenRetained(t)
 	ctx := context.Background()
 	conn := importer(t, db)
 	leave := func(tx, msg int, validator string) ledger.Row {

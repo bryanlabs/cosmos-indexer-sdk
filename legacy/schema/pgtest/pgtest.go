@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,8 @@ import (
 	indexerdb "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/db/models"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/schema"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -35,19 +39,34 @@ type Database struct {
 // creates its own database and role and drops both afterwards. Port 15432
 // is refused because it is the customary forward to the serving database.
 func Open(t *testing.T) Database {
+	return open(t, false)
+}
+
+// OpenRetained uses the same private confined-role fixture but never drops a
+// database or role. Callers under a no-deletes instruction use this variant.
+func OpenRetained(t *testing.T) Database {
+	return open(t, true)
+}
+
+func open(t *testing.T, retained bool) Database {
 	t.Helper()
 	admin := os.Getenv("LEGACY_STORE_TEST_ADMIN_DSN")
 	if admin == "" {
 		t.Skip("private Postgres not supplied")
 	}
-	fields := map[string]string{}
-	for _, part := range strings.Fields(admin) {
-		k, v, _ := strings.Cut(part, "=")
-		fields[k] = v
+	config, parseErr := pgx.ParseConfig(admin)
+	require.NoError(t, parseErr)
+	safe := func(host string, port uint16) bool {
+		ip := net.ParseIP(host)
+		return ip != nil && ip.IsLoopback() && port != 15432 && port != 0
 	}
-	ip := net.ParseIP(fields["host"])
-	if ip == nil || !ip.IsLoopback() || fields["port"] == "15432" || fields["port"] == "" || fields["dbname"] == "" {
+	if !safe(config.Host, config.Port) || config.Database == "" {
 		t.Fatal("refusing a DSN that is not an explicit loopback throwaway server")
+	}
+	for _, fallback := range config.Fallbacks {
+		if !safe(fallback.Host, fallback.Port) {
+			t.Fatal("refusing a non-private fixture fallback")
+		}
 	}
 	quiet := &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)}
 	root, err := gorm.Open(postgres.Open(admin), quiet)
@@ -55,13 +74,26 @@ func Open(t *testing.T) Database {
 	suffix := make([]byte, 6)
 	_, _ = rand.Read(suffix)
 	name := "legacy_schema_test_" + hex.EncodeToString(suffix)
+	if retained {
+		name = "legacy_replay_rehearsal_" + hex.EncodeToString(suffix)
+	}
 	role := "legacy_importer_" + hex.EncodeToString(suffix)
 	require.NoError(t, root.Exec("CREATE DATABASE "+name).Error)
-	dsn := func(user, password string) string {
-		return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", fields["host"], fields["port"], user, password, name)
+	connect := func(user, password string) (*gorm.DB, error) {
+		c := config.Copy()
+		c.Database = name
+		c.User = user
+		c.Password = password
+		// The typed config drives connections; the canonical URL is retained
+		// for command-path tests that intentionally reconnect via the CLI.
+		u := url.URL{Scheme: "postgres", Host: net.JoinHostPort(c.Host, strconv.Itoa(int(c.Port))), User: url.UserPassword(c.User, c.Password), Path: "/" + c.Database, RawQuery: "sslmode=disable"}
+		return gorm.Open(postgres.New(postgres.Config{Conn: stdlib.OpenDB(*c), DSN: u.String()}), quiet)
 	}
-	owner, err := gorm.Open(postgres.Open(dsn(fields["user"], fields["password"])), quiet)
+	owner, err := connect(config.User, config.Password)
 	require.NoError(t, err)
+	var destination string
+	require.NoError(t, owner.Raw("SELECT current_database()").Scan(&destination).Error)
+	require.Equal(t, name, destination, "fixture connection must match its newly created database before migration")
 	var importer *gorm.DB
 	t.Cleanup(func() {
 		for _, db := range []*gorm.DB{importer, owner} {
@@ -71,8 +103,10 @@ func Open(t *testing.T) Database {
 				}
 			}
 		}
-		_ = root.Exec("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)").Error
-		_ = root.Exec("DROP ROLE IF EXISTS " + role).Error
+		if !retained {
+			_ = root.Exec("DROP DATABASE IF EXISTS " + name + " WITH (FORCE)").Error
+			_ = root.Exec("DROP ROLE IF EXISTS " + role).Error
+		}
 		if sql, err := root.DB(); err == nil {
 			_ = sql.Close()
 		}
@@ -90,7 +124,7 @@ func Open(t *testing.T) Database {
 
 	require.NoError(t, schema.Migrate(owner, role))
 	require.NoError(t, owner.Exec("ALTER ROLE "+role+" PASSWORD 'importer-test'").Error)
-	importer, err = gorm.Open(postgres.Open(dsn(role, "importer-test")), quiet)
+	importer, err = connect(role, "importer-test")
 	require.NoError(t, err)
 	return Database{Owner: owner, Importer: importer, Role: role}
 }
