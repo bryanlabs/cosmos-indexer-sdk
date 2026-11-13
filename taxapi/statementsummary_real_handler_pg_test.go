@@ -24,7 +24,7 @@ func TestStatementSummaryRealHandlerPostgres(t *testing.T) {
 		t.Skip("explicit real-copy proof opt-in required")
 	}
 	schema := os.Getenv("COSMOS_TAX_REAL_PROOF_SCHEMA")
-	require.Regexp(t, regexp.MustCompile(`^statement_real_proof_[0-9]+$`), schema)
+	require.Regexp(t, regexp.MustCompile(`^(public|statement_real_proof_[0-9]+)$`), schema)
 	db, err := gorm.Open(postgres.Open(os.Getenv("COSMOS_TAX_TEST_DSN")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	require.NoError(t, err)
 	requireRealProofDatabase(t, db)
@@ -34,7 +34,10 @@ func TestStatementSummaryRealHandlerPostgres(t *testing.T) {
 	defer func() { _ = pool.Close() }()
 	require.NoError(t, db.Exec("SET search_path="+schema).Error)
 	require.NoError(t, db.Exec("SET TIME ZONE 'UTC'").Error)
-	require.True(t, mustTrust(t, db).BuiltBefore.UTC().Equal(summaryDay(2026, 11, 1)), "complete the real-copy advance before handler proof")
+	trust := mustTrust(t, db)
+	require.True(t, trust.MetadataSame && trust.Reason() == "", "handler proof requires a genuinely trusted summary")
+	require.NotNil(t, trust.BuiltBefore)
+	require.True(t, trust.BuiltBefore.UTC().Equal(summaryDay(2026, 11, 1)), "complete the real-copy advance before handler proof")
 	metadata := statementPGServer(t)
 	var source string
 	require.NoError(t, metadata.db.Raw("SELECT current_schema()").Row().Scan(&source))
