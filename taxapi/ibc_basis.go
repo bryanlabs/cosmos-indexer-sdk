@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -191,28 +192,42 @@ func (s *Server) retainLegacyOutboundIdentities(events []tax.TaxableEvent) error
 		}
 	}
 	var ids []uint
+	seen := map[uint]bool{}
 	for _, e := range events {
-		if e.Category == string(tax.CategoryIBCOut) && tax.IBCPacketKey(e.Detail) == "" && owners[e.FromAddr] {
+		if e.Category == string(tax.CategoryIBCOut) && tax.IBCPacketKey(e.Detail) == "" && owners[e.FromAddr] && !seen[e.MessageID] {
 			ids = append(ids, e.MessageID)
+			seen[e.MessageID] = true
 		}
 	}
 	if len(ids) == 0 {
 		return nil
 	}
-	var attrs []struct {
+	type packetAttribute struct {
 		MessageID uint
 		EventID   uint
 		Key       string
 		Value     string
 	}
-	if err := s.db.Table("message_events me").
-		Select("me.message_id, me.id AS event_id, k.key, a.value").
-		Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
-		Joins("JOIN message_event_attributes a ON a.message_event_id=me.id").
-		Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
-		Where("me.message_id IN ? AND et.type = ?", ids, "send_packet").
-		Order("me.id, a.index").Scan(&attrs).Error; err != nil {
-		return err
+	var attrs []packetAttribute
+	const packetIdentityBatch = 32
+	for start := 0; start < len(ids); start += packetIdentityBatch {
+		end := start + packetIdentityBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var batch []packetAttribute
+		if err := s.db.Table("message_events me").
+			Select("me.message_id, me.id AS event_id, k.key, a.value").
+			Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
+			// Preserve per-event indexed reads instead of exposing all wallet
+			// packet IDs to a single global attribute-table join.
+			Joins("JOIN LATERAL (SELECT message_event_attribute_key_id, value, index FROM message_event_attributes WHERE message_event_id=me.id OFFSET 0) a ON true").
+			Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
+			Where("me.message_id IN ? AND et.type = ?", ids[start:end], "send_packet").
+			Order("me.id, a.index").Scan(&batch).Error; err != nil {
+			return fmt.Errorf("outbound packet identities batch %d/%d: %w", start/packetIdentityBatch+1, (len(ids)+packetIdentityBatch-1)/packetIdentityBatch, err)
+		}
+		attrs = append(attrs, batch...)
 	}
 	logs := map[uint]*txlog.LogMessage{}
 	var last uint

@@ -36,7 +36,7 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
 			return err
 		}
-		return fn(&Server{db: tx})
+		return fn(&Server{db: tx, readOnlyLedger: s.readOnlyLedger})
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 }
 
