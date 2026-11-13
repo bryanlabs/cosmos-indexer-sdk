@@ -34,6 +34,8 @@ func TestStatementSummaryFinalBuildRealCopyPostgres(t *testing.T) {
 	require.Equal(t, "public", os.Getenv("COSMOS_TAX_REAL_PROOF_SCHEMA"))
 	archive := os.Getenv("COSMOS_TAX_REAL_REFERENCE_SCHEMA")
 	require.Regexp(t, regexp.MustCompile(`^statement_final_reference_[0-9]+$`), archive)
+	clone := os.Getenv("COSMOS_TAX_REAL_IMMUTABLE_CLONE_SCHEMA")
+	require.Regexp(t, regexp.MustCompile(`^statement_real_proof_[0-9]+$`), clone)
 	binary := os.Getenv("COSMOS_TAX_FINAL_BINARY")
 	require.Regexp(t, regexp.MustCompile(`^/Users/danb/\.cache/stmt2-artifact-[0-9a-f]{40}/taxstatement$`), binary)
 	logDir := filepath.Join(filepath.Dir(binary), "proof-logs")
@@ -77,7 +79,7 @@ func TestStatementSummaryFinalBuildRealCopyPostgres(t *testing.T) {
 	runArtifact("-status", "-require-trusted")
 	assertImmutable := func() {
 		var unchanged bool
-		require.NoError(t, db.Raw("SELECT count(*)=33995171 AND min(age(e.xmin))=max(age(e.xmin)) AND min(age(e.xmin))>(SELECT age(s.xmin) FROM "+archive+".statement_state s) FROM ONLY taxable_events e").Row().Scan(&unchanged))
+		require.NoError(t, db.Raw("WITH p AS MATERIALIZED (SELECT count(*) n,min(age(xmin)) a FROM ONLY public.taxable_events),c AS MATERIALIZED (SELECT count(*) n,min(age(xmin)) a,max(age(xmin)) b FROM ONLY "+clone+".taxable_events),r AS (SELECT age(xmin) a FROM "+archive+".statement_state) SELECT p.n=33995171 AND c.n=33995171 AND c.a=c.b AND p.a>c.a AND c.a>r.a FROM p,c,r").Row().Scan(&unchanged))
 		require.True(t, unchanged, "immutable source/reference binding changed; values withheld")
 	}
 	assertImmutable()
