@@ -91,6 +91,11 @@ func LegacyReplayBlock(h *capture.Height, items []LegacyInclusion, records repla
 		if r.Height != b.Height {
 			return ledger.Block{}, replayHeld
 		}
+		if r.Kind == "movement" && !(r.Phase == "ante" && r.Label == "ante_fee" && r.Amount == "0") {
+			if _, err := replayAmount(r); err != nil {
+				return ledger.Block{}, err
+			}
+		}
 		if r.Tx >= 0 {
 			if r.Tx >= len(items) {
 				return ledger.Block{}, replayHeld
@@ -193,6 +198,17 @@ func LegacyReplayBlock(h *capture.Height, items []LegacyInclusion, records repla
 		ante, transaction := 0, 0
 		anteCommitted := false
 		actualFee := replayDeltas{}
+		// Zero deltas disappear in reconciliation, so authenticate their signed
+		// denomination and multiplicity separately, including aborted ante evidence.
+		expectedZeroFees := map[string]int{}
+		for _, coin := range tx.Fee {
+			if coin.Amount.IsZero() {
+				expectedZeroFees[coin.Denom]++
+			}
+		}
+		zeroFees := map[string]int{}
+		var zeroFeeStatuses []string
+		anteNotInvoked := false
 		messages := make([][]replayrecords.Record, len(tx.Messages))
 		markers := make([]int, len(messages))
 		nextMessage := 0
@@ -214,6 +230,10 @@ func LegacyReplayBlock(h *capture.Height, items []LegacyInclusion, records repla
 				if r.Kind == "accounting" {
 					ante++
 					anteCommitted = r.Status == "committed"
+					anteNotInvoked = r.Label == "ante_not_invoked"
+					if anteNotInvoked && r.Status != "aborted" {
+						return ledger.Block{}, replayHeld
+					}
 					if (anteCommitted && r.Code != 0) || (!anteCommitted && r.Status != "aborted") {
 						return ledger.Block{}, replayHeld
 					}
@@ -222,7 +242,12 @@ func LegacyReplayBlock(h *capture.Height, items []LegacyInclusion, records repla
 						return ledger.Block{}, replayHeld
 					}
 					n, e := replayAmount(r)
-					if e != nil || !n.IsNegative() {
+					if r.Amount == "0" {
+						n, e = sdk.ZeroInt(), nil
+						zeroFees[r.Denom]++
+						zeroFeeStatuses = append(zeroFeeStatuses, r.Status)
+					}
+					if e != nil || n.IsPositive() || r.Code != 0 {
 						return ledger.Block{}, replayHeld
 					}
 					if r.Status == "committed" {
@@ -255,6 +280,28 @@ func LegacyReplayBlock(h *capture.Height, items []LegacyInclusion, records repla
 		}
 		if ante != 1 || transaction != 1 || (item.Result.Code == 0 && (!anteCommitted || nextMessage != len(messages))) {
 			return ledger.Block{}, replayHeld
+		}
+		if anteNotInvoked {
+			// A failure before ante runs cannot produce any fee evidence.
+			for _, r := range txRecords[i] {
+				if r.Phase == "ante" && r.Kind == "movement" {
+					return ledger.Block{}, replayHeld
+				}
+			}
+		} else {
+			if len(zeroFees) != len(expectedZeroFees) {
+				return ledger.Block{}, replayHeld
+			}
+			for denom, count := range expectedZeroFees {
+				if zeroFees[denom] != count {
+					return ledger.Block{}, replayHeld
+				}
+			}
+		}
+		for _, status := range zeroFeeStatuses {
+			if (status == "committed") != anteCommitted {
+				return ledger.Block{}, replayHeld
+			}
 		}
 		expected := replayDeltas{}
 		if anteCommitted {

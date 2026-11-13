@@ -128,7 +128,8 @@ func scan(r io.Reader, p Proof, visit func(Height) error) error {
 		switch x.Kind {
 		case "movement", "principal":
 			amount, ok := new(big.Int).SetString(x.Amount, 10)
-			if !ok || (amount.Sign() == 0 && x.Kind != "principal") || amount.String() != x.Amount || x.Address == "" || x.Denom == "" || x.Code != 0 {
+			zeroAnteFee := !p.Export && x.Kind == "movement" && x.Phase == "ante" && x.Label == "ante_fee" && x.Amount == "0"
+			if !ok || (amount.Sign() == 0 && x.Kind != "principal" && !zeroAnteFee) || amount.String() != x.Amount || x.Address == "" || (x.Denom == "" && !zeroAnteFee) || x.Code != 0 {
 				return invalid
 			}
 			if x.Kind == "principal" && (p.Export || x.Phase != "message" || amount.Sign() < 0 || x.Validator == "" || x.Delegator == "") {
