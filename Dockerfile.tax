@@ -4,6 +4,7 @@
 #   taxrepair  - replays stored event logs through the current parser (one-off Jobs)
 #   taxwatch   - Cosmos Hub release watcher (CronJob)
 #   taxledger  - extends the balance ledger scan from the archive block cache (one-off Jobs)
+#   taxstatement - fills, refreshes and checks the validator statement summary (Job and CronJobs)
 #
 # Both are pure-Go static binaries (CGO off): wasmvm is only an indirect dep and is
 # never invoked, so no muslc/wasmvm static-lib dance is needed.
@@ -20,7 +21,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxapid ./taxapid && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxrepair ./taxrepair && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxwatch ./taxwatch && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxledger ./taxledger
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxledger ./taxledger && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstatement ./taxstatement
 
 FROM build AS test
 # Pure decoder/classification and bounded-enqueue tests only; no live DB or RPC.
@@ -38,6 +40,7 @@ COPY --from=build /out/taxapid /usr/local/bin/taxapid
 COPY --from=build /out/taxrepair /usr/local/bin/taxrepair
 COPY --from=build /out/taxwatch /usr/local/bin/taxwatch
 COPY --from=build /out/taxledger /usr/local/bin/taxledger
+COPY --from=build /out/taxstatement /usr/local/bin/taxstatement
 USER tax
 # Default entrypoint is the API; the indexer Deployment overrides command.
 ENTRYPOINT ["/usr/local/bin/taxapid"]

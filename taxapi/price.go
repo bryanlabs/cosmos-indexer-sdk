@@ -38,15 +38,56 @@ type Oracle struct {
 }
 
 // priceMissTTL bounds how long a "no price found" result is trusted before
-// PriceAt retries the oracle. A found price for a historical date never
-// changes and is cached indefinitely; a miss might just mean the oracle
-// hadn't caught up yet, so it's worth a retry rather than a permanent no.
+// PriceAt retries the oracle: a miss might just mean the oracle had not caught
+// up yet, so it is worth a retry rather than a permanent no.
 const priceMissTTL = 5 * time.Minute
 
+// priceUnsettledTTL bounds how long a found price that may still be revised
+// is reused before PriceAt asks the oracle again. It is long enough for one
+// report to reuse a day's price across its rows and short enough that a
+// revised price reaches every later report.
+const priceUnsettledTTL = 10 * time.Minute
+
+// priceSettleAfter is how long after a day ends its price is taken as final.
+// The oracle refetches each asset from two days before its newest stored day
+// on every refresh (six hours apart), so a day is last rewritten by the first
+// refresh three days after it. A week leaves room for an oracle that was down
+// for several days.
+const priceSettleAfter = 7 * 24 * time.Hour
+
+// priceSettled reports whether a found price can be kept for the life of the
+// process: the oracle returned it for the requested day itself (not an
+// earlier day standing in for a day it has no price for, which a later
+// refresh can fill), and that day ended at least priceSettleAfter ago.
+func priceSettled(requested, returned string, now time.Time) bool {
+	if requested == "" || returned != requested {
+		return false
+	}
+	day, err := time.Parse(apiDateLayout, requested)
+	if err != nil {
+		return false
+	}
+	return !now.Before(day.AddDate(0, 0, 1).Add(priceSettleAfter))
+}
+
 type priceCacheEntry struct {
-	usd    float64
-	found  bool
-	cached time.Time
+	usd     float64
+	found   bool
+	settled bool
+	cached  time.Time
+}
+
+// fresh reports whether the entry can be served at now without asking the
+// oracle again.
+func (e priceCacheEntry) fresh(now time.Time) bool {
+	switch {
+	case e.found && e.settled:
+		return true
+	case e.found:
+		return now.Sub(e.cached) < priceUnsettledTTL
+	default:
+		return now.Sub(e.cached) < priceMissTTL
+	}
 }
 
 // denomTraceMissTTL bounds how long an unresolved trace is trusted before
@@ -127,8 +168,11 @@ func fixedUSDStablecoinPrice(chain, denom string) (float64, bool) {
 // (YYYY-MM-DD). The oracle is authoritative when it has a value. If it does not,
 // an exact allowlist supplies the documented $1 peg for verified USD stablecoin
 // vouchers. found=false for every other miss, which callers must not treat as a
-// confirmed $0 (INF-201). A found price is cached indefinitely; other misses are
-// cached for priceMissTTL so a transient gap still gets retried.
+// confirmed $0 (INF-201). A found price is cached for the life of the process
+// only once it is settled (see priceSettled); a recent day's price, an earlier
+// day's price standing in for the requested day, and the $1 peg are reused for
+// priceUnsettledTTL, and misses for priceMissTTL, so a revised or late price
+// is picked up.
 func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
 	base, _ := ibcBaseDenom(denom)
 	if isUnverifiedJunoFactoryUatom(chain, denom, base) {
@@ -137,7 +181,7 @@ func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
 	key := chain + "|" + denom + "|" + date
 
 	o.mu.Lock()
-	if e, ok := o.prices[key]; ok && (e.found || time.Since(e.cached) < priceMissTTL) {
+	if e, ok := o.prices[key]; ok && e.fresh(nowUTC()) {
 		o.mu.Unlock()
 		return e.usd, e.found
 	}
@@ -146,17 +190,19 @@ func (o *Oracle) PriceAt(chain, denom, date string) (float64, bool) {
 	var body struct {
 		USD   float64 `json:"usd"`
 		Found bool    `json:"found"`
+		Date  string  `json:"date"`
 	}
-	usd, found := 0.0, false
+	usd, found, settled := 0.0, false, false
 	if err := o.get(o.base, "/price", url.Values{apiChain: {chain}, apiDenom: {denom}, apiDate: {date}}, &body); err == nil {
 		usd, found = body.USD, body.Found
+		settled = found && priceSettled(date, body.Date, nowUTC())
 	}
 	if !found {
 		usd, found = fixedUSDStablecoinPrice(chain, denom)
 	}
 
 	o.mu.Lock()
-	o.prices[key] = priceCacheEntry{usd: usd, found: found, cached: nowUTC()}
+	o.prices[key] = priceCacheEntry{usd: usd, found: found, settled: settled, cached: nowUTC()}
 	o.mu.Unlock()
 	return usd, found
 }

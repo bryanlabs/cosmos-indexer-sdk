@@ -60,15 +60,17 @@ type statementAggregates struct {
 }
 
 const (
-	// A statement reads every reward and commission row of the validator in
-	// the period from the table heap, because no index holds the amount or
-	// the recipient. That measured about 4 seconds per million rows on
-	// production (4.4 million rows in 17 seconds). Above this many rows (the
-	// planner's estimate) it cannot finish inside the time limit with room
-	// for a busy database, so the request is refused at once instead of
-	// scanning for minutes. TAX_STATEMENT_MAX_ROWS overrides it; a negative
-	// value turns the check off.
-	defaultStatementMaxRows = 12_000_000
+	// Rows a statement reads from taxable_events come off the table heap,
+	// because no index holds the amount or the recipient. Reads spread over
+	// all of history measured 5.7 to 5.9 microseconds a row on production
+	// (9.6 million rows in 54 seconds, 11.9 million in 70), so the time
+	// limit is reached near 14 million rows, about 12 million as the
+	// planner estimates them. Above this estimate the request is refused at
+	// once instead of scanning until the limit. Months the statement
+	// summary holds are not read from the heap and do not count.
+	// TAX_STATEMENT_MAX_ROWS overrides it; a negative value turns the check
+	// off.
+	defaultStatementMaxRows = 10_500_000
 	// The edge gives up at 120 seconds. The database work is cancelled
 	// before that so an abandoned request does not keep scanning.
 	defaultStatementTimeout = 90 * time.Second
@@ -105,6 +107,11 @@ func approxCount(n int64) string {
 	return decimal.NewFromInt(n).String()
 }
 
+// SetStatementSummary turns reading finished months from the statement
+// summary on or off. It is on by default and has no effect until the
+// taxstatement Job has built the summary.
+func (s *Server) SetStatementSummary(on bool) { s.statementSummaryOff = !on }
+
 // SetStatementLimits overrides the statement row limit and time limit. A
 // zero value keeps the default; a negative maxRows turns the row check off.
 func (s *Server) SetStatementLimits(maxRows int64, timeout time.Duration) {
@@ -137,6 +144,11 @@ func statementRowEstimate(tx *gorm.DB, val string, start, end time.Time) (int64,
 		sql.Named("validator", val), sql.Named("start", start), sql.Named("end", end)).Row().Scan(&plan); err != nil {
 		return 0, err
 	}
+	return planRows(plan)
+}
+
+// planRows reads the top node's row estimate from EXPLAIN (FORMAT JSON).
+func planRows(plan string) (int64, error) {
 	var parsed []struct {
 		Plan struct {
 			Rows float64 `json:"Plan Rows"`
@@ -172,56 +184,120 @@ SELECT 2, NULL, '', '', '', '', 0, COUNT(*)
 FROM (SELECT to_addr FROM pairs WHERE to_addr IS NOT NULL GROUP BY to_addr) d
 ORDER BY 1, 2`
 
-// readStatementAggregates reads the aggregates in one statement. Cancelling
-// ctx cancels the query.
-func (s *Server) readStatementAggregates(ctx context.Context, val string, start, end time.Time) (statementAggregates, error) {
+// statementReadSettings applies the session settings of a statement read to
+// tx. The driver caches prepared statements; a generic plan cannot see the
+// validator or the period and would plan the read badly. The rows are spread
+// over the whole table: a bitmap scan reads them in page order with
+// read-ahead and parallel workers, where a plain index scan fetches one page
+// at a time and measured four times slower. Days and months are UTC.
+func statementReadSettings(tx *gorm.DB) error {
+	for _, setting := range []string{
+		"SET LOCAL plan_cache_mode = force_custom_plan",
+		"SET LOCAL work_mem = '64MB'",
+		"SET LOCAL enable_indexscan = off",
+		"SET LOCAL effective_io_concurrency = 128",
+		"SET LOCAL TimeZone = 'UTC'",
+	} {
+		if err := tx.Exec(setting).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scanStatementAggregates(tx *gorm.DB, sqlText string, args ...any) (statementAggregates, error) {
 	agg := statementAggregates{DelegatorsByMonth: map[string]int64{}}
+	var rows []struct {
+		Part       int
+		Day        *time.Time
+		Month      string
+		Category   string
+		Denom      string
+		Amount     string
+		Events     int64
+		Delegators int64
+	}
+	if err := tx.Raw(sqlText, args...).Scan(&rows).Error; err != nil {
+		return agg, err
+	}
+	for _, r := range rows {
+		switch r.Part {
+		case statementPartDay:
+			if r.Day == nil {
+				return agg, errors.New("statement day row without a day")
+			}
+			agg.Days = append(agg.Days, validatorDayAgg{Day: *r.Day, Category: r.Category, Denom: r.Denom, Amount: r.Amount, Events: r.Events})
+		case statementPartMonth:
+			agg.DelegatorsByMonth[r.Month] = r.Delegators
+		case statementPartTotal:
+			agg.Delegators = r.Delegators
+		}
+	}
+	return agg, nil
+}
+
+// readStatementAggregates reads the aggregates from taxable_events alone, in
+// one statement. Cancelling ctx cancels the query.
+func (s *Server) readStatementAggregates(ctx context.Context, val string, start, end time.Time) (statementAggregates, error) {
+	var agg statementAggregates
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// The driver caches prepared statements; a generic plan cannot see
-		// the validator or the period and would plan the read badly.
-		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
+		if err := statementReadSettings(tx); err != nil {
 			return err
 		}
-		if err := tx.Exec("SET LOCAL work_mem = '64MB'").Error; err != nil {
-			return err
-		}
-		// The rows are spread over the whole table. A bitmap scan reads them
-		// in page order with read-ahead and parallel workers; a plain index
-		// scan fetches one page at a time and measured four times slower.
-		for _, setting := range []string{"SET LOCAL enable_indexscan = off", "SET LOCAL effective_io_concurrency = 128"} {
-			if err := tx.Exec(setting).Error; err != nil {
+		var err error
+		agg, err = scanStatementAggregates(tx, statementAggregateSQL, sql.Named("validator", val), sql.Named("start", start), sql.Named("end", end))
+		return err
+	}, statementReadOnly())
+	return agg, err
+}
+
+// statementRead is one statement's aggregates with how they were read.
+type statementRead struct {
+	Agg      statementAggregates
+	Plan     statementReadPlan
+	Estimate int64
+}
+
+// readStatement reads the aggregates in one snapshot: finished months from
+// the summary when it can be trusted in that snapshot, everything else from
+// taxable_events (planStatementRead). With measure false it only plans and
+// sizes the read. The row limit applies to the rows read from
+// taxable_events. If the summary is dropped under the read, the read is
+// repeated from taxable_events alone.
+func (s *Server) readStatement(ctx context.Context, val string, start, end time.Time, measure bool) (statementRead, error) {
+	var out statementRead
+	run := func(useSummary bool) error {
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := statementReadSettings(tx); err != nil {
 				return err
 			}
-		}
-		var rows []struct {
-			Part       int
-			Day        *time.Time
-			Month      string
-			Category   string
-			Denom      string
-			Amount     string
-			Events     int64
-			Delegators int64
-		}
-		if err := tx.Raw(statementAggregateSQL, sql.Named("validator", val), sql.Named("start", start), sql.Named("end", end)).Scan(&rows).Error; err != nil {
-			return err
-		}
-		for _, r := range rows {
-			switch r.Part {
-			case statementPartDay:
-				if r.Day == nil {
-					return errors.New("statement day row without a day")
-				}
-				agg.Days = append(agg.Days, validatorDayAgg{Day: *r.Day, Category: r.Category, Denom: r.Denom, Amount: r.Amount, Events: r.Events})
-			case statementPartMonth:
-				agg.DelegatorsByMonth[r.Month] = r.Delegators
-			case statementPartTotal:
-				agg.Delegators = r.Delegators
+			var err error
+			if out.Plan, err = planStatementRead(tx, val, start, end, useSummary); err != nil {
+				return err
 			}
-		}
-		return nil
-	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	return agg, err
+			if out.Estimate, err = out.Plan.liveRowEstimate(tx, val); err != nil {
+				return err
+			}
+			if limit := s.statementRowLimit(); limit > 0 && out.Estimate > limit {
+				return statementTooLarge{Rows: out.Estimate, Limit: limit}
+			}
+			if !measure {
+				return nil
+			}
+			if !out.Plan.Summary {
+				out.Agg, err = scanStatementAggregates(tx, statementAggregateSQL, sql.Named("validator", val), sql.Named("start", start), sql.Named("end", end))
+				return err
+			}
+			sqlText, args := out.Plan.statementSummarySQL(val)
+			out.Agg, err = scanStatementAggregates(tx, sqlText, args...)
+			return err
+		}, statementReadOnly())
+	}
+	err := run(!s.statementSummaryOff)
+	if err != nil && ctx.Err() == nil && summaryGone(err) {
+		err = run(false)
+	}
+	return out, err
 }
 
 // statementCoverage tells the reader how much of history the statement can
@@ -353,13 +429,7 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 
 	// Size the read before taking a slot, so a period that is too large is
 	// refused at once even while other statements are being built.
-	estimate, err := statementRowEstimate(s.db.WithContext(ctx), val, start, end)
-	if err == nil {
-		if limit := s.statementRowLimit(); limit > 0 && estimate > limit {
-			err = statementTooLarge{Rows: estimate, Limit: limit}
-		}
-	}
-	if err != nil {
+	if _, err := s.readStatement(ctx, val, start, end, false); err != nil {
 		writeStatementError(ctx, w, val, s.statementTimeLimit(), err)
 		return
 	}
@@ -370,12 +440,13 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		return
 	}
 	queryBegan := time.Now()
-	agg, err := s.readStatementAggregates(ctx, val, start, end)
+	read, err := s.readStatement(ctx, val, start, end, true)
 	<-statementSlots
 	if err != nil {
 		writeStatementError(ctx, w, val, s.statementTimeLimit(), err)
 		return
 	}
+	agg, estimate := read.Agg, read.Estimate
 	queryTook := time.Since(queryBegan)
 	aggs, delegatorsByMonth := agg.Days, agg.DelegatorsByMonth
 
@@ -389,8 +460,8 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	s.prewarmPrices(chain, priced, nil)
 	defer func() {
 		//nolint:gosec // val passed the bech32 checksum, so it carries no control characters
-		log.Printf("validator-statement %s %s..%s: about %d rows, %d day groups, readiness %s, query %s, prices %s, total %s",
-			val, start.Format(apiDateLayout), end.Format(apiDateLayout), estimate, len(aggs),
+		log.Printf("validator-statement %s %s..%s: %s, about %d rows read, %d day groups, readiness %s, query %s, prices %s, total %s",
+			val, start.Format(apiDateLayout), end.Format(apiDateLayout), read.Plan.describe(), estimate, len(aggs),
 			readyTook.Round(time.Millisecond), queryTook.Round(time.Millisecond), time.Since(priceBegan).Round(time.Millisecond), time.Since(began).Round(time.Millisecond))
 	}()
 

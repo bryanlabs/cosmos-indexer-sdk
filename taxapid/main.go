@@ -116,6 +116,10 @@ func main() {
 	statementRows, _ := strconv.ParseInt(os.Getenv("TAX_STATEMENT_MAX_ROWS"), 10, 64)
 	statementTimeout, _ := time.ParseDuration(os.Getenv("TAX_STATEMENT_TIMEOUT"))
 	srv.SetStatementLimits(statementRows, statementTimeout)
+	// The statement summary (filled by the taxstatement Job) is read whenever
+	// it is installed, built and passes its checks. TAX_STATEMENT_SUMMARY=off
+	// makes every statement read live rows only.
+	srv.SetStatementSummary(os.Getenv("TAX_STATEMENT_SUMMARY") != "off")
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
 	// Per-year block coverage for /index-coverage and the coverage warning
