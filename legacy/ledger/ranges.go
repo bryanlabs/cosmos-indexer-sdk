@@ -5,15 +5,24 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // Range is one importer's own run of heights on one chain. Every importer
 // names its range explicitly and no two ranges of a chain may overlap.
+//
+// Evidence identifies the files the importer's rows rest on besides the
+// captures, such as its verdict files. It is recorded when the range is
+// first claimed, and a later claim with other evidence is refused: heights
+// already stored were built from the first files and are not rebuilt.
 type Range struct {
 	Chain    string
 	From, To int64
+	Evidence string
 }
+
+const evidenceMark = " | evidence "
 
 // Progress is what legacy.import_ranges records for a range. The counts
 // describe the heights from From up to, not including, Next: every one of
@@ -76,14 +85,24 @@ func Begin(ctx context.Context, db *sql.DB, r Range, build string) (*Claim, Prog
 		unlock(conn, r)
 		return nil, Progress{}, err
 	}
+	if strings.Contains(build, evidenceMark) {
+		return fail(fmt.Errorf("a build label cannot carry the evidence mark"))
+	}
+	if r.Evidence != "" {
+		build += evidenceMark + r.Evidence
+	}
 	if err := record(ctx, conn, r, build); err != nil {
 		return fail(err)
 	}
 	var to int64
 	var p Progress
-	if err := conn.QueryRowContext(ctx, `SELECT to_height, next_height, heights_stored, transactions, tax_rows FROM legacy.import_ranges
-WHERE chain_id = $1 AND from_height = $2`, r.Chain, r.From).Scan(&to, &p.Next, &p.Stored, &p.Transactions, &p.Rows); err != nil {
+	var recorded string
+	if err := conn.QueryRowContext(ctx, `SELECT to_height, next_height, heights_stored, transactions, tax_rows, build FROM legacy.import_ranges
+WHERE chain_id = $1 AND from_height = $2`, r.Chain, r.From).Scan(&to, &p.Next, &p.Stored, &p.Transactions, &p.Rows, &recorded); err != nil {
 		return fail(err)
+	}
+	if _, evidence, _ := strings.Cut(recorded, evidenceMark); evidence != r.Evidence {
+		return fail(fmt.Errorf("the range was started with other evidence files and its stored heights rest on those"))
 	}
 	if to != r.To {
 		return fail(fmt.Errorf("a range that starts at this height is recorded with a different last height"))

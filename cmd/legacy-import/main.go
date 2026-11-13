@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"flag"
@@ -112,20 +113,28 @@ func main() {
 	build := flag.String("build", os.Getenv("LEGACY_BUILD"), "build label recorded with the range")
 	flag.Parse()
 	verdicts, removals := map[string]string{}, map[string]string{}
-	for path, into := range map[string]map[string]string{*resolutions: verdicts, *removed: removals} {
-		if path == "" {
+	// The sums of the verdict files are recorded with the range. Heights
+	// stored under one pair of files are never continued under another.
+	evidence := ""
+	for _, file := range []struct {
+		name, path string
+		into       map[string]string
+	}{{"fee verdicts", *resolutions, verdicts}, {"removal verdicts", *removed, removals}} {
+		if file.path == "" {
+			evidence += file.name + " none "
 			continue
 		}
-		text, err := os.ReadFile(path)
+		text, err := os.ReadFile(file.path)
 		if err != nil {
 			fail("verdict file unavailable")
 		}
+		evidence += fmt.Sprintf("%s %x ", file.name, sha256.Sum256(text))
 		for _, line := range strings.Split(strings.TrimSpace(string(text)), "\n") {
 			key, verdict, ok := strings.Cut(line, " ")
-			if !ok || !strings.HasPrefix(key, *chain+"/") || into[key] != "" {
+			if !ok || !strings.HasPrefix(key, *chain+"/") || file.into[key] != "" {
 				fail("a verdict file has a line for another chain, a repeated line or no verdict")
 			}
-			into[key] = verdict
+			file.into[key] = verdict
 		}
 	}
 	if *from <= 0 || *to < *from || *workers < 1 || *batch < 1 {
@@ -136,7 +145,7 @@ func main() {
 	if err != nil {
 		fail(safe(err))
 	}
-	claim, progress, err := ledger.Begin(ctx, db, ledger.Range{Chain: *chain, From: *from, To: *to}, *build)
+	claim, progress, err := ledger.Begin(ctx, db, ledger.Range{Chain: *chain, From: *from, To: *to, Evidence: strings.TrimSpace(evidence)}, *build)
 	if err != nil {
 		fail(safe(err))
 	}

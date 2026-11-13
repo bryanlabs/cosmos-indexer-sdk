@@ -201,6 +201,28 @@ func TestARangeBelongsToOneImporterAndResumesWhereItStopped(t *testing.T) {
 	var recorded string
 	require.NoError(t, db.Owner.Raw(`SELECT status || ' ' || next_height || ' ' || heights_stored || ' ' || heights_held || ' ' || build FROM legacy.import_ranges WHERE chain_id = 'cosmoshub-3' AND from_height = 1`).Scan(&recorded).Error)
 	require.Equal(t, "done 101 100 0 build-b", recorded)
+
+	// A range keeps the evidence files it was started with. Another set,
+	// or none, cannot continue it; the same set can, under any build.
+	files := ledger.Range{Chain: "cosmoshub-3", From: 201, To: 300, Evidence: "fee verdicts aa removal verdicts bb"}
+	claim, _, err = ledger.Begin(ctx, conn, files, "build-a")
+	require.NoError(t, err)
+	claim.Release()
+	for _, other := range []string{"", "fee verdicts aa removal verdicts cc", "fee verdicts aa"} {
+		changed := files
+		changed.Evidence = other
+		_, _, err = ledger.Begin(ctx, conn, changed, "build-a")
+		require.ErrorContains(t, err, "started with other evidence files", other)
+	}
+	_, _, err = ledger.Begin(ctx, conn, ledger.Range{Chain: "cosmoshub-3", From: 1, To: 100, Evidence: "fee verdicts aa"}, "build-b")
+	require.ErrorContains(t, err, "started with other evidence files", "a range started without evidence")
+	_, _, err = ledger.Begin(ctx, conn, files, "build | evidence x")
+	require.Error(t, err)
+	claim, _, err = ledger.Begin(ctx, conn, files, "build-c")
+	require.NoError(t, err)
+	claim.Release()
+	require.NoError(t, db.Owner.Raw(`SELECT build FROM legacy.import_ranges WHERE chain_id = 'cosmoshub-3' AND from_height = 201`).Scan(&recorded).Error)
+	require.Equal(t, "build-c | evidence fee verdicts aa removal verdicts bb", recorded)
 }
 
 func TestAReleasedRangeIsFreeForAnotherSession(t *testing.T) {
