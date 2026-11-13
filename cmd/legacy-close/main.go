@@ -113,14 +113,19 @@ func main() {
 	fmt.Printf("addresses compared %d\n", result.Addresses)
 	fmt.Printf("addresses that close exactly %d\n", result.Closed)
 	if change != nil {
-		listed := len(change.Recoveries)
-		fmt.Printf("addresses that close with the %s %d (source wallets %d of %d, recovery wallets %d of %d)\n",
-			change.Name, result.ClosedWithChange, result.ChangeSources, listed, result.ChangeRecoveries, listed)
+		listed := change.Listed()
+		fmt.Printf("addresses that close with the %s %d\n", change.Name, result.ClosedWithChange)
+		fmt.Printf("%s: source wallets that pass their test %d of %d, recovery wallets %d of %d\n",
+			change.Name, result.ChangeSources, listed, result.ChangeRecoveries, listed)
 		fmt.Printf("%s: uatom out of the source wallets %s, into the recovery wallets %s, left to the community pool %s\n",
 			change.Name, result.ChangeOut, result.ChangeIn, result.ChangePool)
+		fmt.Printf("%s: community pool change recorded from the chain state %s, equal to what the list leaves %t\n",
+			change.Name, change.Pool(), result.ChangePoolExact)
 		fmt.Printf("%s: list read from %s %s %s sha256 %s\n", change.Name, change.Repo, change.Tag, change.Path, change.SHA256)
+		fmt.Printf("%s: pool evidence, fee pool answer after the export height sha256 %s, next genesis file sha256 %s\n",
+			change.Name, change.PoolStateSHA256, change.NextGenesisSHA256)
 		if !result.ChangeWhole {
-			fmt.Printf("%s: not every listed wallet was accepted; the ones that were not are counted with the addresses that do not close or that close exactly\n", change.Name)
+			fmt.Printf("%s: list refused as a whole; every listed wallet is counted as a close without the list counts it\n", change.Name)
 		}
 	}
 	if result.ChangeRows != 0 {
@@ -143,7 +148,7 @@ func main() {
 		switch {
 		case change == nil:
 		case !result.ChangeWhole:
-			fmt.Println("rows of the genesis change not recorded: the close did not accept every listed wallet")
+			fmt.Println("rows of the genesis change not recorded: the close refused the list")
 		default:
 			added, err := books.RecordChange(ctx, db, result)
 			if err != nil {

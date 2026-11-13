@@ -84,13 +84,16 @@ type Result struct {
 	// ClosedWithChange counts the addresses that close only with the genesis
 	// change. They are in neither Closed nor Open, and in neither total.
 	ClosedWithChange int
-	// ChangeSources and ChangeRecoveries count the accepted wallets of each
-	// side. ChangeWhole says every listed wallet was accepted and no source
-	// held less than its recovery was given.
+	// ChangeSources and ChangeRecoveries count the listed wallets of each
+	// side that pass their own test. ChangePoolExact says the remainder is
+	// the recorded community pool change. ChangeWhole says the list was
+	// accepted: every wallet passed, no source held less than its recovery
+	// was given, and the remainder is exact.
 	ChangeSources, ChangeRecoveries int
-	ChangeWhole                     bool
-	// ChangeOut is what left the accepted source wallets, ChangeIn what the
-	// accepted recovery wallets were given, ChangePool the rest.
+	ChangePoolExact, ChangeWhole    bool
+	// ChangeOut is what the history gives the source wallets that pass,
+	// ChangeIn what the recovery wallets that pass were given, ChangePool
+	// the rest.
 	ChangeOut, ChangeIn, ChangePool *big.Int
 	// ChangeRows counts the stored rows of the genesis change. They move no
 	// balance in this check.
@@ -110,6 +113,17 @@ const (
 	statusClosed = "closed"
 	statusOpen   = "open"
 )
+
+// listedWallet is a wallet of the genesis change as the close found it.
+type listedWallet struct {
+	address    string
+	line       int
+	account    *account
+	kinds      []string
+	difference *big.Int
+	entry      *Recovery
+	source     bool
+}
 
 type account struct {
 	opening, closing *big.Int
@@ -155,13 +169,15 @@ func Close(ctx context.Context, db *sql.DB, chain string) (*Result, error) {
 }
 
 // CloseWith is Close with the balances the next genesis file changed in
-// code. A wallet the change lists is accepted only when its difference is
-// exactly what the change says: a source wallet when the next genesis holds
-// nothing and the history gives it a balance, a recovery wallet when the
-// next genesis holds exactly the listed amount more than the history gives.
-// An accepted wallet is counted as closing with the change, never as closing
-// exactly. A listed wallet that fails its test stays one that does not
-// close, and no other wallet is affected.
+// code. The list is taken whole or not at all. It is accepted only when
+// every source wallet is empty in the next genesis and has a balance in the
+// history, every recovery wallet holds in the next genesis exactly the
+// listed amount more than the history gives, no source held less than its
+// recovery was given, and the source balances less the listed amounts come
+// to exactly the community pool remainder recorded with the list. Accepted,
+// its wallets are counted as closing with the change, never as closing
+// exactly. Refused, the result is the one a close without the list gives.
+// No wallet outside the list is affected either way.
 func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisChange) (*Result, error) {
 	if change != nil && change.Chain != chain {
 		return nil, fmt.Errorf("the genesis change belongs to another chain")
@@ -192,6 +208,15 @@ func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisCha
 	}
 	if loaded != 2 {
 		return nil, fmt.Errorf("the genesis files of the chain and of the chain after it must both be loaded")
+	}
+	if change != nil {
+		var next string
+		if err := db.QueryRowContext(ctx, `SELECT sha256 FROM legacy.genesis_files WHERE chain_id = $1`, out.Next).Scan(&next); err != nil {
+			return nil, err
+		}
+		if next != change.NextGenesisSHA256 || change.pool == nil {
+			return nil, fmt.Errorf("the genesis file loaded for the chain after this one is not the one the genesis change was proven against")
+		}
 	}
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM legacy.blocks WHERE chain_id = $1 AND height <= $2`, chain, out.Through).
 		Scan(&out.HeightsStored); err != nil {
@@ -327,6 +352,22 @@ WHERE chain_id = $1 AND height <= $2 AND fee_charged AND fee <> '' GROUP BY fee,
 		addresses = append(addresses, address)
 	}
 	sort.Strings(addresses)
+	open := func(kinds []string, difference *big.Int) {
+		out.Open++
+		side := "the next genesis holds more"
+		if difference.Sign() < 0 {
+			side = "the next genesis holds less"
+			out.Over.Sub(out.Over, difference)
+		} else {
+			out.Short.Add(out.Short, difference)
+		}
+		for _, kind := range kinds {
+			out.TouchedOpen[kind]++
+		}
+		out.OpenByCause[side+": "+strings.Join(kinds, ", ")]++
+		out.OpenBySize[size(difference)]++
+	}
+	var listed []listedWallet
 	for _, address := range addresses {
 		a := accounts[address]
 		if a.module {
@@ -357,48 +398,56 @@ WHERE chain_id = $1 AND height <= $2 AND fee_charged AND fee <> '' GROUP BY fee,
 			out.Touched[kind]++
 		}
 		difference := new(big.Int).Sub(a.closing, a.balance)
+		entry, source := change.listed(address)
+		if entry != nil {
+			listed = append(listed, listedWallet{address: address, line: len(out.Lines) - 1, account: a, kinds: kinds,
+				difference: difference, entry: entry, source: source})
+		}
 		if difference.Sign() == 0 {
 			out.Closed++
 			line.Status = statusClosed
 			continue
 		}
-		if entry, source := change.listed(address); entry != nil {
-			switch {
-			case source && a.closing.Sign() == 0 && a.balance.Sign() > 0:
-				out.ChangeSources++
-				out.ChangeOut.Add(out.ChangeOut, a.balance)
-				out.changeSourceBalance[address] = new(big.Int).Set(a.balance)
-				line.Status = StatusChange
-			case !source && difference.Cmp(entry.Amount) == 0:
-				out.ChangeRecoveries++
-				out.ChangeIn.Add(out.ChangeIn, entry.Amount)
-				line.Status = StatusChange
-			}
-			if line.Status == StatusChange {
-				out.ClosedWithChange++
-				continue
-			}
+		// A listed wallet is decided below, once every one has been read.
+		if entry != nil {
+			continue
 		}
-		out.Open++
-		side := "the next genesis holds more"
-		if difference.Sign() < 0 {
-			side = "the next genesis holds less"
-			out.Over.Sub(out.Over, difference)
-		} else {
-			out.Short.Add(out.Short, difference)
-		}
-		for _, kind := range kinds {
-			out.TouchedOpen[kind]++
-		}
-		out.OpenByCause[side+": "+strings.Join(kinds, ", ")]++
-		out.OpenBySize[size(difference)]++
+		open(kinds, difference)
 	}
 	if change != nil {
+		held := map[string]*big.Int{}
+		for _, w := range listed {
+			switch {
+			case w.source && w.account.closing.Sign() == 0 && w.account.balance.Sign() > 0:
+				out.ChangeSources++
+				out.ChangeOut.Add(out.ChangeOut, w.account.balance)
+				held[w.address] = w.account.balance
+			case !w.source && w.difference.Cmp(w.entry.Amount) == 0:
+				out.ChangeRecoveries++
+				out.ChangeIn.Add(out.ChangeIn, w.entry.Amount)
+			}
+		}
 		out.ChangePool.Sub(out.ChangeOut, out.ChangeIn)
-		out.ChangeWhole = out.ChangeSources == len(change.Recoveries) && out.ChangeRecoveries == len(change.Recoveries)
-		for _, entry := range change.Recoveries {
-			if whole := out.changeSourceBalance[entry.Source]; whole != nil && whole.Cmp(entry.Amount) < 0 {
+		out.ChangePoolExact = out.ChangePool.Cmp(change.pool) == 0
+		out.ChangeWhole = out.ChangeSources == change.Listed() && out.ChangeRecoveries == change.Listed() && out.ChangePoolExact
+		for _, entry := range change.recoveries {
+			if whole := held[entry.Source]; whole != nil && whole.Cmp(entry.Amount) < 0 {
 				out.ChangeWhole = false
+			}
+		}
+		// The list is taken whole or not at all. Refused, every listed
+		// wallet is counted exactly as a close without the list counts it.
+		for _, w := range listed {
+			switch {
+			case w.difference.Sign() == 0:
+			case !out.ChangeWhole:
+				open(w.kinds, w.difference)
+			default:
+				out.Lines[w.line].Status = StatusChange
+				out.ClosedWithChange++
+				if w.source {
+					out.changeSourceBalance[w.address] = new(big.Int).Set(w.account.balance)
+				}
 			}
 		}
 	}

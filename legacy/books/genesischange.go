@@ -33,6 +33,23 @@ const (
 	prop29Entries  = 7
 )
 
+// The public program moves the seven source balances into one sum, pays the
+// seven listed amounts out of it and leaves the rest in the community pool.
+// It gives no share per source, so the remainder is pinned as one number: the
+// community pool of the Hub 4 genesis file minus the community pool of Hub 3
+// after its export height, which two archives answered byte for byte alike.
+// The close refuses the whole list unless the source balances it computes,
+// less the listed amounts, come to exactly this.
+const (
+	Prop29Pool = "131859276000"
+	// Prop29PoolStateSHA256 is the sha256 of the archives' answer for the
+	// distribution fee pool after height 5200790.
+	Prop29PoolStateSHA256 = "f598818f717ce3ab2b616220da5348d43ae2be11df88ad0c3c678e16b3768afe"
+	// Prop29NextGenesisSHA256 is the sha256 of the Hub 4 genesis file the
+	// pool was read from, as legacy.genesis_files records it.
+	Prop29NextGenesisSHA256 = "7fe946e6bb3c378da546767f4d078585c38f256c8ec17888d71aeee3b7edd5c7"
+)
+
 // StatusChange is the status a line of legacy.reconciliation carries when
 // the address closes only with the genesis change.
 const StatusChange = "closed_with_prop29_genesis_change"
@@ -44,12 +61,25 @@ type Recovery struct {
 	Amount           *big.Int
 }
 
-// GenesisChange is the whole list with where it came from.
+// GenesisChange is the whole list with where it came from. Only LoadProp29
+// makes one: the list, the community pool remainder and the genesis file the
+// remainder was proven against cannot be set or changed from outside this
+// package.
 type GenesisChange struct {
 	Chain, Name             string
 	Repo, Tag, Path, SHA256 string
-	Recoveries              []Recovery
+	// PoolStateSHA256 and NextGenesisSHA256 name the evidence of the
+	// community pool remainder.
+	PoolStateSHA256, NextGenesisSHA256 string
+	recoveries                         []Recovery
+	pool                               *big.Int
 }
+
+// Listed is the number of recoveries in the list.
+func (c *GenesisChange) Listed() int { return len(c.recoveries) }
+
+// Pool is the community pool remainder the list must leave, in uatom.
+func (c *GenesisChange) Pool() string { return c.pool.String() }
 
 var (
 	donorBlock  = regexp.MustCompile(`(?s)\nfunc (?:btc|eth)Donor[0-9]+\(\) FundRecoveryMessage \{\n(.*?)\n\}\n`)
@@ -73,8 +103,13 @@ func LoadProp29(source []byte) (*GenesisChange, error) {
 	if len(recoveries) != prop29Entries {
 		return nil, fmt.Errorf("the genesis change file lists %d recoveries, not %d", len(recoveries), prop29Entries)
 	}
+	pool, ok := new(big.Int).SetString(Prop29Pool, 10)
+	if !ok {
+		return nil, fmt.Errorf("the recorded community pool remainder is not a number")
+	}
 	return &GenesisChange{Chain: Prop29Chain, Name: Prop29Name,
-		Repo: Prop29Repo, Tag: Prop29Tag, Path: Prop29Path, SHA256: Prop29SHA256, Recoveries: recoveries}, nil
+		Repo: Prop29Repo, Tag: Prop29Tag, Path: Prop29Path, SHA256: Prop29SHA256,
+		PoolStateSHA256: Prop29PoolStateSHA256, NextGenesisSHA256: Prop29NextGenesisSHA256, recoveries: recoveries, pool: pool}, nil
 }
 
 // parseRecoveries reads every donor function of the file. Each must name one
@@ -117,12 +152,12 @@ func (c *GenesisChange) listed(address string) (entry *Recovery, source bool) {
 	if c == nil {
 		return nil, false
 	}
-	for i := range c.Recoveries {
+	for i := range c.recoveries {
 		switch address {
-		case c.Recoveries[i].Source:
-			return &c.Recoveries[i], true
-		case c.Recoveries[i].Recovery:
-			return &c.Recoveries[i], false
+		case c.recoveries[i].Source:
+			return &c.recoveries[i], true
+		case c.recoveries[i].Recovery:
+			return &c.recoveries[i], false
 		}
 	}
 	return nil, false
@@ -141,10 +176,13 @@ type changeDetail struct {
 }
 
 type changeEvidence struct {
-	Repo   string `json:"repo"`
-	Tag    string `json:"tag"`
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
+	Repo              string `json:"repo"`
+	Tag               string `json:"tag"`
+	Path              string `json:"path"`
+	SHA256            string `json:"sha256"`
+	PoolTotal         string `json:"community_pool_total"`
+	PoolStateSHA256   string `json:"community_pool_state_sha256"`
+	NextGenesisSHA256 string `json:"next_genesis_sha256"`
 }
 
 type changeRow struct {
@@ -159,13 +197,14 @@ type changeRow struct {
 func changeRows(result *Result) ([]changeRow, error) {
 	change := result.Change
 	var rows []changeRow
-	for i, entry := range change.Recoveries {
+	for i, entry := range change.recoveries {
 		whole := result.changeSourceBalance[entry.Source]
 		if whole == nil {
 			return nil, fmt.Errorf("a source wallet of the genesis change was not accepted by the close")
 		}
 		pool := new(big.Int).Sub(whole, entry.Amount)
-		evidence := changeEvidence{Repo: change.Repo, Tag: change.Tag, Path: change.Path, SHA256: change.SHA256}
+		evidence := changeEvidence{Repo: change.Repo, Tag: change.Tag, Path: change.Path, SHA256: change.SHA256,
+			PoolTotal: change.pool.String(), PoolStateSHA256: change.PoolStateSHA256, NextGenesisSHA256: change.NextGenesisSHA256}
 		out, err := json.Marshal(changeDetail{Change: change.Name, RecoveryAddress: entry.Recovery, Recovered: entry.Amount.String(),
 			CommunityPool: pool.String(), AmountBasis: "the whole balance the stored history gives at the export height; the next genesis file holds zero",
 			Review: "needs review", Evidence: evidence})
@@ -186,9 +225,10 @@ func changeRows(result *Result) ([]changeRow, error) {
 
 // RecordChange stores the tax rows of the genesis change, once, in
 // legacy.taxable_events: at the export height, in the phase of the state
-// export, dated at the start of the next chain, with the genesis file as the
-// source of the amount. It refuses unless the close covered every height and
-// accepted every listed wallet. Stored rows are never replaced: a second
+// export, dated at the time of the block at the export height (the last block
+// of the chain; the next genesis file carries no start time of its own), with
+// the genesis file as the source of the amount. It refuses unless the close
+// covered every height and accepted the whole list. Stored rows are never replaced: a second
 // call reads them back and fails if one differs. It returns how many rows it
 // added.
 func RecordChange(ctx context.Context, db *sql.DB, result *Result) (int, error) {
@@ -199,7 +239,7 @@ func RecordChange(ctx context.Context, db *sql.DB, result *Result) (int, error) 
 		return 0, fmt.Errorf("the genesis change is recorded only when every height up to the export height is stored")
 	}
 	if !result.ChangeWhole {
-		return 0, fmt.Errorf("the genesis change is recorded only when the close accepted every wallet it lists")
+		return 0, fmt.Errorf("the genesis change is recorded only when the close accepted the whole list")
 	}
 	want, err := changeRows(result)
 	if err != nil {
@@ -211,8 +251,8 @@ func RecordChange(ctx context.Context, db *sql.DB, result *Result) (int, error) 
 	}
 	defer func() { _ = tx.Rollback() }()
 	stored, err := tx.QueryContext(ctx, `SELECT sub_index, category, amount, denom, from_addr, to_addr, detail, amount_source,
-"timestamp" = (SELECT genesis_time FROM legacy.genesis_files WHERE chain_id = $3)
-FROM legacy.taxable_events WHERE chain_id = $1 AND height = $2 AND phase = 4 ORDER BY sub_index`, result.Chain, result.Through, result.Next)
+"timestamp" = (SELECT "time" FROM legacy.blocks WHERE chain_id = $1 AND height = $2)
+FROM legacy.taxable_events WHERE chain_id = $1 AND height = $2 AND phase = 4 ORDER BY sub_index`, result.Chain, result.Through)
 	if err != nil {
 		return 0, err
 	}
@@ -244,8 +284,8 @@ FROM legacy.taxable_events WHERE chain_id = $1 AND height = $2 AND phase = 4 ORD
 	for _, row := range want {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO legacy.taxable_events (chain_id, height, phase, tx_index, msg_index, sub_index, category,
 amount, denom, from_addr, to_addr, detail, "timestamp", amount_source)
-SELECT $1, $2, 4, 0, 0, $3, $4, $5, $6, $7, $8, $9, genesis_time, 'genesis' FROM legacy.genesis_files WHERE chain_id = $10`,
-			result.Chain, result.Through, row.sub, Prop29Category, row.amount, denom, row.from, row.to, row.detail, result.Next); err != nil {
+SELECT $1, $2, 4, 0, 0, $3, $4, $5, $6, $7, $8, $9, "time", 'genesis' FROM legacy.blocks WHERE chain_id = $1 AND height = $2`,
+			result.Chain, result.Through, row.sub, Prop29Category, row.amount, denom, row.from, row.to, row.detail); err != nil {
 			return 0, err
 		}
 	}

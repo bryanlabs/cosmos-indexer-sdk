@@ -59,9 +59,12 @@ VALUES (?, ?, ?, ?, 0, 'base', ?, ?, 0, 0)`, chain, address, position, position,
 	require.NoError(t, err)
 	public := pgtest.Snapshot(t, db.Owner, "public")
 
+	next := strings.Repeat("0b", 32)
+	entries := func(amount1 int64) []books.Recovery {
+		return []books.Recovery{{Source: "source1", Recovery: "recovery1", Amount: big.NewInt(amount1)}, {Source: "source2", Recovery: "recovery2", Amount: big.NewInt(468)}}
+	}
 	list := func(amount1 int64) *books.GenesisChange {
-		return &books.GenesisChange{Chain: "cosmoshub-3", Name: "test genesis change", Repo: "example.org/repo", Tag: "v1", Path: "file.go", SHA256: strings.Repeat("0c", 32),
-			Recoveries: []books.Recovery{{Source: "source1", Recovery: "recovery1", Amount: big.NewInt(amount1)}, {Source: "source2", Recovery: "recovery2", Amount: big.NewInt(468)}}}
+		return books.NewTestChange("test genesis change", 152, next, entries(amount1)...)
 	}
 
 	plain, err := books.Close(ctx, conn, "cosmoshub-3")
@@ -71,35 +74,55 @@ VALUES (?, ?, ?, ?, 0, 'base', ?, ?, 0, 0)`, chain, address, position, position,
 	require.Zero(t, plain.ClosedWithChange)
 	_, err = books.RecordChange(ctx, conn, plain)
 	require.ErrorContains(t, err, "without a genesis change")
+	// A refused list leaves the close exactly as it is without the list.
+	refused := func(change *books.GenesisChange) *books.Result {
+		t.Helper()
+		result, err := books.CloseWith(ctx, conn, "cosmoshub-3", change)
+		require.NoError(t, err)
+		require.False(t, result.ChangeWhole)
+		require.Zero(t, result.ClosedWithChange)
+		require.Equal(t, []int{plain.Closed, plain.Open}, []int{result.Closed, result.Open})
+		require.Equal(t, []string{plain.Short.String(), plain.Over.String()}, []string{result.Short.String(), result.Over.String()})
+		require.Equal(t, plain.OpenByCause, result.OpenByCause)
+		require.Equal(t, plain.OpenBySize, result.OpenBySize)
+		for _, line := range result.Lines {
+			require.NotEqual(t, books.StatusChange, line.Status)
+		}
+		_, err = books.RecordChange(ctx, conn, result)
+		require.ErrorContains(t, err, "accepted the whole list")
+		return result
+	}
 
-	// One coin off the listed amount: that recovery wallet stays open and
-	// nothing of the change is recorded.
-	off, err := books.CloseWith(ctx, conn, "cosmoshub-3", list(901))
-	require.NoError(t, err)
-	require.Equal(t, 3, off.ClosedWithChange)
-	require.Equal(t, 2, off.Open)
-	require.Equal(t, 1, off.ChangeRecoveries)
-	require.False(t, off.ChangeWhole)
-	_, err = books.RecordChange(ctx, conn, off)
-	require.ErrorContains(t, err, "accepted every wallet")
+	// One coin off a listed amount: the whole list is refused, not only that
+	// wallet.
+	off := refused(list(901))
+	require.Equal(t, []int{2, 1}, []int{off.ChangeSources, off.ChangeRecoveries})
 
-	// A source the next genesis did not empty is not accepted, and neither
-	// is a recovery given more than its source held.
-	wrong := list(900)
-	wrong.Recoveries = append(wrong.Recoveries, books.Recovery{Source: "idle", Recovery: "payer", Amount: big.NewInt(1)})
-	stays, err := books.CloseWith(ctx, conn, "cosmoshub-3", wrong)
-	require.NoError(t, err)
-	require.Equal(t, 4, stays.ClosedWithChange)
-	require.Equal(t, 1, stays.Open)
-	require.Equal(t, 1, stays.Closed)
-	require.False(t, stays.ChangeWhole)
-	more := list(900)
-	more.Recoveries[0].Source, more.Recoveries[1].Source = "source2", "source1"
-	swapped, err := books.CloseWith(ctx, conn, "cosmoshub-3", more)
-	require.NoError(t, err)
-	require.Equal(t, 4, swapped.ClosedWithChange)
-	require.False(t, swapped.ChangeWhole, "source2 held 520 and its recovery was given 900")
+	// A source the next genesis did not empty, and a recovery wallet whose
+	// balance the next genesis did not change, refuse the list. The wallet
+	// that closes exactly is still counted as closing exactly.
+	stays := refused(books.NewTestChange("test genesis change", 152, next,
+		append(entries(900), books.Recovery{Source: "idle", Recovery: "payer", Amount: big.NewInt(1)})...))
+	require.Equal(t, []int{2, 2}, []int{stays.ChangeSources, stays.ChangeRecoveries})
+	require.True(t, stays.ChangePoolExact)
 
+	// Every wallet passes its own test and the sum is right, but a recovery
+	// was given more than its source held.
+	crossed := entries(900)
+	crossed[0].Source, crossed[1].Source = "source2", "source1"
+	swapped := refused(books.NewTestChange("test genesis change", 152, next, crossed...))
+	require.Equal(t, []int{2, 2}, []int{swapped.ChangeSources, swapped.ChangeRecoveries})
+	require.True(t, swapped.ChangePoolExact, "source2 held 520 and its recovery was given 900")
+
+	// Every wallet passes its own test, but what the list leaves is not the
+	// recorded community pool change.
+	short := refused(books.NewTestChange("test genesis change", 151, next, entries(900)...))
+	require.Equal(t, []int{2, 2}, []int{short.ChangeSources, short.ChangeRecoveries})
+	require.False(t, short.ChangePoolExact)
+	require.Equal(t, "152", short.ChangePool.String())
+
+	_, err = books.CloseWith(ctx, conn, "cosmoshub-3", books.NewTestChange("test genesis change", 152, strings.Repeat("0e", 32), entries(900)...))
+	require.ErrorContains(t, err, "not the one the genesis change was proven against")
 	_, err = books.CloseWith(ctx, conn, "cosmoshub-2", list(900))
 	require.ErrorContains(t, err, "another chain")
 
@@ -113,6 +136,7 @@ VALUES (?, ?, ?, ?, 0, 'base', ?, ?, 0, 0)`, chain, address, position, position,
 	require.Equal(t, 2, result.ChangeSources)
 	require.Equal(t, 2, result.ChangeRecoveries)
 	require.True(t, result.ChangeWhole)
+	require.True(t, result.ChangePoolExact)
 	require.Equal(t, "1520", result.ChangeOut.String())
 	require.Equal(t, "1368", result.ChangeIn.String())
 	require.Equal(t, "152", result.ChangePool.String())
@@ -134,14 +158,17 @@ WHERE chain_id = 'cosmoshub-3' AND component = 'liquid' ORDER BY address`).Scan(
 	var stored []string
 	require.NoError(t, db.Owner.Raw(`SELECT concat_ws(' ', height, phase, tx_index, msg_index, sub_index, category, amount, denom, 'from=' || from_addr, 'to=' || to_addr,
 amount_source, to_char("timestamp" AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), (detail::json) ->> 'review', (detail::json) ->> 'community_pool',
-coalesce((detail::json) ->> 'recovery_address', (detail::json) ->> 'source_address'), (detail::json) -> 'evidence' ->> 'sha256' = ?)
-FROM legacy.taxable_events WHERE chain_id = 'cosmoshub-3' AND phase = 4 ORDER BY sub_index`, strings.Repeat("0c", 32)).Scan(&stored).Error)
-	const when = "genesis 2021-02-18 06:00:00 needs review"
+coalesce((detail::json) ->> 'recovery_address', (detail::json) ->> 'source_address'), (detail::json) -> 'evidence' ->> 'sha256' = '0c0c',
+(detail::json) -> 'evidence' ->> 'community_pool_total', (detail::json) -> 'evidence' ->> 'next_genesis_sha256' = ?)
+FROM legacy.taxable_events WHERE chain_id = 'cosmoshub-3' AND phase = 4 ORDER BY sub_index`, next).Scan(&stored).Error)
+	// Dated at the block of the export height, not at the genesis time the
+	// next genesis file carries.
+	const when = "genesis 2020-01-02 03:04:05 needs review"
 	require.Equal(t, []string{
-		"1 4 0 0 0 " + books.Prop29Category + " 1000 uatom from=source1 to= " + when + " 100 recovery1 t",
-		"1 4 0 0 1 " + books.Prop29Category + " 900 uatom from= to=recovery1 " + when + " 100 source1 t",
-		"1 4 0 0 2 " + books.Prop29Category + " 520 uatom from=source2 to= " + when + " 52 recovery2 t",
-		"1 4 0 0 3 " + books.Prop29Category + " 468 uatom from= to=recovery2 " + when + " 52 source2 t",
+		"1 4 0 0 0 " + books.Prop29Category + " 1000 uatom from=source1 to= " + when + " 100 recovery1 t 152 t",
+		"1 4 0 0 1 " + books.Prop29Category + " 900 uatom from= to=recovery1 " + when + " 100 source1 t 152 t",
+		"1 4 0 0 2 " + books.Prop29Category + " 520 uatom from=source2 to= " + when + " 52 recovery2 t 152 t",
+		"1 4 0 0 3 " + books.Prop29Category + " 468 uatom from= to=recovery2 " + when + " 52 source2 t 152 t",
 	}, stored)
 
 	// The rows are stored once and move nothing: the same close gives the
@@ -162,8 +189,7 @@ FROM legacy.taxable_events WHERE chain_id = 'cosmoshub-3' AND phase = 4 ORDER BY
 	require.NoError(t, err)
 
 	// A close under another list cannot replace what is stored.
-	other := list(900)
-	other.Name = "another change"
+	other := books.NewTestChange("another change", 152, next, entries(900)...)
 	differs, err := books.CloseWith(ctx, conn, "cosmoshub-3", other)
 	require.NoError(t, err)
 	require.True(t, differs.ChangeWhole)

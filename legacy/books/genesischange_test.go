@@ -76,9 +76,10 @@ func TestThePinnedProposal29FileGivesSevenRecoveries(t *testing.T) {
 	require.NoError(t, err)
 	change, err := LoadProp29(source)
 	require.NoError(t, err)
-	require.Len(t, change.Recoveries, 7)
+	require.Equal(t, 7, change.Listed())
+	require.Equal(t, Prop29Pool, change.Pool())
 	seen := map[string]bool{}
-	for _, entry := range change.Recoveries {
+	for _, entry := range change.recoveries {
 		seen[entry.Source], seen[entry.Recovery] = true, true
 		require.Positive(t, entry.Amount.Sign())
 	}

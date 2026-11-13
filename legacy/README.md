@@ -181,23 +181,35 @@ any of it, so without help those fourteen wallets never close.
 the change (`github.com/cosmos/gaia` `v4.0.0` `app/prop29.go`). Only the
 file with the sha256 recorded in `legacy/books/genesischange.go` is
 accepted, and no wallet or amount of the list is written in this
-repository. The list is closed: a source wallet is accepted only if the
-next genesis holds nothing for it and the history gives more than nothing,
-a recovery wallet only if its difference equals the listed amount exactly.
-Accepted wallets are counted as closing with the Proposal 29 genesis
-change, on their own line and with their own status in
-`legacy.reconciliation`, never as closing exactly. A listed wallet that
-fails its test stays open, and the command exits 1 unless all fourteen are
-accepted.
+repository. The list is closed and is taken whole or not at all. It is
+accepted only when all of this holds: for every source wallet the next
+genesis holds nothing and the history gives more than nothing; for every
+recovery wallet the difference equals the listed amount exactly; no source
+held less than its recovery was given; and the seven source balances less
+the seven listed amounts come to exactly 131,859,276,000 uatom. That last
+number is the change in the community pool between the Hub 3 state after
+the export height and the Hub 4 genesis file. It is recorded next to the
+file's sha256 with the sha256 of its two pieces of evidence, and the close
+does not run with the list at all unless the Hub 4 genesis file loaded in
+the database is the one it was read from. The public program gives no share
+per source (it pays the listed amounts out of one sum), so the remainder is
+checked as one sum.
 
-With `--record` and all fourteen accepted, the change is also stored as
+Accepted, the fourteen wallets are counted as closing with the Proposal 29
+genesis change, on their own line and with their own status in
+`legacy.reconciliation`, never as closing exactly. Refused, the result is
+the one a close without the list gives, and the command exits 1.
+
+With `--record` and the list accepted, the change is also stored as
 fourteen rows in `legacy.taxable_events`, once: at the export height, in
-the phase of the state export, dated at the Hub 4 genesis time, category
+the phase of the state export, dated at the time of the block at the export
+height (the last Hub 3 block; the Hub 4 genesis file carries the Hub 3
+genesis time, not a start time of its own), category
 `prop29_genesis_recovery`, amount source `genesis`. A source wallet gets one
 row out for its whole balance, a recovery wallet one row in for the listed
 amount. Neither is classified as income or as a sale, both say they need
 review, and each names the other wallet, the part left to the community
-pool and the source file. The rows move no balance in the close itself.
+pool and the evidence. The rows move no balance in the close itself.
 
 ```
 LEGACY_IMPORT_DSN="... user=legacy_importer ..." legacy-close --chain cosmoshub-3 --genesis-change prop29.go --record
