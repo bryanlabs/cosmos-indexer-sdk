@@ -35,7 +35,7 @@ import (
 
 var (
 	digits   = regexp.MustCompile(`\d+`)
-	safeText = regexp.MustCompile(`^[A-Za-z0-9 _.,:/()'-]{1,110}$`)
+	safeText = regexp.MustCompile(`^[A-Za-z0-9 _.,:/()'-]{1,160}$`)
 )
 
 func safe(err error) string {
@@ -257,21 +257,40 @@ func main() {
 		}
 	}
 	line()
-	// A removal verdict that named no message of a height read here was not
-	// used. On a read of the whole range that means the file does not belong
-	// to these captures.
-	expected := int64(0)
+	// A removal verdict that names no message of its height was not used: the
+	// file does not belong to these captures. Heights an earlier run stored
+	// are read again for their verdicts, so a rerun cannot pass a file the
+	// run before it refused.
+	expected, earlier := int64(0), map[int64]bool{}
 	for key := range removals {
 		parts := strings.Split(key, "/")
 		if height, err := strconv.ParseInt(parts[min(1, len(parts)-1)], 10, 64); err != nil || len(parts) != 4 {
 			fail("a removal verdict is not keyed by chain, height, transaction and message")
 		} else if height >= *from && height <= *to {
 			expected++
+			if height < first {
+				earlier[height] = true
+			}
 		}
 	}
-	unused := first == *from && attached != expected
+	for height := range earlier {
+		attached += int64(read(*root, *chain, height, *maxBody, verdicts, removals).removals)
+	}
+	// Every stored message that could have removed a validator needs a
+	// verdict. Without one its payout was read as a reward on the count of
+	// payments alone, which a removal that paid only commission also fits.
+	leaves, err := ledger.LastLeaves(ctx, db, ledger.Range{Chain: *chain, From: *from, To: *to})
+	if err != nil {
+		fail("the messages that could have removed a validator could not be listed: " + safe(err))
+	}
+	unproven := 0
+	for _, key := range leaves {
+		if _, ok := removals[key]; !ok {
+			unproven++
+		}
+	}
 	progress.Status = "failed"
-	if progress.Next == *to+1 && progress.Held == 0 && !unused {
+	if progress.Next == *to+1 && progress.Held == 0 && attached == expected && unproven == 0 {
 		progress.Status = "done"
 	}
 	if err := claim.Record(ctx, progress); err != nil {
@@ -280,7 +299,8 @@ func main() {
 	elapsed := time.Since(started)
 	fmt.Printf("chain %s heights %d to %d, read from %d, in %s: range %s\n", *chain, *from, *to, first, elapsed.Round(time.Second), progress.Status)
 	fmt.Printf("heights newly stored %d, already stored and equal %d\n", added, heights["stored"]-added)
-	fmt.Printf("removal verdicts in the file %d, for this range %d, matched to a message read %d\n", len(removals), expected, attached)
+	fmt.Printf("removal verdicts in the file %d, for this range %d, matched to a message %d\n", len(removals), expected, attached)
+	fmt.Printf("stored messages that could have removed a validator %d, without a removal verdict %d\n", len(leaves), unproven)
 	heights.print("heights")
 	categories.print("tax rows by phase, category and amount source")
 	messages.print("block events kept")

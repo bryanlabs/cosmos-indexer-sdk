@@ -274,3 +274,60 @@ func claimOverlappingRangesAtOnce(t *testing.T, db pgtest.Database, pool *sql.DB
 	require.NoError(t, db.Owner.Raw(`SELECT count(*) FROM legacy.import_ranges`).Scan(&recorded).Error)
 	require.Equal(t, 40, recorded)
 }
+
+// moved builds a height whose transactions carry the given tax rows.
+func moved(chain string, height int64, rows ...ledger.Row) ledger.Block {
+	b := ledger.Block{Chain: chain, Height: height, Time: time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC), Hash: strings.Repeat("AB", 32), Proposer: "AA11"}
+	for _, row := range rows {
+		for row.TxIndex >= len(b.Inclusions) {
+			b.Inclusions = append(b.Inclusions, ledger.Inclusion{Index: len(b.Inclusions), Hash: strings.Repeat("0A", 32), CodeEvidence: "explicit",
+				FeePayer: "payer", FeeCharged: true, FeeEvidence: "the transaction succeeded", Signers: []string{"payer"}, Raw: []byte{1}})
+		}
+		row.Phase, row.Amount, row.Denom = ledger.PhaseTx, "5", "uatom"
+		b.Rows = append(b.Rows, row)
+	}
+	return b
+}
+
+func TestLastLeavesListsEveryMessageThatCouldHaveRemovedAValidator(t *testing.T) {
+	db := pgtest.Open(t)
+	ctx := context.Background()
+	conn := importer(t, db)
+	leave := func(tx, msg int, validator string) ledger.Row {
+		return ledger.Row{TxIndex: tx, MsgIndex: msg, Category: "undelegate", From: "who", To: "who", Validator: validator, Detail: `{"completion_time":"x"}`, Source: "event"}
+	}
+	move := func(tx, msg int, from, to string) ledger.Row {
+		return ledger.Row{TxIndex: tx, MsgIndex: msg, Category: "redelegate", From: "who", Validator: to, Source: "event",
+			Detail: `{"source_validator":"` + from + `","destination_validator":"` + to + `","completion_time":"x"}`}
+	}
+	blocks := []ledger.Block{
+		moved("cosmoshub-3", 5, leave(0, 0, "a")),
+		// A reward of the same message is not a second move.
+		moved("cosmoshub-3", 6, move(0, 0, "a", "b"), ledger.Row{TxIndex: 0, MsgIndex: 0, SubIndex: 1, Category: "reward", To: "who", Validator: "a", Trigger: "redelegate", Source: "event"}, leave(0, 1, "b")),
+		// The first row creates validator a again. A plain delegation to b
+		// creates nothing, so b's leave stays the last one.
+		moved("cosmoshub-3", 7, ledger.Row{TxIndex: 0, Category: "delegate", From: "who", Validator: "a", Source: "message"},
+			ledger.Row{TxIndex: 1, Category: "delegate", From: "who", Validator: "b", Source: "event"}),
+		moved("cosmoshub-3", 8, leave(0, 0, "a"), leave(1, 0, "a")),
+		moved("cosmoshub-3", 9, leave(0, 0, "c")),
+	}
+	_, err := ledger.Write(ctx, conn, blocks)
+	require.NoError(t, err)
+	// Another chain's heights are not this chain's.
+	_, err = ledger.Write(ctx, conn, []ledger.Block{moved("cosmoshub-2", 8, leave(2, 0, "a"))})
+	require.NoError(t, err)
+
+	for want, r := range map[string]ledger.Range{
+		"cosmoshub-3/6/0/0 cosmoshub-3/6/0/1 cosmoshub-3/8/1/0 cosmoshub-3/9/0/0": {Chain: "cosmoshub-3", From: 1, To: 9},
+		"cosmoshub-3/6/0/0 cosmoshub-3/6/0/1 cosmoshub-3/8/1/0":                   {Chain: "cosmoshub-3", From: 5, To: 8},
+		// A range that ends early lists the last leave it holds.
+		"cosmoshub-3/5/0/0":                   {Chain: "cosmoshub-3", From: 1, To: 5},
+		"cosmoshub-3/6/0/0 cosmoshub-3/6/0/1": {Chain: "cosmoshub-3", From: 6, To: 7},
+		"cosmoshub-2/8/2/0":                   {Chain: "cosmoshub-2", From: 1, To: 9},
+		"":                                    {Chain: "cosmoshub-3", From: 10, To: 20},
+	} {
+		got, err := ledger.LastLeaves(ctx, conn, r)
+		require.NoError(t, err)
+		require.Equal(t, want, strings.Join(got, " "), r)
+	}
+}

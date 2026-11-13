@@ -5,7 +5,10 @@
 // no event tells from a reward, so the importer reads such a payment as
 // commission only on a verdict from this tool.
 //
-// A candidate is chain/height/transaction/message. For each one the tool
+// A candidate is chain/height/transaction/message. A heights file adds every
+// executed message of those heights that leaves a validator, which is how
+// the messages of heights the importer held become candidates. For each
+// candidate the tool
 // reads the message from the retained captures, then asks every archive for
 // the validator's record after the block. A record that is still there is
 // "not removed". A record that is gone must have been there after the block
@@ -13,6 +16,12 @@
 // coins, is what its removal paid. An archive counts only when it also
 // returns a key every height has, so an archive without the height cannot
 // pass for a missing record. Archives that both answer must agree.
+//
+// The state before and after a block speaks for one message only: the last
+// executed message of the block that leaves the validator, in a block that
+// does not also create that validator. An earlier leave of the same
+// validator in the block, and any leave in a block that creates it, gets no
+// line, and the importer treats a message without a line as unproven.
 //
 // The archive addresses come from the environment and are never printed.
 // Every answer is kept in the evidence directory as received. Output is
@@ -43,6 +52,7 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/core"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/capture"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 )
 
 func fail(text string) {
@@ -203,10 +213,41 @@ func (a *archive) verdict(ctx context.Context, label string, validator sdk.ValAd
 	return "removed with commission " + whole.String() + "uatom", nil
 }
 
+// deciding returns the messages of one block that the state before and after
+// the block can speak for, by transaction and message position, with the
+// validator each leaves: for every validator, the last executed message that
+// leaves it. It also returns the validators the block's executed messages
+// create; the state around the block says nothing about a validator that was
+// both left and created inside it.
+func deciding(items []core.LegacyInclusion) (map[[2]int64]string, map[string]bool) {
+	last, created := map[string][2]int64{}, map[string]bool{}
+	for i, item := range items {
+		if item.Tx == nil || item.Result == nil || item.Result.Code != 0 {
+			continue
+		}
+		for j, message := range item.Tx.Messages {
+			if left := core.LegacyValidatorLeft(message.Derived); left != "" {
+				last[left] = [2]int64{int64(i), int64(j)}
+			}
+			if made, ok := message.Derived.(*stakingtypes.MsgCreateValidator); ok {
+				created[made.ValidatorAddress] = true
+			}
+		}
+	}
+	out := map[[2]int64]string{}
+	for validator, at := range last {
+		if !created[validator] {
+			out[at] = validator
+		}
+	}
+	return out, created
+}
+
 func main() {
 	root := flag.String("cache", "/cache", "block cache root")
 	chain := flag.String("chain", "cosmoshub-3", "legacy chain")
 	candidates := flag.String("candidates", "", "file with one chain/height/transaction/message per line; anything after a space is ignored")
+	heights := flag.String("heights", "", "file with one height per line; every executed message in them that leaves a validator is a candidate")
 	out := flag.String("out", "", "verdict file to write")
 	evidence := flag.String("evidence", "", "directory that receives every archive answer as received")
 	rate := flag.Float64("rate", 4, "requests a second to each archive, 5 at most")
@@ -215,7 +256,7 @@ func main() {
 	if *chain != "cosmoshub-3" {
 		fail("removal verdicts are only built for cosmoshub-3")
 	}
-	if *candidates == "" || *out == "" || *evidence == "" || *rate <= 0 || *rate > 5 {
+	if (*candidates == "" && *heights == "") || *out == "" || *evidence == "" || *rate <= 0 || *rate > 5 {
 		fail("a candidates file, an output file, an evidence directory and a rate of 5 or less are required")
 	}
 	if err := os.MkdirAll(*evidence, 0o700); err != nil {
@@ -231,14 +272,55 @@ func main() {
 	if len(archives) == 0 {
 		fail("LEGACY_ARCHIVE_1 and LEGACY_ARCHIVE_2 name the archives; at least one is required")
 	}
-	text, err := os.ReadFile(*candidates)
-	if err != nil {
-		fail("candidates file unavailable")
-	}
 	type candidate struct{ height, tx, msg int64 }
 	seen := map[candidate]bool{}
 	var list []candidate
-	for _, line := range strings.Split(strings.TrimSpace(string(text)), "\n") {
+	var wanted []string
+	if *heights != "" {
+		body, err := os.ReadFile(*heights)
+		if err != nil {
+			fail("a candidates or heights file is unavailable")
+		}
+		wanted = strings.Fields(string(body))
+	}
+	var err error
+	for _, word := range wanted {
+		height, err := strconv.ParseInt(word, 10, 64)
+		if err != nil || height < 2 {
+			fail("the heights file holds something that is not a height with a block before it")
+		}
+		h, err := capture.LoadHeight(*root, *chain, height, *maxBody)
+		if err != nil {
+			fail(fmt.Sprintf("height %d: capture not readable", height))
+		}
+		items, err := core.DecodeLegacyBlock(h.Block, h.Results)
+		if err != nil {
+			fail(fmt.Sprintf("height %d: capture not decodable", height))
+		}
+		for i, item := range items {
+			if item.Tx == nil || item.Result == nil || item.Result.Code != 0 {
+				continue
+			}
+			for j, message := range item.Tx.Messages {
+				if c := (candidate{height, int64(i), int64(j)}); core.LegacyValidatorLeft(message.Derived) != "" && !seen[c] {
+					seen[c] = true
+					list = append(list, c)
+				}
+			}
+		}
+	}
+	text := ""
+	if *candidates != "" {
+		body, err := os.ReadFile(*candidates)
+		if err != nil {
+			fail("a candidates or heights file is unavailable")
+		}
+		text = strings.TrimSpace(string(body))
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if line == "" {
+			continue
+		}
 		key, _, _ := strings.Cut(line, " ")
 		parts := strings.Split(key, "/")
 		if len(parts) != 4 || parts[0] != *chain {
@@ -284,6 +366,15 @@ func main() {
 		validator, err := sdk.ValAddressFromBech32(left)
 		if items[c.tx].Result.Code != 0 || left == "" || err != nil {
 			fail(fmt.Sprintf("height %d: the candidate is not an executed message that leaves a validator", c.height))
+		}
+		speaks, created := deciding(items)
+		if created[left] {
+			counts["no line: the block also creates the validator"]++
+			continue
+		}
+		if speaks[[2]int64{c.tx, c.msg}] != left {
+			counts["no line: a later message of the block leaves the same validator"]++
+			continue
 		}
 		label := fmt.Sprintf("%d-%d-%d", c.height, c.tx, c.msg)
 		var answers []string

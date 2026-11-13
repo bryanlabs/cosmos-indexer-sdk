@@ -11,7 +11,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/DefiantLabs/cosmos-indexer/core"
+	"github.com/DefiantLabs/cosmos-indexer/legacy"
+	abci "github.com/cometbft/cometbft/abci/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -83,4 +87,32 @@ func TestVerdictNeedsAnArchiveThatHasTheHeight(t *testing.T) {
 	// The record was never there: the candidate is wrong, not a removal.
 	_, err = run(map[string][]byte{"9 " + staking + power: {1}}, false)
 	require.ErrorContains(t, err, "no record before the block either")
+}
+
+// The state around a block speaks for the last message that leaves a
+// validator, and for none when the block also creates that validator.
+func TestDecidingNamesTheLastLeaveOfEachValidatorInABlock(t *testing.T) {
+	a, b, c := sdk.ValAddress(bytes.Repeat([]byte{1}, 20)).String(), sdk.ValAddress(bytes.Repeat([]byte{2}, 20)).String(), sdk.ValAddress(bytes.Repeat([]byte{3}, 20)).String()
+	leave := func(validator string) legacy.Message {
+		return legacy.Message{Derived: &stakingtypes.MsgUndelegate{ValidatorAddress: validator}}
+	}
+	move := func(from, to string) legacy.Message {
+		return legacy.Message{Derived: &stakingtypes.MsgBeginRedelegate{ValidatorSrcAddress: from, ValidatorDstAddress: to}}
+	}
+	create := func(validator string) legacy.Message {
+		return legacy.Message{Derived: &stakingtypes.MsgCreateValidator{ValidatorAddress: validator}}
+	}
+	tx := func(code uint32, messages ...legacy.Message) core.LegacyInclusion {
+		return core.LegacyInclusion{Tx: &legacy.Tx{Messages: messages}, Result: &abci.ResponseDeliverTx{Code: code}}
+	}
+	speaks, created := deciding([]core.LegacyInclusion{
+		tx(0, leave(a), move(b, a)),
+		tx(0, leave(a), leave(c)),
+		// A failed transaction left nothing and created nothing.
+		tx(5, leave(a), leave(b), create(a)),
+		{},
+		tx(0, create(c)),
+	})
+	require.Equal(t, map[[2]int64]string{{1, 0}: a, {0, 1}: b}, speaks)
+	require.Equal(t, map[string]bool{c: true}, created)
 }
