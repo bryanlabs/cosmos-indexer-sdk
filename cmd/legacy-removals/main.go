@@ -23,6 +23,14 @@
 // validator in the block, and any leave in a block that creates it, gets no
 // line, and the importer treats a message without a line as unproven.
 //
+// With --fees the tool settles something else from the same archives: a
+// failed transaction whose fee neither its result nor the account sequence
+// check could prove charged or not. The payer's sequence number after the
+// block before and after the block itself moves once for every transaction
+// of the payer that the ante handler accepted, which is what charges a fee.
+// A fee verdict is written only when two archives served both heights and
+// agree.
+//
 // The archive addresses come from the environment and are never printed.
 // Every answer is kept in the evidence directory as received. Output is
 // counts only; the verdict file holds no address and no amount other than
@@ -250,14 +258,19 @@ func main() {
 	heights := flag.String("heights", "", "file with one height per line; every executed message in them that leaves a validator is a candidate")
 	out := flag.String("out", "", "verdict file to write")
 	evidence := flag.String("evidence", "", "directory that receives every archive answer as received")
+	fees := flag.String("fees", "", "file with one chain/height/transaction per line: failed transactions whose fee nothing else settled. Writes fee verdicts instead of removal verdicts")
+	resolutions := flag.String("resolutions", "", "with --fees: file written by legacy-seqcheck, applied before a fee is looked at")
 	rate := flag.Float64("rate", 4, "requests a second to each archive, 5 at most")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
 	flag.Parse()
 	if *chain != "cosmoshub-3" {
-		fail("removal verdicts are only built for cosmoshub-3")
+		fail("verdicts from chain state are only built for cosmoshub-3")
 	}
-	if (*candidates == "" && *heights == "") || *out == "" || *evidence == "" || *rate <= 0 || *rate > 5 {
-		fail("a candidates file, an output file, an evidence directory and a rate of 5 or less are required")
+	if (*candidates == "" && *heights == "" && *fees == "") || *out == "" || *evidence == "" || *rate <= 0 || *rate > 5 {
+		fail("a candidates, heights or fees file, an output file, an evidence directory and a rate of 5 or less are required")
+	}
+	if *fees != "" && (*candidates != "" || *heights != "") {
+		fail("fee verdicts and removal verdicts are written by separate runs")
 	}
 	if err := os.MkdirAll(*evidence, 0o700); err != nil {
 		fail("evidence directory unavailable")
@@ -271,6 +284,10 @@ func main() {
 	}
 	if len(archives) == 0 {
 		fail("LEGACY_ARCHIVE_1 and LEGACY_ARCHIVE_2 name the archives; at least one is required")
+	}
+	if *fees != "" {
+		feeStates(context.Background(), archives, *root, *chain, *fees, *resolutions, *out, *maxBody)
+		return
 	}
 	type candidate struct{ height, tx, msg int64 }
 	seen := map[candidate]bool{}

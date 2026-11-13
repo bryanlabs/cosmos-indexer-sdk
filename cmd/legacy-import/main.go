@@ -79,6 +79,7 @@ type outcome struct {
 	err      error
 	txs      int
 	removals int
+	settled  int
 }
 
 func open() (*sql.DB, error) {
@@ -107,19 +108,20 @@ func main() {
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture accepted")
 	resolutions := flag.String("resolutions", "", "file written by legacy-seqcheck: chain/height/index and a fee verdict per line")
 	removed := flag.String("removals", "", "file written by legacy-removals: chain/height/index/message and a removal verdict per line")
+	states := flag.String("fee-states", "", "file written by legacy-removals --fees: chain/height/index and a fee verdict from the chain state per line")
 	workers := flag.Int("workers", 4, "heights decoded at once")
 	batch := flag.Int64("batch", 500, "heights stored per database transaction")
 	every := flag.Duration("progress", 30*time.Second, "time between progress lines")
 	build := flag.String("build", os.Getenv("LEGACY_BUILD"), "build label recorded with the range")
 	flag.Parse()
-	verdicts, removals := map[string]string{}, map[string]string{}
+	verdicts, removals, feeStates := map[string]string{}, map[string]string{}, map[string]string{}
 	// The sums of the verdict files are recorded with the range. Heights
-	// stored under one pair of files are never continued under another.
+	// stored under one set of files are never continued under another.
 	evidence := ""
 	for _, file := range []struct {
 		name, path string
 		into       map[string]string
-	}{{"fee verdicts", *resolutions, verdicts}, {"removal verdicts", *removed, removals}} {
+	}{{"fee verdicts", *resolutions, verdicts}, {"removal verdicts", *removed, removals}, {"fee state verdicts", *states, feeStates}} {
 		if file.path == "" {
 			evidence += file.name + " none "
 			continue
@@ -135,6 +137,12 @@ func main() {
 				fail("a verdict file has a line for another chain, a repeated line or no verdict")
 			}
 			file.into[key] = verdict
+		}
+	}
+	// The chain state settles only what the sequence check left open.
+	for key := range feeStates {
+		if _, both := verdicts[key]; both {
+			fail("a fee has a verdict from the sequence check and one from the chain state")
 		}
 	}
 	if *from <= 0 || *to < *from || *workers < 1 || *batch < 1 {
@@ -164,7 +172,7 @@ func main() {
 	first := progress.Next
 	heights, held, messages := counter{}, counter{}, counter{}
 	categories := counter{}
-	var readTxs, readHeights, added, storedRows, attached int64
+	var readTxs, readHeights, added, storedRows, attached, settled int64
 	contiguous := true
 	line := func() {
 		seconds := time.Since(started).Seconds()
@@ -185,7 +193,7 @@ func main() {
 			go func() {
 				defer wait.Done()
 				for height := range jobs {
-					outcomes[height-start] = read(*root, *chain, height, *maxBody, verdicts, removals)
+					outcomes[height-start] = read(*root, *chain, height, *maxBody, verdicts, removals, feeStates)
 				}
 			}()
 		}
@@ -200,6 +208,7 @@ func main() {
 			o := &outcomes[i]
 			readHeights++
 			attached += int64(o.removals)
+			settled += int64(o.settled)
 			switch {
 			case o.missing:
 				heights["not in the cache"]++
@@ -286,6 +295,20 @@ func main() {
 			earlier[height] = true
 		}
 	}
+	// A fee verdict from the chain state that names no open failure of its
+	// height was not used either.
+	open := int64(0)
+	for key := range feeStates {
+		parts := strings.Split(key, "/")
+		if height, err := strconv.ParseInt(parts[min(1, len(parts)-1)], 10, 64); err != nil || len(parts) != 3 {
+			fail("a fee state verdict is not keyed by chain, height and transaction")
+		} else if height >= *from && height <= *to {
+			open++
+			if height < first {
+				earlier[height] = true
+			}
+		}
+	}
 	// Heights an earlier run stored were not read by this one. Those a
 	// verdict file names are read again and compared with what is stored, so
 	// a rerun with other verdict files cannot pass rows the files no longer
@@ -302,11 +325,12 @@ func main() {
 	sort.Slice(again, func(a, b int) bool { return again[a] < again[b] })
 	var reread []ledger.Block
 	for _, height := range again {
-		o := read(*root, *chain, height, *maxBody, verdicts, removals)
+		o := read(*root, *chain, height, *maxBody, verdicts, removals, feeStates)
 		if o.missing || o.err != nil {
 			stop("a height stored by an earlier run cannot be built again with these verdict files")
 		}
 		attached += int64(o.removals)
+		settled += int64(o.settled)
 		reread = append(reread, *o.block)
 	}
 	for start := 0; start < len(reread); start += int(*batch) {
@@ -332,7 +356,7 @@ func main() {
 		}
 	}
 	progress.Status = "failed"
-	if progress.Next == *to+1 && progress.Held == 0 && attached == expected && unproven == 0 {
+	if progress.Next == *to+1 && progress.Held == 0 && attached == expected && settled == open && unproven == 0 {
 		progress.Status = "done"
 	}
 	if err := claim.Record(ctx, progress); err != nil {
@@ -343,6 +367,7 @@ func main() {
 	fmt.Printf("heights newly stored %d, already stored and equal %d\n", added, heights["stored"]-added)
 	fmt.Printf("removal verdicts in the file %d, for this range %d, matched to a message %d\n", len(removals), expected, attached)
 	fmt.Printf("stored messages that could have removed a validator %d, without a removal verdict %d\n", len(leaves), unproven)
+	fmt.Printf("fee verdicts from the chain state in the file %d, for this range %d, matched to an open failure %d\n", len(feeStates), open, settled)
 	fmt.Printf("heights of an earlier run named in a verdict file, read again and equal to what is stored %d\n", len(again))
 	heights.print("heights")
 	categories.print("tax rows by phase, category and amount source")
@@ -353,7 +378,7 @@ func main() {
 	}
 }
 
-func read(root, chain string, height, limit int64, verdicts, removals map[string]string) outcome {
+func read(root, chain string, height, limit int64, verdicts, removals, feeStates map[string]string) outcome {
 	h, err := capture.LoadHeight(root, chain, height, limit)
 	if errors.Is(err, os.ErrNotExist) {
 		return outcome{missing: true}
@@ -365,6 +390,9 @@ func read(root, chain string, height, limit int64, verdicts, removals map[string
 	items, err := core.DecodeLegacyBlock(h.Block, h.Results)
 	if err == nil {
 		err = core.ResolveLegacyFees(items, verdicts)
+	}
+	if err == nil {
+		out.settled, err = core.ResolveLegacyFeeStates(items, feeStates)
 	}
 	if err == nil {
 		out.removals, err = core.ResolveLegacyRemovals(items, removals)

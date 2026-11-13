@@ -539,6 +539,41 @@ func ResolveLegacyRemovals(items []LegacyInclusion, verdicts map[string]string) 
 	return attached, nil
 }
 
+var legacyFeeStateVerdict = regexp.MustCompile(`^(charged|not charged), two archives$`)
+
+// ResolveLegacyFeeStates applies verdicts read from the chain state to failed
+// transactions whose fee neither the block results nor the account sequence
+// check could settle: the payer's sequence number after the block before and
+// after the block itself, which moves once for every transaction of the
+// payer the ante handler accepted. A verdict counts only when two archives
+// gave it. It is for a fee that is still unknown and never changes a settled
+// one, so it runs after ResolveLegacyFees. It returns how many verdicts it
+// attached, so a caller can tell every verdict of a height found its
+// transaction.
+func ResolveLegacyFeeStates(items []LegacyInclusion, verdicts map[string]string) (int, error) {
+	attached := 0
+	for i := range items {
+		text, ok := verdicts[items[i].Identity]
+		if !ok {
+			continue
+		}
+		parts := legacyFeeStateVerdict.FindStringSubmatch(text)
+		if parts == nil {
+			return 0, fmt.Errorf("legacy fee state verdict not recognized")
+		}
+		if items[i].Fee.Charge != "unknown" {
+			return 0, fmt.Errorf("legacy fee state verdict for a fee that is already settled")
+		}
+		if len(items[i].Fee.Payer) == 0 {
+			return 0, fmt.Errorf("legacy fee state verdict for a transaction without a payer")
+		}
+		items[i].Fee.Charge = parts[1]
+		items[i].Fee.Evidence = "the payer's account sequence in the chain state around the block"
+		attached++
+	}
+	return attached, nil
+}
+
 // ResolveLegacyFees applies verdicts from the account sequence check to
 // failed transactions whose fee charge the block results could not prove.
 // Verdicts are keyed by inclusion identity; one for another height is

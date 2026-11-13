@@ -186,6 +186,28 @@ func TestLegacyLedgerBlockBuildsHubThreeRowsOrHoldsTheHeight(t *testing.T) {
 		require.Equal(t, "the payer's account sequence", settled.Inclusions[1].FeeEvidence)
 		require.Len(t, settled.Rows, 1)
 	}
+	// A fee the sequence check left open is settled from the chain state, by
+	// two archives only, and a settled fee is never touched that way.
+	for verdict, charged := range map[string]bool{"charged": true, "not charged": false} {
+		h, items := decode(`{"height":"9","results":{"deliver_tx":[` + sent + `,` + unproven + `]}}`)
+		for _, refused := range []string{verdict, verdict + ", one archive", "maybe, two archives", verdict + ", two archives "} {
+			_, err := ResolveLegacyFeeStates(items, map[string]string{"cosmoshub-3/9/1": refused})
+			require.ErrorContains(t, err, "not recognized", refused)
+		}
+		_, err := ResolveLegacyFeeStates(items, map[string]string{"cosmoshub-3/9/0": "charged, two archives"})
+		require.ErrorContains(t, err, "already settled")
+		attached, err := ResolveLegacyFeeStates(items, map[string]string{"cosmoshub-3/9/1": verdict + ", two archives", "cosmoshub-3/8/1": "charged, two archives"})
+		require.NoError(t, err)
+		require.Equal(t, 1, attached, "a verdict for another height is not counted")
+		settled, err := LegacyLedgerBlock(h, items)
+		require.NoError(t, err)
+		require.Equal(t, charged, settled.Inclusions[1].FeeCharged, verdict)
+		require.Equal(t, "7uatom", settled.Inclusions[1].Fee)
+		require.Equal(t, "the payer's account sequence in the chain state around the block", settled.Inclusions[1].FeeEvidence)
+		require.Len(t, settled.Rows, 1)
+		_, err = ResolveLegacyFeeStates(items, map[string]string{"cosmoshub-3/9/1": verdict + ", two archives"})
+		require.ErrorContains(t, err, "already settled", "the sequence check or an earlier verdict got there first")
+	}
 	h, items := decode(`{"height":"9","results":{"deliver_tx":[` + sent + `,` + failedAfter + `]}}`)
 	_, err = LegacyLedgerBlock(h, items[:1])
 	require.ErrorContains(t, err, "do not cover the block")
