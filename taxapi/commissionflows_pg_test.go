@@ -280,14 +280,16 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 	var hub CommissionFlowsHub
 	chain := chainParam("cosmoshub")
 
-	// Until the list of validators that ever withdrew commission is known,
-	// and while any of them has no run, the Hub shows coverage, not totals.
+	// Until the list of validators that ever withdrew commission is known
+	// the Hub has no true coverage to give, so it asks the caller to retry
+	// instead of stating 0 of 0. An empty list is not a known list either.
 	s.flowExp = map[string]*flowExpected{chain: {loading: true}}
-	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
-	require.False(t, hub.Complete)
-	require.Equal(t, 0, hub.Expected)
-	require.Empty(t, hub.Months)
-	require.True(t, hub.Total.Withdrawn.IsZero())
+	rec = flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusServiceUnavailable, nil)
+	require.Equal(t, "60", rec.Header().Get("Retry-After"))
+	require.NotContains(t, rec.Body.String(), `"expected"`)
+	flowPGExpect(s, chain)
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusServiceUnavailable, nil)
+	// While any of them has no run, the Hub shows coverage, not totals.
 	flowPGExpect(s, chain, flowPGValidator, flowPGOther, "cosmosvaloper1untraced")
 	hub = CommissionFlowsHub{}
 	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)

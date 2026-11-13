@@ -433,6 +433,12 @@ func (s *Server) flowExpectedValidators(chain string) (map[string]bool, bool) {
 	return e.set, e.set != nil
 }
 
+// WarmCommissionFlows starts reading chain's expected validator list at
+// startup, so the Hub figure is ready soon after a restart.
+func (s *Server) WarmCommissionFlows(chain string) {
+	s.flowExpectedValidators(chainParam(chain))
+}
+
 func (s *Server) refreshFlowExpected(chain string) error {
 	validators, err := s.commissionValidators(chain)
 	s.flowExpMu.Lock()
@@ -467,7 +473,7 @@ type CommissionFlowsHub struct {
 	Statuses   map[string]int `json:"statuses"`
 	// Traced of Expected validators have a stored run. Expected is every
 	// validator that ever withdrew commission, the set the daily trace
-	// covers; 0 while that list is still being read. Months and Total stay
+	// covers; until that list is read the endpoint answers 503. Months and Total stay
 	// empty until Complete: a partial set is not a Hub figure.
 	Traced       int               `json:"traced"`
 	Expected     int               `json:"expected"`
@@ -486,6 +492,14 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 	chain := chainParam(q.Get(apiChain))
 	rule := flowRuleParam(q.Get("rule"))
 	start, end := flowMonthParam(q.Get(apiStart)), flowMonthParam(q.Get(apiEnd))
+	expected, known := s.flowExpectedValidators(chain)
+	if !known || len(expected) == 0 {
+		// Until the list is read there is no true coverage figure to give,
+		// so the answer is "try again shortly" rather than 0 of 0.
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "The list of validators that have withdrawn commission is still being read after a restart. Try again in a minute.", http.StatusServiceUnavailable)
+		return
+	}
 	var runs []CommissionFlowRun
 	if err := s.db.Where("chain = ?", chain).Find(&runs).Error; err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -509,7 +523,6 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := CommissionFlowsHub{Chain: chain, Rule: rule, Rules: flowRuleNames[:], Statuses: map[string]int{}, Classes: FlowClassNotes, Method: FlowMethod, Symbol: s.native.Symbol}
-	expected, known := s.flowExpectedValidators(chain)
 	withdrawn := map[string]decimal.Decimal{}
 	unreconciled := decimal.Zero
 	var asOf time.Time
@@ -544,7 +557,7 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		out.AsOf = asOf.Format(apiDateLayout)
 	}
 	out.Expected = len(expected)
-	out.Complete = known && len(expected) > 0 && out.Traced == len(expected)
+	out.Complete = len(expected) > 0 && out.Traced == len(expected)
 	if !out.Complete {
 		flows, withdrawn = nil, map[string]decimal.Decimal{}
 	}
