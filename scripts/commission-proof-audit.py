@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Audit exported PRIVATE commission snapshots offline, without database writes.
 
-Input is SELECT row_to_json(v) from tax_commission_flow_versions, collected as
-an array. Context pins version/build/chain/from_day/as_of and validators. as_of
+Input is the verified private taxcommissionexport JSON array. Legacy inline-only
+rows may also use SELECT row_to_json(v) from tax_commission_flow_versions as an
+array. Raw SQL exports containing chunk markers are not complete evidence and
+must be reassembled and checksum-verified first, never treated as empty objects.
+Context pins version/build/chain/from_day/as_of and validators. as_of
 is the inclusive result day. The native Job flag is the following exclusive day.
 This checks execution integrity, not cash correctness or financial acceptance.
 No output includes wallet identities, coin quantities or private archive URLs.
@@ -18,6 +21,8 @@ from pathlib import Path
 
 
 def decode(value):
+    if isinstance(value, str) and value.startswith("cosmos-commission-payload/"):
+        raise ValueError("chunked private evidence requires verified taxcommissionexport output")
     return json.loads(value) if isinstance(value, str) else value
 
 

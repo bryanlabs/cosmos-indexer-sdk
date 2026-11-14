@@ -1,15 +1,18 @@
 package taxapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 // CommissionFlowVersion is an immutable result and its provenance. Separate
@@ -182,7 +185,7 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 	snapshot := CommissionFlowVersion{Version: o.Version, Chain: run.Chain, Validator: run.Validator, Build: o.Build, ComputedAt: run.ComputedAt, RunJSON: string(r), RowsJSON: string(f), EvidenceJSON: string(b)}
 	// Create is intentionally not an upsert: even a retry must not change
 	// evidence already stored under this version and validator.
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	return s.db.Session(&gorm.Session{Logger: logger.Discard}).Transaction(func(tx *gorm.DB) error {
 		generation := CommissionFlowGeneration{Version: o.Version, Chain: run.Chain, Build: o.Build, FromDay: run.FromDay, AsOf: run.AsOf}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&generation).Error; err != nil {
 			return err
@@ -193,6 +196,9 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 		}
 		if stored.Build != generation.Build || !stored.FromDay.Equal(generation.FromDay) || !stored.AsOf.Equal(generation.AsOf) {
 			return fmt.Errorf("commission output version already belongs to a different build or window")
+		}
+		if err := storeCommissionFlowPayloads(tx, &snapshot); err != nil {
+			return err
 		}
 		return tx.Create(&snapshot).Error
 	})
@@ -209,8 +215,23 @@ func (s *Server) reuseCommissionFlowVersion(o CommissionFlowBuildOptions, chain,
 	if err != nil {
 		return false, err
 	}
+	if isPayloadMarker(snapshot.RunJSON) {
+		var run bytes.Buffer
+		if err := s.ReadCommissionFlowPayload(snapshot, "run", &run); err != nil {
+			return false, err
+		}
+		snapshot.RunJSON = run.String()
+	}
 	if err := reusableCommissionFlowVersion(snapshot, o, chain, validator, from); err != nil {
 		return false, err
+	}
+	for _, field := range []string{"rows", "evidence"} {
+		value, _ := payloadField(&snapshot, field)
+		if isPayloadMarker(*value) {
+			if err := s.ReadCommissionFlowPayload(snapshot, field, io.Discard); err != nil {
+				return false, err
+			}
+		}
 	}
 	return true, nil
 }
@@ -232,5 +253,5 @@ func reusableCommissionFlowVersion(snapshot CommissionFlowVersion, o CommissionF
 }
 
 func CommissionFlowVersionsMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(&CommissionFlowGeneration{}, &CommissionFlowVersion{})
+	return db.AutoMigrate(&CommissionFlowGeneration{}, &CommissionFlowVersion{}, &CommissionFlowPayload{}, &CommissionFlowPayloadChunk{})
 }
