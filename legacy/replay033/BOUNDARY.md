@@ -51,11 +51,25 @@ raw SHA256 of that proof, so another same-height home cannot be substituted. It 
 the analysis host; Python is not added to the replay runtime image.
 
 The source and next-genesis raw SHA256 inputs are pinned. The only migration
-is the unmodified public SDK v0.34.0 script and its library, vendored under
-`testdata/hub1-migration/`, also SHA256 pinned. Sources:
+is the complete, unmodified public 0.33-to-0.34 converter and its library as
+shipped in SDK v0.34.10, vendored under `testdata/hub1-migration/v0.34.10/`,
+also SHA256 pinned. Sources:
 
-- https://github.com/cosmos/cosmos-sdk/blob/v0.34.0/contrib/export/v0.33.x-to-v0.34.0.py
-- https://github.com/cosmos/cosmos-sdk/blob/v0.34.0/contrib/export/lib.py
+- https://github.com/cosmos/cosmos-sdk/blob/v0.34.10/contrib/export/v0.33.x-to-v0.34.0.py
+- https://github.com/cosmos/cosmos-sdk/blob/v0.34.10/contrib/export/lib.py
+
+The original v0.34.0-tagged script is retained unchanged one directory above
+as a negative control. It omitted governance schema conversion and the first
+complete real comparison correctly refused 55 differences in five proposals.
+The complete official script preserves proposal type, title, description,
+identifier, status, tally, deposits and all times. Explicit before/after
+checks prove every native proposal field and scalar type survives and all
+other governance data remains unchanged. The old `proposal_type: Text` enum
+must agree with the concrete `gov/TextProposal` tag. The new SDK content type
+returns that same enum, so its information is retained by the content type,
+not silently discarded. This follows the pinned SDK proposal definitions in
+`x/gov/proposals.go` for v0.33.2 and v0.34.10. Unknown fields, kinds or types
+fail closed rather than disappearing through a migration whitelist.
 
 Every JSON key/value, scalar type and array position is compared. Duplicate
 keys and nonfinite tokens fail closed. Numeric values retain arbitrary

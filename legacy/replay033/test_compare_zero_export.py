@@ -39,7 +39,7 @@ class CompleteBoundaryTests(unittest.TestCase):
             self.assertTrue(boundary.differences(original, changed))
 
     def migration(self):
-        base = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration'
+        base = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration' / 'v0.34.10'
         script = boundary.pinned(base / 'v0.33.x-to-v0.34.0.py', boundary.SCRIPT_SHA)
         library = boundary.pinned(base / 'lib.py', boundary.LIB_SHA)
         return script, library
@@ -51,7 +51,13 @@ class CompleteBoundaryTests(unittest.TestCase):
         native = {'release': boundary.RELEASE, 'source_height': 500000, 'source_app_hash': 'a' * 64, 'for_zero_height': True,
                   'app_state': {'mint': {'params': {'blocks_per_year': 'old'}},
                                 'bank': {'send_enabled': False}, 'distr': {'withdraw_addr_enabled': False},
-                                'accounts': [{'fixture_only': 'preserved'}]}, 'validators': []}
+                                'accounts': [{'fixture_only': 'preserved'}],
+                                'gov': {'proposals': [{'type': 'gov/TextProposal', 'value': {
+                                    'title': 'fixture title', 'description': 'fixture description', 'proposal_type': 'Text',
+                                    'proposal_id': '1', 'proposal_status': 'Passed', 'final_tally_result': {},
+                                    'submit_time': 'submitted', 'deposit_end_time': 'deposit end',
+                                    'total_deposit': [], 'voting_start_time': 'voting start', 'voting_end_time': 'voting end'}}],
+                                    'other_governance': 'preserved'}}, 'validators': []}
         candidate = copy.deepcopy(source)
         candidate['app_state'] = copy.deepcopy(native['app_state'])
         candidate['validators'] = copy.deepcopy(native['validators'])
@@ -83,12 +89,41 @@ class CompleteBoundaryTests(unittest.TestCase):
                  'application_hash': 'a' * 64}
         proof_path = directory / 'proof.json'
         proof_path.write_text(json.dumps(proof))
-        migration = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration'
+        migration = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration' / 'v0.34.10'
         args = argparse.Namespace(source_genesis=paths[0], native_export=paths[1], next_genesis=paths[2],
                                   receipt=directory / 'receipt.json', checkpoint_proof=proof_path, migration_script=migration / 'v0.33.x-to-v0.34.0.py',
                                   migration_lib=migration / 'lib.py')
         hashes = {'SOURCE_SHA': hashlib.sha256(raw[0]).hexdigest(), 'NEXT_SHA': hashlib.sha256(raw[2]).hexdigest()}
         return args, hashes, raw
+
+    def test_every_governance_field_and_type_survives_official_conversion(self):
+        _, native, target = self.fixture()
+        original = native['app_state']['gov']['proposals'][0]
+        actual = target['app_state']['gov']['proposals'][0]
+        self.assertEqual(actual['proposal_content'], {'type': original['type'], 'value': {
+            'title': original['value']['title'], 'description': original['value']['description']}})
+        for key in boundary.GOVERNANCE_VALUE_FIELDS - {'title', 'description', 'proposal_type'}:
+            self.assertEqual(boundary.typed(actual[key]), boundary.typed(original['value'][key]))
+        self.assertEqual(target['app_state']['gov']['other_governance'], 'preserved')
+        for change in ['unknown_field', 'wrong_type', 'wrong_enum']:
+            candidate = {'app_state': copy.deepcopy(native['app_state'])}
+            if change == 'unknown_field':
+                candidate['app_state']['gov']['proposals'][0]['value']['unexpected'] = 'must not disappear'
+            elif change == 'wrong_type':
+                candidate['app_state']['gov']['proposals'][0]['type'] = 'unknown'
+            else:
+                candidate['app_state']['gov']['proposals'][0]['value']['proposal_type'] = 'SoftwareUpgrade'
+            with self.assertRaises(ValueError):
+                boundary.governance_before(candidate)
+
+    def test_original_incomplete_migration_is_preserved_negative_control(self):
+        source, native, target = self.fixture()
+        source['app_state'] = copy.deepcopy(native['app_state'])
+        source['validators'] = copy.deepcopy(native['validators'])
+        old_path = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration' / 'v0.33.x-to-v0.34.0.py'
+        old = boundary.pinned(old_path, '143541654f475ae494abf1a6cef39a987963697b1559454e2de7e1a3a737d29b')
+        with self.assertRaises(ValueError):
+            boundary.migrate(source, target, old, self.migration()[1])
 
     def test_complete_receipt_private_exclusive_and_not_tax_acceptance(self):
         with tempfile.TemporaryDirectory() as temporary:

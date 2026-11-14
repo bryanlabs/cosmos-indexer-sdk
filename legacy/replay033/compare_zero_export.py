@@ -17,7 +17,7 @@ import types
 
 SOURCE_SHA = '73a866b21723ecbc28b6d15951b2eb3aa2f2443650ff6df489bf55ac5edceefa'
 NEXT_SHA = '1e349fb39b85f7707ee78d39879f9d5d61f4d30f67980bb0bf07bd35b2f8bf30'
-SCRIPT_SHA = '143541654f475ae494abf1a6cef39a987963697b1559454e2de7e1a3a737d29b'
+SCRIPT_SHA = 'dfb6f04e543380500ebdc9f46491196724b010420ad7b65cfeb348348b7fc5d3'
 LIB_SHA = '79162c0292de87a338ec60fdad2926fa5cee677ffc83815a6bbbb656d909cbb4'
 RELEASE = 'cosmos-sdk v0.33.2 (gaia), tendermint v0.31.0-dev0-fix0, iavl v0.12.1'
 
@@ -105,7 +105,42 @@ def pinned(path, expected):
     return raw
 
 
+GOVERNANCE_VALUE_FIELDS = {'title', 'description', 'proposal_type', 'proposal_id', 'proposal_status',
+                           'final_tally_result', 'submit_time', 'deposit_end_time',
+                           'total_deposit', 'voting_start_time', 'voting_end_time'}
+
+
+def governance_before(genesis):
+    gov = genesis['app_state']['gov']
+    if type(gov) is not dict or type(gov.get('proposals')) is not list:
+        raise ValueError('native governance proposal array is absent')
+    for proposal in gov['proposals']:
+        if type(proposal) is not dict or set(proposal) != {'type', 'value'} or proposal['type'] != 'gov/TextProposal':
+            raise ValueError('native governance proposal type differs from official migration')
+        if type(proposal['value']) is not dict or set(proposal['value']) != GOVERNANCE_VALUE_FIELDS:
+            raise ValueError('official governance migration would omit an unexpected native field')
+        if type(proposal['value']['proposal_type']) is not str or proposal['value']['proposal_type'] != 'Text':
+            raise ValueError('native proposal enum disagrees with the SDK concrete content type')
+    return copy.deepcopy(gov)
+
+
+def governance_after(before, genesis):
+    after = genesis['app_state']['gov']
+    if type(after) is not dict or set(after) != set(before) or type(after['proposals']) is not list or len(after['proposals']) != len(before['proposals']):
+        raise ValueError('migrated governance structure differs')
+    for key in set(before) - {'proposals'}:
+        if typed(before[key]) != typed(after[key]):
+            raise ValueError('migration changed non-proposal governance data')
+    for original, actual in zip(before['proposals'], after['proposals']):
+        value = original['value']
+        expected = {key: value[key] for key in GOVERNANCE_VALUE_FIELDS - {'title', 'description', 'proposal_type'}}
+        expected['proposal_content'] = {'type': original['type'], 'value': {key: value[key] for key in ['title', 'description']}}
+        if typed(expected) != typed(actual):
+            raise ValueError('official governance migration did not preserve every field and type')
+
+
 def migrate(genesis, target, script, library):
+    before = governance_before(genesis)
     module = types.ModuleType('lib')
     exec(compile(library, '<pinned-sdk-migration-lib>', 'exec'), module.__dict__)
     previous = sys.modules.get('lib')
@@ -114,7 +149,9 @@ def migrate(genesis, target, script, library):
         namespace = {'__name__': 'pinned_sdk_migration'}
         exec(compile(script, '<pinned-sdk-migration>', 'exec'), namespace)
         args = types.SimpleNamespace(chain_id=target['chain_id'], start_time=target['genesis_time'])
-        return namespace['process_raw_genesis'](genesis, args)
+        result = namespace['process_raw_genesis'](genesis, args)
+        governance_after(before, result)
+        return result
     finally:
         if previous is None:
             sys.modules.pop('lib', None)
@@ -155,6 +192,7 @@ def compare(args):
     delta = differences(migrated, target)
     receipt = {
         'component': 'complete-native-hub1-export-to-hub2-genesis',
+        'comparator_source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'source_genesis_sha256': SOURCE_SHA, 'next_genesis_sha256': NEXT_SHA,
         'native_export_sha256': hashlib.sha256(native_raw).hexdigest(),
         'checkpoint_proof_sha256': hashlib.sha256(proof_raw).hexdigest(),
@@ -165,6 +203,9 @@ def compare(args):
         'all_fields_compared': True, 'array_positions_exact': True,
         'scalar_types_and_exact_numeric_values': True,
         'duplicate_keys_rejected': True, 'full_genesis_tree_equal': not delta,
+        'governance_proposals_migrated': len(native['app_state']['gov']['proposals']),
+        'all_native_governance_information_and_types_preserved': True,
+        'legacy_proposal_kind_verified_against_sdk_concrete_content_type': True,
         'difference_count': len(delta), 'differences': delta,
         'accounting_or_tax_acceptance': False,
     }
@@ -179,7 +220,7 @@ def compare(args):
 
 
 def main():
-    default = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration'
+    default = Path(__file__).resolve().parent / 'testdata' / 'hub1-migration' / 'v0.34.10'
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-genesis', required=True)
     parser.add_argument('--next-genesis', required=True)
