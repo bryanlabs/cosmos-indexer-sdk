@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from consume_bounded import Consumer, selected_lines, sha
+from consume_bounded import Consumer, HistoryWindow, selected_lines, sha
 from verify_movement_rehearsal import require
 
 class FixtureDone(Exception):
@@ -16,8 +16,13 @@ class FixtureDone(Exception):
 
 def build_fixture(root, output):
     binding = json.loads((root / 'capture.private.json').read_bytes())
-    histories = list(selected_lines(root, binding, 'native-history'))
-    history = {int(r['height']): r for r in histories if r['kind'] == 'height'}
+    if binding['schema'] == 'native033-closed-source-capture-v1':
+        from consume_closed import ClosedHistory, closed_lines
+        history = ClosedHistory(root, binding)
+        records = closed_lines(root, binding, 'movements')
+    else:
+        history = HistoryWindow(root, binding)
+        records = selected_lines(root, binding, 'movements')
     counts = dict(requests=0)
     with gzip.open(output, 'xb') as out:
         def send(value):
@@ -26,10 +31,10 @@ def build_fixture(root, output):
             if value['kind'] == 'phase' and any(r['kind'] == 'principal' for r in value['rows']):
                 counts['through_actual_principal_phase'] = value['height']
                 raise FixtureDone()
-        send(dict(kind='anchor', anchor=histories[0], through=binding['through']))
-        consumer = Consumer(send, history, binding['through'])
+        send(dict(kind='anchor', anchor=history.anchor, through=binding['through']))
+        consumer = Consumer(send, history, binding['through'], binding['first'])
         try:
-            for r in selected_lines(root, binding, 'movements'):
+            for r in records:
                 consumer.accept(r)
         except FixtureDone:
             pass
