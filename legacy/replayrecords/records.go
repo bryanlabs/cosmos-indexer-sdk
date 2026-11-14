@@ -42,6 +42,8 @@ type Proof struct {
 	Export                     bool                 `json:"zero_height_export,omitempty"`
 	ResultDifferencesSHA256    string               `json:"result_differences_sha256,omitempty"`
 	ResultDifferencesAdmission *DifferenceAdmission `json:"result_differences_admission,omitempty"`
+	GasDiagnostic              *GasAdmission        `json:"gas_diagnostic,omitempty"`
+	FinancialRecording         *GasRecording        `json:"financial_recording,omitempty"`
 }
 type Height struct {
 	Number  int64

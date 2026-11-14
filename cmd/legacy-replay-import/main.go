@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -68,6 +69,15 @@ func verifyStatus(p replayrecords.Proof, s replayStatus) error {
 // Admission always rereads all raw differences, including when a supplied proof
 // already carries a classification receipt. Nothing rewrites the runner status.
 func admitStatus(p *replayrecords.Proof, s replayStatus, path string) error {
+	return admitStatusGas(p, s, path, nil)
+}
+func admitStatusGas(p *replayrecords.Proof, s replayStatus, path string, gas *replayrecords.ApprovedGasProfile) error {
+	if gas == nil && (p.GasDiagnostic != nil || p.FinancialRecording != nil) {
+		return refused
+	}
+	if gas != nil && (p.Export || p.Chain != "cosmoshub-2" || p.Release != replayrecords.Release034 || p.From != 400001 || p.Through != 482090 || p.VerifiedThrough != 482090 || path == "") {
+		return refused
+	}
 	if path == "" {
 		if p.ResultDifferencesAdmission != nil {
 			return refused
@@ -79,14 +89,18 @@ func admitStatus(p *replayrecords.Proof, s replayStatus, path string) error {
 		return refused
 	}
 	defer f.Close()
-	a, err := replayrecords.AdmitTagDifferences(f, p.ResultDifferencesSHA256, s.From, s.Committed, s.Diffs)
+	a, diagnostic, err := replayrecords.AdmitDifferences(f, p.ResultDifferencesSHA256, s.From, s.Committed, s.Diffs, gas, p.FinancialRecording)
 	if err != nil {
 		return refused
 	}
 	if p.ResultDifferencesAdmission != nil && *p.ResultDifferencesAdmission != a {
 		return refused
 	}
+	if p.GasDiagnostic != nil && !reflect.DeepEqual(p.GasDiagnostic, diagnostic) {
+		return refused
+	}
 	p.ResultDifferencesAdmission = &a
+	p.GasDiagnostic = diagnostic
 	return verifyStatus(*p, s)
 }
 func guardDSN(dsn, name string) error {
@@ -104,12 +118,39 @@ func guardDSN(dsn, name string) error {
 	}
 	return nil
 }
+
+// reconcileReplayHeight is the single production path for both ordinary and
+// gas-profile validation. The profile can authenticate extra inputs, never
+// replace or skip the actual financial reconciliation call.
+func reconcileReplayHeight(h *capture.Height, records replayrecords.Height, gas *replayrecords.ApprovedGasProfile) (ledger.Block, error) {
+	if h == nil || h.Block == nil || h.Block.Block == nil || h.Results == nil {
+		return ledger.Block{}, refused
+	}
+	if gas != nil {
+		if h.Results.Legacy == nil {
+			return ledger.Block{}, refused
+		}
+		txs := make([][]byte, len(h.Block.Block.Txs))
+		for i, tx := range h.Block.Block.Txs {
+			txs[i] = tx
+		}
+		if gas.CheckCachedInputs(records.Number, txs, h.Results.Legacy.RawJSON) != nil {
+			return ledger.Block{}, refused
+		}
+	}
+	items, err := core.DecodeLegacyBlock(h.Block, h.Results)
+	if err != nil {
+		return ledger.Block{}, err
+	}
+	return core.LegacyReplayBlock(h, items, records)
+}
 func run() error {
 	root := flag.String("cache", "", "retained block captures")
 	records := flag.String("records", "", "immutable private recorder JSONL")
 	proof := flag.String("proof", "", "exact record digest and pinned release receipt")
 	status := flag.String("status", "", "retained replay run status with next-header verification")
 	differences := flag.String("result-differences", "", "original retained result-differences.txt, SHA256 pinned in proof")
+	gasPath := flag.String("approved-gas-profile", "", "optional SHA-pinned private exact32 gas profile, validation only; never permits writes")
 	exportRecords := flag.String("export-records", "", "optional actual zero-height export JSONL")
 	exportProof := flag.String("export-proof", "", "optional export digest receipt")
 	target := flag.String("rehearsal-db", "", "new empty database named legacy_replay_rehearsal_SUFFIX")
@@ -119,9 +160,28 @@ func run() error {
 	if *root == "" || *records == "" || *proof == "" || *status == "" || *maxBody < 1 {
 		return refused
 	}
+	var gas *replayrecords.ApprovedGasProfile
+	if *gasPath != "" {
+		if *write || *exportRecords != "" || *exportProof != "" {
+			return refused
+		}
+		info, err := os.Lstat(*gasPath)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			return refused
+		}
+		gf, err := os.Open(*gasPath)
+		if err != nil {
+			return refused
+		}
+		gas, err = replayrecords.LoadApprovedGasProfile(gf)
+		gf.Close()
+		if err != nil {
+			return refused
+		}
+	}
 	var p replayrecords.Proof
 	var s replayStatus
-	if readJSON(*proof, &p, true) != nil || p.Export || readJSON(*status, &s, false) != nil || admitStatus(&p, s, *differences) != nil {
+	if readJSON(*proof, &p, true) != nil || p.Export || readJSON(*status, &s, false) != nil || admitStatusGas(&p, s, *differences, gas) != nil {
 		return refused
 	}
 	f, e := os.Open(*records)
@@ -169,6 +229,9 @@ func run() error {
 				return refused
 			}
 		}
+		if gas != nil && gas.CheckCachedFiles(*root, r.Number) != nil {
+			return refused
+		}
 		h, err := capture.LoadHeight(*root, "cosmoshub-2", r.Number, *maxBody)
 		if err != nil {
 			return refused
@@ -177,12 +240,7 @@ func run() error {
 			return refused
 		}
 		parent = h.Hash
-		items, err := core.DecodeLegacyBlock(h.Block, h.Results)
-		if err != nil {
-			held++
-			return nil
-		}
-		b, err := core.LegacyReplayBlock(h, items, r)
+		b, err := reconcileReplayHeight(h, r, gas)
 		if err != nil {
 			held++
 			return nil
