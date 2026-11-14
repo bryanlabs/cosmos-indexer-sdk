@@ -61,6 +61,15 @@ The new pool retains them, keeping every commission origin. The old output is
 preserved, its residuals reported, and no exact causal decomposition of old
 aggregate residuals is inferred merely from the regression reproduction.
 
+Payer fee reads resolve the unique address to its numeric payer before planning.
+For whole UTC-day windows on one chain, independently located day boundaries
+add a redundant height range while retaining the original timestamp predicates.
+Unproved or incomplete boundaries, multiple chain aliases and intraday windows
+keep the unbounded-height query. Failed transactions and fee-only transactions
+remain included. Validate performance changes against the exact offending input
+and compare all ordered fee rows within the same read-only snapshot, not just
+counts or totals. The native snapshot deadline is unchanged.
+
 `scripts/commission-proof-audit.py` is an offline, read-only aggregate verifier
 for privately exported snapshots. It never returns financial acceptance. Its
 context file pins version/build/chain/from_day/as_of and expected validators;

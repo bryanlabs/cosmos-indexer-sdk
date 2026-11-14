@@ -391,19 +391,8 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		}
 	}
 
-	// Fees (generic SDK Fee table): a spend by the payer.
-	var fees []feeRec
-	if err := s.db.Table("fees").
-		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
-		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
-		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
-		Joins("JOIN txes ON txes.id = fees.tx_id").
-		Joins("JOIN blocks ON blocks.id = txes.block_id").
-		Joins("JOIN chains ON chains.id = blocks.chain_id").
-		Where("chains.chain_id IN ?", chainIDs(chain)).
-		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
-		Order("blocks.time_stamp asc, fees.id asc").
-		Scan(&fees).Error; err != nil {
+	fees, err := s.walletFees(chain, addr, start, end)
+	if err != nil {
 		return walletRows{}, err
 	}
 	memos, err := s.eventMemos(events)
