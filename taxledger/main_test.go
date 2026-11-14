@@ -3,7 +3,26 @@ package main
 import (
 	"reflect"
 	"testing"
+	"time"
 )
+
+func TestCommissionReadTimeoutPrivateOnly(t *testing.T) {
+	for _, tc := range []struct {
+		flows   bool
+		version string
+		timeout time.Duration
+		valid   bool
+	}{
+		{false, "", 0, true}, {true, "", 0, true},
+		{true, "private", time.Minute, true}, {true, "private", 0, true},
+		{true, "", time.Minute, false}, {true, "  ", time.Minute, false},
+		{false, "private", time.Minute, false}, {true, "private", -time.Second, false},
+	} {
+		if err := validateCommissionReadTimeout(tc.flows, tc.version, tc.timeout); (err == nil) != tc.valid {
+			t.Fatalf("flows=%v version=%q timeout=%v: %v", tc.flows, tc.version, tc.timeout, err)
+		}
+	}
+}
 
 func TestCommissionRuntimeParamsPrivateOnly(t *testing.T) {
 	for _, c := range []struct {

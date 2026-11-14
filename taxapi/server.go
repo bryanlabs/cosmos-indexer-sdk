@@ -35,7 +35,9 @@ type Server struct {
 	oracle *Oracle
 	native NativeAsset
 	// Private trace readers may derive fee outcomes but never persist ledger data.
-	readOnlyLedger bool
+	readOnlyLedger             bool
+	privateReadSnapshotTimeout time.Duration
+	readSnapshotStarted        time.Time
 
 	attestOnce sync.Once
 	attest     *attestationCache
@@ -361,7 +363,9 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 
 // loadWalletRows performs database work only. Pricing and shared Server caches
 // are deliberately used only after the read snapshot has been released.
-func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (walletRows, error) {
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (result walletRows, err error) {
+	phases := s.privateReadPhases([]string{addr}, start, end, "tax_events")
+	defer func() { err = phases.wrap(err) }()
 	var events []tax.TaxableEvent
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
@@ -370,6 +374,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		Find(&events).Error; err != nil {
 		return walletRows{}, err
 	}
+	phases.next("legacy_correction")
 	reconcileIBCRefunds(events, refundPairs)
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
@@ -391,10 +396,12 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		}
 	}
 
+	phases.next("fees")
 	fees, err := s.walletFees(chain, addr, start, end)
 	if err != nil {
 		return walletRows{}, err
 	}
+	phases.next("memos")
 	memos, err := s.eventMemos(events)
 	if err != nil {
 		return walletRows{}, err
@@ -402,6 +409,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	// Coins the chain moved at the start or end of a block, with no
 	// transaction: unbonding completions, deposit refunds and burns,
 	// community pool payouts.
+	phases.next("block_events")
 	blockRows, err := s.blockEventRows(chain, addr, start, end)
 	if err != nil {
 		return walletRows{}, err

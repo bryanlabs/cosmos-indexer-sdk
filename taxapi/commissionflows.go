@@ -686,6 +686,7 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 	if len(options) == 1 {
 		reader = NewServer(s.db, s.oracle, s.native)
 		reader.readOnlyLedger = true
+		reader.privateReadSnapshotTimeout = options[0].ReadSnapshotTimeout
 	}
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
 	if len(options) == 1 && options[0].ArchiveRPC != "" {
@@ -777,6 +778,9 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		}
 		evidence := loader.evidence()
 		evidence.Wallets = walletEvidence
+		if loader.private {
+			evidence.retainReadFailure(err, tr.order)
+		}
 		if loader.archive != nil {
 			evidence.Archive = loader.archive.evidence(tr.attempted)
 		}

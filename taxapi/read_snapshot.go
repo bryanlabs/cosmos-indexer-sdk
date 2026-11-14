@@ -26,8 +26,17 @@ type reportInput struct {
 // mutexes). Only DB query methods may run on it. All pricing, review application
 // and rendering run on the original Server, preserving its configuration and
 // shared caches. No network calls or report-job writes belong in this callback.
+func (s *Server) readSnapshotContext() (context.Context, context.CancelFunc) {
+	timeout := readSnapshotTimeout
+	if s.readOnlyLedger && s.privateReadSnapshotTimeout > 0 {
+		timeout = s.privateReadSnapshotTimeout
+	}
+	return context.WithTimeout(s.db.Statement.Context, timeout)
+}
+
 func (s *Server) withReadSnapshot(fn func(*Server) error) error {
-	ctx, cancel := context.WithTimeout(s.db.Statement.Context, readSnapshotTimeout)
+	started := time.Now()
+	ctx, cancel := s.readSnapshotContext()
 	defer cancel()
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// The driver caches prepared statements, and after five runs Postgres
@@ -36,7 +45,7 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
 			return err
 		}
-		return fn(&Server{db: tx, readOnlyLedger: s.readOnlyLedger})
+		return fn(&Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started})
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 }
 
@@ -57,14 +66,17 @@ func (s *Server) reportReadiness(chain string, addresses []string, start, end ti
 // Gates, full-history IBC dependencies, financial rows, fees, memos and optional
 // cache evidence all belong to the same PostgreSQL MVCC snapshot. Materialize
 // before pricing so external services cannot prolong a database transaction.
-func (s *Server) readReportInput(chain string, addresses []string, start, end time.Time, fingerprint bool) (reportInput, error) {
-	var input reportInput
-	err := s.withReadSnapshot(func(reader *Server) error {
+func (s *Server) readReportInput(chain string, addresses []string, start, end time.Time, fingerprint bool) (input reportInput, err error) {
+	phases := s.privateReadPhases(addresses, start, end, "snapshot")
+	defer func() { err = phases.wrap(err) }()
+	err = s.withReadSnapshot(func(reader *Server) error {
+		phases.next("readiness")
 		refundPairs, err := reader.reportReadiness(chain, addresses, start, end)
 		if err != nil {
 			return err
 		}
 		for _, addr := range addresses {
+			phases.next("wallet_rows")
 			rows, err := reader.loadWalletRows(chain, addr, start, end, refundPairs)
 			if err != nil {
 				return err
@@ -72,10 +84,14 @@ func (s *Server) readReportInput(chain string, addresses []string, start, end ti
 			input.Wallets = append(input.Wallets, rows)
 		}
 		if fingerprint {
+			phases.next("fingerprint")
 			var err error
 			input.Fingerprint, err = reader.reviewFingerprintInSnapshot(chain, addresses)
-			return err
+			if err != nil {
+				return err
+			}
 		}
+		phases.next("commit")
 		return nil
 	})
 	return input, err

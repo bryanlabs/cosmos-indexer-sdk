@@ -47,9 +47,14 @@ type CommissionFlowBuildOptions struct {
 	Build      string
 	AsOf       time.Time
 	ArchiveRPC string
+	// ReadSnapshotTimeout overrides only private versioned reads. Zero keeps 30s.
+	ReadSnapshotTimeout time.Duration
 }
 
 func (o CommissionFlowBuildOptions) validate() error {
+	if o.ReadSnapshotTimeout < 0 {
+		return fmt.Errorf("commission read snapshot timeout must not be negative")
+	}
 	if strings.TrimSpace(o.Version) == "" || strings.TrimSpace(o.Build) == "" || o.AsOf.IsZero() {
 		return fmt.Errorf("versioned commission output requires version, build and exclusive as-of date")
 	}
@@ -106,11 +111,29 @@ func commissionFlowWalletEvidence(w *flowWallet, actual flowHoldings, day time.T
 	return e
 }
 
+// CommissionFlowReadPrefix records discovery order, not completed financial proof.
+type CommissionFlowReadPrefix struct {
+	Address string
+	Since   time.Time
+	Hop     int
+}
+
 type CommissionFlowEvidence struct {
-	Wallets  []CommissionFlowWalletEvidence `json:",omitempty"`
-	Labels   []AddressLabel
-	Channels map[string]string
-	Archive  []FlowArchiveReceipt
+	ReadFailure *CommissionReadFailure         `json:",omitempty"`
+	ReadPrefix  []CommissionFlowReadPrefix     `json:",omitempty"`
+	Wallets     []CommissionFlowWalletEvidence `json:",omitempty"`
+	Labels      []AddressLabel
+	Channels    map[string]string
+	Archive     []FlowArchiveReceipt
+}
+
+func (e *CommissionFlowEvidence) retainReadFailure(err error, order []*flowWallet) {
+	if !errors.As(err, &e.ReadFailure) {
+		return
+	}
+	for _, w := range order {
+		e.ReadPrefix = append(e.ReadPrefix, CommissionFlowReadPrefix{Address: w.Addr, Since: w.Since, Hop: w.Hop})
+	}
 }
 
 func (l *dbFlowLoader) evidence() CommissionFlowEvidence {
