@@ -25,6 +25,20 @@ import (
 
 const scaleDumpSHA = "6f3295e7a188502d73b2e99020e00a29b6c83510139dfe6f6f424f5f73975519"
 const scaleReceiptSHA = "7c61a99e4c3a559d6057c5e07e52d784148dfefc01211dd2eac942a466cd7613"
+const scaleRetainedNodePath = "/var/lib/bryanlabs-private/hub2-atomic-scale-20261114-c1"
+const scaleRetainedNodeUID = "fa6a9a34-36a8-45f4-acb9-0706a0138cc5"
+
+// The private Identity storage slot is visibly NOT a PVC UID for this profile.
+// Node UID/path provenance is pinned by the externally reviewed Job packet.
+func scaleStorageIdentity(kind, pvc, nodeName, nodeUID string) (string, error) {
+	if kind == "pvc" && pvc != "" {
+		return pvc, nil
+	}
+	if kind == "retained-nodepath" && nodeName == "controller-1" && nodeUID == scaleRetainedNodeUID {
+		return "PRIVATE-RETAINED-NODEPATH:" + nodeUID + ":" + digest([]byte(scaleRetainedNodePath)), nil
+	}
+	return "", fmt.Errorf("explicit private retained storage identity required")
+}
 
 // seedScaleHistory copies only SQL projections, through a read-only source
 // snapshot. Synthetic Hub3 history is visibly offset and never migration proof.
@@ -181,8 +195,11 @@ func TestPrivateScaleDriver(t *testing.T) {
 	require.Empty(t, cfg.Fallbacks)
 	require.Equal(t, "postgres", cfg.User)
 	require.Equal(t, "postgres", cfg.Database)
-	// The Job must provide its actual downward-API identity and pinned PVC UID.
-	runtime := Identity{DeploymentUID: os.Getenv("HUB2_SCALE_JOB_UID"), PodUID: os.Getenv("HUB2_SCALE_POD_UID"), PVCUID: os.Getenv("HUB2_SCALE_PVC_UID"), Endpoint: "127.0.0.1:25673"}
+	// The Job provides actual downward-API identity and explicitly typed storage.
+	// A retained-nodepath fixture is not represented as an actual PVC.
+	storageID, e := scaleStorageIdentity(os.Getenv("HUB2_SCALE_STORAGE_KIND"), os.Getenv("HUB2_SCALE_PVC_UID"), os.Getenv("HUB2_SCALE_NODE_NAME"), os.Getenv("HUB2_SCALE_NODE_UID"))
+	require.NoError(t, e)
+	runtime := Identity{DeploymentUID: os.Getenv("HUB2_SCALE_JOB_UID"), PodUID: os.Getenv("HUB2_SCALE_POD_UID"), PVCUID: storageID, Endpoint: "127.0.0.1:25673"}
 	require.NotEmpty(t, runtime.DeploymentUID)
 	require.NotEmpty(t, runtime.PodUID)
 	require.NotEmpty(t, runtime.PVCUID)
@@ -215,7 +232,7 @@ func TestPrivateScaleDriver(t *testing.T) {
 		lastPhase = time.Now()
 		t.Logf("private-scale phase=%s utc=%s", name, lastPhase.UTC().Format(time.RFC3339))
 	}
-	phase("started", map[string]any{"runtime": runtime, "fixture_only": true, "production_execution": false})
+	phase("started", map[string]any{"runtime": runtime, "fixture_only": true, "production_execution": false, "storage_kind": os.Getenv("HUB2_SCALE_STORAGE_KIND"), "node_name": os.Getenv("HUB2_SCALE_NODE_NAME"), "retained_nodepath": scaleRetainedNodePath})
 	dump := Pin{os.Getenv("HUB2_SCALE_SOURCE_DUMP"), scaleDumpSHA}
 	require.NoError(t, hashFile(dump))
 	receipt := Pin{os.Getenv("HUB2_SCALE_SOURCE_RECEIPT"), scaleReceiptSHA}
