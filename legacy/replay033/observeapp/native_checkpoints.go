@@ -11,6 +11,16 @@ import (
 // SealRecorder preserves the entire final committed state after the caller's
 // target next-header proof. It does not commit or reinterpret incomplete output.
 func (app *GaiaApp) SealRecorder() error {
+	return app.sealRecorder("observation_completed", "segment")
+}
+
+// Distinct marker prevents a closed-reference segment from masquerading as
+// next-header-proven evidence. The driver must first verify all native bytes.
+func (app *GaiaApp) SealClosedTerminalRecorder() error {
+	return app.sealRecorder("observation_closed_terminal_completed", "segment_closed_pinned_native_reference")
+}
+
+func (app *GaiaApp) sealRecorder(kind, phase string) error {
 	o := &app.observer
 	if o.err != nil {
 		return o.err
@@ -26,7 +36,7 @@ func (app *GaiaApp) SealRecorder() error {
 		o.pending = nil
 		return o.err
 	}
-	app.marker("observation_completed", "segment", 0)
+	app.marker(kind, phase, 0)
 	app.flush("committed")
 	return o.err
 }

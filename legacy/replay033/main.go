@@ -73,20 +73,22 @@ func main() {
 }
 
 type runState struct {
-	Release      string  `json:"release"`
-	Chain        string  `json:"chain"`
-	Started      string  `json:"started"`
-	Updated      string  `json:"updated"`
-	From         int64   `json:"first_height_this_run"`
-	Height       int64   `json:"last_height_committed"`
-	HashVerified int64   `json:"state_hash_verified_through"`
-	Target       int64   `json:"target"`
-	Transactions int64   `json:"transactions_this_run"`
-	Rate         float64 `json:"blocks_per_second_last_window"`
-	RateRun      float64 `json:"blocks_per_second_this_run"`
-	ResultDiffs  int64   `json:"heights_where_results_differ_from_cache"`
-	Evidence     int64   `json:"evidence_items_this_run"`
-	Stop         string  `json:"stop_reason,omitempty"`
+	Release          string  `json:"release"`
+	Chain            string  `json:"chain"`
+	Started          string  `json:"started"`
+	Updated          string  `json:"updated"`
+	From             int64   `json:"first_height_this_run"`
+	Height           int64   `json:"last_height_committed"`
+	HashVerified     int64   `json:"state_hash_verified_through"`
+	Target           int64   `json:"target"`
+	Transactions     int64   `json:"transactions_this_run"`
+	Rate             float64 `json:"blocks_per_second_last_window"`
+	RateRun          float64 `json:"blocks_per_second_this_run"`
+	ResultDiffs      int64   `json:"heights_where_results_differ_from_cache"`
+	Evidence         int64   `json:"evidence_items_this_run"`
+	Stop             string  `json:"stop_reason,omitempty"`
+	TerminalVerified int64   `json:"closed_reference_verified_through,omitempty"`
+	ProofMode        string  `json:"terminal_proof_mode,omitempty"`
 }
 
 // tailState carries the hash of the last height's results across a restart,
@@ -142,8 +144,29 @@ func run(args []string) error {
 	lossless := fs.Bool("lossless-recording", false, "exact incremental all-key native recording, requires coin-records")
 	compressEvidence := fs.Bool("compress-evidence", false, "lossless gzip framing for coin records and native history")
 	verifyTarget := fs.Bool("verify-target-next-header", false, "verify target using next cached header without executing it")
+	terminalHome := fs.String("closed-terminal-reference", "", "exact pinned closed Hub1 height500015 source, byte-copied before read-only inspection")
+	terminalProof := fs.String("terminal-proof", "", "exclusive private complete terminal witness outside both homes")
+	terminalCopy := fs.String("terminal-reference-copy", "", "explicit exclusive retained private reference-copy directory")
 	fs.Parse(args)
-	if *historyPath != "" && (!*verifyTarget || !*compare) {
+	terminalMode := *terminalHome != ""
+	if err := validateTerminalRun(*chain, *to, *compare, *verifyTarget, *terminalHome, *genesis, *terminalProof); err != nil {
+		return err
+	}
+	if !terminalMode && *terminalCopy != "" {
+		return fmt.Errorf("terminal copy requires pinned closed reference")
+	}
+	var terminal *closedTerminalReference
+	if terminalMode {
+		var err error
+		if err = validateTerminalPaths(*terminalHome, *home, *terminalCopy, *terminalProof, *auditPath, *historyPath, *coinRecords, *profile); err != nil {
+			return err
+		}
+		terminal, err = loadClosedTerminalReference(*terminalHome, *cache, *genesis, *terminalCopy)
+		if err != nil {
+			return err
+		}
+	}
+	if *historyPath != "" && ((!*verifyTarget && !terminalMode) || !*compare) {
 		return fmt.Errorf("native history requires all result comparisons and target next-header proof")
 	}
 	if *compressEvidence && *coinRecords == "" && *historyPath == "" {
@@ -152,7 +175,7 @@ func run(args []string) error {
 	if *lossless && *coinRecords == "" {
 		return fmt.Errorf("lossless recording requires private coin records")
 	}
-	if *coinRecords != "" && (*chain != "cosmoshub-1" || !*compare || !*verifyTarget) {
+	if *coinRecords != "" && (*chain != "cosmoshub-1" || !*compare || (!*verifyTarget && !terminalMode)) {
 		return fmt.Errorf("Hub1 recording requires exact chain, all result comparisons and target next-header proof")
 	}
 	if *profile != "" {
@@ -254,6 +277,9 @@ func run(args []string) error {
 	defer diffs.Close()
 
 	height := app.LastBlockHeight()
+	if terminalMode && (height != 500000 || !outsideCheckpoint(*home, *terminalProof)) {
+		return fmt.Errorf("closed terminal recording requires exact private height500000 start and external proof")
+	}
 	var lastHash, lastResults []byte
 	appHash := []byte{}
 	if height == 0 {
@@ -436,7 +462,7 @@ func run(args []string) error {
 					return
 				}
 			}
-			if observed != nil || historyFile != nil {
+			if observed != nil || historyFile != nil || terminalMode {
 				if failure = requireRecordedResults(c.results, begin, deliver, end); failure != nil {
 					return
 				}
@@ -477,14 +503,33 @@ func run(args []string) error {
 			report("")
 		}
 	}
-	if *verifyTarget {
-		next := load(*cache, *chain, height+1, false)
-		if err := verifyFinalHeader(next, height, appHash, lastHash, lastResults, vals.current, vals.next); err != nil {
-			return fail(height+1, "%v", err)
+	if *verifyTarget || terminalMode {
+		var next cached
+		if terminalMode {
+			if state.ResultDiffs != 0 {
+				return fail(height, "terminal has unmatched native results")
+			}
+			if _, err := terminalLoadedRoot(db); err != nil {
+				return fail(height, "%v", err)
+			}
+			if err := verifyClosedTerminal(terminal, app, height, lastHash, lastResults, filepath.Join(*home, "validator-updates.jsonl")); err != nil {
+				return fail(height, "%v", err)
+			}
+		} else {
+			next = load(*cache, *chain, height+1, false)
+			if err := verifyFinalHeader(next, height, appHash, lastHash, lastResults, vals.current, vals.next); err != nil {
+				return fail(height+1, "%v", err)
+			}
+			state.HashVerified = height
 		}
-		state.HashVerified = height
 		if observed != nil {
-			if err := observed.SealRecorder(); err != nil {
+			var err error
+			if terminalMode {
+				err = observed.SealClosedTerminalRecorder()
+			} else {
+				err = observed.SealRecorder()
+			}
+			if err != nil {
 				return fail(height, "%v", err)
 			}
 			if movementFile.Sync() != nil {
@@ -500,12 +545,32 @@ func run(args []string) error {
 			if state.ResultDiffs != 0 {
 				return fail(height, "native history has unmatched results")
 			}
-			if err := completeNativeHistory(historyFile, app, state.From, next); err != nil {
+			var err error
+			if terminalMode {
+				err = completeClosedTerminal(historyFile, terminal, state.From)
+			} else {
+				err = completeNativeHistory(historyFile, app, state.From, next)
+			}
+			if err != nil {
 				return fail(height, "native history completion failed")
 			}
 			if err := historyFile.Close(); err != nil {
 				return fail(height, "cannot close private native history")
 			}
+		}
+		if terminalMode {
+			proof, err := createRecordEvidence(*terminalProof, false)
+			if err != nil {
+				return fail(height, "terminal proof exclusive output refused")
+			}
+			err = completeClosedTerminal(proof, terminal, state.From)
+			closeErr := proof.Close()
+			if err != nil || closeErr != nil {
+				return fail(height, "terminal proof could not persist")
+			}
+			state.TerminalVerified, state.ProofMode = height, "closed_pinned_native_reference"
+			report("reached target; complete native state and results equal pinned closed terminal reference; no next-header proof")
+			return nil
 		}
 		report("reached target; verified by unexecuted next header")
 		return nil

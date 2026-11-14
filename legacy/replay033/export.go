@@ -54,6 +54,10 @@ func exportZero(args []string) (failure error) {
 	recordsPath := fs.String("coin-records", "", "optional exclusive private native payout and state evidence")
 	lossless := fs.Bool("lossless-recording", false, "exact incremental all-key native recording, requires coin-records")
 	compressEvidence := fs.Bool("compress-evidence", false, "lossless gzip framing for private coin records")
+	terminalHome := fs.String("closed-terminal-reference", "", "exact pinned closed Hub1 terminal reference")
+	cache := fs.String("cache", "", "immutable terminal source cache")
+	genesis := fs.String("genesis", "", "pinned source genesis for terminal proof")
+	terminalCopy := fs.String("terminal-reference-copy", "", "explicit exclusive retained private reference-copy directory")
 	if fs.Parse(args) != nil {
 		return fmt.Errorf("invalid native export flags")
 	}
@@ -72,6 +76,23 @@ func exportZero(args []string) (failure error) {
 	if !outsideCheckpoint(*home, *out) {
 		return fmt.Errorf("private export must be outside the existing source checkpoint")
 	}
+	var terminal *closedTerminalReference
+	if *terminalHome != "" || *requiredHeight == terminalHeight {
+		if *terminalHome == "" || *requiredHeight != terminalHeight {
+			return fmt.Errorf("terminal export requires exact closed reference")
+		}
+		var err error
+		if err = validateTerminalPaths(*terminalHome, *home, *terminalCopy, *out, *recordsPath); err != nil {
+			return err
+		}
+		terminal, err = loadClosedTerminalReference(*terminalHome, *cache, *genesis, *terminalCopy)
+		if err != nil {
+			return err
+		}
+	}
+	if terminal == nil && *terminalCopy != "" {
+		return fmt.Errorf("terminal copy requires exact closed reference")
+	}
 	lock, err := os.Lstat(filepath.Join(*home, "application.db", "LOCK"))
 	if err != nil || !lock.Mode().IsRegular() {
 		return fmt.Errorf("native source checkpoint must have its existing regular database lock")
@@ -84,6 +105,19 @@ func exportZero(args []string) (failure error) {
 	app := gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true)
 	if app.LastBlockHeight() != *requiredHeight {
 		return fmt.Errorf("native export source height differs from required height")
+	}
+	if terminal != nil {
+		if _, err := terminalLoadedRoot(db); err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(filepath.Join(*home, "tail.json"))
+		var tail tailState
+		if err != nil || json.Unmarshal(raw, &tail) != nil || tail.Height != terminalHeight {
+			return fmt.Errorf("terminal export requires complete native result tail")
+		}
+		if err := verifyClosedTerminal(terminal, app, terminalHeight, terminal.BlockHash, tail.Results, filepath.Join(*home, "validator-updates.jsonl")); err != nil {
+			return err
+		}
 	}
 	sourceAppHash := hex.EncodeToString(app.LastCommitID().Hash)
 	artifact, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -116,14 +150,20 @@ func exportZero(args []string) (failure error) {
 	if err != nil {
 		return fmt.Errorf("cannot encode complete native validator set")
 	}
+	proofMode, manifest := "", ""
+	if terminal != nil {
+		proofMode, manifest = "closed_pinned_native_reference", terminalManifestPin
+	}
 	result := struct {
-		Release       string          `json:"release"`
-		SourceHeight  int64           `json:"source_height"`
-		SourceAppHash string          `json:"source_app_hash"`
-		ForZeroHeight bool            `json:"for_zero_height"`
-		AppState      json.RawMessage `json:"app_state"`
-		Validators    json.RawMessage `json:"validators"`
-	}{release, app.LastBlockHeight(), sourceAppHash, true, state, validatorJSON}
+		Release              string          `json:"release"`
+		SourceHeight         int64           `json:"source_height"`
+		SourceAppHash        string          `json:"source_app_hash"`
+		ForZeroHeight        bool            `json:"for_zero_height"`
+		AppState             json.RawMessage `json:"app_state"`
+		Validators           json.RawMessage `json:"validators"`
+		TerminalProofMode    string          `json:"terminal_proof_mode,omitempty"`
+		ClosedSourceManifest string          `json:"closed_source_manifest_sha256,omitempty"`
+	}{release, app.LastBlockHeight(), sourceAppHash, true, state, validatorJSON, proofMode, manifest}
 	if json.NewEncoder(artifact).Encode(result) != nil || artifact.Sync() != nil {
 		return fmt.Errorf("cannot persist complete private native export")
 	}
