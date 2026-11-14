@@ -25,6 +25,7 @@ type Result struct {
 	Chunks            int           `json:"chunks"`
 	Rows              int64         `json:"rows"`
 	LockWait          time.Duration `json:"lock_wait"`
+	LegacyLockHeld    time.Duration `json:"legacy_lock_held"`
 	Duration          time.Duration `json:"duration"`
 }
 type hooks struct {
@@ -105,6 +106,11 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if _, err = tx.ExecContext(ctx, `SET LOCAL lock_timeout='250ms'; SET LOCAL statement_timeout='30s'; SET LOCAL synchronous_commit=on`); err != nil {
 		return r, err
 	}
+	if m.Profile == PrivateScaleProfile {
+		if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='10min'`); err != nil {
+			return r, err
+		}
+	}
 	if err = tx.QueryRowContext(ctx, `SELECT pg_catalog.current_setting('synchronous_commit'),pg_catalog.current_setting('transaction_isolation')`).Scan(&r.SynchronousCommit, &r.Isolation); err != nil {
 		return r, err
 	}
@@ -125,11 +131,13 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 		return r, errors.New("bounded legacy lock acquisition refused")
 	}
 	r.LockWait = time.Since(lockStart)
+	lockedAt := time.Now()
+	defer func() { r.LegacyLockHeld = time.Since(lockedAt) }()
 	// Calling a SECURITY DEFINER function in RR may establish a snapshot before
 	// its LOCK runs. Never assume otherwise. The authoritative baseline is read
 	// by a fresh READ ONLY auditor AFTER every lock, then compared to RR. A commit
 	// that slipped between those points causes refusal, never stale admission.
-	baseline, err := beginAudit(ctx, auditor)
+	baseline, err := beginAuditBudget(ctx, auditor, m.Profile == PrivateScaleProfile)
 	if err != nil {
 		return r, err
 	}

@@ -251,7 +251,7 @@ const (
 // AuditOutcome never adopts, repairs or retries. Even an empty result is only a
 // report. A new attempt requires independent re-admission by an operator.
 func AuditOutcome(ctx context.Context, audit *sql.DB, m Manifest, runtime Identity) (Outcome, error) {
-	tx, e := beginAudit(ctx, audit)
+	tx, e := beginAuditBudget(ctx, audit, m.Profile == PrivateScaleProfile)
 	if e != nil {
 		return OutcomeConflict, e
 	}
@@ -286,7 +286,7 @@ func AuditOutcome(ctx context.Context, audit *sql.DB, m Manifest, runtime Identi
 }
 
 func freshScopeAudit(ctx context.Context, auditor *sql.DB, m Manifest, runtime Identity) error {
-	tx, e := beginAudit(ctx, auditor)
+	tx, e := beginAuditBudget(ctx, auditor, m.Profile == PrivateScaleProfile)
 	if e != nil {
 		return e
 	}
@@ -312,6 +312,12 @@ func freshScopeAudit(ctx context.Context, auditor *sql.DB, m Manifest, runtime I
 }
 
 func beginAudit(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	return beginAuditBudget(ctx, db, false)
+}
+
+// Only the explicit private 1.4M profile receives a larger bounded scan budget.
+// Lock acquisition stays at 250ms and every exact comparison remains required.
+func beginAuditBudget(ctx context.Context, db *sql.DB, scale bool) (*sql.Tx, error) {
 	tx, e := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if e != nil {
 		return nil, e
@@ -319,6 +325,12 @@ func beginAudit(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
 	if _, e = tx.ExecContext(ctx, `SET LOCAL search_path=pg_catalog,pg_temp; SET LOCAL timezone='UTC'; SET LOCAL lock_timeout='250ms'; SET LOCAL statement_timeout='30s'`); e != nil {
 		_ = tx.Rollback()
 		return nil, e
+	}
+	if scale {
+		if _, e = tx.ExecContext(ctx, `SET LOCAL statement_timeout='10min'`); e != nil {
+			_ = tx.Rollback()
+			return nil, e
+		}
 	}
 	return tx, nil
 }

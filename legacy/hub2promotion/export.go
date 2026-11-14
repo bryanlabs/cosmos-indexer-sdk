@@ -17,10 +17,20 @@ import (
 // It never opens the original native source or calls a decoder/financial tool.
 // Its source transaction is READ ONLY and its directory must be NEW/retained.
 func ExportProjection(ctx context.Context, source *sql.DB, expected Identity, dir string) ([]Projection, error) {
+	return exportProjection(ctx, source, expected, dir, false)
+}
+
+// ExportPrivateScaleProjection permits a bounded ten-minute statement for the
+// retained private SQL prefix, without changing the ordinary export profile.
+func ExportPrivateScaleProjection(ctx context.Context, source *sql.DB, expected Identity, dir string) ([]Projection, error) {
+	return exportProjection(ctx, source, expected, dir, true)
+}
+
+func exportProjection(ctx context.Context, source *sql.DB, expected Identity, dir string, scale bool) ([]Projection, error) {
 	if !strings.HasPrefix(expected.Database, "legacy_replay_rehearsal_") || !filepath.IsAbs(dir) {
 		return nil, errors.New("private staging identity and absolute NEW directory required")
 	}
-	tx, e := beginAudit(ctx, source)
+	tx, e := beginAuditBudget(ctx, source, scale)
 	if e != nil {
 		return nil, e
 	}
