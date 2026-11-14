@@ -228,34 +228,55 @@ func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, 
 func (l *dbFlowLoader) holdingsAt(addr string, day time.Time) (flowHoldings, bool, error) {
 	if l.archive != nil && l.chain == apiMainnet {
 		if h, ok := l.archive.cachedHoldings(addr, day); ok {
+			if l.private && h.Source.Kind != "archive_exact" {
+				return h, false, fmt.Errorf("commission archive holding provenance missing")
+			}
 			return h, true, nil
 		}
 	}
-	h, known, err := l.s.flowHoldingsAt(l.chain, addr, day)
+	h, source, err := l.s.flowHoldingsAt(l.chain, addr, day, l.private)
+	known := source.Kind != ""
 	if err != nil || known || l.archive == nil {
+		h.Source = source
 		return h, known, err
 	}
 	h, err = l.archive.holdingsAt(l.s, l.chain, addr, day)
+	if err == nil {
+		if l.private && h.Source.Kind != "archive_exact" {
+			return h, false, fmt.Errorf("commission archive holding provenance missing")
+		}
+	}
 	return h, err == nil, err
 }
 
-func (s *Server) flowHoldingsAt(chain, addr string, day time.Time) (flowHoldings, bool, error) {
-	h := flowHoldings{Liquid: decimal.Zero, Staked: map[string]decimal.Decimal{}, Unbonding: map[string]decimal.Decimal{}}
+func (s *Server) flowHoldingsAt(chain, addr string, day time.Time, strict bool) (flowHoldings, CommissionFlowHoldingSource, error) {
 	bals, err := s.HistoricalBalances(chain, addr, []time.Time{day})
 	if err != nil {
-		return h, false, err
+		return flowHoldings{}, CommissionFlowHoldingSource{}, err
 	}
-	b := bals[0]
-	if b.Status != balanceExact && b.Status != balanceApproximate {
-		return h, false, nil
+	if len(bals) != 1 {
+		return flowHoldings{}, CommissionFlowHoldingSource{}, fmt.Errorf("commission historical holding result missing")
+	}
+	return flowHistoricalHoldings(bals[0], s.native.Denom, strict)
+}
+
+func flowHistoricalHoldings(b HistoricalBalance, denom string, strict bool) (flowHoldings, CommissionFlowHoldingSource, error) {
+	h := flowHoldings{Liquid: decimal.Zero, Staked: map[string]decimal.Decimal{}, Unbonding: map[string]decimal.Decimal{}}
+	if (strict && b.Height <= 0) || (b.Status != balanceExact && (strict || b.Status != balanceApproximate)) {
+		return h, CommissionFlowHoldingSource{}, nil
 	}
 	for _, line := range b.Lines {
-		if line.Denom != s.native.Denom {
+		if strict && line.Denom == denom && line.Approximate {
+			return h, CommissionFlowHoldingSource{}, nil
+		}
+	}
+	for _, line := range b.Lines {
+		if line.Denom != denom {
 			continue
 		}
 		v, err := decimal.NewFromString(line.AmountBase)
 		if err != nil {
-			return h, false, err
+			return h, CommissionFlowHoldingSource{}, err
 		}
 		switch line.Bucket {
 		case apiLiquid:
@@ -266,7 +287,11 @@ func (s *Server) flowHoldingsAt(chain, addr string, day time.Time) (flowHoldings
 			h.Unbonding[line.Validator] = h.Unbonding[line.Validator].Add(v)
 		}
 	}
-	return h, true, nil
+	kind := "ledger_exact"
+	if b.Status == balanceApproximate {
+		kind = "ledger_approximate"
+	}
+	return h, CommissionFlowHoldingSource{Kind: kind, Height: b.Height}, nil
 }
 
 func (l *dbFlowLoader) events(addr string, start, end time.Time) ([]flowEvent, error) {
@@ -744,12 +769,14 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	run := CommissionFlowRun{Chain: chain, Validator: validator, FromDay: from, AsOf: asOf.AddDate(0, 0, -1), ComputedAt: nowUTC(), Overdraw: "{}", Commission: "{}", Untracked: "{}", DriftBase: "0"}
 	tr := newFlowTrace(validator, from, asOf, loader)
 	tr.strict = loader.private
+	var walletEvidence []CommissionFlowWalletEvidence
 	fail := func(err error) (CommissionFlowRun, error) {
 		run.Status, run.Reason = flowStatusError, err.Error()
 		if errors.Is(err, errAwaitingCorrection) {
 			run.Reason = "a receiving wallet has rows awaiting a methodology correction"
 		}
 		evidence := loader.evidence()
+		evidence.Wallets = walletEvidence
 		if loader.archive != nil {
 			evidence.Archive = loader.archive.evidence(tr.attempted)
 		}
@@ -803,6 +830,12 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 			continue
 		}
 		drift = drift.Add(w.simulated().Sub(actual.total()).Abs())
+		if loader.private {
+			e := commissionFlowWalletEvidence(w, actual, asOfDay)
+			e.OpeningSource = w.OpeningSource
+			e.ClosingSource = actual.Source
+			walletEvidence = append(walletEvidence, e)
+		}
 	}
 	for r := 0; r < flowRules; r++ {
 		overdraw[flowRuleNames[r]] = total[r].String()
@@ -839,6 +872,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		rows = append(rows, CommissionFlow{Chain: chain, Validator: validator, Rule: flowRuleNames[k.Rule], Month: k.Month, Class: k.Class, Detail: k.Detail, ViaUnbonding: k.ViaUnbonding, AmountBase: v.String()})
 	}
 	evidence := loader.evidence()
+	evidence.Wallets = walletEvidence
 	if loader.archive != nil {
 		evidence.Archive = loader.archive.evidence(tr.attempted)
 	}

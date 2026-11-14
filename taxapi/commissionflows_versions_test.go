@@ -102,6 +102,7 @@ func TestCommissionFlowVersionsAppendOnlyPostgres(t *testing.T) {
 	require.NoError(t, db.Model(&IBCChannel{}).Count(&count).Error)
 	require.Zero(t, count, "private channel lookup must not change shared mappings")
 	evidence := loader.evidence()
+	evidence.Wallets = []CommissionFlowWalletEvidence{{Address: flowPGDeposit, OpeningKnown: true, Since: from, OpeningSource: CommissionFlowHoldingSource{Kind: "ledger_exact", Height: 1}, ClosingSource: CommissionFlowHoldingSource{Kind: "archive_exact", Height: 123, ReceiptHashes: []string{"receipt-link"}}, ClosingDay: run.AsOf, ActualLiquidBase: "1000000", SimulatedBase: "1000000", DriftBase: "0", Overdraw: map[string]string{"fifo": "0", "pro_rata": "0"}}}
 	require.Len(t, evidence.Labels, 1)
 	require.Equal(t, "proof-chain", evidence.Channels["transfer/channel-1"])
 	raw := "{\n  \"z\": 1, \"a\": [2, 3]\n}"

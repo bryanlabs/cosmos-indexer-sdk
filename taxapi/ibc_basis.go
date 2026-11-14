@@ -43,6 +43,17 @@ func isIBCRefund(trigger string) bool {
 	return trigger == ibcTimeoutRefund || trigger == ibcErrorAckRefund
 }
 
+// ibcRefundDenom identifies a voucher by the hash of its complete ICS-20
+// trace. Legacy sends can retain the trace while native refunds name its hash.
+// Never strip a hop or compare base denoms: distinct routes are distinct coins.
+func ibcRefundDenom(denom string) string {
+	trace := transfertypes.ParseDenomTrace(denom)
+	if trace.Path != "" && trace.Validate() == nil {
+		return trace.IBCDenom()
+	}
+	return denom
+}
+
 // matchIBCRefunds pairs each refund with the one send it returned: same owner,
 // same packet identity, same coin, and the refund no earlier than the send. A
 // matched send never left the wallet, so undoing it keeps the original lots
@@ -71,7 +82,7 @@ func matchIBCRefunds(events []tax.TaxableEvent) map[uint]string {
 			continue
 		}
 		r, o := returned[0], sent[0]
-		if r.ID == 0 || o.ID == 0 || r.Denom == "" || r.Denom != o.Denom || r.Amount == "" || r.Amount != o.Amount || r.Timestamp.Before(o.Timestamp) {
+		if r.ID == 0 || o.ID == 0 || r.Denom == "" || ibcRefundDenom(r.Denom) != ibcRefundDenom(o.Denom) || r.Amount == "" || r.Amount != o.Amount || r.Timestamp.Before(o.Timestamp) {
 			continue
 		}
 		pairs[o.ID] = ibcRefundRoleSend

@@ -59,7 +59,55 @@ func (o CommissionFlowBuildOptions) validate() error {
 	return nil
 }
 
+// CommissionFlowHoldingSource identifies the exact holding read. Archive hashes
+// link to retained response bytes for this wallet at the recorded height.
+type CommissionFlowHoldingSource struct {
+	Kind          string
+	Height        int64
+	ReceiptHashes []string `json:",omitempty"`
+}
+
+// CommissionFlowWalletEvidence preserves the closing comparison for each
+// private traced wallet so source gaps can be investigated without retracing.
+// These records never become serving balances or repair the source ledger.
+type CommissionFlowWalletEvidence struct {
+	Address             string
+	Hop                 int
+	Since               time.Time
+	OpeningKnown        bool
+	OpeningSource       CommissionFlowHoldingSource
+	ClosingSource       CommissionFlowHoldingSource
+	ClosingDay          time.Time
+	ActualLiquidBase    string
+	ActualStakedBase    map[string]string
+	ActualUnbondingBase map[string]string
+	SimulatedBase       string
+	DriftBase           string
+	Overdraw            map[string]string
+}
+
+func commissionFlowWalletEvidence(w *flowWallet, actual flowHoldings, day time.Time) CommissionFlowWalletEvidence {
+	e := CommissionFlowWalletEvidence{
+		Address: w.Addr, Hop: w.Hop, Since: w.Since, OpeningKnown: w.Known,
+		ClosingDay: day, ActualLiquidBase: actual.Liquid.String(),
+		ActualStakedBase: map[string]string{}, ActualUnbondingBase: map[string]string{},
+		SimulatedBase: w.simulated().String(), DriftBase: w.simulated().Sub(actual.total()).String(),
+		Overdraw: map[string]string{},
+	}
+	for k, v := range actual.Staked {
+		e.ActualStakedBase[k] = v.String()
+	}
+	for k, v := range actual.Unbonding {
+		e.ActualUnbondingBase[k] = v.String()
+	}
+	for r, name := range flowRuleNames {
+		e.Overdraw[name] = w.Overdraw[r].String()
+	}
+	return e
+}
+
 type CommissionFlowEvidence struct {
+	Wallets  []CommissionFlowWalletEvidence `json:",omitempty"`
 	Labels   []AddressLabel
 	Channels map[string]string
 	Archive  []FlowArchiveReceipt

@@ -46,15 +46,19 @@ func newFlowArchive(origin string) (*flowArchive, error) {
 	return &flowArchive{rpc: rpc, holdings: map[string]flowHoldings{}}, nil
 }
 
-func (a *flowArchive) response(addr string, height int64, method string, q url.Values, out any) error {
+func (a *flowArchive) response(addr string, height int64, method string, q url.Values, out any, local ...*[]FlowArchiveReceipt) error {
 	var raw json.RawMessage
 	if err := a.rpc.GetJSON(method, q, &raw); err != nil {
 		return fmt.Errorf("commission archive %s request failed", method)
 	}
 	hash := sha256.Sum256(raw)
+	receipt := FlowArchiveReceipt{Address: addr, Height: height, Method: method, QueryPath: q.Get("path"), RequestData: q.Get("data"), SHA256: hex.EncodeToString(hash[:]), Response: string(raw)}
 	a.mu.Lock()
-	a.receipts = append(a.receipts, FlowArchiveReceipt{Address: addr, Height: height, Method: method, QueryPath: q.Get("path"), RequestData: q.Get("data"), SHA256: hex.EncodeToString(hash[:]), Response: string(raw)})
+	a.receipts = append(a.receipts, receipt)
 	a.mu.Unlock()
+	for _, dst := range local {
+		*dst = append(*dst, receipt)
+	}
 	var envelope struct{ Error json.RawMessage }
 	if err := json.Unmarshal(raw, &envelope); err != nil || (len(envelope.Error) > 0 && string(envelope.Error) != "null") {
 		return fmt.Errorf("invalid commission archive %s envelope", method)
@@ -65,7 +69,7 @@ func (a *flowArchive) response(addr string, height int64, method string, q url.V
 	return nil
 }
 
-func (a *flowArchive) header(addr string, height int64) (time.Time, error) {
+func (a *flowArchive) header(addr string, height int64, local ...*[]FlowArchiveReceipt) (time.Time, error) {
 	var body struct {
 		Result struct {
 			Block struct {
@@ -77,7 +81,7 @@ func (a *flowArchive) header(addr string, height int64) (time.Time, error) {
 			} `json:"block"`
 		} `json:"result"`
 	}
-	if err := a.response(addr, height, "block", url.Values{"height": {strconv.FormatInt(height, 10)}}, &body); err != nil {
+	if err := a.response(addr, height, "block", url.Values{"height": {strconv.FormatInt(height, 10)}}, &body, local...); err != nil {
 		return time.Time{}, err
 	}
 	h := body.Result.Block.Header
@@ -90,7 +94,7 @@ func (a *flowArchive) header(addr string, height int64) (time.Time, error) {
 type flowProtoRequest interface{ Marshal() ([]byte, error) }
 type flowProtoResponse interface{ Unmarshal([]byte) error }
 
-func (a *flowArchive) query(addr string, height int64, path string, request flowProtoRequest, response flowProtoResponse) error {
+func (a *flowArchive) query(addr string, height int64, path string, request flowProtoRequest, response flowProtoResponse, local ...*[]FlowArchiveReceipt) error {
 	data, err := request.Marshal()
 	if err != nil {
 		return err
@@ -105,7 +109,7 @@ func (a *flowArchive) query(addr string, height int64, path string, request flow
 		} `json:"result"`
 	}
 	q := url.Values{"path": {strconv.Quote(path)}, "height": {strconv.FormatInt(height, 10)}, "data": {"0x" + hex.EncodeToString(data)}}
-	if err := a.response(addr, height, "abci_query", q, &body); err != nil {
+	if err := a.response(addr, height, "abci_query", q, &body, local...); err != nil {
 		return err
 	}
 	r := body.Result.Response
@@ -129,6 +133,12 @@ func (a *flowArchive) cachedHoldings(addr string, day time.Time) (flowHoldings, 
 	return h, ok
 }
 
+func (a *flowArchive) holdingSource(addr string, day time.Time) CommissionFlowHoldingSource {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.holdings[addr+"|"+flowDay(day).Format(time.DateOnly)].Source
+}
+
 func (a *flowArchive) holdingsAt(s *Server, chain, addr string, day time.Time) (flowHoldings, error) {
 	if chain != apiMainnet {
 		return flowHoldings{}, fmt.Errorf("commission archive supports only the verified Hub chain")
@@ -146,11 +156,12 @@ func (a *flowArchive) holdingsAt(s *Server, chain, addr string, day time.Time) (
 		return h, err
 	}
 	end := flowDay(day).AddDate(0, 0, 1)
-	at, err := a.header(addr, last.Height)
+	var localReceipts []FlowArchiveReceipt
+	at, err := a.header(addr, last.Height, &localReceipts)
 	if err != nil {
 		return h, err
 	}
-	next, err := a.header(addr, last.Height+1)
+	next, err := a.header(addr, last.Height+1, &localReceipts)
 	if err != nil {
 		return h, err
 	}
@@ -164,7 +175,7 @@ func (a *flowArchive) holdingsAt(s *Server, chain, addr string, day time.Time) (
 	var key []byte
 	for page := 0; page < 1000; page++ {
 		var response banktypes.QueryAllBalancesResponse
-		if err := a.query(addr, last.Height, "/cosmos.bank.v1beta1.Query/AllBalances", &banktypes.QueryAllBalancesRequest{Address: addr, Pagination: &querytypes.PageRequest{Key: key, Limit: 1000}}, &response); err != nil {
+		if err := a.query(addr, last.Height, "/cosmos.bank.v1beta1.Query/AllBalances", &banktypes.QueryAllBalancesRequest{Address: addr, Pagination: &querytypes.PageRequest{Key: key, Limit: 1000}}, &response, &localReceipts); err != nil {
 			return h, err
 		}
 		for _, coin := range response.Balances {
@@ -185,7 +196,7 @@ func (a *flowArchive) holdingsAt(s *Server, chain, addr string, day time.Time) (
 	}
 	for page := 0; page < 1000; page++ {
 		var response stakingtypes.QueryDelegatorDelegationsResponse
-		if err := a.query(addr, last.Height, "/cosmos.staking.v1beta1.Query/DelegatorDelegations", &stakingtypes.QueryDelegatorDelegationsRequest{DelegatorAddr: addr, Pagination: &querytypes.PageRequest{Key: key, Limit: 1000}}, &response); err != nil {
+		if err := a.query(addr, last.Height, "/cosmos.staking.v1beta1.Query/DelegatorDelegations", &stakingtypes.QueryDelegatorDelegationsRequest{DelegatorAddr: addr, Pagination: &querytypes.PageRequest{Key: key, Limit: 1000}}, &response, &localReceipts); err != nil {
 			return h, err
 		}
 		for _, d := range response.DelegationResponses {
@@ -207,7 +218,7 @@ func (a *flowArchive) holdingsAt(s *Server, chain, addr string, day time.Time) (
 	}
 	for page := 0; page < 1000; page++ {
 		var response stakingtypes.QueryDelegatorUnbondingDelegationsResponse
-		if err := a.query(addr, last.Height, "/cosmos.staking.v1beta1.Query/DelegatorUnbondingDelegations", &stakingtypes.QueryDelegatorUnbondingDelegationsRequest{DelegatorAddr: addr, Pagination: &querytypes.PageRequest{Key: key, Limit: 1000}}, &response); err != nil {
+		if err := a.query(addr, last.Height, "/cosmos.staking.v1beta1.Query/DelegatorUnbondingDelegations", &stakingtypes.QueryDelegatorUnbondingDelegationsRequest{DelegatorAddr: addr, Pagination: &querytypes.PageRequest{Key: key, Limit: 1000}}, &response, &localReceipts); err != nil {
 			return h, err
 		}
 		for _, d := range response.UnbondingResponses {
@@ -227,7 +238,17 @@ func (a *flowArchive) holdingsAt(s *Server, chain, addr string, day time.Time) (
 		return h, fmt.Errorf("commission archive unbonding pagination did not finish")
 	}
 	a.mu.Lock()
-	a.holdings[addr+"|"+flowDay(day).Format(time.DateOnly)] = h
+	keyName := addr + "|" + flowDay(day).Format(time.DateOnly)
+	source := CommissionFlowHoldingSource{Kind: "archive_exact", Height: last.Height}
+	seen := map[string]bool{}
+	for _, receipt := range localReceipts {
+		if receipt.Address == addr && (receipt.Height == last.Height || receipt.Height == last.Height+1) && !seen[receipt.SHA256] {
+			source.ReceiptHashes = append(source.ReceiptHashes, receipt.SHA256)
+			seen[receipt.SHA256] = true
+		}
+	}
+	h.Source = source
+	a.holdings[keyName] = h
 	a.mu.Unlock()
 	return h, nil
 }

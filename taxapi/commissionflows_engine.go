@@ -127,6 +127,7 @@ type flowEvent struct {
 
 // flowHoldings is a wallet's native coin at the end of a day, in base units.
 type flowHoldings struct {
+	Source    CommissionFlowHoldingSource
 	Liquid    decimal.Decimal
 	Staked    map[string]decimal.Decimal
 	Unbonding map[string]decimal.Decimal
@@ -235,7 +236,7 @@ func (p *flowPool) take(amount decimal.Decimal) (out []flowPart, short decimal.D
 			if share.IsPositive() {
 				out = append(out, flowPart{Origin: x.Origin, Amount: share})
 			}
-			if rest := x.Amount.Sub(share); rest.GreaterThanOrEqual(flowDustAmount) {
+			if rest := x.Amount.Sub(share); rest.IsPositive() {
 				kept = append(kept, flowPart{Origin: x.Origin, Amount: rest})
 			}
 		}
@@ -303,12 +304,13 @@ func (p *flowPools) total() decimal.Decimal {
 }
 
 type flowWallet struct {
-	Addr     string
-	Hop      int
-	Since    time.Time
-	Known    bool
-	pools    [flowRules]*flowPools
-	Overdraw [flowRules]decimal.Decimal
+	Addr          string
+	Hop           int
+	Since         time.Time
+	Known         bool
+	OpeningSource CommissionFlowHoldingSource
+	pools         [flowRules]*flowPools
+	Overdraw      [flowRules]decimal.Decimal
 }
 
 // FlowFateKey is one line of a validator's result: coins of one commission
@@ -416,6 +418,7 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 		return fmt.Errorf("commission opening requires exact archive state")
 	}
 	w.Known = known
+	w.OpeningSource = h.Source
 	if known {
 		for r := 0; r < flowRules; r++ {
 			p := w.pools[r]
