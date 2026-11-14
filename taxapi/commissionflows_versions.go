@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -183,6 +184,9 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 		return err
 	}
 	snapshot := CommissionFlowVersion{Version: o.Version, Chain: run.Chain, Validator: run.Validator, Build: o.Build, ComputedAt: run.ComputedAt, RunJSON: string(r), RowsJSON: string(f), EvidenceJSON: string(b)}
+	if err := captureCommissionFlowPayload(os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"), snapshot); err != nil {
+		return err
+	}
 	// Create is intentionally not an upsert: even a retry must not change
 	// evidence already stored under this version and validator.
 	return s.db.Session(&gorm.Session{Logger: logger.Discard}).Transaction(func(tx *gorm.DB) error {
