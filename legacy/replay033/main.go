@@ -48,7 +48,7 @@ func plain(v interface{}) string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: replay033 scan|run [flags]")
+		fmt.Fprintln(os.Stderr, "usage: replay033 scan|run|export-zero [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -57,6 +57,8 @@ func main() {
 		err = scan(os.Args[2:])
 	case "run":
 		err = run(os.Args[2:])
+	case "export-zero":
+		err = exportZero(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown mode")
 	}

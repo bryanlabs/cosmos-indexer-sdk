@@ -8,10 +8,12 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-replay-go-mod go mod dow
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-replay-go-mod \
     --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-replay-go-build \
-    go test ./... && go build -trimpath -o /out/replay033 .
+    go test ./... && go build -trimpath -o /out/replay033 . && \
+    go build -trimpath -o /out/checkpoint-proof ./cmd/checkpoint-proof
 
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN adduser -D -u 1137 tax
 COPY --from=build /out/replay033 /usr/local/bin/replay033
+COPY --from=build /out/checkpoint-proof /usr/local/bin/checkpoint-proof
 USER tax
 ENTRYPOINT ["/usr/local/bin/replay033"]
