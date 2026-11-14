@@ -823,7 +823,7 @@ func checkStatementSummaryLocked(ctx context.Context, db, withdrawalDB *gorm.DB,
 		rows, err := db.WithContext(ctx).Raw(`SELECT validator_address, month FROM (
 			SELECT validator_address, date_trunc('month', day::timestamp)::timestamp AS month FROM statement_days
 			UNION SELECT validator_address, month::timestamp FROM statement_delegators
-		) cells ORDER BY md5(validator_address || month::text || ?::text) LIMIT ?`, seed, (cells+1)/2).Rows()
+		) cells ORDER BY md5(validator_address || month::text || ?::bigint::text) LIMIT ?`, seed, (cells+1)/2).Rows()
 		if err != nil {
 			return res, err
 		}
