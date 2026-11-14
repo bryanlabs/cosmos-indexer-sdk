@@ -33,10 +33,20 @@ func main() {
 	asOfText := flag.String("as-of", "", "exact exclusive end day YYYY-MM-DD")
 	members := flag.String("validators-file", "", "private JSON array of explicit validators")
 	output := flag.String("output", "", "new private export file, never stdout or overwrite")
+	profilePath := flag.String("private-profile", "", "exact source-bound private generation profile")
+	profileSHA := flag.String("private-profile-sha256", "", "exact immutable private profile digest")
 	timeout := flag.Duration("timeout", 60*time.Second, "whole read/export budget, not a provider restriction")
 	flag.Parse()
 	if *output == "" || *members == "" || *timeout <= 0 {
 		fail("private output, explicit membership and positive timeout are required")
+	}
+	var profile *taxapi.CommissionPrivateProfile
+	var err error
+	if *profilePath != "" || *profileSHA != "" {
+		profile, err = taxapi.LoadCommissionPrivateProfile(*profilePath, *profileSHA)
+		if err != nil {
+			fail("private export profile mismatch")
+		}
 	}
 	from, err := time.Parse(time.DateOnly, *fromText)
 	if err != nil {
@@ -84,7 +94,7 @@ func main() {
 	}
 	hash := sha256.New()
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
-	err = srv.ExportCommissionFlowVersions(taxapi.CommissionFlowBuildOptions{Version: *version, Build: *build, AsOf: asOf}, *chain, from, validators, io.MultiWriter(partial, hash))
+	err = srv.ExportCommissionFlowVersions(taxapi.CommissionFlowBuildOptions{Version: *version, Build: *build, AsOf: asOf, PrivateProfile: profile}, *chain, from, validators, io.MultiWriter(partial, hash))
 	if err != nil {
 		_ = partial.Close()
 		fail("private export incomplete, partial file retained and no complete file published")

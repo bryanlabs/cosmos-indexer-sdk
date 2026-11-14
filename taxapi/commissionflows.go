@@ -652,6 +652,9 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		if err := o.validate(); err != nil {
 			return err
 		}
+		if o.PrivateProfile != nil && !from.Equal(o.PrivateProfile.From) {
+			return fmt.Errorf("private projection generation start mismatch")
+		}
 		if !from.Before(o.AsOf) || o.AsOf.After(asOf) {
 			return fmt.Errorf("invalid commission trace date range")
 		}
@@ -687,6 +690,10 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		reader = NewServer(s.db, s.oracle, s.native)
 		reader.readOnlyLedger = true
 		reader.privateReadSnapshotTimeout = options[0].ReadSnapshotTimeout
+		reader.commissionPrivateProfile = options[0].PrivateProfile
+		if reader.commissionPrivateProfile != nil {
+			reader.privateProjectionReceipts = &commissionProjectionJournal{rows: map[string]CommissionPrivateProjectionReceipt{}}
+		}
 	}
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
 	if len(options) == 1 && options[0].ArchiveRPC != "" {
@@ -767,6 +774,9 @@ const (
 var flowDriftTolerance = decimal.NewFromInt(1000000)
 
 func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, validator string, from, asOf time.Time, save func(CommissionFlowRun, []CommissionFlow, CommissionFlowEvidence) error) (CommissionFlowRun, error) {
+	if s.commissionPrivateProfile != nil {
+		s, loader = s.privateProjectionTrace(loader)
+	}
 	run := CommissionFlowRun{Chain: chain, Validator: validator, FromDay: from, AsOf: asOf.AddDate(0, 0, -1), ComputedAt: nowUTC(), Overdraw: "{}", Commission: "{}", Untracked: "{}", DriftBase: "0"}
 	tr := newFlowTrace(validator, from, asOf, loader)
 	tr.strict = loader.private

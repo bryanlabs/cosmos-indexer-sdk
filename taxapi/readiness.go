@@ -16,16 +16,19 @@ const unknownClaimSemantics = "unknown_claim_semantics"
 // ReportReadiness covers the review and retained parser/decode evidence gates.
 // It does not certify archive coverage, prices, basis or off-chain history.
 type ReportReadiness struct {
-	ExportReady            bool     `json:"export_ready"`
-	ParserDecodeComplete   bool     `json:"parser_decode_complete"`
-	PendingAssetReviews    int      `json:"pending_asset_reviews"`
-	PendingSemanticReviews int      `json:"pending_semantic_reviews"`
-	ParserErrors           int64    `json:"parser_errors"`
-	DecodeErrors           int64    `json:"decode_errors"`
-	OpaqueMessages         int64    `json:"opaque_messages"`
-	UnreviewedMessages     int64    `json:"unreviewed_messages"`
-	Scope                  string   `json:"scope"`
-	ReviewRequired         []string `json:"review_required,omitempty"`
+	ExportReady              bool     `json:"export_ready"`
+	ParserDecodeComplete     bool     `json:"parser_decode_complete"`
+	PendingAssetReviews      int      `json:"pending_asset_reviews"`
+	PendingSemanticReviews   int      `json:"pending_semantic_reviews"`
+	ParserErrors             int64    `json:"parser_errors"`
+	ReclassifiedParserErrors int64    `json:"private_reclassified_parser_errors,omitempty"`
+	RemainingParserErrors    int64    `json:"private_remaining_parser_errors"`
+	PrivateProfileSHA256     string   `json:"private_profile_sha256,omitempty"`
+	DecodeErrors             int64    `json:"decode_errors"`
+	OpaqueMessages           int64    `json:"opaque_messages"`
+	UnreviewedMessages       int64    `json:"unreviewed_messages"`
+	Scope                    string   `json:"scope"`
+	ReviewRequired           []string `json:"review_required,omitempty"`
 }
 
 func semanticReviewReason(row Row) string {
@@ -237,7 +240,26 @@ func (s *Server) classificationReadiness(chain string, addresses []string, start
 		}
 		r.DecodeErrors += unattributed
 	}
-	r.ParserDecodeComplete = r.ParserErrors == 0 && r.DecodeErrors == 0 && r.OpaqueMessages == 0 && r.UnreviewedMessages == 0
+	r.RemainingParserErrors = r.ParserErrors
+	if p := s.commissionPrivateProfile; p != nil {
+		if !s.readOnlyLedger || s.privateProjectionSnapshot == "" || chainParam(chain) != apiMainnet || start.Before(p.From) || end.After(p.AsOf) || !start.Before(end) {
+			return r, fmt.Errorf("private projection scope mismatch")
+		}
+		var reclassified int64
+		if err := count(&reclassified, "JOIN (SELECT DISTINCT m.tx_id FROM message_parser_errors mpe JOIN messages m ON m.id=mpe.message_id WHERE mpe.id=10262 AND m.id=27907375 AND m.tx_id=18802568) parser_scope ON parser_scope.tx_id=t.id"); err != nil {
+			return r, err
+		}
+		if reclassified > 1 || reclassified > r.ParserErrors {
+			return r, fmt.Errorf("private projection error cardinality mismatch")
+		}
+		r.ReclassifiedParserErrors = reclassified
+		r.RemainingParserErrors -= reclassified
+		r.PrivateProfileSHA256 = p.digest
+		if reclassified != 0 && s.privateProjectionReceipts != nil {
+			s.privateProjectionReceipts.retain(addresses, start, end, CommissionPrivateProjectionReceipt{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, Snapshot: s.privateProjectionSnapshot, OriginalParserErrors: r.ParserErrors, ReclassifiedParserErrors: reclassified, RemainingParserErrors: r.RemainingParserErrors})
+		}
+	}
+	r.ParserDecodeComplete = r.RemainingParserErrors == 0 && r.DecodeErrors == 0 && r.OpaqueMessages == 0 && r.UnreviewedMessages == 0
 	r.ExportReady = r.ParserDecodeComplete
 	return r, nil
 }

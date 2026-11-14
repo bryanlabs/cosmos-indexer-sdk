@@ -38,15 +38,27 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 	started := time.Now()
 	ctx, cancel := s.readSnapshotContext()
 	defer cancel()
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	var pending *commissionProjectionJournal
+	if s.commissionPrivateProfile != nil && s.privateProjectionReceipts != nil {
+		pending = &commissionProjectionJournal{rows: map[string]CommissionPrivateProjectionReceipt{}}
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// The driver caches prepared statements, and after five runs Postgres
 		// may switch to a generic plan that cannot see the period or the type
 		// ids; the readiness counts then went from 1s to over 20s.
 		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
 			return err
 		}
-		return fn(&Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started})
+		reader := &Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started, commissionPrivateProfile: s.commissionPrivateProfile, privateProjectionReceipts: pending}
+		if err := reader.validatePrivateProjection(); err != nil {
+			return err
+		}
+		return fn(reader)
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err == nil && pending != nil {
+		s.privateProjectionReceipts.merge(pending)
+	}
+	return err
 }
 
 func (s *Server) requireReportReady(chain string, addresses []string, start, end time.Time) error {

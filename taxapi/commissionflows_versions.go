@@ -20,14 +20,15 @@ import (
 // storage leaves all prior published runs and flow rows untouched while a new
 // build is being proved. Serving endpoints do not read this table implicitly.
 type CommissionFlowVersion struct {
-	Version      string `gorm:"primaryKey"`
-	Chain        string `gorm:"primaryKey"`
-	Validator    string `gorm:"primaryKey"`
-	Build        string `gorm:"not null"`
-	ComputedAt   time.Time
-	RunJSON      string `gorm:"type:jsonb;not null"`
-	RowsJSON     string `gorm:"type:jsonb;not null"`
-	EvidenceJSON string `gorm:"type:jsonb;not null"`
+	Version              string `gorm:"primaryKey"`
+	Chain                string `gorm:"primaryKey"`
+	Validator            string `gorm:"primaryKey"`
+	Build                string `gorm:"not null"`
+	PrivateProfileSHA256 string
+	ComputedAt           time.Time
+	RunJSON              string `gorm:"type:jsonb;not null"`
+	RowsJSON             string `gorm:"type:jsonb;not null"`
+	EvidenceJSON         string `gorm:"type:jsonb;not null"`
 }
 
 func (CommissionFlowVersion) TableName() string { return "tax_commission_flow_versions" }
@@ -35,11 +36,12 @@ func (CommissionFlowVersion) TableName() string { return "tax_commission_flow_ve
 // CommissionFlowGeneration prevents slices with mismatched builds or windows
 // from being accepted under the same version name.
 type CommissionFlowGeneration struct {
-	Version string    `gorm:"primaryKey"`
-	Chain   string    `gorm:"primaryKey"`
-	Build   string    `gorm:"not null"`
-	FromDay time.Time `gorm:"type:date;not null"`
-	AsOf    time.Time `gorm:"type:date;not null"`
+	Version              string `gorm:"primaryKey"`
+	Chain                string `gorm:"primaryKey"`
+	Build                string `gorm:"not null"`
+	PrivateProfileSHA256 string
+	FromDay              time.Time `gorm:"type:date;not null"`
+	AsOf                 time.Time `gorm:"type:date;not null"`
 }
 
 func (CommissionFlowGeneration) TableName() string { return "tax_commission_flow_generations" }
@@ -53,6 +55,14 @@ type CommissionFlowBuildOptions struct {
 	ArchiveRPC string
 	// ReadSnapshotTimeout overrides only private versioned reads. Zero keeps 30s.
 	ReadSnapshotTimeout time.Duration
+	PrivateProfile      *CommissionPrivateProfile
+}
+
+func (o CommissionFlowBuildOptions) profileSHA() string {
+	if o.PrivateProfile != nil {
+		return o.PrivateProfile.digest
+	}
+	return ""
 }
 
 func (o CommissionFlowBuildOptions) validate() error {
@@ -61,6 +71,12 @@ func (o CommissionFlowBuildOptions) validate() error {
 	}
 	if strings.TrimSpace(o.Version) == "" || strings.TrimSpace(o.Build) == "" || o.AsOf.IsZero() {
 		return fmt.Errorf("versioned commission output requires version, build and exclusive as-of date")
+	}
+	if o.PrivateProfile == nil && strings.Contains(o.Version, "-profile") {
+		return fmt.Errorf("profile-named generation requires exact private profile")
+	}
+	if o.PrivateProfile != nil && (o.PrivateProfile.digest == "" || !o.AsOf.Equal(o.PrivateProfile.AsOf) || !strings.Contains(o.Version, "-profile"+o.PrivateProfile.digest[:12])) {
+		return fmt.Errorf("private profile requires its own immutable version and window")
 	}
 	if !o.AsOf.Equal(flowDay(o.AsOf)) {
 		return fmt.Errorf("commission as-of must be midnight UTC")
@@ -123,12 +139,14 @@ type CommissionFlowReadPrefix struct {
 }
 
 type CommissionFlowEvidence struct {
-	ReadFailure *CommissionReadFailure         `json:",omitempty"`
-	ReadPrefix  []CommissionFlowReadPrefix     `json:",omitempty"`
-	Wallets     []CommissionFlowWalletEvidence `json:",omitempty"`
-	Labels      []AddressLabel
-	Channels    map[string]string
-	Archive     []FlowArchiveReceipt
+	ReadFailure        *CommissionReadFailure         `json:",omitempty"`
+	ReadPrefix         []CommissionFlowReadPrefix     `json:",omitempty"`
+	Wallets            []CommissionFlowWalletEvidence `json:",omitempty"`
+	Labels             []AddressLabel
+	Channels           map[string]string
+	Archive            []FlowArchiveReceipt
+	PrivateProjections []CommissionPrivateProjectionReceipt `json:",omitempty"`
+	PrivateProfile     *CommissionPrivateProfileEvidence    `json:",omitempty"`
 }
 
 func (e *CommissionFlowEvidence) retainReadFailure(err error, order []*flowWallet) {
@@ -144,6 +162,9 @@ func (l *dbFlowLoader) evidence() CommissionFlowEvidence {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e := CommissionFlowEvidence{Channels: map[string]string{}}
+	if l.s.privateProjectionReceipts != nil {
+		e.PrivateProjections = l.s.privateProjectionReceipts.receipts()
+	}
 	for _, label := range l.labels {
 		e.Labels = append(e.Labels, label)
 	}
@@ -179,18 +200,26 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 	if len(evidence) > 1 {
 		return fmt.Errorf("only one evidence set is allowed")
 	}
+	if o.PrivateProfile != nil {
+		p := o.PrivateProfile
+		guard := &Server{db: s.db, readOnlyLedger: true, privateReadSnapshotTimeout: o.ReadSnapshotTimeout, commissionPrivateProfile: p}
+		if err := guard.withReadSnapshot(func(*Server) error { return nil }); err != nil {
+			return err
+		}
+		e.PrivateProfile = &CommissionPrivateProfileEvidence{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, ParserSHA256: p.ParserSHA256, EconomicProofSHA256: p.EconomicProofSHA256}
+	}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
-	snapshot := CommissionFlowVersion{Version: o.Version, Chain: run.Chain, Validator: run.Validator, Build: o.Build, ComputedAt: run.ComputedAt, RunJSON: string(r), RowsJSON: string(f), EvidenceJSON: string(b)}
+	snapshot := CommissionFlowVersion{Version: o.Version, Chain: run.Chain, Validator: run.Validator, Build: o.Build, PrivateProfileSHA256: o.profileSHA(), ComputedAt: run.ComputedAt, RunJSON: string(r), RowsJSON: string(f), EvidenceJSON: string(b)}
 	if err := captureCommissionFlowPayload(os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"), snapshot); err != nil {
 		return err
 	}
 	// Create is intentionally not an upsert: even a retry must not change
 	// evidence already stored under this version and validator.
 	return s.db.Session(&gorm.Session{Logger: logger.Discard}).Transaction(func(tx *gorm.DB) error {
-		generation := CommissionFlowGeneration{Version: o.Version, Chain: run.Chain, Build: o.Build, FromDay: run.FromDay, AsOf: run.AsOf}
+		generation := CommissionFlowGeneration{Version: o.Version, Chain: run.Chain, Build: o.Build, PrivateProfileSHA256: o.profileSHA(), FromDay: run.FromDay, AsOf: run.AsOf}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&generation).Error; err != nil {
 			return err
 		}
@@ -198,7 +227,7 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 		if err := tx.Where("version = ? AND chain = ?", o.Version, run.Chain).First(&stored).Error; err != nil {
 			return err
 		}
-		if stored.Build != generation.Build || !stored.FromDay.Equal(generation.FromDay) || !stored.AsOf.Equal(generation.AsOf) {
+		if stored.PrivateProfileSHA256 != generation.PrivateProfileSHA256 || stored.Build != generation.Build || !stored.FromDay.Equal(generation.FromDay) || !stored.AsOf.Equal(generation.AsOf) {
 			return fmt.Errorf("commission output version already belongs to a different build or window")
 		}
 		if err := storeCommissionFlowPayloads(tx, &snapshot); err != nil {
@@ -245,7 +274,7 @@ func reusableCommissionFlowVersion(snapshot CommissionFlowVersion, o CommissionF
 	if err := json.Unmarshal([]byte(snapshot.RunJSON), &run); err != nil {
 		return fmt.Errorf("invalid immutable commission result")
 	}
-	if snapshot.Build != o.Build || snapshot.Version != o.Version || snapshot.Chain != chain || snapshot.Validator != validator || run.Chain != chain || run.Validator != validator || !run.FromDay.Equal(from) || !run.AsOf.Equal(o.AsOf.AddDate(0, 0, -1)) {
+	if snapshot.PrivateProfileSHA256 != o.profileSHA() || snapshot.Build != o.Build || snapshot.Version != o.Version || snapshot.Chain != chain || snapshot.Validator != validator || run.Chain != chain || run.Validator != validator || !run.FromDay.Equal(from) || !run.AsOf.Equal(o.AsOf.AddDate(0, 0, -1)) {
 		return fmt.Errorf("immutable commission result has a different build or window")
 	}
 	switch run.Status {

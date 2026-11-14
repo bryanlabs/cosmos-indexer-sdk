@@ -38,6 +38,9 @@ type Server struct {
 	readOnlyLedger             bool
 	privateReadSnapshotTimeout time.Duration
 	readSnapshotStarted        time.Time
+	commissionPrivateProfile   *CommissionPrivateProfile
+	privateProjectionSnapshot  string
+	privateProjectionReceipts  *commissionProjectionJournal
 
 	attestOnce sync.Once
 	attest     *attestationCache
