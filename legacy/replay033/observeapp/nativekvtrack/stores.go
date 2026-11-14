@@ -18,6 +18,7 @@ type accountKV struct {
 	cached         bool
 	pending        map[string]struct{}
 	unknownPending bool
+	id             uint64
 }
 
 func (v *accountKV) accountView() *accountKV { return v }
@@ -36,11 +37,12 @@ func (v *accountKV) noteWrite(k []byte) {
 	if v.generation != v.t.generation {
 		v.t.fail()
 	}
+	v.t.candidate(k)
 	v.t.beforeWrite(k)
 	if !v.cached {
 		return
 	}
-	if len(v.t.fences) == 0 {
+	if len(v.t.fences) == 0 && !v.t.images {
 		v.unknownPending = true
 		return
 	}
@@ -49,8 +51,24 @@ func (v *accountKV) noteWrite(k []byte) {
 	}
 	v.pending[string(k)] = struct{}{}
 }
-func (v *accountKV) Set(k, b []byte) { v.noteWrite(k); v.target().Set(k, b) }
-func (v *accountKV) Delete(k []byte) { v.noteWrite(k); v.target().Delete(k) }
+func (v *accountKV) write(k, b []byte, op string, apply func()) {
+	active := v.t.writeSink != nil && v.t.writeActive != nil && v.t.writeActive()
+	var before []byte
+	if active {
+		before = v.t.read(v, k)
+	}
+	v.noteWrite(k)
+	apply()
+	if active {
+		var parent uint64
+		if v.parent != nil {
+			parent = v.parent.id
+		}
+		v.t.writeSink(v.id, parent, clone(k), before, clone(b), op)
+	}
+}
+func (v *accountKV) Set(k, b []byte) { v.write(k, b, "set", func() { v.target().Set(k, b) }) }
+func (v *accountKV) Delete(k []byte) { v.write(k, nil, "delete", func() { v.target().Delete(k) }) }
 func (v *accountKV) wrapChild(raw st.CacheWrap) st.CacheWrap {
 	child := v.t.wrapKV(raw.(st.KVStore))
 	cv := child.(interface{ accountView() *accountKV }).accountView()
@@ -70,10 +88,11 @@ func (v *accountKV) beforeFlush() {
 	if v.generation != v.t.generation {
 		v.t.fail()
 	}
-	if v.unknownPending && len(v.t.fences) != 0 {
+	if v.unknownPending && (len(v.t.fences) != 0 || v.t.images) {
 		v.t.fail()
 	}
 	for k := range v.pending {
+		v.t.candidate([]byte(k))
 		v.t.beforeWrite([]byte(k))
 	}
 }
@@ -89,6 +108,13 @@ func (v *accountKV) afterFlush() {
 	}
 	v.pending = nil
 	v.unknownPending = false
+	if v.t.flushSink != nil && v.t.writeActive != nil && v.t.writeActive() {
+		var parent uint64
+		if v.parent != nil {
+			parent = v.parent.id
+		}
+		v.t.flushSink(v.id, parent)
+	}
 }
 
 type cacheKV struct {
@@ -103,7 +129,7 @@ type commitKV struct {
 	st.Committer
 }
 
-func (v *commitKV) Commit() st.CommitID { v.t.boundary(); return v.Committer.Commit() }
+func (v *commitKV) Commit() st.CommitID { v.t.commitBoundary(v.accountKV); return v.Committer.Commit() }
 
 type queryKV struct {
 	*accountKV
@@ -119,7 +145,11 @@ type queryCacheKV struct {
 }
 
 func (t *Tracker) wrapKV(raw st.KVStore) st.KVStore {
-	v := &accountKV{KVStore: raw, raw: raw, t: t, generation: t.generation}
+	t.nextView++
+	if t.nextView == 0 {
+		t.fail()
+	}
+	v := &accountKV{KVStore: raw, raw: raw, t: t, generation: t.generation, id: t.nextView}
 	q, query := raw.(st.Queryable)
 	if c, ok := raw.(st.CommitKVStore); ok {
 		r := &commitKV{v, c}
@@ -294,7 +324,11 @@ func (m *commitMulti) SetTracingContext(c st.TraceContext) st.MultiStore {
 	return m
 }
 func (m *commitMulti) Commit() st.CommitID {
-	m.t.boundary()
+	var root st.KVStore
+	if m.t.images {
+		root = m.GetKVStore(m.t.key)
+	}
+	m.t.commitBoundary(root)
 	m.account = nil
 	return m.CommitMultiStore.Commit()
 }

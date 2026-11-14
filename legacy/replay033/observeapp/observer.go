@@ -2,10 +2,13 @@ package observeapp
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"sort"
+
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay033/observeapp/nativekvtrack"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/auth"
@@ -19,6 +22,9 @@ import (
 // Status is committed, aborted (attempted writes discarded), or exported.
 // Amount is a signed integer, never a floating point value.
 type Record struct {
+	NativeView      uint64          `json:"native_view,omitempty"`
+	NativeParent    uint64          `json:"native_parent,omitempty"`
+	WriteOperation  string          `json:"write_operation,omitempty"`
 	Classification  string          `json:"classification,omitempty"`
 	EvidenceQuality string          `json:"evidence_quality,omitempty"`
 	Before          json.RawMessage `json:"before,omitempty"`
@@ -56,6 +62,11 @@ type observer struct {
 	blockNative          func()
 	fullSnapshots        uint64
 	baselineCaptured     bool
+	lossless             bool
+	messageViews         [9]uint64
+	messageFlushed       [9]bool
+	anteViews            [9]uint64
+	anteFlushed          [9]bool
 	handlers             int
 	handlerFailure       bool
 	deposits             []gov.Deposit
@@ -76,7 +87,51 @@ func (app *GaiaApp) SetRecorder(w io.Writer) {
 	o.writer = w
 }
 
-func (app *GaiaApp) RecorderError() error { return app.observer.err }
+// SetLosslessRecording enables exact incremental native images. The full
+// iterator oracle remains the default. No financial admission is implied.
+func (app *GaiaApp) SetLosslessRecording(enabled bool) {
+	o := &app.observer
+	if o.active || len(o.pending) != 0 || o.err != nil || (o.lossless && !enabled) {
+		app.fail()
+		return
+	}
+	o.lossless = enabled
+	if enabled {
+		for i, t := range app.nativeTrackers {
+			t.EnableImages()
+			s := app.nativeStores()[i]
+			index := i
+			label := "store:" + s.key.Name() + ":" + s.name
+			t.ObserveFlushes(func(view, parent uint64) {
+				if view == o.messageViews[index] {
+					o.messageFlushed[index] = true
+				}
+				if view == o.anteViews[index] {
+					o.anteFlushed[index] = true
+				}
+				r := app.nativeRecord("native_cache_write", label, "native_cache_flush")
+				r.NativeView, r.NativeParent = view, parent
+				o.pending = append(o.pending, r)
+			})
+			t.ObserveWrites(func() bool { return app.observer.active }, func(view, parent uint64, k, b, a []byte, op string) {
+				r := app.nativeRecord("native_write", label+"/key:"+base64.StdEncoding.EncodeToString(k), "native_store_bytes")
+				r.NativeView, r.NativeParent, r.WriteOperation = view, parent, op
+				r.Before, r.After = app.nativeJSON(b), app.nativeJSON(a)
+				app.observer.pending = append(app.observer.pending, r)
+			})
+		}
+	}
+}
+func (app *GaiaApp) RecorderError() error {
+	if app.observer.lossless {
+		for _, t := range app.nativeTrackers {
+			if t.Error() != nil {
+				app.fail()
+			}
+		}
+	}
+	return app.observer.err
+}
 func (app *GaiaApp) marker(kind, phase string, code uint32) {
 	o := &app.observer
 	o.pending = append(o.pending, Record{Kind: kind, Validator: o.validator, Delegator: o.delegator, Height: o.height, Tx: o.tx, Message: o.message, Phase: phase, Label: o.label, Code: code})
@@ -107,17 +162,84 @@ func (app *GaiaApp) snapshot(ctx sdk.Context) balances {
 type accountingFence struct {
 	ctx    sdk.Context
 	before balances
+	raw    *nativekvtrack.Fence
 }
 
 func (app *GaiaApp) openAccounting(ctx sdk.Context) *accountingFence {
-	return &accountingFence{ctx: ctx, before: app.snapshot(ctx)}
+	f := &accountingFence{ctx: ctx}
+	if !app.observer.lossless {
+		f.before = app.snapshot(ctx)
+		return f
+	}
+	var err error
+	f.raw, err = app.nativeTrackers[1].OpenFence(ctx.MultiStore().GetKVStore(app.keyAccount))
+	if err != nil {
+		app.fail()
+	}
+	return f
 }
 func (app *GaiaApp) closeAccounting(f *accountingFence, records []Record) (balances, balances) {
 	if f == nil {
 		app.fail()
 		return balances{}, balances{}
 	}
-	return f.before, app.snapshot(f.ctx)
+	if !app.observer.lossless {
+		return f.before, app.snapshot(f.ctx)
+	}
+	var keys [][]byte
+	for _, r := range records {
+		if r.Kind != "movement" {
+			continue
+		}
+		a, err := sdk.AccAddressFromBech32(r.Address)
+		if err != nil || len(a) != 20 || a.String() != r.Address {
+			app.fail()
+			continue
+		}
+		if _, ok := sdk.NewIntFromString(r.Amount); !ok {
+			app.fail()
+		}
+		keys = append(keys, auth.AddressStoreKey(a))
+	}
+	b, a, err := f.raw.CloseFence(keys)
+	if err != nil {
+		app.fail()
+	}
+	return app.decodeAccounting(b), app.decodeAccounting(a)
+}
+func (app *GaiaApp) decodeAccounting(values nativekvtrack.Values) (out balances) {
+	out = balances{}
+	defer func() {
+		if recover() != nil {
+			app.fail()
+		}
+	}()
+	for key, value := range values {
+		// Full IterateAccounts only decodes the address prefix. Other raw keys
+		// remain in complete native images, not invented account balances.
+		if len(key) == 0 {
+			app.fail()
+			continue
+		}
+		if key[0] != auth.AddressStoreKeyPrefix[0] || value == nil {
+			continue
+		}
+		var a auth.Account
+		if len(key) != 21 || app.cdc.UnmarshalBinaryBare(value, &a) != nil || a == nil {
+			app.fail()
+			continue
+		}
+		if !bytes.Equal([]byte(key)[1:], a.GetAddress()) {
+			app.fail()
+			continue
+		}
+		for _, c := range a.GetCoins() {
+			if !c.Amount.IsZero() {
+				out[balanceKey{a.GetAddress().String(), c.Denom}] = c.Amount
+			}
+		}
+	}
+	return
 }
 func amount(b balances, k balanceKey) sdk.Int {
 	if n, ok := b[k]; ok {
@@ -305,8 +427,21 @@ func (app *GaiaApp) observeAnte(h sdk.AnteHandler) sdk.AnteHandler {
 				afterCtx = newCtx
 			}
 			finishNative()
-			fence.ctx = afterCtx
-			before, after := app.closeAccounting(fence, o.pending[start:])
+			inputs := o.pending[start:]
+			if o.lossless {
+				if afterCtx.MultiStore().GetKVStore(app.keyAccount) != ctx.MultiStore().GetKVStore(app.keyAccount) {
+					app.fail()
+				}
+				inputs = append([]Record(nil), inputs...)
+				if std, ok := tx.(auth.StdTx); ok && len(std.GetSigners()) > 0 {
+					for _, c := range std.Fee.Amount {
+						inputs = append(inputs, Record{Kind: "movement", Address: std.GetSigners()[0].String(), Denom: c.Denom, Amount: "0"})
+					}
+				}
+			} else {
+				fence.ctx = afterCtx
+			}
+			before, after := app.closeAccounting(fence, inputs)
 			// auth v0.33.2 writes the payer directly, not through bank. Independently
 			// expect its signed fee only, and reconcile against the complete account set.
 			std, ok := tx.(auth.StdTx)
@@ -364,22 +499,51 @@ func (app *GaiaApp) DeliverTx(tx []byte) abci.ResponseDeliverTx {
 	o.message = -1
 	o.handlers, o.handlerFailure = 0, false
 	o.anteCalled = false
+	o.messageViews, o.anteViews = [9]uint64{}, [9]uint64{}
+	o.messageFlushed, o.anteFlushed = [9]bool{}, [9]bool{}
 	ctx := app.NewContext(false, abci.Header{Height: o.height})
 	fence := app.openAccounting(ctx)
 	previousPhase := o.phase
 	o.phase = "transaction"
 	finishNative := app.nativeFence(ctx)
-	o.phase = previousPhase
+	if !o.lossless {
+		o.phase = previousPhase
+	}
 	start := len(o.pending)
 	res := app.BaseApp.DeliverTx(tx)
 	finishNative()
+	o.phase = previousPhase
 	if !o.anteCalled {
 		o.pending = append(o.pending, Record{Kind: "accounting", Height: o.height, Tx: o.tx, Message: -1, Phase: "ante", Label: "ante_not_invoked", Status: "aborted", Code: res.Code})
 	}
 	// BaseApp may return a deferred gas error after writing the message cache.
 	// Net-zero movements cannot disambiguate that case. Never classify them
 	// as aborted merely because the final response failed.
-	if res.Code != 0 && o.handlers > 0 && !o.handlerFailure {
+	messageCommitted := res.Code == 0
+	if o.lossless {
+		anteFlushed := 0
+		for _, yes := range o.anteFlushed {
+			if yes {
+				anteFlushed++
+			}
+		}
+		if anteFlushed != 0 && anteFlushed != 9 {
+			app.fail()
+		}
+		flushed := 0
+		for _, yes := range o.messageFlushed {
+			if yes {
+				flushed++
+			}
+		}
+		if flushed != 0 && flushed != 9 {
+			app.fail()
+		}
+		messageCommitted = flushed == 9
+		if o.handlers > 0 && res.Code == 0 && !messageCommitted {
+			app.fail()
+		}
+	} else if res.Code != 0 && o.handlers > 0 && !o.handlerFailure {
 		app.fail()
 	}
 	var retained []Record
@@ -388,7 +552,7 @@ func (app *GaiaApp) DeliverTx(tx []byte) abci.ResponseDeliverTx {
 		if r.Status == "aborted" {
 			continue
 		}
-		if r.Phase == "message" && res.Code != 0 {
+		if r.Phase == "message" && !messageCommitted {
 			r.Status = "aborted"
 			continue
 		}
@@ -439,7 +603,12 @@ func (app *GaiaApp) Commit() abci.ResponseCommit {
 			return abci.ResponseCommit{}
 		}
 	}
+	previousPhase := o.phase
+	if o.lossless {
+		o.phase = "commit"
+	}
 	res := app.BaseApp.Commit()
+	o.phase = previousPhase
 	if o.active {
 		o.tx, o.message = -1, -1
 		app.marker("height_completed", "block", 0)

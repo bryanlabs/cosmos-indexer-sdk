@@ -14,7 +14,7 @@ func completeNativeOracle(t *testing.T, app *GaiaApp, ctx sdk.Context, native na
 		expected := make([]nativeKV, 0)
 		it := quiet(ctx).KVStore(s.key).Iterator(nil, nil)
 		for ; it.Valid(); it.Next() {
-			expected = append(expected, nativeKV{nativeCopy(it.Key()), nativeCopy(it.Value())})
+			expected = append(expected, nativeKV{Key: nativeCopy(it.Key()), Value: nativeCopy(it.Value())})
 		}
 		it.Close()
 		if !reflect.DeepEqual(expected, native[i].values) {

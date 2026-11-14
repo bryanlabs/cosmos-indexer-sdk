@@ -15,14 +15,26 @@ var ErrTracking = errors.New("native KV tracking failed")
 // Values owns its keys and values. A present key with nil value means absence.
 type Values map[string][]byte
 
-// Tracker is permanently attached to store decorators. No fences means no
-// observer reads, key validation, or copying on the mutation path.
+// Tracker is permanently attached to store decorators. Without fences or
+// incremental images, mutations do no observer reads, validation or copying.
 type Tracker struct {
-	key        st.StoreKey
-	fences     map[*Fence]struct{}
-	err        error
-	generation uint64
-	revision   uint64
+	key             st.StoreKey
+	fences          map[*Fence]struct{}
+	err             error
+	generation      uint64
+	revision        uint64
+	images          bool
+	image           []Entry
+	imageGeneration uint64
+	dirty           map[string]uint64
+	lastView        *accountKV
+	lastImage       []Entry
+	lastRevision    uint64
+	lastGeneration  uint64
+	nextView        uint64
+	writeActive     func() bool
+	writeSink       func(uint64, uint64, []byte, []byte, []byte, string)
+	flushSink       func(uint64, uint64)
 }
 
 func NewTracker() *Tracker { return &Tracker{} }
@@ -179,6 +191,11 @@ func (f *Fence) CloseFence(extra [][]byte) (Values, Values, error) {
 
 // A commit/load cannot silently carry a fence across an invalidated view.
 func (t *Tracker) boundary() {
+	t.image = nil
+	t.lastView, t.lastImage = nil, nil
+	if t.images {
+		t.dirty = make(map[string]uint64)
+	}
 	t.touch()
 	if len(t.fences) != 0 {
 		t.fail()

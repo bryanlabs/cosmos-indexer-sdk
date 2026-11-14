@@ -52,8 +52,16 @@ func exportZero(args []string) (failure error) {
 	out := fs.String("out", "", "private complete native export, exclusive new file")
 	requiredHeight := fs.Int64("require-height", 500000, "exact committed source height")
 	recordsPath := fs.String("coin-records", "", "optional exclusive private native payout and state evidence")
+	lossless := fs.Bool("lossless-recording", false, "exact incremental all-key native recording, requires coin-records")
+	compressEvidence := fs.Bool("compress-evidence", false, "lossless gzip framing for private coin records")
 	if fs.Parse(args) != nil {
 		return fmt.Errorf("invalid native export flags")
+	}
+	if *compressEvidence && *recordsPath == "" {
+		return fmt.Errorf("compression requires private coin records")
+	}
+	if *lossless && *recordsPath == "" {
+		return fmt.Errorf("lossless recording requires private coin records")
 	}
 	if *home == "" || *out == "" || *requiredHeight < 1 {
 		return fmt.Errorf("home, out and positive require-height are required")
@@ -86,15 +94,16 @@ func exportZero(args []string) (failure error) {
 	var state json.RawMessage
 	var validators []tmtypes.GenesisValidator
 	if *recordsPath != "" {
-		records, e := createPrivateEvidence(*recordsPath)
+		records, e := createRecordEvidence(*recordsPath, *compressEvidence)
 		if e != nil {
 			return e
 		}
 		defer records.Close()
 		observed := observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true)
+		observed.SetLosslessRecording(*lossless)
 		observed.SetRecorder(records)
 		state, validators, err = observed.ExportObserved()
-		if observed.RecorderError() != nil || records.Sync() != nil {
+		if observed.RecorderError() != nil || records.Sync() != nil || records.Close() != nil {
 			return fmt.Errorf("native export evidence failed")
 		}
 	} else {

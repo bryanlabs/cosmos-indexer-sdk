@@ -13,10 +13,7 @@ import (
 // Native bytes are evidence, not token movements or financial acceptance. The
 // checkpoints retain every persistent key, including indexes, queues and params.
 // Byte slices encode as base64; absent values encode as null, not empty bytes.
-type nativeKV struct {
-	Key   []byte `json:"key"`
-	Value []byte `json:"value"`
-}
+type nativeKV = nativekvtrack.Entry
 type nativeStore struct {
 	name string
 	key  *sdk.KVStoreKey
@@ -88,18 +85,27 @@ func (app *GaiaApp) nativeSnapshot(ctx sdk.Context, stores []nativeStore) (out n
 			continue
 		}
 		values := make([]nativeKV, 0)
-		func() {
-			it := quiet(ctx).KVStore(s.key).Iterator(nil, nil)
-			defer it.Close()
-			for ; it.Valid(); it.Next() {
-				key := nativeCopy(it.Key())
-				if len(key) == 0 || (len(values) > 0 && bytes.Compare(values[len(values)-1].Key, key) >= 0) {
-					app.fail()
-					return
-				}
-				values = append(values, nativeKV{key, nativeCopy(it.Value())})
+		if app.observer.lossless {
+			var imageErr error
+			values, imageErr = app.nativeTrackers[i].Image(view)
+			if imageErr != nil {
+				app.fail()
+				return nil, false
 			}
-		}()
+		} else {
+			func() {
+				it := quiet(ctx).KVStore(s.key).Iterator(nil, nil)
+				defer it.Close()
+				for ; it.Valid(); it.Next() {
+					key := nativeCopy(it.Key())
+					if len(key) == 0 || (len(values) > 0 && bytes.Compare(values[len(values)-1].Key, key) >= 0) {
+						app.fail()
+						return
+					}
+					values = append(values, nativeKV{Key: key, Value: nativeCopy(it.Value())})
+				}
+			}()
+		}
 		now, e := app.nativeTrackers[i].Token(view)
 		if e != nil || now != token {
 			app.fail()
@@ -117,6 +123,20 @@ func (app *GaiaApp) nativeSnapshot(ctx sdk.Context, stores []nativeStore) (out n
 func (app *GaiaApp) nativeFence(ctx sdk.Context) func() {
 	stores := app.nativeStores()
 	before, ok := app.nativeSnapshot(ctx, stores)
+	if app.observer.lossless {
+		for i, s := range stores {
+			id, err := app.nativeTrackers[i].ViewID(ctx.MultiStore().GetKVStore(s.key))
+			if err != nil {
+				app.fail()
+			}
+			if app.observer.phase == "message" {
+				app.observer.messageViews[i] = id
+			}
+			if app.observer.phase == "ante" {
+				app.observer.anteViews[i] = id
+			}
+		}
+	}
 	base := app.nativeRecord("native_state", "", "native_store_bytes")
 	closed := false
 	return func() {

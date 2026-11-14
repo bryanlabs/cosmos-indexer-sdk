@@ -137,9 +137,21 @@ func run(args []string) error {
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
 	auditPath := fs.String("native-audit", "", "optional exclusive full native response and all-store evidence")
+	historyPath := fs.String("native-history", "", "optional exclusive compact complete native results/header/all9roots history")
 	coinRecords := fs.String("coin-records", "", "optional exclusive private native033 movement evidence")
+	lossless := fs.Bool("lossless-recording", false, "exact incremental all-key native recording, requires coin-records")
+	compressEvidence := fs.Bool("compress-evidence", false, "lossless gzip framing for coin records and native history")
 	verifyTarget := fs.Bool("verify-target-next-header", false, "verify target using next cached header without executing it")
 	fs.Parse(args)
+	if *historyPath != "" && (!*verifyTarget || !*compare) {
+		return fmt.Errorf("native history requires all result comparisons and target next-header proof")
+	}
+	if *compressEvidence && *coinRecords == "" && *historyPath == "" {
+		return fmt.Errorf("compression requires private evidence")
+	}
+	if *lossless && *coinRecords == "" {
+		return fmt.Errorf("lossless recording requires private coin records")
+	}
 	if *coinRecords != "" && (*chain != "cosmoshub-1" || !*compare || !*verifyTarget) {
 		return fmt.Errorf("Hub1 recording requires exact chain, all result comparisons and target next-header proof")
 	}
@@ -190,15 +202,16 @@ func run(args []string) error {
 	}
 	var app replayApp
 	var observed *observeapp.GaiaApp
-	var movementFile *os.File
+	var movementFile *evidenceWriter
 	if *coinRecords != "" {
-		records, err := createPrivateEvidence(*coinRecords)
+		records, err := createRecordEvidence(*coinRecords, *compressEvidence)
 		if err != nil {
 			return err
 		}
 		defer records.Close()
 		movementFile = records
 		observed = observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+		observed.SetLosslessRecording(*lossless)
 		observed.SetRecorder(records)
 		app = observed
 	} else {
@@ -214,6 +227,17 @@ func run(args []string) error {
 			return err
 		}
 		defer auditFile.Close()
+	}
+	var historyFile *evidenceWriter
+	if *historyPath != "" {
+		if !outsideCheckpoint(*home, *historyPath) {
+			return fmt.Errorf("native history must be outside replay home")
+		}
+		historyFile, err = createRecordEvidence(*historyPath, *compressEvidence)
+		if err != nil {
+			return err
+		}
+		defer historyFile.Close()
 	}
 	vals, err := openValidators(filepath.Join(*home, "validator-updates.jsonl"))
 	if err != nil {
@@ -277,6 +301,9 @@ func run(args []string) error {
 			lastResults = tail.Results
 		}
 		fmt.Printf("resumed after height %d\n", height)
+	}
+	if err := auditHistoryAnchor(historyFile, db, app, *chain, *genesis); err != nil {
+		return err
 	}
 	if auditFile != nil {
 		if err := auditNativeCheckpoint(*auditPath+".source-checkpoint.json", *chain, app); err != nil {
@@ -408,6 +435,8 @@ func run(args []string) error {
 				if failure = observed.RecorderError(); failure != nil {
 					return
 				}
+			}
+			if observed != nil || historyFile != nil {
 				if failure = requireRecordedResults(c.results, begin, deliver, end); failure != nil {
 					return
 				}
@@ -427,6 +456,9 @@ func run(args []string) error {
 			return fail(h, "%v", failure)
 		}
 		if err := auditNative(auditFile, app, c, begin, deliver, end); err != nil {
+			return fail(h, "%v", err)
+		}
+		if err := auditNativeHistory(historyFile, db, app, c, begin, deliver, end); err != nil {
 			return fail(h, "%v", err)
 		}
 		if err := vals.advance(h); err != nil {
@@ -457,6 +489,22 @@ func run(args []string) error {
 			}
 			if movementFile.Sync() != nil {
 				return fail(height, "cannot sync sealed private evidence")
+			}
+		}
+		if movementFile != nil {
+			if err := movementFile.Close(); err != nil {
+				return fail(height, "cannot close private movement evidence")
+			}
+		}
+		if historyFile != nil {
+			if state.ResultDiffs != 0 {
+				return fail(height, "native history has unmatched results")
+			}
+			if err := completeNativeHistory(historyFile, app, state.From, next); err != nil {
+				return fail(height, "native history completion failed")
+			}
+			if err := historyFile.Close(); err != nil {
+				return fail(height, "cannot close private native history")
 			}
 		}
 		report("reached target; verified by unexecuted next header")
