@@ -84,6 +84,50 @@ func TestPaidFeeNativeCollectionNotSignedIntent(t *testing.T) {
 	r.Rows[0].Amount = "10"
 	refused(t, func() { financialCheck(r, a, b) })
 }
+func TestPreAnteFailureCannotInventEffects(t *testing.T) {
+	marker := record{Kind: "accounting", Label: "ante_not_invoked", Height: 9, Tx: 0, Message: -1, Phase: "ante", Status: "aborted", Code: 11}
+	original := []byte{1, 2, 3}
+	r := request{Height: 9, Tx: 0, Message: -1, Phase: "transaction", Changes: blank(), Transactions: [][]byte{original}, UninvokedAnte: []record{marker}, Rows: []record{{Kind: "native_execution", Label: "native_abci", Height: 9, Tx: 0, Message: -1, Phase: "transaction", Status: "committed", Code: 11, Before: raw(original), After: raw(map[string]interface{}{"code": 11})}}}
+	preAnteFailure(r)
+	r.Rows[0].Code = 12
+	refused(t, func() { preAnteFailure(r) })
+	r.Rows[0].Code = 11
+	r.Rows[0].Kind = "movement"
+	refused(t, func() { preAnteFailure(r) })
+	r.Rows[0].Kind = "native_execution"
+	r.UninvokedAnte[0].Status = "committed"
+	refused(t, func() { preAnteFailure(r) })
+	r.UninvokedAnte[0].Status = "aborted"
+	r.Changes["acc"] = []pair{{Key: []byte{1}, Before: raw(nil), Value: raw([]byte{2})}}
+	refused(t, func() { preAnteFailure(r) })
+}
+
+func TestSignedZeroFeeVectorAndPayerBinding(t *testing.T) {
+	del := sdk.AccAddress(make([]byte, 20))
+	val := sdk.ValAddress(make([]byte, 20))
+	a, b := zeroFinancial(), zeroFinancial()
+	makeRequest := func(fees sdk.Coins) request {
+		tx := auth.NewStdTx([]sdk.Msg{staking.NewMsgDelegate(del, val, sdk.NewInt64Coin("uatom", 1))}, auth.StdFee{Amount: fees}, nil, "")
+		data, e := codec.MarshalBinaryLengthPrefixed(tx)
+		must(e)
+		return request{Tx: 0, Phase: "ante", Status: "committed", Transactions: [][]byte{data}}
+	}
+	signedAnte(makeRequest(sdk.Coins{{Denom: "uatom", Amount: sdk.ZeroInt()}}), a, b)
+	signedAnte(makeRequest(sdk.Coins{}), a, b)
+	r := makeRequest(sdk.Coins{sdk.NewInt64Coin("uatom", 10)})
+	refused(t, func() { signedAnte(r, a, b) })
+	a.Bank[del.String()+"/uatom"] = sdk.NewInt(100)
+	b.Bank[del.String()+"/uatom"] = sdk.NewInt(90)
+	b.Fees = sdk.Coins{sdk.NewInt64Coin("uatom", 10)}
+	signedAnte(r, a, b)
+	refused(t, func() { signedAnte(makeRequest(sdk.Coins{{Denom: "uatom", Amount: sdk.ZeroInt()}}), a, b) })
+	b.Fees = sdk.Coins{sdk.NewInt64Coin("uatom", 9)}
+	refused(t, func() { signedAnte(r, a, b) })
+	b.Fees = sdk.Coins{sdk.NewInt64Coin("uatom", 10)}
+	b.Bank = map[string]sdk.Int{"wrong-payer/uatom": sdk.NewInt(-10)}
+	refused(t, func() { signedAnte(r, a, b) })
+}
+
 func TestOriginalNativeStakingRequestBinding(t *testing.T) {
 	del := sdk.AccAddress(make([]byte, 20))
 	val := sdk.ValAddress(make([]byte, 20))

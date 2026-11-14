@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zlib
-from consume_bounded import Consumer, HistoryWindow, native_numbers, selected_lines, sha, verify
+from consume_bounded import Consumer, HistoryWindow, native_numbers, patches, selected_lines, sha, verify
 from compare_zero_export import strict_json
 
 ROOT = os.environ.get('HUB1_BOUNDED_CAPTURE')
@@ -17,10 +17,62 @@ class Scalars(unittest.TestCase):
         value = native_numbers(strict_json('{"number":1,"text":"1"}'))
         self.assertIs(type(value['number']), int)
         self.assertIs(type(value['text']), str)
+    def test_immutable_state_hash_cache_and_net_zero_touches(self):
+        from consume_bounded import commitment
+        c = Consumer(lambda q: None, {}, 1000)
+        state = {b'key': 'AQ=='}
+        with patch('consume_bounded.commitment', wraps=commitment) as oracle:
+            self.assertEqual(c.state_commitment(state), c.state_commitment(state))
+            self.assertEqual(oracle.call_count, 1)
+            self.assertEqual(c.state_commitment(state.copy()), c.state_commitment(state))
+            self.assertEqual(oracle.call_count, 2)
+        self.assertEqual(patches({'acc': state}, {'acc': state}), {'acc': []})
+        touched = patches({'acc': state}, {'acc': state}, {'acc': {b'key'}})
+        self.assertEqual(len(touched['acc']), 1)
+        self.assertEqual(touched['acc'][0]['before'], touched['acc'][0]['value'])
+
     def test_duplicate_fields_and_fraction_refused(self):
         for text in ('{"a":1,"a":2}', '{"a":1.0}', '{"a":NaN}'):
             with self.assertRaises(ValueError):
                 native_numbers(strict_json(text))
+
+class PhaseOwners(unittest.TestCase):
+    def test_pre_ante_failure_retains_marker_and_proves_no_changes(self):
+        h = 7
+        history = {h: dict(header={}, transactions=['original'], deliver=[dict(code=11)])}
+        sent = []
+        c = Consumer(sent.append, history, h)
+        state = {name: {} for name in ('main', 'acc', 'staking', 'slashing', 'mint', 'distr', 'gov', 'fee', 'params')}
+        c.latest = state.copy()
+        c.before = state.copy()
+        c.after = state.copy()
+        c.scope = (h, 0, -1, 'transaction', 'committed')
+        marker = dict(kind='accounting', height=h, tx=0, message=-1, phase='ante', status='aborted', label='ante_not_invoked', code=11)
+        c.rows[h, 0, -1, 'ante', 'aborted'] = [marker]
+        c.finish_scope()
+        self.assertEqual(sent[0]['uninvoked_ante'], [marker])
+        self.assertFalse(c.rows)
+        c = Consumer(lambda q: None, history, h)
+        c.latest, c.before, c.after = state.copy(), state.copy(), state.copy()
+        c.scope = (h, 0, -1, 'transaction', 'committed')
+        with self.assertRaises(ValueError):
+            c.finish_scope()
+
+    def test_end_block_maturity_owner_is_not_a_separate_state_phase(self):
+        sent = []
+        h = 400760
+        c = Consumer(sent.append, {h: dict(header={}, transactions=[])}, h, 400001)
+        state = {name: {} for name in ('main', 'acc', 'staking', 'slashing', 'mint', 'distr', 'gov', 'fee', 'params')}
+        c.latest = state.copy()
+        c.before = state.copy()
+        c.after = state.copy()
+        c.scope = (h, -1, -1, 'end_block', 'committed')
+        c.accept(dict(kind='native_execution', height=h, tx=-1, message=-1, phase='end_block', status='committed', validator='source-owner', delegator='delegation-owner', label='native_complete_redelegation', code=0))
+        c.finish_scope()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]['rows'][0]['validator'], 'source-owner')
+        self.assertEqual(sent[0]['rows'][0]['delegator'], 'delegation-owner')
+        self.assertFalse(c.rows)
 
 @unittest.skipUnless(ROOT, 'explicit actual read-only bounded capture required')
 class Actual(unittest.TestCase):
@@ -31,7 +83,7 @@ class Actual(unittest.TestCase):
         cls.history = {int(r['height']): r for r in selected_lines(cls.root, cls.binding, 'native-history') if r['kind'] == 'height'}
     def control(self, name):
         changed = False
-        consumer = Consumer(lambda value: None, self.history, self.binding['through'])
+        consumer = Consumer(lambda value: None, self.history, self.binding['through'], self.binding['first'])
         def records():
             nonlocal changed
             for original in selected_lines(self.root, self.binding, 'movements'):
@@ -75,11 +127,11 @@ class Actual(unittest.TestCase):
                 self.control(name)
     def test_history_cursor_keeps_current_and_next_only(self):
         history = HistoryWindow(self.root, self.binding)
-        for height in range(1, self.binding['through'] + 2):
+        for height in range(self.binding['first'], self.binding['through'] + 2):
             self.assertEqual(history[height]['height'], height)
             self.assertLessEqual(len(history.cache), 2)
         with self.assertRaises(ValueError):
-            history[1]
+            history[self.binding['first']]
     def test_changed_source_bytes_refused(self):
         binding = copy.deepcopy(self.binding)
         binding['streams']['movements']['fragment_sha256'] = '0' * 64

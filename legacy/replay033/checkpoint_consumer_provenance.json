@@ -1,0 +1,26 @@
+{
+  "schema": "native033-checkpoint-consumer-executed-source-pins-v1",
+  "producer_signed_source": "e999d6057f3f791ba9ed540616ed0ff7385ea371",
+  "producer_image_sha256": "ba3fe2827be1057855a40edfa0c2f37bda2b80392e5c0442fa537d33d5abd190",
+  "actual_independent_native_helper_sha256": "aa5670f673574fad0641530580bc91d394a1649d2e5520ee6d618ea1395c8ea4",
+  "actual_independent_native_go_source_sha256": "4ae1b3c1818cf04881e7ca0e8e1696571e79e18a7aef977b8505e765ed7024cf",
+  "actual_checkpoint_capture_source_sha256": "dce4fc07d20575232ba515f40d5faeff06e5a0abefb6b576f37d076b9943f5f8",
+  "actual_executed_python_source_sha256": {
+    "200001..201000": "1a4c5ee354189c75db11fc2fec911b2beb7d762f5e7a6bab4f40a529c06617ec",
+    "400001..401000": "963fca1f9677155bb3a6b7c93bfd99a42dc633bb16bee56787001ccded190ea7"
+  },
+  "actual_completed_component_receipt_sha256": {
+    "200001..201000": "c0241059e8a76a08d4bd19f9dc51582f328379590dc8de387be277f39036aa9b",
+    "400001..401000": "b61f5a50523817dd158601f4653a84796d133a7658ba2ce686aee249490835c5"
+  },
+  "actual_checkpoint_negative_controls_sha256": {
+    "200001..201000": "0876360b805ef53783399c1c6ac55f6680c8d301c7c08775c2815dab5b637d2f",
+    "400001..401000": "ce1d699021dbac8dc4cc857e0d8bdb1badfb461d77fb7dfcf7a2f38ed118b74e"
+  },
+  "scope": "Two new checkpoint-started 1000-height private financial components, not whole-source acceptance",
+  "source_snapshots_retained_under": "hub1-checkpoint-consumer-20261114T1534Z/source-v2 and source-v3",
+  "later_source_changes_not_retroactively_claimed_as_executed": "Additional pre-ante no-op guards and immutable state-digest memoization are unit-tested preparation. Actual first-height request equivalence is separately retained. The completed 1000-height proofs ran the exact source snapshots above, not later source bytes.",
+  "historical_blocks_or_old_exports_or_payouts_reexecuted": false,
+  "financial_admission": false,
+  "all500015_financial_books_tax_acceptance": false
+}

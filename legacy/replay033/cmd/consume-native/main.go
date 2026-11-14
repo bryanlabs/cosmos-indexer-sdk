@@ -29,6 +29,8 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/params"
 	"github.com/cosmos/cosmos-sdk/x/staking"
 	skt "github.com/cosmos/cosmos-sdk/x/staking/types"
+	"github.com/syndtr/goleveldb/leveldb/filter"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 	amino "github.com/tendermint/go-amino"
 	abci "github.com/tendermint/tendermint/abci/types"
 	dbm "github.com/tendermint/tendermint/libs/db"
@@ -100,6 +102,7 @@ type request struct {
 	Phase, Status    string
 	Restore, Changes patch
 	Rows             []record
+	UninvokedAnte    []record `json:"uninvoked_ante"`
 	Header           tm.Header
 	Transactions     [][]byte
 	History          history
@@ -112,8 +115,9 @@ type native struct {
 	trans map[string]*sdk.TransientStoreKey
 }
 
-func newNative() *native {
-	n := &native{cms: store.NewCommitMultiStore(dbm.NewMemDB()), keys: map[string]*sdk.KVStoreKey{}, trans: map[string]*sdk.TransientStoreKey{}}
+func newNative() *native { return nativeDB(dbm.NewMemDB()) }
+func nativeDB(db dbm.DB) *native {
+	n := &native{cms: store.NewCommitMultiStore(db), keys: map[string]*sdk.KVStoreKey{}, trans: map[string]*sdk.TransientStoreKey{}}
 	for _, name := range names {
 		k := sdk.NewKVStoreKey(name)
 		n.keys[name] = k
@@ -124,6 +128,7 @@ func newNative() *native {
 		n.trans[name] = k
 		n.cms.MountStoreWithDB(k, st.StoreTypeTransient, nil)
 	}
+	n.cms.SetPruning(st.NewPruningOptions(100, 0))
 	must(n.cms.LoadLatestVersion())
 	return n
 }
@@ -489,6 +494,31 @@ func signedStakingBinding(r request, row record) {
 	}
 }
 
+func preAnteFailure(r request) {
+	if len(r.UninvokedAnte) == 0 {
+		return
+	}
+	need(r.Phase == "transaction" && r.Tx >= 0 && r.Tx < len(r.Transactions) && r.Message == -1 && len(r.UninvokedAnte) == 1, "invalid pre-ante failure scope")
+	for _, pairs := range r.Changes {
+		need(len(pairs) == 0, "pre-ante failure changed native raw state")
+	}
+	marker := r.UninvokedAnte[0]
+	need(marker.Kind == "accounting" && marker.Label == "ante_not_invoked" && marker.Phase == "ante" && marker.Status == "aborted" && marker.Height == r.Height && marker.Tx == r.Tx && marker.Message == -1 && marker.Code != 0, "pre-ante failure marker differs")
+	found := false
+	for _, row := range r.Rows {
+		need((row.Kind == "accounting" || row.Kind == "native_execution") && row.Height == r.Height && row.Tx == r.Tx && row.Message == -1 && row.Phase == "transaction" && row.Code == marker.Code, "pre-ante failure contains financial effect or wrong native scope")
+		if row.Kind == "native_execution" && row.Label == "native_abci" {
+			var result abci.ResponseDeliverTx
+			must(json.Unmarshal(row.After, &result))
+			var original []byte
+			must(json.Unmarshal(row.Before, &original))
+			need(!found && row.Phase == "transaction" && row.Code == marker.Code && result.Code == marker.Code && bytes.Equal(original, r.Transactions[r.Tx]), "pre-ante failure original signed bytes/result differ")
+			found = true
+		}
+	}
+	need(found, "pre-ante failure lacks original native response")
+}
+
 func signedAnte(r request, a, b financial) {
 	need(r.Tx >= 0 && r.Tx < len(r.Transactions), "native ante missing original signed transaction")
 	var tx auth.StdTx
@@ -501,7 +531,18 @@ func signedAnte(r request, a, b financial) {
 		for _, coin := range tx.Fee.Amount {
 			add(expected, signers[0].String()+"/"+coin.Denom, coin.Amount.Neg())
 		}
-		need(sameInts(actual, expected) && b.Fees.Sub(a.Fees).IsEqual(tx.Fee.Amount), "native charged fee not bound to original signer and complete signed fee vector")
+		paid := map[string]sdk.Int{}
+		for _, coin := range b.Fees.Sub(a.Fees) {
+			add(paid, coin.Denom, coin.Amount)
+		}
+		signedFees := map[string]sdk.Int{}
+		for _, coin := range tx.Fee.Amount {
+			need(!coin.Amount.IsNegative(), "negative original signed fee")
+			add(signedFees, coin.Denom, coin.Amount)
+		}
+		// Native ante skips an all-zero vector. Preserve its original signed
+		// bytes while comparing complete coin values, not zero-entry lengths.
+		need(sameInts(actual, expected) && sameInts(paid, signedFees), "native charged fee not bound to original signer and complete signed fee vector")
 	}
 }
 
@@ -542,14 +583,94 @@ func checkHistory(cache string, h history, next tm.Header, prior []byte) {
 	must(c.UnmarshalJSON(rawCache(cache, h.Height+1, "-block.raw.gz"), &following))
 	need(following.Block != nil && equal(next, following.Block.Header) && bytes.Equal(next.AppHash, h.Commit.Hash) && bytes.Equal(next.LastResultsHash, tm.NewResults(h.Deliver).Hash()) && bytes.Equal(next.LastBlockID.Hash, h.Hash), "independent next-header root/result binding differs")
 }
+
+// The original closed normal checkpoint is byte-copied into a new exclusive
+// private home before LevelDB is opened. No historical block is executed.
+func copyCheckpoint(source, destination string) {
+	need(source != "" && destination != "", "exclusive checkpoint copy paths required")
+	must(os.Mkdir(destination, 0700))
+	must(filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		must(err)
+		rel, e := filepath.Rel(source, path)
+		must(e)
+		if rel == "." {
+			need(info.IsDir(), "normal checkpoint directory required")
+			return nil
+		}
+		out := filepath.Join(destination, rel)
+		if info.IsDir() {
+			return os.Mkdir(out, 0700)
+		}
+		need(info.Mode().IsRegular(), "nonregular checkpoint member refused")
+		in, e := os.Open(path)
+		must(e)
+		defer in.Close()
+		f, e := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		must(e)
+		_, e = io.CopyBuffer(f, in, make([]byte, 1<<20))
+		must(e)
+		must(f.Sync())
+		return f.Close()
+	}))
+}
+
+func checkRoots(n *native, h int64, id sdk.CommitID, roots roots) {
+	need(id.Version == h && equal(n.cms.LastCommitID(), id), "normal native application commitment differs")
+	need(roots.Version == h && len(roots.StoreInfos) == 9, "all-nine native roots required")
+	seen := map[string]bool{}
+	for _, s := range roots.StoreInfos {
+		k, ok := n.keys[s.Name]
+		need(ok && !seen[s.Name], "duplicate root store")
+		seen[s.Name] = true
+		actual := n.cms.GetCommitKVStore(k).LastCommitID()
+		need(actual.Version == s.Core.CommitID.Version && bytes.Equal(actual.Hash, s.Core.CommitID.Hash), "complete raw store does not reproduce native IAVL commitment")
+	}
+}
+func sameRaw(a, b *native) {
+	for _, name := range names {
+		x := a.cms.GetKVStore(a.keys[name]).Iterator(nil, nil)
+		y := b.cms.GetKVStore(b.keys[name]).Iterator(nil, nil)
+		for ; x.Valid() && y.Valid(); x.Next() {
+			need(bytes.Equal(x.Key(), y.Key()) && bytes.Equal(x.Value(), y.Value()), "normal opening complete raw baseline differs from native checkpoint")
+			y.Next()
+		}
+		need(!x.Valid() && !y.Valid(), "normal opening incomplete raw baseline")
+		x.Close()
+		y.Close()
+	}
+}
+func checkpointHeader(cache string, anchor history) {
+	c := amino.NewCodec()
+	ctypes.RegisterAmino(c)
+	var previous, following ctypes.ResultBlock
+	must(c.UnmarshalJSON(rawCache(cache, anchor.Height, "-block.raw.gz"), &previous))
+	must(c.UnmarshalJSON(rawCache(cache, anchor.Height+1, "-block.raw.gz"), &following))
+	need(previous.Block != nil && previous.BlockMeta != nil && previous.Block.ValidateBasic() == nil && previous.Block.Height == anchor.Height, "normal checkpoint previous raw block invalid")
+	need(following.Block != nil && following.Block.ValidateBasic() == nil && following.Block.Height == anchor.Height+1 && following.Block.ChainID == "cosmoshub-1", "normal checkpoint following raw block invalid")
+	need(bytes.Equal(previous.Block.Hash(), previous.BlockMeta.BlockID.Hash) && bytes.Equal(following.Block.LastBlockID.Hash, previous.Block.Hash()) && bytes.Equal(following.Block.AppHash, anchor.Commit.Hash), "normal checkpoint native root/header join differs")
+	var results ctypes.ResultBlockResults
+	must(c.UnmarshalJSON(rawCache(cache, anchor.Height, "-block_results.raw.gz"), &results))
+	need(results.Height == anchor.Height && results.Results != nil && bytes.Equal(following.Block.LastResultsHash, tm.NewResults(results.Results.DeliverTx).Hash()), "normal checkpoint previous raw result/header join differs")
+}
 func run() {
 	cache := flag.String("cache", "", "bounded immutable native raw cache")
 	receipt := flag.String("receipt", "", "exclusive private receipt")
+	checkpoint := flag.String("checkpoint-home", "", "retained private byte-copy of original normal checkpoint")
+	working := flag.String("working-home", "", "exclusive private mutable native journal reconstruction")
 	flag.Parse()
 	need(*cache != "" && *receipt != "", "private paths required")
 	phase, committed := newNative(), newNative()
+	if *checkpoint != "" {
+		copyCheckpoint(*checkpoint, *working)
+		db, e := dbm.NewGoLevelDBWithOpts("application", *working, &opt.Options{BlockCacheCapacity: 8 << 20, WriteBuffer: 4 << 20, OpenFilesCacheCapacity: 2000, Filter: filter.NewBloomFilter(10)})
+		must(e)
+		defer db.Close()
+		committed = nativeDB(db)
+	} else {
+		need(*working == "", "working checkpoint cannot replace genuine genesis")
+	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
-	var height, through, phases, transactions int64
+	var height, first, through, phases, transactions int64
 	var prior []byte
 	anchor := false
 	openingChecked := false
@@ -564,7 +685,15 @@ func run() {
 		need(!done, "trailing native data")
 		switch r.Kind {
 		case "anchor":
-			need(!anchor && r.Anchor.Height == 0 && r.Anchor.Kind == "source_anchor" && r.Anchor.Chain == "cosmoshub-1" && r.Through > 0, "genuine genesis anchor required")
+			need(!anchor && r.Anchor.Kind == "source_anchor" && r.Anchor.Chain == "cosmoshub-1" && r.Through > r.Anchor.Height, "genuine normal source anchor required")
+			if *checkpoint == "" {
+				need(r.Anchor.Height == 0, "genuine genesis anchor required")
+			} else {
+				need(r.Anchor.Height == 200000 || r.Anchor.Height == 400000, "unsupported original normal checkpoint")
+				checkRoots(committed, r.Anchor.Height, r.Anchor.Commit, r.Anchor.Roots)
+				checkpointHeader(*cache, r.Anchor)
+			}
+			height, first = r.Anchor.Height, r.Anchor.Height+1
 			raw, e := os.ReadFile(filepath.Join(*cache, "genesis/genesis.cosmoshub-1.json"))
 			must(e)
 			sum := sha256.Sum256(raw)
@@ -576,14 +705,19 @@ func run() {
 			need(anchor && r.Height == height+1, "native phase height gap")
 			phase.apply(r.Restore)
 			if !openingChecked {
-				need(r.Height == 1 && r.Phase == "begin_block", "genuine opening must precede first phase")
-				genesisOpening(filepath.Join(*cache, "genesis/genesis.cosmoshub-1.json"), phase)
+				need(r.Height == first && r.Phase == "begin_block", "genuine opening must precede first phase")
+				if first == 1 {
+					genesisOpening(filepath.Join(*cache, "genesis/genesis.cosmoshub-1.json"), phase)
+				} else {
+					sameRaw(phase, committed)
+				}
 				openingChecked = true
 			}
 			a := phase.decode(r.Header)
 			phase.apply(r.Changes)
 			b := phase.decode(r.Header)
 			financialCheck(r, a, b)
+			preAnteFailure(r)
 			for _, row := range r.Rows {
 				if row.Kind == "principal_request" || row.Kind == "share_request" || row.Kind == "principal" || row.Kind == "staking_shares" {
 					signedStakingBinding(r, row)
@@ -598,15 +732,7 @@ func run() {
 			committed.apply(r.Changes)
 			id := committed.cms.Commit()
 			need(id.Version == r.Height && bytes.Equal(id.Hash, r.History.Commit.Hash), "raw source journals do not reproduce native IAVL application commitment")
-			need(r.History.Roots.Version == r.Height && len(r.History.Roots.StoreInfos) == 9, "all-nine native roots required")
-			seen := map[string]bool{}
-			for _, s := range r.History.Roots.StoreInfos {
-				k, ok := committed.keys[s.Name]
-				need(ok && !seen[s.Name], "duplicate root store")
-				seen[s.Name] = true
-				actual := committed.cms.GetCommitKVStore(k).LastCommitID()
-				need(actual.Version == s.Core.CommitID.Version && bytes.Equal(actual.Hash, s.Core.CommitID.Hash), "complete raw store does not reproduce native IAVL commitment")
-			}
+			checkRoots(committed, r.Height, r.History.Commit, r.History.Roots)
 			checkHistory(*cache, r.History, r.NextHeader, prior)
 			prior = id.Hash
 			height = r.Height
@@ -625,7 +751,7 @@ func run() {
 	f, e := os.OpenFile(*receipt, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	must(e)
 	defer f.Close()
-	must(json.NewEncoder(f).Encode(map[string]interface{}{"schema": "native033-independent-bounded-financial-v1", "first": 1, "through": height, "native_iavl_heights": height, "typed_financial_phases": phases, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
+	must(json.NewEncoder(f).Encode(map[string]interface{}{"schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
 	must(f.Sync())
 }
 func main() {

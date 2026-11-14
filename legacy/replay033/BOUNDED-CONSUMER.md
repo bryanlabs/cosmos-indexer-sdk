@@ -9,10 +9,14 @@ No SQL, API, public result, source financial row, or financial book is written.
 ## Actual running-source capture
 
 `capture_bounded.py --directory <new-private-directory> --through 1000` reads
-only the owned range-0 producer. It preserves the real source target 200000 and
-its in-progress native status. The current implementation deliberately supports
-genesis-prefix bounded captures only. It does not pretend to accept the later
-two checkpoint-started ranges or the terminal suffix yet.
+one of the three explicitly pinned original producers. `--first` is exactly 1,
+200001, or 400001, with real targets 200000, 400000, and 500000. The capture
+preserves the actual in-progress native status, not a fabricated source closure.
+Checkpoint openings are byte-identical copies of the original frozen 200000 or
+400000 source and its initial-clone manifests. All nine raw opening stores,
+native application/store roots, current header, and prior result join must agree.
+The native helper opens only another NEW private copy and applies the source
+journal. No old historical block, export or payout is executed.
 
 Original compressed chunks are retained independently for coin records through
 `height_completed(1000)` and history through native height 1001. These are
@@ -67,6 +71,16 @@ The native helper is independent of the observed producer implementation. It:
   full cached ABCI result, then authenticates each commit/result against its
   independently captured next header. No gas, epoch or metadata waiver exists.
 
+A complete signed fee vector containing zero-valued coins remains bound to the
+original transaction. Native ante skips an all-zero vector. Paid comparisons use
+complete denomination values, not SDK `Coins.IsEqual` slice lengths. Nonzero
+charges still require the original payer and exact signed vector. EndBlock can
+complete many owners' maturity entries in one all-store phase. Per-row owner
+annotations remain retained and never split that native phase or get dropped.
+A transaction rejected before ante retains its actual aborted `ante_not_invoked`
+marker and full original failed ABCI response. It can have no native state change,
+message execution, or cache flush, and is never treated as a paid fee.
+
 Transaction disposition follows actual complete nine-store cache flush evidence,
 not final ABCI code alone. A late native block-gas error can follow a successful
 message flush. Aborted attempted writes remain evidence but are not paid income.
@@ -87,6 +101,11 @@ that substituting 500015 for canonical migration height 500000 is refused.
 `actual_bounded_controls.py` mutates actual fee/share/principal, native result,
 all-store root/application root and before-image inputs, requiring the specific
 native refusal, not just any nonzero exit or missing completion.
+
+`actual_checkpoint_controls.py` checks actual native opening application/store
+roots, full opening bytes, explicit before-images, final store roots, complete
+native ABCI results, and actual next-header binding. Each needs its specific
+refusal, not just EOF. All original failed attempts remain retained.
 
 The actual first 1000 heights include 239 transactions and nonzero discarded
 message writes. This bounded proof does not close ALL1..500015. Final closure

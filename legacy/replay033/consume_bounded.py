@@ -11,6 +11,7 @@ import subprocess
 import zlib
 from compare_zero_export import strict_json, typed, Number
 from terminal_journal import Journal
+from capture_bounded import PROFILES
 from verify_movement_rehearsal import blob, commitment, state_values, require, CLASSES
 
 RECORD_FIELDS = set('native_view native_parent write_operation classification evidence_quality before after unit validator delegator kind code height tx message phase label status address denom amount'.split())
@@ -66,6 +67,9 @@ def patches(before, after, touched=None):
     result = {}
     for name in sorted(after):
         old = before.get(name, {})
+        if touched is None and old is after[name]:
+            result[name] = []
+            continue
         keys = set(old) | set(after[name]) if touched is None else touched.get(name, set())
         result[name] = [{'key': base64.b64encode(key).decode(), 'before': old.get(key), 'value': after[name].get(key)}
                         for key in sorted(keys) if touched is not None or old.get(key) != after[name].get(key)]
@@ -76,7 +80,8 @@ class HistoryWindow:
     def __init__(self, root, binding):
         self.rows = iter(selected_lines(root, binding, 'native-history'))
         self.anchor = self.validate(next(self.rows), anchor=True)
-        self.cache, self.last = {}, 0
+        require(self.anchor['height'] == binding['first'] - 1, 'native opening height differs from actual producer range')
+        self.cache, self.last = {}, self.anchor['height']
 
     @staticmethod
     def validate(row, anchor=False):
@@ -85,7 +90,7 @@ class HistoryWindow:
         fields |= {'genesis_sha256'} if anchor else set('header block_hash transactions begin deliver end'.split())
         require(set(row) == fields and row['kind'] == ('source_anchor' if anchor else 'height'), 'unknown or missing native history field')
         if anchor:
-            require(row['height'] == 0 and row['genesis_sha256'] == '73a866b21723ecbc28b6d15951b2eb3aa2f2443650ff6df489bf55ac5edceefa', 'genuine genesis opening required')
+            require(row['height'] in (0, 200000, 400000) and row['genesis_sha256'] == '73a866b21723ecbc28b6d15951b2eb3aa2f2443650ff6df489bf55ac5edceefa', 'genuine normal native opening required')
         return row
 
     def __getitem__(self, height):
@@ -108,18 +113,29 @@ class CommitJournal(Journal):
         super().accept(record)
 
 class Consumer:
-    def __init__(self, send, history, through):
-        self.send, self.history, self.through = send, history, through
+    def __init__(self, send, history, through, first=1):
+        self.send, self.history, self.through, self.first = send, history, through, first
         self.journal = CommitJournal()
         self.versions, self.latest, self.helper = {}, {}, {}
         self.pending, self.scope, self.before, self.after, self.rows = None, None, {}, {}, {}
-        self.heights, self.counts, self.seen, self.committed_touched = 0, Counter(), set(), {}
+        self.heights, self.counts, self.seen, self.committed_touched = first - 1, Counter(), set(), {}
         self.phase_order = []
         self.txs_seen = set()
         self.transactions = 0
         self.block_start, self.tx_start, self.ante_tip, self.message_tip = {}, {}, {}, {}
         self.message_index, self.retained_tip = {}, {}
         self.dispositions, self.flushes = {}, {}
+        self.state_commitments = {}
+
+    def state_commitment(self, state):
+        # Store maps are immutable after construction. Retaining the object
+        # with its digest prevents id reuse, then height completion prunes it.
+        entry = self.state_commitments.get(id(state))
+        if entry is None:
+            entry = (state, commitment(state))
+            self.state_commitments[id(state)] = entry
+        require(entry[0] is state, 'immutable native state identity differs')
+        return entry[1]
 
     def finish_store(self):
         if self.pending is None:
@@ -127,7 +143,7 @@ class Consumer:
         record, changes = self.pending
         store = record['label'].split(':')[1]
         require(store in self.latest, 'native scope before complete baseline')
-        scope = tuple(record.get(k, '') for k in ('height', 'tx', 'message', 'phase', 'status', 'validator', 'delegator'))
+        scope = tuple(record.get(k, '') for k in ('height', 'tx', 'message', 'phase', 'status'))
         if scope != self.scope:
             self.finish_scope()
             self.scope = scope
@@ -135,8 +151,8 @@ class Consumer:
         key = store, record['before']['sha256']
         require(key in self.versions, 'missing native before-image anchor')
         before = self.versions[key]
-        require(commitment(before) == record['before'], 'complete native before commitment differs')
-        after, seen = before.copy(), set()
+        require(self.state_commitment(before) == record['before'], 'complete native before commitment differs')
+        after, seen = (before.copy() if changes else before), set()
         for change in changes:
             key = blob(change['label'].split('/key:', 1)[1])
             require(key not in seen and before.get(key) == change['before'], 'duplicate key or changed native before-image')
@@ -148,7 +164,7 @@ class Consumer:
             else:
                 blob(change['after'])
                 after[key] = change['after']
-        require(commitment(after) == record['after'], 'complete native after commitment differs')
+        require(self.state_commitment(after) == record['after'], 'complete native after commitment differs')
         self.before[store], self.after[store] = before, after
         self.versions[store, record['after']['sha256']] = after
         self.pending = None
@@ -157,16 +173,19 @@ class Consumer:
         if self.scope is None:
             return
         require(set(self.before) == set(self.after) == NAMES, 'phase lacks all nine complete stores')
-        h, tx, msg, phase, status, val, delegator = self.scope
+        h, tx, msg, phase, status = self.scope
         require(phase in ('begin_block', 'ante', 'message', 'transaction', 'end_block', 'block'), 'unknown native phase')
         require(self.scope not in self.seen, 'overlapping duplicate phase')
         self.seen.add(self.scope)
         self.dispositions[int(h), int(tx), int(msg), phase] = status
         self.phase_order.append(phase)
         identity = int(h), int(tx)
+        uninvoked_ante = []
         if phase == 'begin_block':
             require(self.before == self.latest and self.phase_order == ['begin_block'], 'begin block before-image is not actual committed predecessor')
             self.block_start = self.before.copy()
+            if int(h) == self.first:
+                self.opening = self.before.copy()
         elif phase == 'ante':
             require(self.before == self.latest and identity not in self.tx_start and int(msg) == -1, 'ante before-image/duplicate transaction differs')
             self.tx_start[identity] = self.before.copy()
@@ -180,14 +199,21 @@ class Consumer:
             if status == 'committed':
                 self.retained_tip[identity] = self.after.copy()
         elif phase == 'transaction':
-            require(identity in self.tx_start and self.before == self.tx_start[identity] and self.after == self.retained_tip[identity], 'native transaction ante/cache commit/rollback chain differs')
+            orphan = (h, tx, -1, 'ante', 'aborted')
+            if identity not in self.tx_start:
+                uninvoked_ante = self.rows.pop(orphan, [])
+                result = self.history[int(h)]['deliver'][int(tx)]
+                require(len(uninvoked_ante) == 1 and uninvoked_ante[0]['kind'] == 'accounting' and uninvoked_ante[0]['label'] == 'ante_not_invoked' and uninvoked_ante[0]['code'] == result['code'] != 0, 'transaction lacks exact original pre-ante failure marker')
+                require(self.before == self.after == self.latest and identity not in self.message_index and not any(k[:2] == identity for k in self.flushes), 'pre-ante failure changed native state or flushed a cache')
+            else:
+                require(orphan not in self.rows and self.before == self.tx_start[identity] and self.after == self.retained_tip[identity], 'native transaction ante/cache commit/rollback chain differs')
         elif phase == 'end_block':
             require(self.before == self.latest, 'end block before-image differs from committed transaction chain')
         elif phase == 'block':
             require(self.before == self.block_start, 'aggregate block missing original begin predecessor')
         self.send(dict(kind='phase', height=int(h), tx=int(tx), message=int(msg), phase=phase, status=status,
             restore=patches(self.helper, self.before), changes=patches(self.before, self.after), rows=self.rows.pop(self.scope, []),
-            header=self.history[int(h)]['header'], transactions=self.history[int(h)]['transactions']))
+            uninvoked_ante=uninvoked_ante, header=self.history[int(h)]['header'], transactions=self.history[int(h)]['transactions']))
         self.helper = self.after.copy()
         if phase in ('begin_block', 'transaction', 'end_block'):
             self.latest = self.after.copy()
@@ -200,7 +226,7 @@ class Consumer:
     def accept(self, r):
         require(set(r) <= RECORD_FIELDS, 'unknown native record field')
         kind, h = r['kind'], int(r['height'])
-        require(1 <= h <= self.through, 'native record outside selected full range')
+        require(self.first <= h <= self.through, 'native record outside selected full range')
         require(r['status'] in ('committed', 'aborted'), 'invalid phase disposition')
         if kind != 'native_state':
             self.finish_store()
@@ -210,14 +236,17 @@ class Consumer:
             require(store in NAMES and store not in self.latest, 'unknown or duplicate native baseline store')
             state = state_values(r['before'])
             self.latest[store] = state
-            self.versions[store, commitment(state)['sha256']] = state
+            self.versions[store, self.state_commitment(state)['sha256']] = state
         elif kind == 'native_state_hash':
             self.pending = r, []
         elif kind == 'native_state':
             require(self.pending is not None and r['label'].split('/key:', 1)[0] == self.pending[0]['label'], 'native key lacks enclosing scope')
             self.pending[1].append(r)
         elif kind in ('movement', 'principal', 'principal_request', 'staking_shares', 'share_request', 'accounting', 'native_execution'):
-            row_scope = tuple(r.get(k, '') for k in ('height', 'tx', 'message', 'phase', 'status', 'validator', 'delegator'))
+            # EndBlock can complete many owners' maturity entries inside one
+            # all-store phase. Owner annotations belong to individual rows,
+            # not separate native state scopes. Every row stays in the frame.
+            row_scope = tuple(r.get(k, '') for k in ('height', 'tx', 'message', 'phase', 'status'))
             self.rows.setdefault(row_scope, []).append(r)
             if kind == 'movement':
                 require(r['label'] in CLASSES and r.get('classification') == CLASSES[r['label']] and r.get('unit') == 'native_bank_tokens', 'unknown or changed native financial classification')
@@ -236,7 +265,7 @@ class Consumer:
             require(self.phase_order[0] == 'begin_block' and self.phase_order[-2:] == ['end_block', 'block'] and not self.rows, 'height phase order or financial row scope incomplete')
             history = self.history[h]
             require({(h, i) for i in range(len(history['transactions']))} == {i for i in self.txs_seen if i[0] == h}, 'missing native transaction execution')
-            self.send(dict(kind='commit', height=h, changes=patches({}, self.latest) if h == 1 else patches(self.committed, self.latest, self.committed_touched), history=history, next_header=self.history[h + 1]['header']))
+            self.send(dict(kind='commit', height=h, changes=patches({}, self.latest) if h == 1 else patches(self.opening if h == self.first else self.committed, self.latest, self.committed_touched), history=history, next_header=self.history[h + 1]['header']))
             for (dh, tx, msg, phase), status in self.dispositions.items():
                 if dh == h and phase in ('ante', 'message'):
                     flushed = self.flushes.get((h, tx, 'ante' if phase == 'ante' else 'message'), set())
@@ -254,7 +283,8 @@ class Consumer:
             self.committed = self.latest.copy()
             self.committed_touched = {}
             self.heights = h
-            self.versions = {(s, commitment(v)['sha256']): v for s, v in self.latest.items()}
+            self.versions = {(s, self.state_commitment(v)['sha256']): v for s, v in self.latest.items()}
+            self.state_commitments = {id(v): self.state_commitments[id(v)] for v in self.latest.values()}
             self.phase_order, self.seen = [], set()
         elif kind not in ('native_write', 'native_cache_write'):
             raise ValueError('unknown financial record kind')
@@ -274,12 +304,15 @@ class Consumer:
 
 def verify(root, binary, receipt):
     binding = json.loads((root / 'capture.private.json').read_bytes())
-    require(binding['schema'] == 'native033-bounded-in-progress-capture-v1' and binding['first'] == 1 and binding['source_target'] == 200000 and binding['source_whole_complete'] is False, 'capture must preserve actual running source target')
+    first = binding['first']
+    require(first in PROFILES, 'unsupported actual producer opening')
+    target, pod_name, pod_uid = PROFILES[first]
+    require(binding['schema'] == 'native033-bounded-in-progress-capture-v1' and first <= binding['through'] < target and binding['source_target'] == target and binding['source_whole_complete'] is False, 'capture must preserve actual running source target')
     for name, kind, height in [('movements', 'height_completed', binding['through']), ('native-history', 'height', binding['through'] + 1)]:
         spec = binding['streams'][name]
         require(spec['boundary_kind'] == kind and spec['boundary_height'] == height and spec['source_gzip_whole_closed'] is False, 'bounded stream selection does not bind exact complete common height and next header')
     pod = json.loads((root / 'source-pod.private.json').read_bytes())
-    require(pod['metadata']['name'] == 'cosmos-tax-hub1-financial-e999d60-v1-0-4r29d' and pod['metadata']['uid'] == 'ae26e6f8-4ee7-4ece-96a0-ff6d523829d5', 'actual bounded producer identity differs')
+    require(pod['metadata']['name'] == pod_name and pod['metadata']['uid'] == pod_uid, 'actual bounded producer identity differs')
     require(pod['spec']['containers'][0]['image'] == 'ghcr.io/bryanlabs/cosmos-tax-replay033@sha256:ba3fe2827be1057855a40edfa0c2f37bda2b80392e5c0442fa537d33d5abd190', 'immutable producer image differs')
     after_pod_path = root / ('source-pod-after.private.json' if (root / 'source-pod-after.private.json').exists() else 'source-pod-continuity.private.json')
     after_pod = json.loads(after_pod_path.read_bytes())
@@ -289,23 +322,35 @@ def verify(root, binary, receipt):
     require(before_container['containerID'] == after_container['containerID'] and before_container['imageID'] == after_container['imageID'] and before_container['restartCount'] == after_container['restartCount'] == 0 and before_container['state']['running']['startedAt'] == after_container['state']['running']['startedAt'] and after_container['ready'], 'source container restarted or changed')
     for name in ('source-status-before.private.json', 'source-status-after.private.json'):
         status = json.loads((root / name).read_bytes())
-        require(status['chain'] == 'cosmoshub-1' and status['target'] == 200000 and status['first_height_this_run'] == 1 and binding['through'] < status['state_hash_verified_through'] < status['last_height_committed'] < 200000 and status['heights_where_results_differ_from_cache'] == 0 and not status.get('stop_reason'), 'actual whole producer is not the claimed in-progress source')
+        require(status['chain'] == 'cosmoshub-1' and status['target'] == target and status['first_height_this_run'] == first and binding['through'] < status['state_hash_verified_through'] < status['last_height_committed'] < target and status['heights_where_results_differ_from_cache'] == 0 and not status.get('stop_reason'), 'actual whole producer is not the claimed in-progress source')
     for name, expected in binding['cache_members_sha256'].items():
         require(sha(root / 'cache' / name) == expected, 'changed current/next raw source cache')
     for name, expected in binding['source_metadata_sha256'].items():
         require(sha(root / name) == expected, 'changed actual source binding')
+    opening_pins = binding.get('opening_checkpoint_members_sha256')
+    if first > 1:
+        require(type(opening_pins) is dict and opening_pins, 'normal raw checkpoint opening missing')
+        from capture_bounded import manifest
+        require(opening_pins == manifest((root / 'source-before.private.sha256').read_bytes()) == manifest((root / 'initial-clone.private.sha256').read_bytes()), 'normal opening differs from original producer checkpoint clone')
+        for name, expected in opening_pins.items():
+            require(sha(root / 'opening-checkpoint' / name) == expected, 'changed original normal checkpoint bytes')
+    else:
+        require(not opening_pins, 'genesis must not use synthetic checkpoint opening')
     history = HistoryWindow(root, binding)
     anchor = history.anchor
     with (receipt.parent / 'native-consumer.private.log').open('xb') as log:
-        process = subprocess.Popen([str(binary), '--cache', str(root / 'cache'), '--receipt', str(receipt.parent / 'native-proof.private.json')], stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+        command = [str(binary), '--cache', str(root / 'cache'), '--receipt', str(receipt.parent / 'native-proof.private.json')]
+        if first > 1:
+            command += ['--checkpoint-home', str(root / 'opening-checkpoint'), '--working-home', str(receipt.parent / 'native-home')]
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
         def send(value):
             process.stdin.write((json.dumps(value, separators=(',', ':')) + '\n').encode())
-        consumer = Consumer(send, history, binding['through'])
+        consumer = Consumer(send, history, binding['through'], first)
         send(dict(kind='anchor', anchor=anchor, through=binding['through']))
         try:
             for r in selected_lines(root, binding, 'movements'):
                 consumer.accept(r)
-            require(consumer.heights == binding['through'] and consumer.journal.heights == binding['through'], 'bounded complete height count differs')
+            require(consumer.heights == binding['through'] and consumer.journal.heights == binding['through'] - first + 1, 'bounded complete height count differs')
             send(dict(kind='bounded_end', height=consumer.heights))
             process.stdin.close()
             require(process.wait(timeout=1800) == 0, 'independent typed/native financial proof refused')
@@ -316,9 +361,9 @@ def verify(root, binary, receipt):
                 pass
             process.wait(timeout=30)
             raise
-    result = dict(schema='native033-bounded-component-v1', first=1, through=consumer.heights,
+    result = dict(schema='native033-bounded-component-v1', first=first, through=consumer.heights,
         phases=dict(consumer.counts), transactions=consumer.transactions, journal_counts=dict(consumer.journal.counts),
-        source_target=200000, source_whole_complete=False, financial_admission=False, global_books_tax_acceptance=False,
+        source_target=target, source_whole_complete=False, financial_admission=False, global_books_tax_acceptance=False,
         original_capture_sha256=sha(root / 'capture.private.json'), source_runtime_after_sha256=sha(after_pod_path), native_proof_sha256=sha(receipt.parent / 'native-proof.private.json'),
         independent_helper_sha256=sha(binary))
     with receipt.open('x') as stream:
