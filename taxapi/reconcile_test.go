@@ -9,7 +9,7 @@ func TestSummarizeCoverage(t *testing.T) {
 	rows := []typeCount{
 		{MessageType: "/ibc.core.client.v1.MsgUpdateClient", Total: 128, Classified: 0}, // relayer noise, unsupported
 		{MessageType: "/cosmos.bank.v1beta1.MsgSend", Total: 38, Classified: 38},
-		{MessageType: "/cosmos.staking.v1beta1.MsgDelegate", Total: 8, Classified: 5},
+		{MessageType: apiDelegateMessageType, Total: 8, Classified: 5},
 	}
 	rep := summarizeCoverage(rows, time.Time{}, time.Time{})
 
@@ -30,7 +30,7 @@ func TestSummarizeCoverage(t *testing.T) {
 	// A partially-classified supported type reports the remainder as unclassified.
 	var del CoverageRow
 	for _, r := range rep.Rows {
-		if r.MessageType == "/cosmos.staking.v1beta1.MsgDelegate" {
+		if r.MessageType == apiDelegateMessageType {
 			del = r
 		}
 	}

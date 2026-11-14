@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -17,6 +19,14 @@ type IndexConfig struct {
 }
 
 type IndexBase struct {
+	BlockResultsJSONRPC    bool          `mapstructure:"block-results-json-rpc"`
+	ArchiveGuard           bool          `mapstructure:"archive-guard"`
+	ArchiveRequestInterval time.Duration `mapstructure:"archive-request-interval"`
+	ArchiveRequestBudget   uint64        `mapstructure:"archive-request-budget"`
+	ArchiveHTTPTimeout     time.Duration `mapstructure:"archive-http-timeout"`
+	ArchiveMaxConcurrent   int           `mapstructure:"archive-max-concurrent"`
+	ArchiveEvidenceDir     string        `mapstructure:"archive-evidence-dir"`
+	ArchiveHTTPClient      *http.Client  `mapstructure:"-"`
 	throttlingBase
 	retryBase
 	ReindexMessageType              string `mapstructure:"reindex-message-type"`
@@ -50,6 +60,13 @@ type flags struct {
 }
 
 func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
+	cmd.PersistentFlags().BoolVar(&conf.Base.BlockResultsJSONRPC, "base.block-results-json-rpc", false, "request block results using JSON-RPC POST at the exact RPC base URL")
+	cmd.PersistentFlags().BoolVar(&conf.Base.ArchiveGuard, "base.archive-guard", false, "enable fail-closed archive HTTP request guard (bounded runs only)")
+	cmd.PersistentFlags().DurationVar(&conf.Base.ArchiveRequestInterval, "base.archive-request-interval", time.Second, "minimum interval between actual archive HTTP requests")
+	cmd.PersistentFlags().Uint64Var(&conf.Base.ArchiveRequestBudget, "base.archive-request-budget", 50000, "maximum actual archive HTTP requests")
+	cmd.PersistentFlags().DurationVar(&conf.Base.ArchiveHTTPTimeout, "base.archive-http-timeout", 15*time.Second, "archive HTTP request timeout")
+	cmd.PersistentFlags().IntVar(&conf.Base.ArchiveMaxConcurrent, "base.archive-max-concurrent", 1, "maximum in-flight archive requests (1..32); global pacing and budget still apply")
+	cmd.PersistentFlags().StringVar(&conf.Base.ArchiveEvidenceDir, "base.archive-evidence-dir", "", "persist compressed source responses before indexing; requires archive guard and a fresh run directory")
 	// chain indexing
 	cmd.PersistentFlags().Int64Var(&conf.Base.StartBlock, "base.start-block", 0, "block to start indexing at (use -1 to resume from highest block indexed)")
 	cmd.PersistentFlags().Int64Var(&conf.Base.EndBlock, "base.end-block", -1, "block to stop indexing at (use -1 to index indefinitely")
@@ -85,6 +102,23 @@ func SetupIndexSpecificFlags(conf *IndexConfig, cmd *cobra.Command) {
 }
 
 func (conf *IndexConfig) Validate() error {
+	if conf.Base.ArchiveEvidenceDir != "" && !conf.Base.ArchiveGuard {
+		return errors.New("archive evidence capture requires archive guard")
+	}
+	if conf.Base.ArchiveGuard {
+		if conf.Base.ArchiveMaxConcurrent < 0 || conf.Base.ArchiveMaxConcurrent > 32 {
+			return errors.New("archive max concurrent must be between 1 and 32 (zero retains serial compatibility)")
+		}
+		if conf.Base.ArchiveRequestInterval <= 0 || conf.Base.ArchiveRequestBudget == 0 || conf.Base.ArchiveHTTPTimeout <= 0 {
+			return errors.New("archive guard requires positive interval, budget and timeout")
+		}
+		if conf.Base.EndBlock <= 0 && conf.Base.BlockInputFile == "" {
+			return errors.New("archive guard requires end-block or block-input-file")
+		}
+		if conf.Base.RequestRetryAttempts != 0 {
+			return errors.New("archive guard requires base.request-retry-attempts=0")
+		}
+	}
 	err := validateDatabaseConf(conf.Database)
 	if err != nil {
 		return err
@@ -105,7 +139,6 @@ func (conf *IndexConfig) Validate() error {
 	}
 
 	err = conf.validateBlockInputValues()
-
 	if err != nil {
 		return err
 	}

@@ -30,9 +30,12 @@ import (
 
 // urls are every message type the production parser classifies and that can
 // be replayed from the stored event log: the event-only types ReconstructMsg
-// rebuilds, authz (handled event by event) and validator commission (kept
-// from the stored rows with the operator address verified).
-var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec")
+// rebuilds, authz (handled event by event), validator commission (kept
+// from the stored rows with the operator address verified) and the pre-v24
+// SDK fork's tokenize-share reward messages, which are always stored with
+// their bytes.
+var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec",
+	tax.LegacyTypeURLRedeemTokensForShares, tax.LegacyTypeURLWithdrawTokenizeShareReward, tax.LegacyTypeURLWithdrawAllTokenizeShareReward)
 
 type row struct {
 	models.Message
@@ -74,7 +77,7 @@ func newBackup(path string) (*backupWriter, error) {
 	if path == "" {
 		return nil, nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +117,7 @@ func (b *backupWriter) persist(plans []backup) error {
 	b.lines += len(plans)
 	return nil
 }
+
 func (b *backupWriter) verify() (string, error) {
 	if b == nil {
 		return "", nil
@@ -131,13 +135,17 @@ func (b *backupWriter) verify() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func main() {
+func main() { os.Exit(run()) }
+
+func run() int {
 	apply := flag.Bool("apply", false, "write repaired rows (requires --backup)")
 	path := flag.String("backup", "", "new JSONL backup file, never overwritten")
 	addresses := flag.String("addresses", "", "optional comma-separated wallets")
 	batch := flag.Int("batch", 500, "bounded messages per batch")
 	from := flag.Uint("from-message-id", 0, "exclusive lower message ID for resume")
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
+	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
+	kinds := flag.String("message-types", "", "optional comma-separated message type URLs; replay only messages of those types")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -167,19 +175,31 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	max := *to
-	if max == 0 {
-		if err := db.Table("messages").Select("COALESCE(max(id),0)").Scan(&max).Error; err != nil {
+	maxID := *to
+	if maxID == 0 {
+		if err := db.Table("messages").Select("COALESCE(max(id),0)").Scan(&maxID).Error; err != nil {
 			fatal(err.Error())
 		}
 	}
-	if max < *from {
+	if maxID < *from {
 		fatal("upper message ID precedes lower ID")
 	}
 	var wallets []string
 	for _, a := range strings.Split(*addresses, ",") {
 		if a = strings.TrimSpace(a); a != "" {
 			wallets = append(wallets, a)
+		}
+	}
+	var categories []string
+	for _, c := range strings.Split(*only, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			categories = append(categories, c)
+		}
+	}
+	var types []string
+	for _, t := range strings.Split(*kinds, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			types = append(types, t)
 		}
 	}
 	var candidates []uint
@@ -189,6 +209,27 @@ func main() {
 			fatal(err.Error())
 		}
 	}
+	if len(categories) > 0 {
+		ids, err := categoryIDs(db, categories, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	if len(types) > 0 {
+		ids, err := typeIDs(db, types, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 || len(categories) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0
 	b, err := newBackup(*path)
 	if err != nil {
 		fatal(err.Error())
@@ -199,13 +240,30 @@ func main() {
 	scanned, changed, zeroed, skipped := 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
-	fmt.Printf("snapshot_max_message_id=%d apply=%t wallet_candidates=%d\n", max, *apply, len(candidates))
-	for len(wallets) == 0 || len(candidates) > 0 {
-		rows, err := load(db, last, max, *batch, candidates)
+	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s message_types=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","), strings.Join(types, ","))
+	for {
+		// A restricted run walks its candidate ids a batch at a time instead of
+		// every message id, so sparse candidates never make one load scan
+		// millions of messages.
+		var chunk []uint
+		if restricted {
+			for len(candidates) > 0 && candidates[0] <= last {
+				candidates = candidates[1:]
+			}
+			if len(candidates) == 0 {
+				break
+			}
+			chunk = candidates[:min(*batch, len(candidates))]
+		}
+		rows, err := load(db, last, maxID, *batch, chunk)
 		if err != nil {
 			fatal(err.Error())
 		}
 		if len(rows) == 0 {
+			if restricted {
+				last = chunk[len(chunk)-1]
+				continue
+			}
 			break
 		}
 		plans, skips, err := planBatch(db, codec, rows)
@@ -234,6 +292,9 @@ func main() {
 			}
 		}
 		last = rows[len(rows)-1].ID
+		if restricted {
+			last = chunk[len(chunk)-1]
+		}
 		fmt.Printf("last_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d\n", last, scanned, changed, zeroed, skipped)
 	}
 	sum, err := b.verify()
@@ -243,12 +304,13 @@ func main() {
 	if b != nil {
 		fmt.Printf("backup=%s sha256=%s records=%d\n", *path, sum, b.lines)
 	}
-	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", max, scanned, changed, zeroed, skipped, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
+	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", maxID, scanned, changed, zeroed, skipped, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
 	if skipped > 0 {
 		// Every skipped message is printed above; the run is incomplete until
 		// each one is explained or replayed from an archive node.
-		os.Exit(3)
+		return 3
 	}
+	return 0
 }
 
 // skip records a message the replay could not classify from its stored
@@ -280,15 +342,64 @@ func walletIDs(db *gorm.DB, addresses []string) ([]uint, error) {
  JOIN addresses a ON a.id=tsa.address_id WHERE a.address IN ? ORDER BY 1`, addresses, addresses, addresses).Scan(&ids).Error
 	return ids, err
 }
-func load(db *gorm.DB, last, max uint, n int, candidates []uint) ([]row, error) {
-	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, max, urls).Order("m.id").Limit(n)
+
+// categoryIDs lists the messages in (from, maxID] that hold a stored row in
+// one of categories, so a repair of one classification leaves every other
+// message alone.
+func categoryIDs(db *gorm.DB, categories []string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Raw("SELECT DISTINCT message_id FROM taxable_events WHERE category IN ? AND message_id > ? AND message_id <= ? ORDER BY 1", categories, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// typeIDs lists the messages in (from, maxID] of one of the given type URLs,
+// so a repair of one message kind leaves every other message alone.
+func typeIDs(db *gorm.DB, types []string, from, maxID uint) ([]uint, error) {
+	var ids []uint
+	err := db.Raw("SELECT m.id FROM messages m JOIN message_types mt ON mt.id=m.message_type_id WHERE mt.message_type IN ? AND m.id > ? AND m.id <= ? ORDER BY 1", types, from, maxID).Scan(&ids).Error
+	return ids, err
+}
+
+// intersect keeps the ids present in both sorted lists.
+func intersect(a, b []uint) []uint {
+	var out []uint
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
+}
+
+// idArray renders ids as one Postgres array literal. Passed as a single
+// parameter it keeps the planner from treating hundreds of ids as constants.
+func idArray(ids []uint) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprint(id)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// load reads the next batch of replayable messages after last, only from
+// candidates when they are given.
+func load(db *gorm.DB, last, maxID uint, n int, candidates []uint) ([]row, error) {
+	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, maxID, urls).Order("m.id").Limit(n)
 	if candidates != nil {
-		q = q.Where("m.id IN ?", candidates)
+		q = q.Where("m.id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(candidates))
 	}
 	var rows []row
 	err := q.Scan(&rows).Error
 	return rows, err
 }
+
 func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 	var rows []tax.TaxableEvent
 	if err := db.Where("message_id IN ?", ids).Order("message_id,sub_index").Find(&rows).Error; err != nil {
@@ -300,6 +411,7 @@ func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 	}
 	return out, nil
 }
+
 func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup, []skip, error) {
 	if len(rows) == 0 {
 		return nil, nil, nil
@@ -312,8 +424,11 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	if err != nil {
 		return nil, nil, err
 	}
+	// The ids go in as one opaque array: with a literal list of hundreds the
+	// planner estimates enough events to merge join against the whole
+	// attribute index (measured 35 s for 500 messages, 0.35 s this way).
 	var attrs []eventRow
-	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id IN ?", ids).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
+	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(ids)).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
 	if err != nil {
 		return nil, nil, err
 	}
@@ -372,6 +487,7 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	}
 	return plans, skips, nil
 }
+
 func applyPlans(db *gorm.DB, plans []backup) error {
 	if len(plans) == 0 {
 		return nil
@@ -426,12 +542,22 @@ func applyPlans(db *gorm.DB, plans []backup) error {
 		return nil
 	})
 }
+
 func repairCodec() (codectypes.AnyUnpacker, error) {
 	m := tax.GaiaLiquidMsgTypes()
+	for k, v := range tax.LegacyLSMMsgTypes() {
+		m[k] = v
+	}
 	for k, v := range tax.IBCChannelV2MsgTypes() {
 		m[k] = v
 	}
 	for k, v := range tax.TokenFactoryMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.ProviderMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.LiquidityMsgTypes() {
 		m[k] = v
 	}
 	c, err := probe.GetProbeClient(config.Probe{RPC: "http://127.0.0.1:1"}, nil, m)
@@ -440,11 +566,12 @@ func repairCodec() (codectypes.AnyUnpacker, error) {
 	}
 	return c.Codec.InterfaceRegistry, nil
 }
+
 func same(a, b []tax.TaxableEvent) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
+	for i := 0; i < len(a) && i < len(b); i++ {
 		x, y := a[i], b[i]
 		if x.MessageID != y.MessageID || x.SubIndex != y.SubIndex || x.Category != y.Category || x.Amount != y.Amount || x.Denom != y.Denom || x.Asset != y.Asset || x.FromAddr != y.FromAddr || x.ToAddr != y.ToAddr || x.BlockHeight != y.BlockHeight || !x.Timestamp.Equal(y.Timestamp) || x.TxHash != y.TxHash || x.ValidatorAddress != y.ValidatorAddress || x.RewardTrigger != y.RewardTrigger || x.Detail != y.Detail {
 			return false
@@ -452,6 +579,7 @@ func same(a, b []tax.TaxableEvent) bool {
 	}
 	return true
 }
+
 func add(t totals, events []tax.TaxableEvent) {
 	for _, e := range events {
 		denom := e.Denom
@@ -481,6 +609,7 @@ func env(k string) string {
 	}
 	return v
 }
+
 func envDefault(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

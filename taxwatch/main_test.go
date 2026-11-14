@@ -7,13 +7,13 @@ func TestNewer(t *testing.T) {
 		a, b string
 		want bool
 	}{
-		{"v29.0.0", "v28.3.1", true},
-		{"v28.3.1", "v29.0.0", false},
-		{"v29.0.0", "v29.0.0-rc0", true},
-		{"v29.0.0-rc0", "v29.0.0", false},
-		{"v29.0.0-rc1", "v28.3.1", true},
+		{fixtureNewRelease, fixtureReviewedRelease, true},
+		{fixtureReviewedRelease, fixtureNewRelease, false},
+		{fixtureNewRelease, "v29.0.0-rc0", true},
+		{"v29.0.0-rc0", fixtureNewRelease, false},
+		{"v29.0.0-rc1", fixtureReviewedRelease, true},
 		{"v28.10.0", "v28.9.0", true},
-		{"v28.3.1", "v28.3.1", false},
+		{fixtureReviewedRelease, fixtureReviewedRelease, false},
 	}
 	for _, c := range cases {
 		if got := newer(c.a, c.b); got != c.want {

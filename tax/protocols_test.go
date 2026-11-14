@@ -88,7 +88,7 @@ func TestFixtureClassification(t *testing.T) {
 			}
 			golden := "testdata/" + n + ".golden"
 			if os.Getenv("UPDATE_GOLDEN") != "" {
-				if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+				if err := os.WriteFile(golden, []byte(got), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				return

@@ -56,6 +56,7 @@ func scratch(t *testing.T) *gorm.DB {
 	}
 	return db
 }
+
 func seedMessage(t *testing.T, db *gorm.DB, id uint, typ string, wire []byte, fixture string) {
 	t.Helper()
 	stamp := time.Date(2026, 4, 15, 9, 40, 52, 0, time.UTC)
@@ -111,6 +112,7 @@ func seedMessage(t *testing.T, db *gorm.DB, id uint, typ string, wire []byte, fi
 		}
 	}
 }
+
 func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	db := scratch(t)
 	delegate := &staking.MsgDelegate{DelegatorAddress: "cosmos1ts4vwmfccwjv0vehlzd4x5rw5xzljjnhgm7gnz", ValidatorAddress: "val", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
@@ -205,6 +207,30 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 	if after[2][0].Amount != "35629" || after[2][1].Amount != "47507213" || after[2][0].BlockHeight != 30672572 {
 		t.Fatal(after[2])
 	}
+	ids, err := categoryIDs(db, []string{string(tax.CategoryRedelegate)}, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("category candidates = %v", ids)
+	}
+	only, err := load(db, 0, 2, 100, ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only) != 1 || only[0].ID != 2 {
+		t.Fatalf("candidate load got %d messages", len(only))
+	}
+	kinds, err := typeIDs(db, []string{urls[2]}, 0, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 1 || kinds[0] != 2 {
+		t.Fatalf("message type candidates = %v", kinds)
+	}
+	if got := intersect([]uint{1, 2, 5}, []uint{2, 3, 5}); len(got) != 2 || got[0] != 2 || got[1] != 5 {
+		t.Fatalf("intersect = %v", got)
+	}
 	again, _, err := planBatch(db, codec, rows)
 	if err != nil {
 		t.Fatal(err)
@@ -234,7 +260,7 @@ func TestRepairIntegrationZeroSplitStampsAndIdempotence(t *testing.T) {
 
 func TestRepairRejectsConcurrentChanges(t *testing.T) {
 	db := scratch(t)
-	msg := &staking.MsgDelegate{DelegatorAddress: "wallet", ValidatorAddress: "val", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
+	msg := &staking.MsgDelegate{DelegatorAddress: fixtureWallet, ValidatorAddress: "val", Amount: sdk.NewInt64Coin("uatom", 94405000000)}
 	wire, _ := msg.Marshal()
 	seedMessage(t, db, 1, urls[0], wire, "delegate-principal")
 	codec, _ := repairCodec()

@@ -1,7 +1,6 @@
 package taxapi
 
 import (
-	"fmt"
 	"net/url"
 	"time"
 )
@@ -37,11 +36,11 @@ func (o *Oracle) ValidatorMonikers() map[string]string {
 				NextKey string `json:"next_key"`
 			} `json:"pagination"`
 		}
-		query := url.Values{"pagination.limit": {"1000"}}
+		query := url.Values{apiPaginationLimit: {"1000"}}
 		if key != "" {
-			query.Set("pagination.key", key)
+			query.Set(apiPaginationKey, key)
 		}
-		if err := o.get(fmt.Sprintf("%s/cosmos/staking/v1beta1/validators?%s", o.nodeREST, query.Encode()), &body); err != nil {
+		if err := o.get(o.nodeREST, "/cosmos/staking/v1beta1/validators", query, &body); err != nil {
 			// Retry after five minutes, retaining the last successful labels.
 			o.validatorsAt = nowUTC().Add(-55 * time.Minute)
 			return o.validators
@@ -80,15 +79,15 @@ func (o *Oracle) ValidatorStatuses() map[string]string {
 
 func validatorStatusLabel(status string, jailed bool) string {
 	if jailed {
-		return "jailed"
+		return apiJailed
 	}
 	switch status {
-	case "BOND_STATUS_BONDED":
+	case apiBondStatusBonded:
 		return "bonded"
 	case "BOND_STATUS_UNBONDING":
 		return "unbonding"
 	case "BOND_STATUS_UNBONDED":
 		return "unbonded"
 	}
-	return "unknown"
+	return apiUnknown
 }

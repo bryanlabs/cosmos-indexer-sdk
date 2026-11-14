@@ -8,11 +8,11 @@ func TestIBCBaseDenom(t *testing.T) {
 		base  string
 		isIBC bool
 	}{
-		{"transfer/channel-0/uatom", "uatom", true},
-		{"transfer/channel-1/uatom", "uatom", true},
+		{"transfer/channel-0/uatom", apiUatom, true},
+		{"transfer/channel-1/uatom", apiUatom, true},
 		{"transfer/channel-0/transfer/08-wasm-1369/0xabc", "0xabc", true},
 		{"transfer/channel-0/factory/cosmos1xyz/ustars", "factory/cosmos1xyz/ustars", true},
-		{"uatom", "uatom", false},
+		{apiUatom, apiUatom, false},
 		{"ibc/ABC123", "ibc/ABC123", false},
 	}
 	for _, c := range cases {

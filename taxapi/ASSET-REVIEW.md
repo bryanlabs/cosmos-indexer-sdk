@@ -1,6 +1,6 @@
 # Explicit suspected-spam asset review
 
-Methodology v7 keeps suspected-spam and identity-mismatch receipts visible with
+Methodology v9 keeps suspected-spam and identity-mismatch receipts visible with
 their reported labels, original denomination, amount, wallet, transaction memo,
 and available source-chain trace. Suspicion is not a finding of fraud or a tax
 classification. No token identity, valuation, or exclusion is preselected.
@@ -101,11 +101,67 @@ accepts per-receipt decisions for exceptions.
   public events on this readiness check. Backend tax export functions also gate,
   so disabling a button is not the sole control.
 - Report cache keys hash canonical decisions as well as the query/methodology.
-  Cached previews also recheck a current source-review fingerprint, so memo or
-  trace corrections cannot silently reuse stale evidence or decisions.
+  Cached previews also recheck a streamed fingerprint of exact persisted financial
+  events, transaction memos and payer-side fees across the wallets' full history.
+  Historical corrections, inserts, deletions and same-amount fee payer changes
+  invalidate previews even when their blockchain timestamps are old. The digest
+  is checked before and after computation; changes during computation fail closed.
   An override cannot contaminate the undecided report or another decision set.
   Failed jobs remain terminal until explicit regeneration/resync, not an endless
   automatic retry loop.
+
+## IBC refund basis readiness
+
+Timeout and error-ack refunds are principal returns, not new FMV acquisitions.
+Packet-linked restoration of original FIFO lots is not implemented. Authoritative
+calculations and cached previews therefore return HTTP 409 with
+`readiness.review_required=["ibc_refund_basis_reconciliation_required"]` for
+an affected wallet. No tax CSV, positions or phantom disposal result is returned.
+Token identity, spam/value decisions and user tags cannot clear this blocker.
+
+The gate reads full persisted chain/wallet IBC history, including refunds after
+the requested end date, to block a matching earlier send and later inventory or
+real spends. Packet identity uses source port/channel/sequence for v1 and source
+and destination clients/sequence for v2. Known unrelated packets, wallets and
+chains are not linked by amount, token or timestamp. Legacy outbound rows can use
+exact retained `send_packet` evidence. Missing or ambiguous legacy identity in
+a wallet with refunds adds `ibc_outbound_packet_identity_required` until replay
+restores the evidence. The gate does not certify unindexed refunds or off-chain
+basis and does not perform the missing lot reconciliation.
+
+## Semantic and parser/decode readiness
+
+Token identity and value review is separate from economic classification review.
+Unknown contract claims retain observed transfer legs, `unknown_claim` as the
+source trigger, and `review_required="true"` with
+`review_reason="unknown_claim_semantics"` in detail. These rows are not certified
+as income or returned principal. Asset exclusions, price overrides, denom rules,
+spam policy and user tags do not resolve this semantic blocker. Actual classifier
+review and successful reindexing are required; no tax-policy override is inferred.
+
+`/asset-review` returns `semantic_reviews` plus a `readiness` object containing
+`export_ready`, `parser_decode_complete`, `pending_asset_reviews`,
+`pending_semantic_reviews`, `parser_errors`, `decode_errors` and `scope`. Its
+`pending` count sums asset and semantic review obligations, so a row with both
+issues counts twice. `/report-job` still reports `status="ready"` when its preview
+CSV is computed, with `preview_only=true` and the separate readiness object.
+The preview's `Taxable` column is `unknown` for unresolved semantic rows.
+
+Retained message parser errors and failed-message/transaction decode evidence
+block downloads and cached previews with HTTP 409 JSON, `status="blocked"`,
+`readiness` and an explanatory `error`, never a stale prior CSV. Checks run before
+cache reuse and again after background computation. Wallet attribution uses
+retained signers, fee payers, classified legs, validator addresses or exact
+message-event values, scoped to chain and period. Unattributable failed
+transactions appear in `/coverage` parser/decode counts rather than blocking
+every unrelated wallet. Counts represent affected transactions, not each nested
+parser exception. Archive completeness, unsupported opaque payload coverage,
+missing prices, basis and off-chain history require separate checks.
+
+Cached report storage adds `readiness_json`, covered by the existing `ReportJob`
+AutoMigrate. Methodology v9 and a readiness generation in the report key invalidate
+old previews; semantic review markers also participate in current fingerprints,
+including claims denominated in the native token.
 
 ## Effects of explicit choices
 

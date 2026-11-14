@@ -46,11 +46,52 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `taxapi/validatorstatement.go` (monthly commission and delegator rewards over
   the `idx_tax_validator` partial index; `coverage` reports the index bounds
   and the replay cursor, which skips LSM reward rows the replay never
-  rewrites). Every handler normalises `chain` through `chainParam` in
+  rewrites; months that intersect a block gap are `incomplete` too).
+  `taxapi/indexcoverage.go` (`GET /index-coverage`: per UTC year block
+  range, indexed and expected counts, fully covered dates, gaps; a
+  background scanner reads `blocks` in 100k-height buckets with a
+  gaps-and-islands query and serves a cached snapshot, 503 until the first
+  one; never count `blocks` per request. A bucket with both flags on every
+  height is never read again; one settled for `tx_indexed` only rereads its
+  event runs (every pass when events are the criterion, hourly otherwise).
+  Snapshots publish every 25 bucket reads, so a pass cut off by its timeout
+  still publishes; until every bucket has been read the status is `scanning`
+  and a period it cannot vouch for is `unknown`. Days before genesis count as
+  covered and add `note` / `X-Index-Coverage-Note` instead. Year start
+  heights for cosmoshub-4 are hard-coded in `hubYearStarts`; later years are
+  found by binary search on indexed blocks. A block counts when
+  `tx_indexed`; `TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true` also requires
+  `block_events_indexed`. Report and export routes are wrapped in
+  `withPeriodCoverage`, which sets `X-Index-Coverage`
+  (`complete|incomplete|unknown`), `X-Index-Coverage-Warning`,
+  `X-Index-Coverage-Incomplete-Years` and `X-Index-Coverage-Note`; `/report-job`, `/positions` and
+  `/validator-statement` also return `index_coverage` in the body, evaluated
+  per response so cached jobs pick up backfill progress. No route clamps
+  dates to the index start). Every handler normalises `chain` through `chainParam` in
   `taxapi/server.go` (`cosmoshub`, `cosmoshub-4` and `mainnet` are the same
   oracle key); never read `q.Get("chain")` raw. `/events?preview=1` emits the preview
   columns the website parses. A Gaia release that changes event shapes gets a
   review entry in `tax/gaia_versions.go`, not a silent parser change.
+- `taxapi/validatorstatement.go`: `/validator-statement` reads the validator's
+  reward and commission rows once (`readStatementAggregates`, a bitmap scan
+  with read-ahead, one snapshot) for the day sums and the distinct
+  recipients. No index holds the amount or the recipient, so cost grows with
+  the rows read, about 4 seconds per million on production. A period the
+  planner sizes above `TAX_STATEMENT_MAX_ROWS` (default 12 million) is
+  refused with 422 before any row is read; the database work is cancelled at
+  `TAX_STATEMENT_TIMEOUT` (default 90s, under the 120s edge) or when the
+  caller goes away, answering 504. At most three statements are read at a
+  time. `validatorstatement_pg_test.go` keeps the three former queries word
+  for word and pins the single read to them. Stage 2
+  (`taxapi/statementsummary*.go`, `taxstatement/`) requires explicit production
+  approval: a Job installs/fills derived day totals and monthly
+  recipient sets with statement-level invalidation triggers. The API never
+  installs or writes them; it mixes trusted, unmarked whole months with live
+  rows in one snapshot and counts unique recipients across their union.
+  `TAX_STATEMENT_SUMMARY=off` forces live-only reads without deleting anything.
+  Preserve the 12M live-row default and all coverage gates. Real-copy proofs
+  are opt-in, use newly retained schemas and never rewrite the preserved base.
+  DELETE-shaped fixture proofs must roll back.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message
@@ -66,8 +107,8 @@ Upgrading the SDK is not viable, so those messages are declared by hand and
 registered under their real type URLs via `RegisterCustomMsgTypesByTypeURLs`
 (probe's registry is the same object the decoder uses, so this works).
 
-Covered today: Gaia `x/liquid` (LSM, tokenized-share reward income), IBC channel
-v2 (inbound bridge transfers), and tokenfactory (minted balances, STARS on the
+Covered today: Gaia `x/liquid` and pre-v24 SDK-fork LSM namespaces
+(tokenized-share reward income), IBC channel v2 (inbound bridge transfers), and tokenfactory (minted balances, STARS on the
 Hub). Field numbers come from each project's own `.proto`; nested Coins that no
 taxable event depends on are kept as raw bytes.
 
@@ -84,19 +125,25 @@ Three rules if you add another:
    on the message at all and come from `withdraw_tokenize_share_reward`. Do not
    attribute the internal module-account withdrawal to the owner or count both
    sides of LSM's module-account hop.
-3. **Watch for the `ibccallbackerror-` prefix.** A failed destination callback
-   makes ibc-go re-emit that execution's events with that prefix on the type *and*
-   every attribute key. The transfer still happened.
+3. **Do not treat `ibccallbackerror-` events as committed credits.** Core
+   ibc-go v8/v10 re-emits discarded application receive caches with that prefix
+   on the type *and* every attribute key. A lower app's `success=true` can precede
+   an enclosing middleware error acknowledgement. Require unprefixed app success
+   and bank evidence. A separately failed optional callback may leave a transfer
+   committed, but that is version/middleware dependent, not guaranteed by the
+   prefix. Unreconciled successful receives persist a classification error.
 
-An undecodable message is skipped individually (`core/tx.go`); it does not fail
-the block. Before that fix one unknown type destroyed every unrelated
-transaction in its block.
+An undecodable message is retained as opaque evidence (`core/opaque.go` and
+`core/tx.go`): original type URL, index, bytes and ordered events. It is not
+classified by guessing, and does not silently disappear from an indexed block.
+A nonzero fee with no resolvable payer defers its block rather than inventing
+an address. Raw-disabled upserts must not erase existing raw bytes.
 
-Deliberately left undecoded, having checked on chain that their transactions
-move only fees and tips: `ibc.core.client` v1/v2 updates, `interchain_security`
-provider messages, `interchain_accounts` controller messages, and
-`cosmos.gov.v1.MsgSubmitProposal` (refundable deposit; gov v1beta1 is not
-classified either).
+Some `ibc.core.client`, `interchain_security` provider and
+`interchain_accounts` controller messages remain opaque. Historical provider
+allocation is not a second wallet income event; actual consumer-denominated
+reward withdrawals still matter. Governance v1 and v1beta1 deposits are
+classified as principal records, not income.
 
 ## Who consumes it
 The platform mono-app `/tax` section. The web app calls this API via `TAX_SDK_API_URL`
@@ -112,7 +159,13 @@ The in-cluster Hub fullnode is pruned, so history before the live indexer's
 `start-block` needs an archive node. Jobs, the failed-block re-attempt pass, the
 gap re-index tool and a completeness verifier live in
 `bare-metal/cluster/apps/cosmos-tax-sdk-backfill/` — read that README before
-running anything against an archive.
+running anything against an archive. Historical 2025 version changes, contract
+candidates and acceptance gates are documented in `tax/HISTORICAL-2025.md`.
+The optional archive HTTP guard requires bounded input, hard request pacing,
+a timeout, budget and zero RPC retries; a 403/429 stops the run. Historical
+`tx_search` can omit transactions present in blocks. Prefer block bytes plus
+execution results (`skip-block-by-height-rpc-request=true`) and independently
+verify their counts before claiming completeness.
 
 ## Gotchas
 - Token names and suffixes are not asset identity. The Juno tokenfactory `uatom`
@@ -143,7 +196,8 @@ running anything against an archive.
   fully indexed, and the `cosmos-tax` Grafana dashboard shows it.
 - `throttling` is a float used as `time.Duration(f)`, so anything below 1
   truncates to zero. Configs that look throttled are not; `rpc-workers` is the
-  only real rate control.
+  practical legacy rate control. Guarded archive runs additionally pace every
+  actual HTTP call through one shared transport.
 - `index-message-events` is read from the `[flags]` section, not `[base]`. Every
   config in the fleet sets it under `[base]`, where it is silently ignored, which
   is why `message_event_attributes` is the largest table in the database.

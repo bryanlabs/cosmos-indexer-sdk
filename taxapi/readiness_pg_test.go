@@ -1,0 +1,150 @@
+package taxapi
+
+import (
+	"context"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+// Connection-local temporary tables exercise the actual readiness SQL without
+// reading, migrating or mutating any persistent application schema.
+func TestReadinessRetainedEvidencePostgres(t *testing.T) {
+	dsn := os.Getenv("COSMOS_TAX_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set COSMOS_TAX_TEST_DSN for native Postgres readiness verification")
+	}
+	database, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	connection, err := database.DB()
+	require.NoError(t, err)
+	connection.SetMaxOpenConns(1)
+	connection.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = connection.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	database = database.WithContext(ctx)
+	for _, sql := range []string{
+		"SET search_path = pg_temp",
+		"CREATE TEMP TABLE chains (id bigint, chain_id text)",
+		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, time_stamp timestamptz)",
+		"CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)",
+		"CREATE TEMP TABLE messages (id bigint, tx_id bigint, opaque boolean, message_type_id bigint)",
+		"CREATE TEMP TABLE message_types (id bigint, message_type text)",
+		"CREATE TEMP TABLE message_parser_errors (message_id bigint)",
+		"CREATE TEMP TABLE failed_messages (tx_id bigint)",
+		"CREATE TEMP TABLE failed_txes (block_id bigint, hash text)",
+		"CREATE TEMP TABLE addresses (id bigint, address text)",
+		"CREATE TEMP TABLE tx_signer_addresses (tx_id bigint, address_id bigint)",
+		"CREATE TEMP TABLE fees (tx_id bigint, payer_address_id bigint)",
+		"CREATE TEMP TABLE taxable_events (message_id bigint, from_addr text, to_addr text, validator_address text)",
+		"CREATE TEMP TABLE message_events (id bigint, message_id bigint)",
+		"CREATE TEMP TABLE message_event_attributes (message_event_id bigint, value text)",
+		"INSERT INTO pg_temp.chains VALUES (1,'cosmoshub-4')",
+		"INSERT INTO pg_temp.blocks VALUES (1,1,'2025-06-01T00:00:00Z')",
+		"INSERT INTO pg_temp.txes VALUES (1,1,'fixture-tx',0)",
+		"INSERT INTO pg_temp.message_types VALUES (1,'/cosmos.bank.v1beta1.MsgSend'),(2,'/cosmos.gov.v1.MsgVote')",
+		"INSERT INTO pg_temp.messages VALUES (1,1,false,1)",
+		"INSERT INTO pg_temp.addresses VALUES (1,'cosmos1fixture-wallet')",
+		"INSERT INTO pg_temp.tx_signer_addresses VALUES (1,1)",
+	} {
+		require.NoError(t, database.Exec(sql).Error)
+	}
+	server := &Server{db: database}
+	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(1, 0, 0)
+	wallet := []string{"cosmos1fixture-wallet"}
+	check := func(addresses []string, complete bool, parser, decode, opaque int64) {
+		t.Helper()
+		r, err := server.classificationReadiness(apiMainnet, addresses, start, end)
+		require.NoError(t, err)
+		require.Equal(t, complete, r.ParserDecodeComplete)
+		require.Equal(t, complete, r.ExportReady)
+		require.Equal(t, parser, r.ParserErrors)
+		require.Equal(t, decode, r.DecodeErrors)
+		require.Equal(t, opaque, r.OpaqueMessages)
+	}
+	check(wallet, true, 0, 0, 0)
+	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET opaque=true").Error)
+	check(wallet, false, 0, 0, 1)
+	check([]string{"cosmos1unrelated-wallet"}, true, 0, 0, 0)
+	require.Error(t, server.requireClassificationReady(apiMainnet, wallet, start, end))
+	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET opaque=false").Error)
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.message_parser_errors VALUES (1)").Error)
+	check(wallet, false, 1, 0, 0)
+	require.NoError(t, database.Exec("DELETE FROM pg_temp.message_parser_errors").Error)
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.failed_messages VALUES (1)").Error)
+	check(wallet, false, 0, 1, 0)
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.failed_txes VALUES (1,'fixture-tx')").Error)
+	check(wallet, false, 0, 1, 0)
+	require.NoError(t, database.Exec("DELETE FROM pg_temp.failed_messages").Error)
+	require.NoError(t, database.Exec("DELETE FROM pg_temp.failed_txes").Error)
+	check(wallet, true, 0, 0, 0)
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.failed_txes VALUES (1,'no-retained-transaction')").Error)
+	check(nil, false, 0, 1, 0)
+	check(wallet, true, 0, 0, 0)
+
+	// A type with no tax decision blocks only once a message of it exists.
+	require.NoError(t, database.Exec("DELETE FROM pg_temp.failed_txes").Error)
+	require.NoError(t, database.Exec("INSERT INTO pg_temp.message_types VALUES (3,'/cosmos.gov.v1.MsgCancelProposal')").Error)
+	check(wallet, true, 0, 0, 0)
+	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET message_type_id=3").Error)
+	r, err := server.classificationReadiness(apiMainnet, wallet, start, end)
+	require.NoError(t, err)
+	require.False(t, r.ParserDecodeComplete)
+	require.Equal(t, int64(1), r.UnreviewedMessages)
+	require.NoError(t, database.Exec("UPDATE pg_temp.messages SET message_type_id=2").Error)
+	check(wallet, true, 0, 0, 0)
+
+	// A failed transaction moved nothing but its fee, so its opaque or
+	// unreviewed messages do not hold the report back.
+	for _, sql := range []string{
+		"INSERT INTO pg_temp.txes VALUES (2,1,'failed-tx',5)",
+		"INSERT INTO pg_temp.tx_signer_addresses VALUES (2,1)",
+		"INSERT INTO pg_temp.messages VALUES (2,2,true,1),(3,2,false,3)",
+	} {
+		require.NoError(t, database.Exec(sql).Error)
+	}
+	r, err = server.classificationReadiness(apiMainnet, wallet, start, end)
+	require.NoError(t, err)
+	require.True(t, r.ParserDecodeComplete)
+	require.Zero(t, r.OpaqueMessages)
+	require.Zero(t, r.UnreviewedMessages)
+	require.NoError(t, database.Exec("UPDATE pg_temp.txes SET code=0 WHERE id=2").Error)
+	r, err = server.classificationReadiness(apiMainnet, wallet, start, end)
+	require.NoError(t, err)
+	require.False(t, r.ParserDecodeComplete)
+	require.Equal(t, int64(1), r.OpaqueMessages)
+	require.Equal(t, int64(1), r.UnreviewedMessages)
+}
+
+// walletTxScope finds the set from the addresses. The per-transaction EXISTS
+// form is the definition it must match, with one transaction per kind of
+// evidence and one that names only another wallet.
+func TestWalletTxScopeMatchesPerTransactionAttributionPostgres(t *testing.T) {
+	s := refundCachePGFixture(t)
+	for _, sql := range []string{
+		"DELETE FROM pg_temp.tx_signer_addresses",
+		"INSERT INTO pg_temp.txes VALUES (5,4,'unrelated',0,''),(6,4,'validator',0,''),(7,4,'sender',0,'')",
+		"INSERT INTO pg_temp.messages (id,tx_id,opaque) VALUES (5,5,false),(6,6,false),(7,7,false)",
+		"INSERT INTO pg_temp.tx_signer_addresses VALUES (1,1),(5,2)",
+		"INSERT INTO pg_temp.fees VALUES (1,2,1,1,10),(2,5,2,1,10)",
+		"INSERT INTO pg_temp.taxable_events (id,message_id,sub_index,category,from_addr,to_addr,validator_address) VALUES (1,3,0,'transfer','other-wallet','wallet',''),(2,5,0,'transfer','other-wallet','other-wallet',''),(3,6,0,'reward','','other-wallet','wallet'),(4,7,0,'transfer','wallet','other-wallet','')",
+		"INSERT INTO pg_temp.message_events (id,message_id,message_event_type_id) VALUES (1,4,1),(2,5,1)",
+		"INSERT INTO pg_temp.message_event_attributes VALUES (1,1,0,'wallet'),(2,1,0,'other-wallet')",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error)
+	}
+	ids := func(scope func(*gorm.DB, []string) *gorm.DB) []int64 {
+		var out []int64
+		require.NoError(t, scope(s.db.Table("txes t"), []string{"wallet"}).Order("t.id").Pluck("t.id", &out).Error)
+		return out
+	}
+	require.Equal(t, []int64{1, 2, 3, 4, 6, 7}, ids(walletTxScope))
+	require.Equal(t, ids(walletFewTxScope), ids(walletTxScope))
+}

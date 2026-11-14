@@ -11,7 +11,7 @@ import (
 // (INF-208) — this simulates a 6-decimal non-ATOM denom (e.g. Noble's uusdc).
 func TestGetNativeHoldingsNonAtomDenom(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(apiContentType, apiJSONContentType)
 		switch {
 		case strings.Contains(r.URL.Path, "/cosmos/bank/"):
 			_, _ = w.Write([]byte(`{"balances":[{"denom":"uusdc","amount":"5000000"}]}`))
@@ -23,7 +23,7 @@ func TestGetNativeHoldingsNonAtomDenom(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	h, err := getNativeHoldings(srv.URL, "noble1abc", NativeAsset{Denom: "uusdc", Decimals: 6, Symbol: "USDC"})
+	h, err := getNativeHoldings(srv.URL, "noble1abc", NativeAsset{Denom: apiUusdc, Decimals: 6, Symbol: apiSymbolUSDC})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -37,15 +37,15 @@ func TestGetNativeHoldingsNonAtomDenom(t *testing.T) {
 func TestGetNativeHoldingsGracefulWithoutStakingModule(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/cosmos/bank/") {
-			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(apiContentType, apiJSONContentType)
 			_, _ = w.Write([]byte(`{"balances":[{"denom":"uusdc","amount":"1000000"}]}`))
 			return
 		}
-		http.Error(w, "not found", http.StatusNotFound)
+		http.Error(w, apiNotFound, http.StatusNotFound)
 	}))
 	defer srv.Close()
 
-	h, err := getNativeHoldings(srv.URL, "noble1abc", NativeAsset{Denom: "uusdc", Decimals: 6, Symbol: "USDC"})
+	h, err := getNativeHoldings(srv.URL, "noble1abc", NativeAsset{Denom: apiUusdc, Decimals: 6, Symbol: apiSymbolUSDC})
 	if err != nil {
 		t.Fatalf("a missing staking module should not fail the whole lookup: %v", err)
 	}

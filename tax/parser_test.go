@@ -1,10 +1,14 @@
 package tax
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
+	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
@@ -26,9 +30,9 @@ func ev(t string, attrs ...[2]string) indexerTxTypes.LogMessageEvent {
 }
 
 func TestClassifyBankSend(t *testing.T) {
-	msg := &banktypes.MsgSend{FromAddress: del, ToAddress: other, Amount: sdk.NewCoins(sdk.NewInt64Coin("uatom", 100))}
+	msg := &banktypes.MsgSend{FromAddress: del, ToAddress: other, Amount: sdk.NewCoins(sdk.NewInt64Coin(fixtureNativeDenom, 100))}
 	out := classify(msg, &indexerTxTypes.LogMessage{})
-	if len(out) != 1 || out[0].Category != string(CategoryTransfer) || out[0].Amount != "100" || out[0].Denom != "uatom" || out[0].FromAddr != del || out[0].ToAddr != other {
+	if len(out) != 1 || out[0].Category != string(CategoryTransfer) || out[0].Amount != "100" || out[0].Denom != fixtureNativeDenom || out[0].FromAddr != del || out[0].ToAddr != other {
 		t.Fatalf("bank send classification wrong: %+v", out)
 	}
 }
@@ -36,8 +40,8 @@ func TestClassifyBankSend(t *testing.T) {
 func TestClassifyDelegatorRewardFromEvents(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "500uatom"}),
-		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "500uatom"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, del}, [2]string{attributeAmount, fixtureHalfMilliAtom}),
+		ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureHalfMilliAtom}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "500" || out[0].ToAddr != del {
@@ -52,8 +56,8 @@ func TestClassifyDelegatorRewardFromEvents(t *testing.T) {
 func TestClassifyRewardRedirectedToWithdrawAddressStillAttributesToDelegator(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "500uatom"}),
-		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "500uatom"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, other}, [2]string{attributeAmount, fixtureHalfMilliAtom}),
+		ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureHalfMilliAtom}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "500" || out[0].ToAddr != del {
@@ -80,9 +84,9 @@ func TestClassifyRewardRedirectedToWithdrawAddressMainnetFixture(t *testing.T) {
 		ValidatorAddress: "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k",
 	}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", withdrawAddr}, [2]string{"amount", "627uatom"}),
-		ev("transfer", [2]string{"recipient", withdrawAddr}, [2]string{"sender", "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"}, [2]string{"amount", "627uatom"}),
-		ev("withdraw_rewards", [2]string{"amount", "627uatom"}, [2]string{"validator", "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k"}, [2]string{"delegator", delegator}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, withdrawAddr}, [2]string{attributeAmount, fixtureTransferWithFee}),
+		ev(string(CategoryTransfer), [2]string{attributeRecipient, withdrawAddr}, [2]string{attributeSender, "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"}, [2]string{attributeAmount, fixtureTransferWithFee}),
+		ev("withdraw_rewards", [2]string{attributeAmount, fixtureTransferWithFee}, [2]string{attributeValidator, "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k"}, [2]string{attributeDelegator, delegator}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "627" || out[0].ToAddr != delegator {
@@ -97,8 +101,8 @@ func TestClassifyRewardRedirectedToWithdrawAddressMainnetFixture(t *testing.T) {
 func TestClassifyRedelegateRewardRedirectedToWithdrawAddressStillAttributesToDelegator(t *testing.T) {
 	msg := &stakingtypes.MsgBeginRedelegate{DelegatorAddress: del, ValidatorSrcAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", other}, [2]string{"amount", "250uatom"}),
-		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "250uatom"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, other}, [2]string{attributeAmount, fixtureQuarterMilliAtom}),
+		ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureQuarterMilliAtom}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "250" || out[0].ToAddr != del {
@@ -112,8 +116,8 @@ func TestClassifyAuthzExecRestake(t *testing.T) {
 	inner := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	exec := authz.NewMsgExec(sdk.AccAddress("grantee-bot-addr"), []sdk.Msg{inner})
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "750uatom"}, [2]string{"authz_msg_index", "0"}),
-		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "750uatom"}, [2]string{"authz_msg_index", "0"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, del}, [2]string{attributeAmount, "750uatom"}, [2]string{attributeAuthzMsgIndex, "0"}),
+		ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, "750uatom"}, [2]string{attributeAuthzMsgIndex, "0"}),
 	}}
 	out := classify(&exec, log)
 	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "750" || out[0].ToAddr != del {
@@ -129,7 +133,7 @@ func TestClassifyNFTSale(t *testing.T) {
 		ev("wasm-finalize-sale",
 			[2]string{"collection", "cosmos1coll"},
 			[2]string{"token_id", "468"},
-			[2]string{"denom", "uatom"},
+			[2]string{attributeDenom, fixtureNativeDenom},
 			[2]string{"price", "30000000"},
 			[2]string{"seller_recipient", del},
 			[2]string{"nft_recipient", other},
@@ -140,7 +144,7 @@ func TestClassifyNFTSale(t *testing.T) {
 		t.Fatalf("want 1 nft sale, got %d: %+v", len(out), out)
 	}
 	e := out[0]
-	if e.Category != string(CategoryNFTSale) || e.Amount != "30000000" || e.Denom != "uatom" ||
+	if e.Category != string(CategoryNFTSale) || e.Amount != "30000000" || e.Denom != fixtureNativeDenom ||
 		e.FromAddr != del || e.ToAddr != other || e.Asset != "cosmos1coll/468" {
 		t.Fatalf("nft sale classification wrong: %+v", e)
 	}
@@ -150,9 +154,9 @@ func TestClassifyNFTSale(t *testing.T) {
 func TestClassifyRewardNoDoubleCount(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_received", [2]string{"receiver", del}, [2]string{"amount", "7240259uatom"}),
-		ev("transfer", [2]string{"recipient", del}, [2]string{"sender", val}, [2]string{"amount", "7240259uatom"}),
-		ev("withdraw_rewards", [2]string{"delegator", del}, [2]string{"validator", val}, [2]string{"amount", "7240259uatom"}),
+		ev(eventCoinReceived, [2]string{attributeReceiver, del}, [2]string{attributeAmount, fixtureDelegatedAmount}),
+		ev(string(CategoryTransfer), [2]string{attributeRecipient, del}, [2]string{attributeSender, val}, [2]string{attributeAmount, fixtureDelegatedAmount}),
+		ev("withdraw_rewards", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, [2]string{attributeAmount, fixtureDelegatedAmount}),
 	}}
 	out := classify(msg, log)
 	if len(out) != 1 || out[0].Amount != "7240259" {
@@ -163,10 +167,10 @@ func TestClassifyRewardNoDoubleCount(t *testing.T) {
 // DEX swap (wasm action=swap) → two legs: dispose offer, acquire return.
 func TestClassifySwap(t *testing.T) {
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("wasm",
-			[2]string{"action", "swap"},
-			[2]string{"receiver", del},
-			[2]string{"offer_asset", "uatom"}, [2]string{"offer_amount", "330000"},
+		ev(eventWasm,
+			[2]string{attributeAction, string(CategorySwap)},
+			[2]string{attributeReceiver, del},
+			[2]string{"offer_asset", fixtureNativeDenom}, [2]string{"offer_amount", "330000"},
 			[2]string{"ask_asset", "factory/x/art"}, [2]string{"return_amount", "15362"},
 		),
 	}}
@@ -174,7 +178,7 @@ func TestClassifySwap(t *testing.T) {
 	if len(out) != 2 {
 		t.Fatalf("want 2 swap legs, got %d: %+v", len(out), out)
 	}
-	if out[0].FromAddr != del || out[0].Denom != "uatom" || out[0].Amount != "330000" {
+	if out[0].FromAddr != del || out[0].Denom != fixtureNativeDenom || out[0].Amount != "330000" {
 		t.Fatalf("offer leg wrong: %+v", out[0])
 	}
 	if out[1].ToAddr != del || out[1].Denom != "factory/x/art" || out[1].Amount != "15362" {
@@ -185,17 +189,126 @@ func TestClassifySwap(t *testing.T) {
 // NFT mint (wasm action=mint) → acquisition for owner with the spent cost.
 func TestClassifyNFTMint(t *testing.T) {
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
-		ev("coin_spent", [2]string{"spender", del}, [2]string{"amount", "5000000uatom"}),
-		ev("wasm",
-			[2]string{"_contract_address", "coll1"},
-			[2]string{"action", "mint"},
+		ev("coin_spent", [2]string{"spender", del}, [2]string{attributeAmount, "5000000uatom"}),
+		ev(eventWasm,
+			[2]string{attributeContractAddress, "coll1"},
+			[2]string{attributeAction, "mint"},
 			[2]string{"owner", del},
 			[2]string{"token_id", "1047"},
 		),
 	}}
-	out := nftMintEvents(log)
+	out := nftMintEvents(log, del)
 	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].ToAddr != del ||
-		out[0].Asset != "coll1/1047" || out[0].Amount != "5000000" || out[0].Denom != "uatom" {
+		out[0].Asset != "coll1/1047" || out[0].Amount != "5000000" || out[0].Denom != fixtureNativeDenom {
 		t.Fatalf("nft mint classification wrong: %+v", out)
+	}
+}
+
+// Stargaze's March 2026 migration: the supervisor executes mint on the
+// collection for a holder who already owned the token on Stargaze. That is a
+// transfer in, not a purchase at zero. The supervisor's own paid mints go
+// through the vending minter and stay ordinary mints, as does anyone else
+// calling the collection directly. Shapes are from cosmoshub-4 heights
+// 30283017 and 30587753.
+func TestClassifyStargazeMigrationMint(t *testing.T) {
+	const collection, vending = "coll1", "vending1"
+	mint := func(owner, token string) indexerTxTypes.LogMessageEvent {
+		return ev(eventWasm,
+			[2]string{attributeContractAddress, collection},
+			[2]string{attributeAction, "mint"},
+			[2]string{"minter", vending},
+			[2]string{"owner", owner},
+			[2]string{"token_id", token},
+		)
+	}
+	direct := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("execute", [2]string{attributeContractAddress, collection}),
+		mint(del, "19"),
+	}}
+	out := classify(&wasmtypes.MsgExecuteContract{Sender: stargazeMigrationSupervisor, Contract: collection}, direct)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTTransfer) || out[0].ToAddr != del || out[0].FromAddr != "" ||
+		out[0].Asset != "coll1/19" || out[0].RewardTrigger != TriggerStargazeMigration || out[0].Amount != "" ||
+		!strings.Contains(out[0].Detail, `"migrated_from":"stargaze-1"`) || !strings.Contains(out[0].Detail, `"protocol":"Stargaze"`) {
+		t.Fatalf("migration mint classified wrong: %+v", out)
+	}
+
+	paid := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("coin_spent", [2]string{"spender", stargazeMigrationSupervisor}, [2]string{attributeAmount, "50000uatom"}),
+		ev("execute", [2]string{attributeContractAddress, vending}),
+		ev(eventWasm, [2]string{attributeContractAddress, vending}, [2]string{attributeAction, "mint"}, [2]string{attributeSender, stargazeMigrationSupervisor}),
+		ev("execute", [2]string{attributeContractAddress, collection}),
+		mint(stargazeMigrationSupervisor, "20"),
+	}}
+	out = classify(&wasmtypes.MsgExecuteContract{Sender: stargazeMigrationSupervisor, Contract: vending}, paid)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].Amount != "50000" || out[0].RewardTrigger != "" {
+		t.Fatalf("supervisor's paid mint classified wrong: %+v", out)
+	}
+
+	out = classify(&wasmtypes.MsgExecuteContract{Sender: del, Contract: collection}, direct)
+	if len(out) != 1 || out[0].Category != string(CategoryNFTMint) || out[0].RewardTrigger != "" {
+		t.Fatalf("a holder's own mint classified wrong: %+v", out)
+	}
+}
+
+// Gaia v4 and v5 (SDK 0.42) logs carry no coin_received, and merge the
+// commission payout and an unrelated transfer into one ordered transfer event.
+func TestClassifyCommissionFallsBackToDistributionTransferBeforeCoinReceived(t *testing.T) {
+	msg := &disttypes.MsgWithdrawValidatorCommission{ValidatorAddress: val}
+	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
+		ev("withdraw_commission", [2]string{attributeAmount, "1500uatom"}),
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, other}, [2]string{attributeSender, del}, [2]string{attributeAmount, "7uatom"},
+			[2]string{attributeRecipient, del}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "1500uatom"}),
+	}}
+	out := classify(msg, log)
+	if len(out) != 1 || out[0].Category != string(CategoryCommission) || out[0].Amount != "1500" || out[0].ToAddr != del {
+		t.Fatalf("pre-v6 commission should come from the distribution module transfer, got %+v", out)
+	}
+}
+
+func TestClassifyCreateValidatorSelfBondIsDelegatePrincipal(t *testing.T) {
+	operator := "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k"
+	msg := &stakingtypes.MsgCreateValidator{ValidatorAddress: operator, Value: sdk.NewInt64Coin(fixtureNativeDenom, 1000000)}
+	out := classify(msg, &indexerTxTypes.LogMessage{})
+	if len(out) != 1 || out[0].Category != string(CategoryDelegate) || out[0].Amount != "1000000" ||
+		out[0].FromAddr != "cosmos140kq2fts8ed9m73a6dch7sgdap6hnp2pqqasx9" || out[0].ValidatorAddress != operator {
+		t.Fatalf("self-bond should record delegate principal from the operator account, got %+v", out)
+	}
+}
+
+func TestClassifyFundCommunityPoolAndVestingGrantAreTransfers(t *testing.T) {
+	coins := sdk.NewCoins(sdk.NewInt64Coin(fixtureNativeDenom, 42))
+	pool := classify(&disttypes.MsgFundCommunityPool{Depositor: del, Amount: coins}, &indexerTxTypes.LogMessage{})
+	if len(pool) != 1 || pool[0].Category != string(CategoryTransfer) || pool[0].FromAddr != del || pool[0].ToAddr != distributionModuleAddress || pool[0].Amount != "42" {
+		t.Fatalf("community pool funding should be a transfer to the distribution module, got %+v", pool)
+	}
+	periodic := &vestingtypes.MsgCreatePeriodicVestingAccount{FromAddress: del, ToAddress: other, VestingPeriods: []vestingtypes.Period{{Amount: coins}, {Amount: coins}}}
+	grant := classify(periodic, &indexerTxTypes.LogMessage{})
+	if len(grant) != 1 || grant[0].FromAddr != del || grant[0].ToAddr != other || grant[0].Amount != "84" {
+		t.Fatalf("a periodic vesting grant should move the summed periods up front, got %+v", grant)
+	}
+}
+
+// A spam IBC transfer whose receiver is 600 kB failed its block on the
+// to_addr index. The counterparty is stored bounded and unique while the real
+// sender, amount and denom are untouched.
+func TestBoundIndexedFieldsKeepsSenderAndBoundsSpamReceiver(t *testing.T) {
+	spam := strings.Repeat("x", 600001)
+	e := TaxableEvent{Category: string(CategoryTransfer), FromAddr: fixtureCosmosAddress, ToAddr: spam, Amount: "1", Denom: fixtureNativeDenom}
+	boundIndexedFields(&e)
+	if e.FromAddr != fixtureCosmosAddress || e.Amount != "1" || e.Denom != fixtureNativeDenom {
+		t.Fatalf("sender side changed: %+v", e)
+	}
+	if len(e.ToAddr) > maxIndexedField || !strings.HasPrefix(e.ToAddr, "xxxx") || !strings.Contains(e.ToAddr, "...sha256:") {
+		t.Fatalf("receiver not bounded: %d bytes", len(e.ToAddr))
+	}
+	if boundIndexed(spam+"y") == e.ToAddr {
+		t.Fatal("distinct oversized strings must stay distinct")
+	}
+	if got := boundIndexed("bad\x00addr\xff"); strings.ContainsRune(got, 0) || !utf8.ValidString(got) {
+		t.Fatalf("text Postgres cannot store survived: %q", got)
+	}
+	if got := boundIndexed(fixtureIBCReceiver); got != fixtureIBCReceiver {
+		t.Fatalf("a real address changed: %q", got)
 	}
 }

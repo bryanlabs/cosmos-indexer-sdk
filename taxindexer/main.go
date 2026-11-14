@@ -12,6 +12,8 @@ import (
 
 	"github.com/DefiantLabs/cosmos-indexer/cmd"
 	"github.com/DefiantLabs/cosmos-indexer/tax"
+	"github.com/cosmos/cosmos-sdk/types/module"
+	ica "github.com/cosmos/ibc-go/v7/modules/apps/27-interchain-accounts"
 )
 
 func main() {
@@ -26,6 +28,10 @@ func main() {
 		log.Fatalf("tax-indexer: registering x/liquid message types: %v", err)
 	}
 
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.LegacyLSMMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering legacy LSM message types: %v", err)
+	}
+
 	// IBC channel v2 (ibc-go v10) likewise post-dates this build's ibc-go v7.
 	// A v2 receive is an inbound transfer, so it has to decode. See tax/ibcv2.go.
 	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.IBCChannelV2MsgTypes()); err != nil {
@@ -37,6 +43,26 @@ func main() {
 	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.TokenFactoryMsgTypes()); err != nil {
 		log.Fatalf("tax-indexer: registering tokenfactory message types: %v", err)
 	}
+
+	// Interchain Security's provider and IBC v2's client messages move no coins,
+	// but left undecoded they are opaque rows that hold back the signer's
+	// reports. See tax/ccv.go and tax/ibcclientv2.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.ProviderMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering provider message types: %v", err)
+	}
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.IBCClientV2MsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering IBC client v2 message types: %v", err)
+	}
+
+	// Gravity DEX (x/liquidity, Gaia v5 to v10). Its batch messages escrow
+	// coins and pool creation swaps them. See tax/liquidity.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.LiquidityMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering liquidity message types: %v", err)
+	}
+
+	// Interchain accounts ship in this build's ibc-go but not in probe's
+	// default module set.
+	indexer.RegisterCustomModuleBasics([]module.AppModuleBasic{ica.AppModuleBasic{}})
 
 	// The SDK requires each registered parser to have a globally-unique
 	// identifier, so register a distinct instance (same logic) per type URL.

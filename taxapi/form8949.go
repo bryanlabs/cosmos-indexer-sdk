@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/shopspring/decimal"
 )
 
@@ -27,9 +28,20 @@ type Form8949Row struct {
 	// fabricated basis — the true cost is whatever the user actually paid
 	// wherever they acquired it, which we cannot see (see INF-205).
 	BasisUnknown bool
+	// ProceedsUnknown is true when the price source had no USD price for the
+	// asset on the sale date. Proceeds (and gain) are then 0, which is not a
+	// confirmed value; the line says so rather than report a silent 0.00.
+	ProceedsUnknown bool
 }
 
 const basisUnknownNote = " (basis unknown, complete in your aggregator)"
+
+const proceedsUnknownNote = " (no USD price on the sale date, proceeds unknown)"
+
+// stargazeBasisNote marks the sale of an NFT that arrived in Stargaze's
+// March 2026 migration. Its basis and acquired date are the holder's Stargaze
+// purchase, which Cosmos Hub does not show.
+const stargazeBasisNote = " (migrated from Stargaze: enter the Stargaze purchase cost and date)"
 
 type lot struct {
 	qty          decimal.Decimal // display units
@@ -46,7 +58,7 @@ type lot struct {
 // could be an exchange withdrawal or a wallet we don't track — the FMV at
 // receipt is not necessarily what the user actually paid for it.
 func basisUnknownFor(category string) bool {
-	return category == "transfer" || category == "ibc_in"
+	return category == apiTransfer || category == "ibc_in"
 }
 
 // basisUnknownForRow extends basisUnknownFor with the user's tag: a receipt
@@ -86,6 +98,12 @@ func Build8949(rows []Row) []Form8949Row {
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
+		// A Stargaze migration mint is record-only, but the NFT keeps the
+		// holder's Stargaze lot, so a later sale says where its basis is.
+		if r.Category == apiNFTTransfer && r.RewardTrigger == tax.TriggerStargazeMigration && r.Direction == "in" && r.UserTag == "" {
+			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), date: r.Time, basisUnknown: true})
+			continue
+		}
 		// Record-only rows describe where the user's own assets went; they
 		// are neither acquisitions nor disposals. The same holds for rows the
 		// user tagged as an internal transfer, a protocol deposit or spam.
@@ -93,44 +111,61 @@ func Build8949(rows []Row) []Form8949Row {
 			continue
 		}
 		// NFT acquisition via mint: establishes the NFT's cost basis.
-		if r.Category == "nft_mint" {
+		if r.Category == apiNFTMint {
 			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
 			continue
 		}
 
 		// NFT marketplace sale: dispose/acquire the NFT, valued in USD.
-		if r.Category == "nft_sale" {
+		if r.Category == apiNFTSale {
 			key := r.Asset
 			desc := "NFT " + r.Asset
 			switch r.Direction {
 			case "in": // buyer acquires the NFT; basis = USD paid
 				nftLots[key] = append(nftLots[key], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
-			case "out": // seller disposes the NFT; proceeds = USD received
+			case apiOut:
 				proceeds := r.ValueUSD
+				if r.PriceMissing {
+					desc += proceedsUnknownNote
+				}
 				q := nftLots[key]
 				if len(q) == 0 {
 					// No recorded mint/buy: this NFT's acquisition is outside our
 					// view (bought elsewhere, or minted before the indexed window).
 					out = append(out, Form8949Row{
-						Description:  desc + basisUnknownNote,
-						DateAcquired: "Various",
-						DateSold:     r.Time.UTC().Format("01/02/2006"),
-						Proceeds:     proceeds,
-						CostBasis:    decimal.Zero,
-						GainLoss:     proceeds,
-						LongTerm:     false,
-						BasisUnknown: true,
+						Description:     desc + basisUnknownNote,
+						DateAcquired:    apiVariousDates,
+						DateSold:        r.Time.UTC().Format(apiUSDateLayout),
+						Proceeds:        proceeds,
+						CostBasis:       decimal.Zero,
+						GainLoss:        proceeds,
+						LongTerm:        false,
+						BasisUnknown:    true,
+						ProceedsUnknown: r.PriceMissing,
 					})
-				} else {
-					l := q[0]
+				} else if l := q[0]; l.basisUnknown {
 					out = append(out, Form8949Row{
-						Description:  desc,
-						DateAcquired: l.date.UTC().Format("01/02/2006"),
-						DateSold:     r.Time.UTC().Format("01/02/2006"),
-						Proceeds:     proceeds,
-						CostBasis:    l.cost,
-						GainLoss:     proceeds.Sub(l.cost),
-						LongTerm:     r.Time.Sub(l.date) > 365*24*time.Hour,
+						Description:     desc + stargazeBasisNote,
+						DateAcquired:    apiVariousDates,
+						DateSold:        r.Time.UTC().Format(apiUSDateLayout),
+						Proceeds:        proceeds,
+						CostBasis:       decimal.Zero,
+						GainLoss:        proceeds,
+						LongTerm:        false,
+						BasisUnknown:    true,
+						ProceedsUnknown: r.PriceMissing,
+					})
+					nftLots[key] = q[1:]
+				} else {
+					out = append(out, Form8949Row{
+						Description:     desc,
+						DateAcquired:    l.date.UTC().Format(apiUSDateLayout),
+						DateSold:        r.Time.UTC().Format(apiUSDateLayout),
+						Proceeds:        proceeds,
+						CostBasis:       l.cost,
+						GainLoss:        proceeds.Sub(l.cost),
+						LongTerm:        r.Time.Sub(l.date) > 365*24*time.Hour,
+						ProceedsUnknown: r.PriceMissing,
 					})
 					nftLots[key] = q[1:]
 				}
@@ -146,9 +181,11 @@ func Build8949(rows []Row) []Form8949Row {
 			asset = r.AssetIdentity.RawDenom
 		}
 		switch {
-		case r.Direction == "in" && r.Category != "fee":
+		case r.Direction == "in" && r.Category != apiFee:
 			// acquisition
-			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownForRow(r)
+			// An acquisition with no USD price has no receipt-time value to
+			// stand on, so its basis is unknown whatever kind of receipt it was.
+			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownForRow(r) || r.PriceMissing
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
 				cost = r.ManualBasisUSD.DivRound(r.Amount, 64)
 				acquired = *r.ManualAcquiredDate
@@ -160,7 +197,7 @@ func Build8949(rows []Row) []Form8949Row {
 			})
 			sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
 
-		case r.Direction == "out":
+		case r.Direction == apiOut:
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil {
 				remaining := r.Amount
 				for remaining.IsPositive() && len(lots[asset]) > 0 {
@@ -173,26 +210,41 @@ func Build8949(rows []Row) []Form8949Row {
 						q[0].qty = q[0].qty.Sub(take)
 					}
 				}
-				out = append(out, Form8949Row{Description: r.Amount.String() + " " + asset + " (user-supplied basis/value)", DateAcquired: r.ManualAcquiredDate.UTC().Format("01/02/2006"), DateSold: r.Time.UTC().Format("01/02/2006"), Proceeds: r.ValueUSD, CostBasis: *r.ManualBasisUSD, GainLoss: r.ValueUSD.Sub(*r.ManualBasisUSD), LongTerm: r.Time.Sub(*r.ManualAcquiredDate) > 365*24*time.Hour})
+				desc := r.Amount.String() + " " + asset + " (user-supplied basis/value)"
+				if r.PriceMissing {
+					desc += proceedsUnknownNote
+				}
+				out = append(out, Form8949Row{Description: desc, DateAcquired: r.ManualAcquiredDate.UTC().Format(apiUSDateLayout), DateSold: r.Time.UTC().Format(apiUSDateLayout), Proceeds: r.ValueUSD, CostBasis: *r.ManualBasisUSD, GainLoss: r.ValueUSD.Sub(*r.ManualBasisUSD), LongTerm: r.Time.Sub(*r.ManualAcquiredDate) > 365*24*time.Hour, ProceedsUnknown: r.PriceMissing})
 				break
 			}
 			// disposal (incl. fee spends): consume FIFO
 			remaining := r.Amount
 			disposalPrice := r.PriceUSD
+			proceedsUnknown := r.PriceMissing
+			if r.Category == "gov_deposit_burn" {
+				// Burned by the chain: the coins are gone for nothing.
+				disposalPrice = decimal.Zero
+				proceedsUnknown = false
+			}
+			priceNote := ""
+			if proceedsUnknown {
+				priceNote = proceedsUnknownNote
+			}
 			for remaining.IsPositive() {
 				q := lots[asset]
 				if len(q) == 0 {
 					// no known lot at all: basis unknown
 					proceeds := remaining.Mul(disposalPrice)
 					out = append(out, Form8949Row{
-						Description:  remaining.String() + " " + asset + basisUnknownNote,
-						DateAcquired: "Various",
-						DateSold:     r.Time.UTC().Format("01/02/2006"),
-						Proceeds:     proceeds,
-						CostBasis:    decimal.Zero,
-						GainLoss:     proceeds,
-						LongTerm:     false,
-						BasisUnknown: true,
+						Description:     remaining.String() + " " + asset + basisUnknownNote + priceNote,
+						DateAcquired:    apiVariousDates,
+						DateSold:        r.Time.UTC().Format(apiUSDateLayout),
+						Proceeds:        proceeds,
+						CostBasis:       decimal.Zero,
+						GainLoss:        proceeds,
+						LongTerm:        false,
+						BasisUnknown:    true,
+						ProceedsUnknown: proceedsUnknown,
 					})
 					break
 				}
@@ -216,14 +268,15 @@ func Build8949(rows []Row) []Form8949Row {
 					gain = proceeds.Sub(cost)
 				}
 				out = append(out, Form8949Row{
-					Description:  desc,
-					DateAcquired: l.date.UTC().Format("01/02/2006"),
-					DateSold:     r.Time.UTC().Format("01/02/2006"),
-					Proceeds:     proceeds,
-					CostBasis:    cost,
-					GainLoss:     gain,
-					LongTerm:     r.Time.Sub(l.date) > 365*24*time.Hour,
-					BasisUnknown: l.basisUnknown,
+					Description:     desc + priceNote,
+					DateAcquired:    l.date.UTC().Format(apiUSDateLayout),
+					DateSold:        r.Time.UTC().Format(apiUSDateLayout),
+					Proceeds:        proceeds,
+					CostBasis:       cost,
+					GainLoss:        gain,
+					LongTerm:        r.Time.Sub(l.date) > 365*24*time.Hour,
+					BasisUnknown:    l.basisUnknown,
+					ProceedsUnknown: proceedsUnknown,
 				})
 				remaining = remaining.Sub(take)
 				if l.qty.Equal(take) {
@@ -253,6 +306,19 @@ func CountUnknownBasis(rows []Form8949Row) int {
 	return n
 }
 
+// CountUnknownProceeds returns how many 8949 lines have no USD price on the
+// sale date. Nonzero means those lines' proceeds and gains are not reported
+// here and must be completed from another price source.
+func CountUnknownProceeds(rows []Form8949Row) int {
+	n := 0
+	for _, r := range rows {
+		if r.ProceedsUnknown {
+			n++
+		}
+	}
+	return n
+}
+
 // ScheduleD is the capital-gains summary that the 8949 totals flow into on IRS
 // Schedule D (Form 1040). Short-term and long-term are taxed differently, so they
 // stay separate; Net is line 16 (overall capital gain or loss).
@@ -267,14 +333,17 @@ type ScheduleD struct {
 	// UnknownBasisLines > 0 means this wallet is not "pure on-chain" (INF-205):
 	// some disposed lots arrived from outside our view, so these totals are a
 	// floor, not the full picture — steer to a full-history aggregator.
-	UnknownBasisLines  int             `json:"unknown_basis_lines"`
-	ShortTermProceeds  decimal.Decimal `json:"short_term_proceeds"`
-	ShortTermCostBasis decimal.Decimal `json:"short_term_cost_basis"`
-	ShortTermGainLoss  decimal.Decimal `json:"short_term_gain_loss"` // Schedule D line 7
-	LongTermProceeds   decimal.Decimal `json:"long_term_proceeds"`
-	LongTermCostBasis  decimal.Decimal `json:"long_term_cost_basis"`
-	LongTermGainLoss   decimal.Decimal `json:"long_term_gain_loss"` // Schedule D line 15
-	NetGainLoss        decimal.Decimal `json:"net_gain_loss"`       // Schedule D line 16
+	UnknownBasisLines int `json:"unknown_basis_lines"`
+	// UnknownProceedsLines > 0 means some disposals had no USD price on the
+	// sale date, so their proceeds are missing from these totals.
+	UnknownProceedsLines int             `json:"unknown_proceeds_lines"`
+	ShortTermProceeds    decimal.Decimal `json:"short_term_proceeds"`
+	ShortTermCostBasis   decimal.Decimal `json:"short_term_cost_basis"`
+	ShortTermGainLoss    decimal.Decimal `json:"short_term_gain_loss"` // Schedule D line 7
+	LongTermProceeds     decimal.Decimal `json:"long_term_proceeds"`
+	LongTermCostBasis    decimal.Decimal `json:"long_term_cost_basis"`
+	LongTermGainLoss     decimal.Decimal `json:"long_term_gain_loss"` // Schedule D line 15
+	NetGainLoss          decimal.Decimal `json:"net_gain_loss"`       // Schedule D line 16
 }
 
 // BuildScheduleD rolls up 8949 lines into the Schedule D short/long-term totals.
@@ -303,13 +372,13 @@ func BuildScheduleD(rows []Form8949Row) ScheduleD {
 func Write8949CSV(out io.Writer, rows []Form8949Row) error {
 	w := csv.NewWriter(out)
 	defer w.Flush()
-	_ = w.Write([]string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown"})
+	_ = w.Write([]string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown", "Proceeds unknown"})
 	write := func(part string, longTerm bool) {
 		for _, r := range rows {
 			if r.LongTerm != longTerm {
 				continue
 			}
-			_ = w.Write([]string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown)})
+			_ = w.Write([]string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown), boolStr(r.ProceedsUnknown)})
 		}
 	}
 	write("I (short-term)", false)

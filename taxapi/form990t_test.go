@@ -10,7 +10,7 @@ import (
 func TestCompute990T(t *testing.T) {
 	// Under the $1,000 threshold: no filing, no tax.
 	low := compute990T(decimal.NewFromInt(800), 0, RecognitionPolicyDefault)
-	if low.FilingRequired || low.EstimatedTaxUSD != "0.00" || low.TaxableUBTI != "0.00" {
+	if low.FilingRequired || low.EstimatedTaxUSD != apiZeroUSD || low.TaxableUBTI != apiZeroUSD {
 		t.Fatalf("under-threshold wrong: %+v", low)
 	}
 	// $5,000 UBTI: taxable = 4,000; trust tax = 3100*10% + 900*24% = 310 + 216 = 526.
@@ -31,8 +31,8 @@ func TestCompute990TFlagsMissingPrices(t *testing.T) {
 }
 
 func TestCompute990TPrintsRecognitionPolicy(t *testing.T) {
-	got := compute990T(decimal.NewFromInt(2000), 0, "at-claim")
-	if got.RecognitionPolicy != "at-claim" {
+	got := compute990T(decimal.NewFromInt(2000), 0, apiAtClaim)
+	if got.RecognitionPolicy != apiAtClaim {
 		t.Fatalf("want recognition_policy echoed, got %+v", got)
 	}
 }

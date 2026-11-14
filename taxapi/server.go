@@ -28,7 +28,7 @@ type NativeAsset struct {
 
 // DefaultNativeAsset is ATOM/uatom/6 — cosmoshub's asset, the default so
 // existing mainnet/testnet deployments need no new env vars.
-var DefaultNativeAsset = NativeAsset{Denom: "uatom", Decimals: 6, Symbol: "ATOM"}
+var DefaultNativeAsset = NativeAsset{Denom: apiUatom, Decimals: 6, Symbol: apiSymbolATOM}
 
 type Server struct {
 	db     *gorm.DB
@@ -37,6 +37,18 @@ type Server struct {
 
 	attestOnce sync.Once
 	attest     *attestationCache
+
+	indexCovMu      sync.RWMutex
+	coverageScanner *indexCoverageScanner
+
+	ledgerCov ledgerCoverage
+
+	flowExpMu sync.Mutex
+	flowExp   map[string]*flowExpected
+
+	statementMaxRows    int64
+	statementTimeout    time.Duration
+	statementSummaryOff bool
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -46,23 +58,28 @@ func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
-	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("GET /report-job", s.handleReportJob)
-	mux.HandleFunc("GET /asset-review", s.handleAssetReview)
-	mux.HandleFunc("GET /8949", s.handle8949)
-	mux.HandleFunc("GET /schedule-d", s.handleScheduleD)
-	mux.HandleFunc("GET /income", s.handleIncome)
-	mux.HandleFunc("GET /990t", s.handle990T)
+	mux.HandleFunc("GET /events", s.withPeriodCoverage(s.handleEvents))
+	mux.HandleFunc("GET /report-job", s.withPeriodCoverage(s.handleReportJob))
+	mux.HandleFunc("GET /asset-review", s.withPeriodCoverage(s.handleAssetReview))
+	mux.HandleFunc("GET /8949", s.withPeriodCoverage(s.handle8949))
+	mux.HandleFunc("GET /schedule-d", s.withPeriodCoverage(s.handleScheduleD))
+	mux.HandleFunc("GET /income", s.withPeriodCoverage(s.handleIncome))
+	mux.HandleFunc("GET /990t", s.withPeriodCoverage(s.handle990T))
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
+	mux.HandleFunc("GET /index-coverage", s.handleIndexCoverage)
 	mux.HandleFunc("GET /balance", s.handleBalance)
+	mux.HandleFunc("GET /balance-statement", s.handleBalanceStatement)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
 	mux.HandleFunc("GET /methodology", s.handleMethodology)
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	mux.HandleFunc("GET /catalog", s.handleCatalog)
 	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
-	mux.HandleFunc("GET /journal", s.handleJournal)
-	mux.HandleFunc("GET /positions", s.handlePositions)
-	mux.HandleFunc("GET /validator-statement", s.handleValidatorStatement)
+	mux.HandleFunc("GET /journal", s.withPeriodCoverage(s.handleJournal))
+	mux.HandleFunc("GET /positions", s.withPeriodCoverage(s.handlePositions))
+	mux.HandleFunc("GET /validator-statement", s.withPeriodCoverage(s.handleValidatorStatement))
+	mux.HandleFunc("GET /validator-commission-flows", s.handleValidatorCommissionFlows)
+	mux.HandleFunc("GET /commission-flows", s.handleCommissionFlowsHub)
+	mux.HandleFunc("GET /address-labels", s.handleAddressLabels)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
 	mux.HandleFunc("GET /validators/attest/check", s.handleAttestationCheck)
 	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
@@ -71,7 +88,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /wasm/submissions", s.handleListWasmSubmissions)
 	mux.HandleFunc("GET /wasm/submissions/status", s.handleWasmSubmissionStatus)
 	mux.HandleFunc("PATCH /wasm/submissions/{id}", s.handleUpdateWasmSubmission)
-	mux.HandleFunc("GET /delegator-report", s.handleDelegatorReport)
+	mux.HandleFunc("GET /delegator-report", s.withPeriodCoverage(s.handleDelegatorReport))
 	mux.HandleFunc("POST /admin/validator-keys", s.handleCreateValidatorKey)
 	mux.HandleFunc("GET /admin/validator-keys", s.handleListValidatorKeys)
 	return withCORS(mux)
@@ -79,24 +96,24 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := q.Get("address")
+	addr := q.Get(apiAddress)
 	if addr == "" {
-		http.Error(w, "address required", http.StatusBadRequest)
+		http.Error(w, apiAddressRequired, http.StatusBadRequest)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	format := def(q.Get("format"), "summ")
-	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	chain := chainParam(q.Get(apiChain))
+	format := def(q.Get(apiFormat), apiSumm)
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=cosmos-tax-"+format+".csv")
+	w.Header().Set(apiContentType, apiCSVContentType)
+	w.Header().Set(apiContentDisposition, "attachment; filename=cosmos-tax-"+format+".csv")
 	// preview=1 is the same transport the report job uses: every row kept,
 	// with the category, taxable flag, detail and user tag appended, for the
 	// site's public JSON API rather than a tax-software import.
-	if q.Get("preview") == "1" && format == "cryptotaxcalculator" {
+	if q.Get("preview") == "1" && format == apiCryptotaxcalculator {
 		_ = WritePreviewCSV(w, format, rows)
 		return
 	}
@@ -105,13 +122,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := q.Get("address")
+	addr := q.Get(apiAddress)
 	if addr == "" {
-		http.Error(w, "address required", http.StatusBadRequest)
+		http.Error(w, apiAddressRequired, http.StatusBadRequest)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	chain := chainParam(q.Get(apiChain))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
 		return
@@ -128,20 +145,21 @@ func (s *Server) handle8949(w http.ResponseWriter, r *http.Request) {
 	// completeness. Exposed as a header (the body is a CSV) so the web UI can
 	// gate the confident-download path without re-parsing the CSV.
 	w.Header().Set("X-Basis-Unknown-Count", strconv.Itoa(CountUnknownBasis(form)))
-	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=form-8949.csv")
+	w.Header().Set("X-Proceeds-Unknown-Count", strconv.Itoa(CountUnknownProceeds(form)))
+	w.Header().Set(apiContentType, apiCSVContentType)
+	w.Header().Set(apiContentDisposition, "attachment; filename=form-8949.csv")
 	_ = Write8949CSV(w, form)
 }
 
 func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := q.Get("address")
+	addr := q.Get(apiAddress)
 	if addr == "" {
-		http.Error(w, "address required", http.StatusBadRequest)
+		http.Error(w, apiAddressRequired, http.StatusBadRequest)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	chain := chainParam(q.Get(apiChain))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
 		return
@@ -151,7 +169,8 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 	sched.Address = addr
 	sched.WalletByWallet = true
 	sched.UnknownBasisLines = CountUnknownBasis(form)
-	w.Header().Set("Content-Type", "application/json")
+	sched.UnknownProceedsLines = CountUnknownProceeds(form)
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(sched)
 }
 
@@ -160,9 +179,9 @@ func (s *Server) handleScheduleD(w http.ResponseWriter, r *http.Request) {
 // income at the time received, distinct from the 8949's capital dispositions.
 func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := q.Get("address")
+	addr := q.Get(apiAddress)
 	if addr == "" {
-		http.Error(w, "address required", http.StatusBadRequest)
+		http.Error(w, apiAddressRequired, http.StatusBadRequest)
 		return
 	}
 	// Recognition policy is a documented, explicit parameter (INF-206), not a
@@ -175,14 +194,14 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("recognition policy %q is not implemented yet; only %q is available today", recognition, RecognitionPolicyDefault), http.StatusNotImplemented)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	chain := chainParam(q.Get(apiChain))
+	rows, err := s.rowsForRequest(r, chain, []string{addr}, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		writeTaxError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "text/csv")
-	w.Header().Set("Content-Disposition", "attachment; filename=income-schedule1-990t.csv")
+	w.Header().Set(apiContentType, apiCSVContentType)
+	w.Header().Set(apiContentDisposition, "attachment; filename=income-schedule1-990t.csv")
 	_, _ = w.Write([]byte(buildIncomeCSV(rows, addr, recognition, s.jurisdictionFunc(chain))))
 }
 
@@ -197,7 +216,7 @@ func (s *Server) handleIncome(w http.ResponseWriter, r *http.Request) {
 func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction JurisdictionFunc) string {
 	var buf strings.Builder
 	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"address", "date_utc", "type", "symbol", "denom", "amount", "unit_price_usd", "value_usd", "tx_hash", "validator_address", "validator_moniker", "reward_trigger", "validator_jurisdiction", "source"})
+	_ = cw.Write([]string{apiAddress, apiDateUTC, apiType, apiSymbol, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, apiTxHash, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "validator_jurisdiction", "source"})
 	total := decimal.Zero
 	byJurisdiction := map[string]decimal.Decimal{}
 	missingDenoms := map[string]bool{}
@@ -213,20 +232,20 @@ func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction Jurisd
 			missingDenoms[row.Symbol] = true
 		}
 		jur := ""
-		if row.Category == "reward" || row.Category == "commission" {
+		if row.Category == apiReward || row.Category == apiCommission {
 			jur = jurisdiction(row.ValidatorAddress)
 			byJurisdiction[jur] = byJurisdiction[jur].Add(row.ValueUSD)
 		}
 		typ := row.Category
-		if row.Category == "income" || row.UserTag != "" {
+		if row.Category == TagIncome || row.UserTag != "" {
 			typ = incomeType(row)
 		}
 		_ = cw.Write([]string{
-			address, row.Time.UTC().Format("2006-01-02"), typ, row.Symbol, row.Denom,
+			address, row.Time.UTC().Format(apiDateLayout), typ, row.Symbol, row.Denom,
 			row.Amount.String(), row.PriceUSD.String(), rowValueText(row), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger, jur, incomeSource(row),
 		})
 	}
-	_ = cw.Write([]string{address, "", "TOTAL", "", "", "", "", total.String(), "", "", "", "", "", ""})
+	_ = cw.Write([]string{address, "", apiTotalLabel, "", "", "", "", total.String(), "", "", "", "", "", ""})
 	jurs := make([]string, 0, len(byJurisdiction))
 	for j := range byJurisdiction {
 		jurs = append(jurs, j)
@@ -242,7 +261,8 @@ func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction Jurisd
 			denoms = append(denoms, sym)
 		}
 		sort.Strings(denoms)
-		_ = cw.Write([]string{address, "", "WARNING", "", "", "", "",
+		_ = cw.Write([]string{
+			address, "", apiWarningLabel, "", "", "", "",
 			fmt.Sprintf("no price found for: %s -- TOTAL above excludes their value, actual income is higher", strings.Join(denoms, ", ")),
 			"", "", "", "", "", "",
 		})
@@ -256,9 +276,9 @@ func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction Jurisd
 // deduction, taxable UBTI, and estimated tax at trust rates.
 func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	addr := q.Get("address")
+	addr := q.Get(apiAddress)
 	if addr == "" {
-		http.Error(w, "address required", http.StatusBadRequest)
+		http.Error(w, apiAddressRequired, http.StatusBadRequest)
 		return
 	}
 	recognition := def(q.Get("recognition"), RecognitionPolicyDefault)
@@ -266,9 +286,9 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("recognition policy %q is not implemented yet; only %q is available today", recognition, RecognitionPolicyDefault), http.StatusNotImplemented)
 		return
 	}
-	chain := chainParam(q.Get("chain"))
-	start := dateParam(q.Get("start"), time.Time{})
-	end := dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1))
+	chain := chainParam(q.Get(apiChain))
+	start := dateParam(q.Get(apiStart), time.Time{})
+	end := dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
 	// An entity may hold several wallets; the $1,000 deduction is per return, so
 	// sum staking income across all of them, then compute one 990-T.
 	rows, err := s.rowsForRequest(r, chain, strings.Split(addr, ","), start, end)
@@ -277,7 +297,7 @@ func (s *Server) handle990T(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ubti, priceMissingRows := sumUBTI(rows)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(compute990T(ubti, priceMissingRows, recognition))
 }
 
@@ -290,7 +310,7 @@ func sumUBTI(rows []Row) (ubti decimal.Decimal, priceMissingRows int) {
 		if row.Excluded {
 			continue
 		}
-		if row.Category != "reward" && row.Category != "commission" {
+		if row.Category != apiReward && row.Category != apiCommission {
 			continue
 		}
 		ubti = ubti.Add(row.ValueUSD)
@@ -303,12 +323,12 @@ func sumUBTI(rows []Row) (ubti decimal.Decimal, priceMissingRows int) {
 
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	rep, err := s.coverage(dateParam(q.Get("start"), time.Time{}), dateParam(q.Get("end"), nowUTC().AddDate(0, 0, 1)))
+	rep, err := s.coverage(chainParam(q.Get(apiChain)), dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(rep)
 }
 
@@ -328,28 +348,37 @@ type feeRec struct {
 // replay rewrites. A reward row from one of these with an empty trigger is a
 // legacy row the replay has not reached.
 var replayedMessageTypes = []string{
-	"/cosmos.staking.v1beta1.MsgDelegate", "/cosmos.staking.v1beta1.MsgUndelegate",
+	apiDelegateMessageType, "/cosmos.staking.v1beta1.MsgUndelegate",
 	"/cosmos.staking.v1beta1.MsgBeginRedelegate", "/cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward",
 	"/cosmos.authz.v1beta1.MsgExec",
 }
 
 func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error) {
-	meta := s.oracle.Denoms(chain)
+	input, err := s.readReportInput(chain, []string{addr}, start, end, false)
+	if err != nil {
+		return nil, err
+	}
+	return s.priceWalletRows(chain, addr, input.Wallets[0]), nil
+}
 
+// loadWalletRows performs database work only. Pricing and shared Server caches
+// are deliberately used only after the read snapshot has been released.
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (walletRows, error) {
 	var events []tax.TaxableEvent
-	if err := s.db.
+	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
 		Where("timestamp >= ? AND timestamp < ?", start, end).
 		Order("timestamp asc").
 		Find(&events).Error; err != nil {
-		return nil, err
+		return walletRows{}, err
 	}
+	reconcileIBCRefunds(events, refundPairs)
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.
 	var legacyIDs []uint
 	for _, event := range events {
-		if event.Category == "reward" && event.RewardTrigger == "" {
+		if event.Category == apiReward && event.RewardTrigger == "" {
 			legacyIDs = append(legacyIDs, event.MessageID)
 		}
 	}
@@ -357,24 +386,48 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 		var legacyCount int64
 		if err := s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
 			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, replayedMessageTypes).Count(&legacyCount).Error; err != nil {
-			return nil, err
+			return walletRows{}, err
 		}
 		if legacyCount > 0 {
-			return nil, errAwaitingCorrection
+			return walletRows{}, errAwaitingCorrection
 		}
 	}
 
 	// Fees (generic SDK Fee table): a spend by the payer.
 	var fees []feeRec
-	_ = s.db.Table("fees").
+	if err := s.db.Table("fees").
 		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
 		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
 		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
 		Joins("JOIN txes ON txes.id = fees.tx_id").
 		Joins("JOIN blocks ON blocks.id = txes.block_id").
+		Joins("JOIN chains ON chains.id = blocks.chain_id").
+		Where("chains.chain_id IN ?", chainIDs(chain)).
 		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
-		Scan(&fees).Error
+		Scan(&fees).Error; err != nil {
+		return walletRows{}, err
+	}
+	memos, err := s.eventMemos(events)
+	if err != nil {
+		return walletRows{}, err
+	}
+	// Coins the chain moved at the start or end of a block, with no
+	// transaction: unbonding completions, deposit refunds and burns,
+	// community pool payouts.
+	blockRows, err := s.blockEventRows(chain, addr, start, end)
+	if err != nil {
+		return walletRows{}, err
+	}
+	if len(blockRows) > 0 {
+		events = append(events, blockRows...)
+		sort.SliceStable(events, func(i, j int) bool { return events[i].Timestamp.Before(events[j].Timestamp) })
+	}
+	return walletRows{Events: events, Fees: fees, Memos: memos}, nil
+}
 
+func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
+	events, fees, memos := input.Events, input.Fees, input.Memos
+	meta := s.oracle.Denoms(chain)
 	// A busy wallet can have thousands of rows, almost all on distinct dates, and
 	// buildRow's price lookup is a network call to the oracle on a cache miss —
 	// done one row at a time this made a large report take tens of seconds.
@@ -383,10 +436,6 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	// in-memory cache hits.
 	s.prewarmPrices(chain, events, fees)
 
-	memos, err := s.eventMemos(events)
-	if err != nil {
-		return nil, err
-	}
 	var validatorNames map[string]string
 	for _, event := range events {
 		if event.ValidatorAddress != "" {
@@ -397,8 +446,16 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	out := make([]Row, 0, len(events)+len(fees))
 	for _, e := range events {
 		dir := eventDirection(e, addr)
-		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, e.Denom, e.Amount, e.FromAddr, e.ToAddr)
+		denom, amount := e.Denom, e.Amount
+		bonded, bondedAmount, isShare := lsmUnderlying(e.Category, e.Denom, e.Detail)
+		if isShare {
+			denom, amount = bonded, bondedAmount
+		}
+		row := s.buildRow(chain, meta, e.Timestamp, e.TxHash, e.Category, dir, denom, amount, e.FromAddr, e.ToAddr)
 		row.Asset = e.Asset
+		if isShare {
+			row.Asset = e.Denom
+		}
 		row.ValidatorAddress = e.ValidatorAddress
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
@@ -408,10 +465,10 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 	}
 	implySwapPrices(out)
 	for _, f := range fees {
-		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, "fee", "out", f.Denom, f.Amount, addr, ""))
+		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, ""))
 	}
 
-	return out, nil
+	return out
 }
 
 const priceWarmConcurrency = 16
@@ -426,9 +483,13 @@ func (s *Server) prewarmPrices(chain string, events []tax.TaxableEvent, fees []f
 	seen := make(map[dateKey]struct{})
 	add := func(denom string, ts time.Time) {
 		base, _ := s.resolveBaseDenom(denom)
-		seen[dateKey{base, ts.UTC().Format("2006-01-02")}] = struct{}{}
+		seen[dateKey{base, ts.UTC().Format(apiDateLayout)}] = struct{}{}
 	}
 	for _, e := range events {
+		if bonded, _, ok := lsmUnderlying(e.Category, e.Denom, e.Detail); ok {
+			add(bonded, e.Timestamp)
+			continue
+		}
 		add(e.Denom, e.Timestamp)
 	}
 	for _, f := range fees {
@@ -501,17 +562,19 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 		symbol = base
 	}
 	unverifiedFactory := isUnverifiedJunoFactoryUatom(chain, denom, base)
-	atomMismatch := chain == "mainnet" && denom != "uatom" && (unverifiedFactory || strings.EqualFold(symbol, "ATOM") || base == "uatom")
+	atomMismatch := chain == apiMainnet && denom != apiUatom && (unverifiedFactory || strings.EqualFold(symbol, apiSymbolATOM) || base == apiUatom)
 	var identity *AssetIdentity
 	if atomMismatch {
-		identity = &AssetIdentity{ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
-			BaseToken: base, Treatment: "unreviewed", Note: "Did not match the official Cosmos Hub ATOM denom. Native ATOM pricing is disabled; user treatment has not been selected."}
+		identity = &AssetIdentity{
+			ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
+			BaseToken: base, Treatment: apiUnreviewed, Note: "Did not match the official Cosmos Hub ATOM denom. Native ATOM pricing is disabled; user treatment has not been selected.",
+		}
 	}
 	if unverifiedFactory {
 		// Source-chain metadata verifies ATOMREWARDS and its display exponent.
 		decimals, assumed, isIBC = 6, false, true
-		identity.TokenName = "ATOMREWARDS"
-		identity.SourceChain = "juno-1"
+		identity.TokenName = junoFactoryUatomSymbol
+		identity.SourceChain = apiJunoChainID
 		identity.ChannelPath = "transfer/channel-141/transfer/channel-42"
 		identity.BaseToken = junoFactoryUatomBase
 	}
@@ -523,7 +586,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 
 	price := decimal.Zero
 	priceMissing := false
-	date := ts.UTC().Format("2006-01-02")
+	date := ts.UTC().Format(apiDateLayout)
 	usdF, found := s.oracle.PriceAt(chain, base, date)
 	// If denom-trace resolution changed the lookup key, retry the exact voucher.
 	// The oracle may know a price or pinned stablecoin policy for that on-chain
@@ -554,7 +617,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 func ibcBaseDenom(denom string) (string, bool) {
 	parts := strings.Split(denom, "/")
 	i := 0
-	for i+1 < len(parts) && (parts[i] == "transfer" || strings.HasPrefix(parts[i], "08-wasm-")) {
+	for i+1 < len(parts) && (parts[i] == apiTransfer || strings.HasPrefix(parts[i], "08-wasm-")) {
 		i += 2
 	}
 	if i == 0 {
@@ -569,10 +632,10 @@ func ibcBaseDenom(denom string) (string, bool) {
 // normaliser a request with chain=cosmoshub priced every row as missing.
 func chainParam(v string) string {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "mainnet", "cosmoshub", "cosmoshub-4", "cosmos-hub", "cosmos":
-		return "mainnet"
-	case "testnet", "theta-testnet-001", "provider", "provider-testnet", "cosmoshub-testnet":
-		return "testnet"
+	case "", apiMainnet, apiCosmoshub, apiHubChainID, "cosmos-hub", "cosmos":
+		return apiMainnet
+	case apiTestnet, apiThetaTestnet001, apiProvider, "provider-testnet", "cosmoshub-testnet":
+		return apiTestnet
 	}
 	return strings.TrimSpace(v)
 }
@@ -588,7 +651,7 @@ func dateParam(v string, fallback time.Time) time.Time {
 	if v == "" {
 		return fallback
 	}
-	if t, err := time.Parse("2006-01-02", v); err == nil {
+	if t, err := time.Parse(apiDateLayout, v); err == nil {
 		return t
 	}
 	return fallback
