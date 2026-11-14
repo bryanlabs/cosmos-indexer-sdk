@@ -149,7 +149,9 @@ func valuePrefixes(values []string) []string {
 }
 
 // walletFewTxScope applies the same attribution to a handful of candidate
-// transactions. OFFSET 0 keeps the event-attribute check a per-transaction index lookup;
+// transactions. The message fence reads classified legs by message ID, rather
+// than repeating a large wallet-history scan for each candidate.
+// OFFSET 0 keeps the event-attribute check a per-transaction index lookup;
 // without it Postgres may hash the whole attribute table instead, which took
 // 88s on the live database for eight candidates.
 func walletFewTxScope(q *gorm.DB, addresses []string) *gorm.DB {
@@ -160,7 +162,7 @@ func walletTxCondition(attributeSuffix string) string {
 	return `(
  EXISTS (SELECT 1 FROM tx_signer_addresses tsa JOIN addresses a ON a.id=tsa.address_id WHERE tsa.tx_id=t.id AND a.address IN ?)
  OR EXISTS (SELECT 1 FROM fees f JOIN addresses a ON a.id=f.payer_address_id WHERE f.tx_id=t.id AND a.address IN ?)
- OR EXISTS (SELECT 1 FROM messages wm JOIN taxable_events te ON te.message_id=wm.id WHERE wm.tx_id=t.id AND (te.from_addr IN ? OR te.to_addr IN ? OR te.validator_address IN ?))
+ OR EXISTS (SELECT 1 FROM messages wm JOIN LATERAL (SELECT from_addr,to_addr,validator_address FROM taxable_events WHERE message_id=wm.id OFFSET 0) te ON true WHERE wm.tx_id=t.id AND (te.from_addr IN ? OR te.to_addr IN ? OR te.validator_address IN ?))
  OR EXISTS (SELECT 1 FROM messages wm JOIN message_events me ON me.message_id=wm.id JOIN message_event_attributes mea ON mea.message_event_id=me.id WHERE wm.tx_id=t.id AND mea.value IN ?` + attributeSuffix + `)
  )`
 }

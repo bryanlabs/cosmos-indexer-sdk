@@ -70,6 +70,19 @@ remain included. Validate performance changes against the exact offending input
 and compare all ordered fee rows within the same read-only snapshot, not just
 counts or totals. The native snapshot deadline is unchanged.
 
+Sparse readiness and incomplete-refund candidates retain every signer, payer,
+classified-leg and exact retained-attribute attribution path. Classified legs
+are read by each candidate message ID before testing wallet fields, rather than
+repeatedly scanning the wallet's whole history. This changes the lookup plan,
+not the financial scope. Compare candidate sets against the original query and
+exercise each attribution path with positive and negative PostgreSQL fixtures.
+
+Private versioned commission processes enable bitmap page prefetch through a
+connection startup parameter. The API and ordinary ledger modes retain their
+settings. The snapshot deadline remains 30 seconds. This does not guarantee
+that every cold source read will fit that deadline; retain any failure and its
+actual phase evidence rather than omitting rows or treating a retry as proof.
+
 `scripts/commission-proof-audit.py` is an offline, read-only aggregate verifier
 for privately exported snapshots. It never returns financial acceptance. Its
 context file pins version/build/chain/from_day/as_of and expected validators;

@@ -41,6 +41,19 @@ func env(k, d string) string {
 	return d
 }
 
+func commissionRuntimeParams(flows bool, version string) []string {
+	if !flows {
+		return nil
+	}
+	params := []string{"jit=off"}
+	if version != "" {
+		// Private full-history bitmap reads benefit from page prefetch. This
+		// is a connection startup parameter, never a global database change.
+		params = append(params, "effective_io_concurrency=200")
+	}
+	return params
+}
+
 func main() {
 	chain := flag.String("chain", "mainnet", "chain the ledger scan belongs to")
 	cache := flag.String("cache", "/cache", "archive block cache directory for this chain")
@@ -68,10 +81,7 @@ func main() {
 	// The commission trace runs thousands of small per-wallet queries whose
 	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
 	// of work. Session-only, so other jobs and the API keep their settings.
-	var runtime []string
-	if *flows {
-		runtime = append(runtime, "jit=off")
-	}
+	runtime := commissionRuntimeParams(*flows, *flowsVersion)
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
