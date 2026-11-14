@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay033/observeapp"
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	gaia "github.com/cosmos/cosmos-sdk/cmd/gaia/app"
 	"github.com/cosmos/cosmos-sdk/store"
@@ -103,6 +104,25 @@ func writeJSON(path string, v interface{}) {
 	}
 }
 
+// The original native constructor remains the default execution path.
+type replayApp interface {
+	InitChain(abci.RequestInitChain) abci.ResponseInitChain
+	BeginBlock(abci.RequestBeginBlock) abci.ResponseBeginBlock
+	DeliverTx([]byte) abci.ResponseDeliverTx
+	EndBlock(abci.RequestEndBlock) abci.ResponseEndBlock
+	Commit() abci.ResponseCommit
+	LastBlockHeight() int64
+	LastCommitID() sdk.CommitID
+	Query(abci.RequestQuery) abci.ResponseQuery
+}
+
+func createPrivateEvidence(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create exclusive private evidence file")
+	}
+	return f, nil
+}
 func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cache := fs.String("cache", "/cache", "cache root")
@@ -116,7 +136,13 @@ func run(args []string) error {
 	blockCache := fs.Int("db-cache-mb", 8, "database block cache")
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
+	auditPath := fs.String("native-audit", "", "optional exclusive full native response and all-store evidence")
+	coinRecords := fs.String("coin-records", "", "optional exclusive private native033 movement evidence")
+	verifyTarget := fs.Bool("verify-target-next-header", false, "verify target using next cached header without executing it")
 	fs.Parse(args)
+	if *coinRecords != "" && (*chain != "cosmoshub-1" || !*compare || !*verifyTarget) {
+		return fmt.Errorf("Hub1 recording requires exact chain, all result comparisons and target next-header proof")
+	}
 	if *profile != "" {
 		f, err := os.Create(*profile)
 		if err != nil {
@@ -133,6 +159,11 @@ func run(args []string) error {
 	}
 	if err := os.MkdirAll(*home, 0o700); err != nil {
 		return err
+	}
+	if *coinRecords != "" {
+		if err := createRecordingAttempt(*home); err != nil {
+			return err
+		}
 	}
 	db, err := dbm.NewGoLevelDBWithOpts("application", *home, &opt.Options{
 		BlockCacheCapacity:     *blockCache << 20,
@@ -157,7 +188,33 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("pruning is recent, syncable or nothing")
 	}
-	app := gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+	var app replayApp
+	var observed *observeapp.GaiaApp
+	var movementFile *os.File
+	if *coinRecords != "" {
+		records, err := createPrivateEvidence(*coinRecords)
+		if err != nil {
+			return err
+		}
+		defer records.Close()
+		movementFile = records
+		observed = observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+		observed.SetRecorder(records)
+		app = observed
+	} else {
+		app = gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+	}
+	var auditFile *os.File
+	if *auditPath != "" {
+		if !outsideCheckpoint(*home, *auditPath) {
+			return fmt.Errorf("native audit must be outside replay home")
+		}
+		auditFile, err = createPrivateEvidence(*auditPath)
+		if err != nil {
+			return err
+		}
+		defer auditFile.Close()
+	}
 	vals, err := openValidators(filepath.Join(*home, "validator-updates.jsonl"))
 	if err != nil {
 		return err
@@ -221,8 +278,16 @@ func run(args []string) error {
 		}
 		fmt.Printf("resumed after height %d\n", height)
 	}
+	if auditFile != nil {
+		if err := auditNativeCheckpoint(*auditPath+".source-checkpoint.json", *chain, app); err != nil {
+			return err
+		}
+	}
 	state.From, state.Height, state.HashVerified = height+1, height, height-1
 	if *to == height {
+		if *verifyTarget {
+			return fmt.Errorf("target already exists; use independent offline checkpoint proof")
+		}
 		fmt.Printf("already at the target height %d\n", height)
 		return nil
 	}
@@ -339,13 +404,30 @@ func run(args []string) error {
 				failure = fmt.Errorf("the application changed consensus parameters, which this tool does not track")
 				return
 			}
+			if observed != nil {
+				if failure = observed.RecorderError(); failure != nil {
+					return
+				}
+				if failure = requireRecordedResults(c.results, begin, deliver, end); failure != nil {
+					return
+				}
+			}
 			if failure = vals.record(h, end.ValidatorUpdates); failure != nil {
 				return
 			}
 			appHash = app.Commit().Data
+			if observed != nil {
+				failure = observed.RecorderError()
+				if failure == nil && movementFile.Sync() != nil {
+					failure = fmt.Errorf("cannot sync committed private evidence")
+				}
+			}
 		}()
 		if failure != nil {
 			return fail(h, "%v", failure)
+		}
+		if err := auditNative(auditFile, app, c, begin, deliver, end); err != nil {
+			return fail(h, "%v", err)
 		}
 		if err := vals.advance(h); err != nil {
 			return fail(h, "%v", err)
@@ -362,6 +444,23 @@ func run(args []string) error {
 		if time.Since(window) >= 30*time.Second {
 			report("")
 		}
+	}
+	if *verifyTarget {
+		next := load(*cache, *chain, height+1, false)
+		if err := verifyFinalHeader(next, height, appHash, lastHash, lastResults, vals.current, vals.next); err != nil {
+			return fail(height+1, "%v", err)
+		}
+		state.HashVerified = height
+		if observed != nil {
+			if err := observed.SealRecorder(); err != nil {
+				return fail(height, "%v", err)
+			}
+			if movementFile.Sync() != nil {
+				return fail(height, "cannot sync sealed private evidence")
+			}
+		}
+		report("reached target; verified by unexecuted next header")
+		return nil
 	}
 	report(fmt.Sprintf("reached the target; the state after height %d is checked by the next header only", height))
 	return nil

@@ -1,0 +1,26 @@
+{
+  "module": "github.com/cosmos/cosmos-sdk",
+  "version": "v0.33.2",
+  "native_release": "cosmos-sdk v0.33.2 (gaia), tendermint v0.31.0-dev0-fix0, iavl v0.12.1",
+  "upstream_sha256": {
+    "cmd/gaia/app/app.go": "f37ef7ab2922526b73e14236fa27c21f64b16bfb8b82b9d4bf6e206d2e3ad989",
+    "cmd/gaia/app/export.go": "325622ad86d011fd3f4f27c4f668273c4b987c1cd16c081e93dfea3bc030ca04",
+    "cmd/gaia/app/genesis.go": "d99606f111fa76ed9eff01386f3a2f420d410fce43cc3278d65d9369f3d96085",
+    "cmd/gaia/app/invariants.go": "366bd8ea069ca5821a117a099c626ce76ebb89b999acfa1aca83a5f0ac62c364",
+    "x/staking/handler.go": "aa20142899e1fcded14a850be849fa00f6048967f1edde02a96704f1e46caf3b",
+    "baseapp/baseapp.go": "c24e3a13e050f2d662c46fb39065e5dbc2972340474794f7fd77a9768b2103b5"
+  },
+  "native_interfaces": [
+    "x/staking/types/msg.go",
+    "x/staking/keeper/delegation.go",
+    "x/distribution/keeper/hooks.go",
+    "x/distribution/keeper/keeper.go",
+    "x/gov/endblocker.go",
+    "store/iavl/store.go",
+    "github.com/tendermint/tendermint@v0.31.0-dev0-fix0/abci/types/result.go"
+  ],
+  "observer_reference": "legacy/replay034/observeapp at signed host70b8ed6cda63254e99414461aafda9c17fe19a94, accounting control flow only; no034 application or token request interfaces substituted",
+  "license": "Apache-2.0, copied LICENSE retained",
+  "derived_source_identity": "The signed repository commit binds every derived file. Runtime source and immutable image must be verified separately.",
+  "financial_admission": false
+}

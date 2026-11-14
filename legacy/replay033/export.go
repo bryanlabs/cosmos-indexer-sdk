@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay033/observeapp"
 	gaia "github.com/cosmos/cosmos-sdk/cmd/gaia/app"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	dbm "github.com/tendermint/tendermint/libs/db"
 	"github.com/tendermint/tendermint/libs/log"
+	tmtypes "github.com/tendermint/tendermint/types"
 )
 
 func outsideCheckpoint(home, output string) bool {
@@ -49,11 +51,15 @@ func exportZero(args []string) (failure error) {
 	home := fs.String("home", "", "offline application checkpoint directory")
 	out := fs.String("out", "", "private complete native export, exclusive new file")
 	requiredHeight := fs.Int64("require-height", 500000, "exact committed source height")
+	recordsPath := fs.String("coin-records", "", "optional exclusive private native payout and state evidence")
 	if fs.Parse(args) != nil {
 		return fmt.Errorf("invalid native export flags")
 	}
 	if *home == "" || *out == "" || *requiredHeight < 1 {
 		return fmt.Errorf("home, out and positive require-height are required")
+	}
+	if *recordsPath != "" && (*recordsPath == *out || !outsideCheckpoint(*home, *recordsPath)) {
+		return fmt.Errorf("private movement evidence must be distinct and outside source checkpoint")
 	}
 	if !outsideCheckpoint(*home, *out) {
 		return fmt.Errorf("private export must be outside the existing source checkpoint")
@@ -77,7 +83,23 @@ func exportZero(args []string) (failure error) {
 		return fmt.Errorf("cannot create exclusive private native export")
 	}
 	defer artifact.Close()
-	state, validators, err := app.ExportAppStateAndValidators(true, nil)
+	var state json.RawMessage
+	var validators []tmtypes.GenesisValidator
+	if *recordsPath != "" {
+		records, e := createPrivateEvidence(*recordsPath)
+		if e != nil {
+			return e
+		}
+		defer records.Close()
+		observed := observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true)
+		observed.SetRecorder(records)
+		state, validators, err = observed.ExportObserved()
+		if observed.RecorderError() != nil || records.Sync() != nil {
+			return fmt.Errorf("native export evidence failed")
+		}
+	} else {
+		state, validators, err = app.ExportAppStateAndValidators(true, nil)
+	}
 	if err != nil {
 		return fmt.Errorf("pinned native zero-height export failed")
 	}
