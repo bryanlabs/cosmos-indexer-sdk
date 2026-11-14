@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -149,6 +150,7 @@ func run() error {
 	records := flag.String("records", "", "immutable private recorder JSONL")
 	proof := flag.String("proof", "", "exact record digest and pinned release receipt")
 	status := flag.String("status", "", "retained replay run status with next-header verification")
+	sealedWindow := flag.String("sealed-window-receipt", "", "explicit derived sealed prefix of the original still-running Job, validation-only component")
 	differences := flag.String("result-differences", "", "original retained result-differences.txt, SHA256 pinned in proof")
 	gasPath := flag.String("approved-gas-profile", "", "optional SHA-pinned private exact32 gas profile, validation only; never permits writes")
 	exportRecords := flag.String("export-records", "", "optional actual zero-height export JSONL")
@@ -158,6 +160,9 @@ func run() error {
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture")
 	flag.Parse()
 	if *root == "" || *records == "" || *proof == "" || *status == "" || *maxBody < 1 {
+		return refused
+	}
+	if *sealedWindow != "" && (*gasPath == "" || *write || *exportRecords != "" || *exportProof != "" || filepath.Clean(*root) != filepath.Join(filepath.Dir(*sealedWindow), "cache")) {
 		return refused
 	}
 	var gas *replayrecords.ApprovedGasProfile
@@ -181,7 +186,19 @@ func run() error {
 	}
 	var p replayrecords.Proof
 	var s replayStatus
-	if readJSON(*proof, &p, true) != nil || p.Export || readJSON(*status, &s, false) != nil || admitStatusGas(&p, s, *differences, gas) != nil {
+	if readJSON(*proof, &p, true) != nil || p.Export {
+		return refused
+	}
+	if *sealedWindow != "" {
+		var err error
+		s, err = loadSealedWindow(*sealedWindow, *records, *status, *differences, p)
+		if err != nil {
+			return refused
+		}
+	} else if readJSON(*status, &s, false) != nil {
+		return refused
+	}
+	if admitStatusGas(&p, s, *differences, gas) != nil {
 		return refused
 	}
 	f, e := os.Open(*records)
