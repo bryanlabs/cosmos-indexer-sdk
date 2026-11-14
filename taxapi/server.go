@@ -367,7 +367,15 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	phases := s.privateReadPhases([]string{addr}, start, end, "tax_events")
 	defer func() { err = phases.wrap(err) }()
 	var events []tax.TaxableEvent
-	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
+	if s.readOnlyLedger {
+		// Fence the indexed address set before applying the period. Otherwise
+		// PostgreSQL can build a bitmap over the entire multi-year time index
+		// and intersect it with the wallet, exhausting the snapshot deadline.
+		events = make([]tax.TaxableEvent, 0)
+		if err := s.db.Raw(privateWalletTaxEventsSQL, addr, addr, start, end, chainIDs(chain)).Scan(&events).Error; err != nil {
+			return walletRows{}, err
+		}
+	} else if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
 		Where("timestamp >= ? AND timestamp < ?", start, end).
 		Order("timestamp asc, taxable_events.id asc").
