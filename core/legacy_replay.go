@@ -554,7 +554,7 @@ func replayMessageLabel(name string) string {
 		"cosmos-sdk/MsgDelegate": "delegate", "cosmos-sdk/MsgCreateValidator": "create_validator",
 		"cosmos-sdk/MsgUndelegate": "undelegate", "cosmos-sdk/MsgBeginRedelegate": "redelegate",
 		"cosmos-sdk/MsgWithdrawDelegationReward": "delegation_reward", "cosmos-sdk/MsgWithdrawValidatorCommission": "validator_commission",
-		"cosmos-sdk/MsgModifyWithdrawAddress": "distribution/set_withdraw_address", "cosmos-sdk/MsgEditValidator": "staking/edit_validator",
+		"cosmos-sdk/MsgModifyWithdrawAddress": "distr/set_withdraw_address", "cosmos-sdk/MsgEditValidator": "staking/edit_validator",
 		"cosmos-sdk/MsgDeposit": "gov/deposit", "cosmos-sdk/MsgSubmitProposal": "gov/submit_proposal", "cosmos-sdk/MsgVote": "gov/vote",
 		"cosmos-sdk/MsgUnjail": "slashing/unjail", "cosmos-sdk/MsgVerifyInvariant": "crisis/verify_invariant",
 	}[name]
