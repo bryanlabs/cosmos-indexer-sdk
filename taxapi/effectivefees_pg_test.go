@@ -158,6 +158,10 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 		"INSERT INTO fees VALUES(1,1,1,1,1),(2,1,1,2,2),(3,1,1,3,3),(4,1,2,3,4),(5,2,1,4,5),(6,1,1,5,6),(7,1,1,6,700),(8,1,2,6,800),(9,1,1,7,900),(10,1,1,8,10),(11,1,1,9,11),(12,1,1,10,12),(13,1,1,11,13),(14,1,1,12,14),(15,1,1,13,15),(16,1,1,14,16),(17,1,1,15,17),(18,2,1,16,1800),(19,2,2,16,1900),(20,2,1,17,20)",
 		"INSERT INTO tax_fee_grants VALUES(4,'proof-unregistered-granter'),(5,'proof-owner'),(16,'proof-unregistered-granter'),(17,'proof-owner')",
 		"INSERT INTO tax_failed_tx_fees VALUES(6,'7uatom,11uosmo'),(7,''),(15,'not-a-coin'),(16,'19uatom,23uosmo')",
+		"INSERT INTO blocks VALUES(11,9,1,'2026-01-07 12:00Z')",
+		"INSERT INTO txes VALUES(18,11,'null-charged',5)",
+		"INSERT INTO fees VALUES(21,1,1,18,2100)",
+		"INSERT INTO tax_failed_tx_fees VALUES(18,NULL)",
 	} {
 		require.NoError(t, database.Exec(sql).Error)
 	}
@@ -253,6 +257,7 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 	for _, c := range []struct{ name, start, end string }{
 		{"unresolved_no_partial_results", "2026-01-04T00:00:00Z", "2026-01-05T00:00:00Z"},
 		{"malformed_charged_no_partial_results", "2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"},
+		{"null_charge_no_partial_results", "2026-01-07T00:00:00Z", "2026-01-08T00:00:00Z"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, direct := range []bool{false, true} {

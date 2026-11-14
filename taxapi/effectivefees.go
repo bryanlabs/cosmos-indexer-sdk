@@ -61,7 +61,7 @@ func (s *Server) effectiveWalletFees(chain, addr string, start, end time.Time) (
 	// EXISTS avoids multiplying rows even if source grant records repeat.
 	const projection = `SELECT f.id AS fee_id, x.id AS tx_id, x.hash, x.code,
  d.base AS denom, f.amount::text AS amount, b.time_stamp AS ts,
- o.tx_id IS NOT NULL AS resolved, COALESCE(o.charged, '') AS charged
+ o.tx_id IS NOT NULL AND o.charged IS NOT NULL AS resolved, COALESCE(o.charged, '') AS charged
  FROM fees f JOIN txes x ON x.id=f.tx_id
  JOIN blocks b ON b.id=x.block_id
  JOIN denoms d ON d.id=f.denomination_id

@@ -164,7 +164,12 @@ func TestEffectiveFeesActual43ReadOnly(t *testing.T) {
 			b, e := os.ReadFile(strings.TrimSuffix(captures[0], ".native-cash.private.json") + ".input.private.json")
 			require.NoError(t, e)
 			require.NoError(t, json.Unmarshal(b, &old))
-			input, e := (&Server{db: db, readOnlyLedger: true}).readReportInput(apiMainnet, []string{c.Address}, c.Since, c.End, false)
+			var budget time.Duration
+			if value := os.Getenv("EFFECTIVE_NATIVE_READ_TIMEOUT"); value != "" {
+				budget, e = time.ParseDuration(value)
+				require.NoError(t, e)
+			}
+			input, e := (&Server{db: db, readOnlyLedger: true, privateReadSnapshotTimeout: budget}).readReportInput(apiMainnet, []string{c.Address}, c.Since, c.End, false)
 			if e != nil {
 				receipt, marshalErr := json.Marshal(map[string]any{"index": i, "error": e.Error()})
 				require.NoError(t, marshalErr)
