@@ -8,6 +8,9 @@ import (
 // walletFees preserves every payer-side fee in [start,end), including fees on
 // failed transactions and transactions with no classified taxable event.
 func (s *Server) walletFees(chain, addr string, start, end time.Time) ([]feeRec, error) {
+	if s.readOnlyLedger {
+		return s.effectiveWalletFees(chain, addr, start, end)
+	}
 	start, end = start.UTC(), end.UTC()
 	var payer struct{ ID uint }
 	res := s.db.Table("addresses").Select("id").Where("address = ?", addr).Scan(&payer)
