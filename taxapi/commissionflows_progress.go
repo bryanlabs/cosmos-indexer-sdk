@@ -5,17 +5,21 @@ import "time"
 // This is execution telemetry, never a financial acceptance receipt or a
 // bound on the undiscovered graph. Telemetry never includes wallet identifiers.
 type commissionFlowProgress struct {
-	Version             string `json:"version"`
-	Build               string `json:"build"`
-	Validator           string `json:"validator"`
-	Phase               string `json:"phase"`
-	Sequence            int    `json:"sequence"`
-	ElapsedMilliseconds int64  `json:"elapsed_ms"`
-	AttemptedWallets    int    `json:"attempted_wallets"`
-	LoadedWallets       int    `json:"loaded_wallets"`
-	PendingEvents       int    `json:"pending_events"`
-	AppliedQueuedEvents int    `json:"applied_queued_events"`
-	DiscoveryComplete   bool   `json:"discovery_complete"`
+	Version                     string `json:"version"`
+	Build                       string `json:"build"`
+	Validator                   string `json:"validator"`
+	Phase                       string `json:"phase"`
+	Sequence                    int    `json:"sequence"`
+	ElapsedMilliseconds         int64  `json:"elapsed_ms"`
+	AttemptedWallets            int    `json:"attempted_wallets"`
+	LoadedWallets               int    `json:"loaded_wallets"`
+	ClosingReadCompletedWallets int    `json:"closing_read_completed_wallets"`
+	// Archive counters are job-cumulative, not attributed to one root. Minus one means unavailable.
+	JobArchiveCallAttempts int64 `json:"job_archive_call_attempts"`
+	JobHeaderCacheReuses   int64 `json:"job_header_cache_reuses"`
+	PendingEvents          int   `json:"pending_events"`
+	AppliedQueuedEvents    int   `json:"applied_queued_events"`
+	DiscoveryComplete      bool  `json:"discovery_complete"`
 	// -1 means unknown, including every phase before discovery completes.
 	ClosingRemaining int `json:"closing_remaining"`
 }
@@ -29,7 +33,8 @@ func (t *flowTrace) reportProgress(phase, _ string, closingRemaining int) {
 		Validator: t.Validator, Phase: phase, Sequence: t.progressSequence,
 		ElapsedMilliseconds: time.Since(t.started).Milliseconds(),
 		AttemptedWallets:    len(t.attempted), LoadedWallets: len(t.order),
-		PendingEvents: t.queue.Len(), AppliedQueuedEvents: t.appliedQueuedEvents,
+		ClosingReadCompletedWallets: t.closingReadCompletedWallets,
+		PendingEvents:               t.queue.Len(), AppliedQueuedEvents: t.appliedQueuedEvents,
 		DiscoveryComplete: t.discoveryComplete, ClosingRemaining: closingRemaining,
 	}
 	t.progress(p)

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/taxapi/internal/servicehttp"
@@ -34,11 +35,13 @@ type FlowArchiveReceipt struct {
 }
 
 type flowArchive struct {
-	rpc      *servicehttp.Endpoint
-	mu       sync.Mutex
-	receipts []FlowArchiveReceipt
-	holdings map[string]flowHoldings
-	headers  flowHeaderCache
+	rpc          *servicehttp.Endpoint
+	mu           sync.Mutex
+	receipts     []FlowArchiveReceipt
+	holdings     map[string]flowHoldings
+	headers      flowHeaderCache
+	callAttempts atomic.Int64
+	headerReuses atomic.Int64
 }
 
 func newFlowArchive(origin string) (*flowArchive, error) {
@@ -51,6 +54,7 @@ func newFlowArchive(origin string) (*flowArchive, error) {
 
 func (a *flowArchive) response(addr string, height int64, method string, q url.Values, out any, local ...*[]FlowArchiveReceipt) error {
 	var raw json.RawMessage
+	a.callAttempts.Add(1)
 	if err := a.rpc.GetJSON(method, q, &raw); err != nil {
 		return fmt.Errorf("commission archive %s request failed", method)
 	}
@@ -80,12 +84,16 @@ func (a *flowArchive) header(addr string, height int64, local ...*[]FlowArchiveR
 	q := url.Values{"height": {strconv.FormatInt(height, 10)}}
 	raw, reused, err := a.headers.get(height, func() (string, error) {
 		var body json.RawMessage
+		a.callAttempts.Add(1)
 		if err := a.rpc.GetJSON("block", q, &body); err != nil {
 			return "", fmt.Errorf("commission archive block request failed")
 		}
 		_, err := flowArchiveHeader(string(body), height)
 		return string(body), err
 	})
+	if reused {
+		a.headerReuses.Add(1)
+	}
 	// Failed responses and cache hits both retain the exact bytes in every
 	// requesting wallet's evidence, not just the first caller's receipts.
 	if raw != "" {

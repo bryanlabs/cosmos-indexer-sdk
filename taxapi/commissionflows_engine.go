@@ -358,11 +358,12 @@ type flowTrace struct {
 	strict    bool
 	attempted map[string]bool
 
-	progress            func(commissionFlowProgress)
-	started             time.Time
-	progressSequence    int
-	appliedQueuedEvents int
-	discoveryComplete   bool
+	progress                    func(commissionFlowProgress)
+	started                     time.Time
+	progressSequence            int
+	appliedQueuedEvents         int
+	closingReadCompletedWallets int
+	discoveryComplete           bool
 
 	Wallets    map[string]*flowWallet
 	order      []*flowWallet

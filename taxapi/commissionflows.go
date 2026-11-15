@@ -723,6 +723,11 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		defer progressSink.close()
 		loader.progress = func(p commissionFlowProgress) {
 			p.Version, p.Build = options[0].Version, options[0].Build
+			p.JobArchiveCallAttempts, p.JobHeaderCacheReuses = -1, -1
+			if loader.archive != nil {
+				p.JobArchiveCallAttempts = loader.archive.callAttempts.Load()
+				p.JobHeaderCacheReuses = loader.archive.headerReuses.Load()
+			}
 			progressSink.update(p)
 		}
 	}
@@ -887,6 +892,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 			}
 			continue
 		}
+		tr.closingReadCompletedWallets++
 		tr.reportProgress("closing_complete", w.Addr, len(tr.order)-i-1)
 		drift = drift.Add(w.simulated().Sub(actual.total()).Abs())
 		if loader.private {
