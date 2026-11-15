@@ -1237,7 +1237,12 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	// Coverage up to the tip is monotone, so when the lowest target's window
 	// is complete every target's is.
 	allIndexed := false
-	if lowest < tip.Height {
+	// A private commission holding asks for one day. Its per-target check
+	// below already counts this exact window. Do not speculatively count it
+	// first, then repeat the full scan when coverage is incomplete. Keep
+	// multi-day sharing and public readers unchanged, with no cross-wallet
+	// cache or reuse across database snapshots.
+	if lowest < tip.Height && (!s.readOnlyLedger || len(targets) > 1) {
 		missing, err := s.windowIndexed(ids, lowest, tip.Height)
 		if err != nil {
 			return nil, 0, err
