@@ -94,7 +94,7 @@ func newFixture(t *testing.T) fixture {
 	id := randomID()
 	s := Scope{"h2p_s_" + id, "h2p_l_" + id, "h2p_v_" + id, "h2p_k_" + id}
 	require.NoError(t, InstallScope(context.Background(), owner, s))
-	_, e = owner.Exec("ALTER ROLE " + s.Loader + " PASSWORD 'synthetic-fixture-only'")
+	_, e = owner.Exec("ALTER ROLE " + s.Loader + " PASSWORD '${PRESERVATION_REDACTED}'")
 	require.NoError(t, e)
 	var dbname string
 	require.NoError(t, owner.QueryRow("SELECT current_database()").Scan(&dbname))
@@ -102,7 +102,7 @@ func newFixture(t *testing.T) fixture {
 	require.NoError(t, e)
 	c.Database = dbname
 	c.User = s.Loader
-	c.Password = "synthetic-fixture-only"
+	c.Password = "${PRESERVATION_REDACTED}"
 	loader := stdlib.OpenDB(*c)
 	t.Cleanup(func() { loader.Close() })
 	for _, chain := range []string{"cosmoshub-3", "cosmoshub-4"} {
@@ -253,7 +253,7 @@ func fixtureDB(t *testing.T, f fixture, user string) *sql.DB {
 	require.NoError(t, e)
 	c.Database = f.m.Destination.Database
 	c.User = user
-	c.Password = "synthetic-fixture-only"
+	c.Password = "${PRESERVATION_REDACTED}"
 	db := stdlib.OpenDB(*c)
 	t.Cleanup(func() { db.Close() })
 	return db

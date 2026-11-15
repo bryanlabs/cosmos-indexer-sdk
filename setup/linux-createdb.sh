@@ -8,7 +8,7 @@ createuser taxapp
 createdb taxappdb
 # command line session with postgres tool
 psql
-alter user taxapp with encrypted password 'taxapptest';
+alter user taxapp with encrypted password '${PRESERVATION_REDACTED}';
 grant all privileges on database taxappdb to taxapp;
 
 #now confirm the DB is there

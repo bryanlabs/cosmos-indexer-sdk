@@ -89,7 +89,7 @@ func TestPG5LocksCompetitionAndPublicConcurrency(t *testing.T) {
 	}
 	t.Run("two-promoters-and-public-writes", func(t *testing.T) {
 		f := newFixture(t)
-		mustExec(t, f.owner, "ALTER ROLE "+f.publicWriter+" PASSWORD 'synthetic-fixture-only'")
+		mustExec(t, f.owner, "ALTER ROLE "+f.publicWriter+" PASSWORD '${PRESERVATION_REDACTED}'")
 		public := fixtureDB(t, f, f.publicWriter)
 		entered, release := make(chan struct{}), make(chan struct{})
 		var once sync.Once
