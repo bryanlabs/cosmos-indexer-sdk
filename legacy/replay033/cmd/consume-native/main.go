@@ -96,6 +96,7 @@ type history struct {
 	Genesis              string `json:"genesis_sha256"`
 }
 type request struct {
+	nativeWitness    *financial
 	Kind             string
 	Height, Through  int64
 	Tx, Message      int
@@ -182,6 +183,10 @@ type financial struct {
 
 func (n *native) decode(header tm.Header) financial {
 	ctx := sdk.NewContext(n.cms, tm.TM2PB.Header(&header), false, log.NewNopLogger())
+	return n.decodeContext(ctx)
+}
+
+func (n *native) decodeContext(ctx sdk.Context) financial {
 	pk := params.NewKeeper(codec, n.keys[params.StoreKey], n.trans[params.TStoreKey])
 	ak := auth.NewAccountKeeper(codec, n.keys[auth.StoreKey], pk.Subspace(auth.DefaultParamspace), auth.ProtoBaseAccount)
 	bk := bank.NewBaseKeeper(ak, pk.Subspace(bank.DefaultParamspace), bank.DefaultCodespace)
@@ -222,7 +227,7 @@ func (n *native) decode(header tm.Header) financial {
 	sk.IterateRedelegations(ctx, func(_ int64, x skt.Redelegation) bool { v.Redelegations = append(v.Redelegations, x); return false })
 	// Independent native iterators must cover every typed prefix, not a projection.
 	counts := func(name string, prefix byte) int {
-		it := n.cms.GetKVStore(n.keys[name]).Iterator([]byte{prefix}, []byte{prefix + 1})
+		it := ctx.KVStore(n.keys[name]).Iterator([]byte{prefix}, []byte{prefix + 1})
 		defer it.Close()
 		count := 0
 		for ; it.Valid(); it.Next() {
@@ -379,7 +384,10 @@ func financialCheck(r request, a, b financial) {
 	}
 	if r.Phase == "begin_block" {
 		need(equal(b.Minter, a.Next), "native exact minter transition differs")
-		need(b.Pool.NotBondedTokens.Sub(a.Pool.NotBondedTokens).Equal(a.Provision.Amount) && b.Pool.BondedTokens.Equal(a.Pool.BondedTokens), "native mint/pool supply differs")
+		if beginNeedsWitness(a, b) {
+			need(r.nativeWitness != nil, "native mint/pool supply differs without authenticated slash witness")
+			exactBeginPoolWitness(a, b, *r.nativeWitness)
+		}
 		inflow := sdk.NewDecCoins(sdk.Coins{a.Provision})
 		beforeLiability := a.Liabilities.Add(sdk.NewDecCoins(a.Fees))
 		afterLiability := b.Liabilities.Add(sdk.NewDecCoins(b.Fees))
@@ -657,6 +665,10 @@ func run() {
 	receipt := flag.String("receipt", "", "exclusive private receipt")
 	checkpoint := flag.String("checkpoint-home", "", "retained private byte-copy of original normal checkpoint")
 	working := flag.String("working-home", "", "exclusive private mutable native journal reconstruction")
+	validatorHistory := flag.String("validator-history", "", "optional retained supplemental validator history")
+	validatorHistoryPin := flag.String("validator-history-sha256", "", "explicit supplemental history source pin")
+	evidenceCache := flag.String("evidence-cache", "", "retained raw cache for historical evidence headers")
+	evidenceCapturePin := flag.String("evidence-capture-sha256", "", "explicit supplemental captured-source pin")
 	flag.Parse()
 	need(*cache != "" && *receipt != "", "private paths required")
 	phase, committed := newNative(), newNative()
@@ -671,6 +683,14 @@ func run() {
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
 	var height, first, through, phases, transactions int64
+	var reductions *os.File
+	var assetFactRows, assetBlocks int64
+	verifiedHeaders := map[int64][]byte{}
+	defer func() {
+		if reductions != nil {
+			reductions.Close()
+		}
+	}()
 	var prior []byte
 	anchor := false
 	openingChecked := false
@@ -701,6 +721,7 @@ func run() {
 			anchor = true
 			through = r.Through
 			prior = r.Anchor.Commit.Hash
+			if r.Anchor.Height > 0 { verifiedHeaders[r.Anchor.Height] = append([]byte(nil), r.Anchor.Hash...) }
 		case "phase":
 			need(anchor && r.Height == height+1, "native phase height gap")
 			phase.apply(r.Restore)
@@ -716,7 +737,23 @@ func run() {
 			a := phase.decode(r.Header)
 			phase.apply(r.Changes)
 			b := phase.decode(r.Header)
+			if requiresNativeBeginWitness(r, a, b) {
+				witness := nativeDowntimeWitness(phase, committed, r, *cache, verifiedHeaders, *validatorHistory, *validatorHistoryPin, *evidenceCache, *evidenceCapturePin)
+				r.nativeWitness = &witness
+			}
 			financialCheck(r, a, b)
+			if r.nativeWitness != nil {
+				facts := exactAssetChanges(a, b)
+				if reductions == nil {
+					var e error
+					reductions, e = os.OpenFile(*receipt+".stake-assets.partial", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+					must(e)
+				}
+				must(json.NewEncoder(reductions).Encode(map[string]interface{}{"schema": "native033-stake-asset-reduction-v1", "height": r.Height, "facts": facts, "tax_classification": "unclassified", "native_all_store_witness": true}))
+				must(reductions.Sync())
+				assetFactRows += int64(len(facts))
+				assetBlocks++
+			}
 			preAnteFailure(r)
 			for _, row := range r.Rows {
 				if row.Kind == "principal_request" || row.Kind == "share_request" || row.Kind == "principal" || row.Kind == "staking_shares" {
@@ -734,6 +771,7 @@ func run() {
 			need(id.Version == r.Height && bytes.Equal(id.Hash, r.History.Commit.Hash), "raw source journals do not reproduce native IAVL application commitment")
 			checkRoots(committed, r.Height, r.History.Commit, r.History.Roots)
 			checkHistory(*cache, r.History, r.NextHeader, prior)
+			verifiedHeaders[r.Height] = append([]byte(nil), r.History.Hash...)
 			prior = id.Hash
 			height = r.Height
 			if height%100 == 0 {
@@ -748,10 +786,31 @@ func run() {
 		}
 	}
 	need(done, "EOF is not bounded completion")
+	assetDigest := ""
+	if reductions != nil {
+		must(reductions.Sync())
+		assetFile, e := os.Open(reductions.Name())
+		must(e)
+		digest := sha256.New()
+		_, e = io.Copy(digest, assetFile)
+		must(e)
+		must(assetFile.Close())
+		assetDigest = hex.EncodeToString(digest.Sum(nil))
+		partial := reductions.Name()
+		must(reductions.Close())
+		reductions = nil
+		// Publish only after the complete verified height sequence. Link is
+		// exclusive, unlike Rename, and preserves the original attempt artifact.
+		must(os.Link(partial, filepath.Join(filepath.Dir(*receipt), "native-stake-reductions.private.jsonl")))
+		directory, e := os.Open(filepath.Dir(*receipt))
+		must(e)
+		must(directory.Sync())
+		must(directory.Close())
+	}
 	f, e := os.OpenFile(*receipt, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	must(e)
 	defer f.Close()
-	must(json.NewEncoder(f).Encode(map[string]interface{}{"schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
+	must(json.NewEncoder(f).Encode(map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
 	must(f.Sync())
 }
 func main() {

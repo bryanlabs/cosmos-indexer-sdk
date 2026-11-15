@@ -141,12 +141,18 @@ def validate_source(root):
         require(not b.get('opening_checkpoint_members_sha256'), 'genesis cannot use synthetic opening')
     return b
 
-def verify(root, binary, receipt):
+def verify(root, binary, receipt, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256=''):
     b = validate_source(root)
     history = ClosedHistory(root, b)
     command = [str(binary), '--cache', str(root / 'cache'), '--receipt', str(receipt.parent / 'native-proof.private.json')]
     if b['first'] > 1:
         command += ['--checkpoint-home', str(root / 'opening-checkpoint'), '--working-home', str(receipt.parent / 'native-home')]
+    if validator_history is not None:
+        require(validator_history_sha256 and sha(validator_history) == validator_history_sha256, 'supplemental native validator history pin differs')
+        command += ['--validator-history', str(validator_history), '--validator-history-sha256', validator_history_sha256]
+    if evidence_cache is not None:
+        require(evidence_capture_sha256 and sha(evidence_cache.parent / 'capture.private.json') == evidence_capture_sha256, 'supplemental evidence capture pin differs')
+        command += ['--evidence-cache', str(evidence_cache), '--evidence-capture-sha256', evidence_capture_sha256]
     with (receipt.parent / 'native-consumer.private.log').open('xb') as log:
         p = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
         def send(q):
@@ -167,6 +173,16 @@ def verify(root, binary, receipt):
                 pass
             p.wait(timeout=30)
             raise
+    native = strict_json((receipt.parent / 'native-proof.private.json').read_bytes())
+    asset_blocks = native.get('native_stake_asset_blocks', 0)
+    asset_rows = native.get('native_stake_asset_fact_rows', 0)
+    asset_hash = native.get('native_stake_asset_facts_sha256', '')
+    asset_file = receipt.parent / 'native-stake-reductions.private.jsonl'
+    require(isinstance(asset_blocks, int) and isinstance(asset_rows, int) and asset_blocks >= 0 and asset_rows >= 0, 'native asset counts invalid')
+    if asset_blocks:
+        require(asset_file.is_file() and sha(asset_file) == asset_hash, 'native asset facts missing or changed')
+    else:
+        require(not asset_file.exists() and not asset_hash and not asset_rows, 'unbound native asset facts')
     ending = history.cache[b['through']]
     result = dict(schema='native033-complete-profile-financial-v1', first=b['first'], through=c.heights,
                   heights=c.journal.heights, transactions=c.transactions, phases=dict(c.counts), journal_counts=dict(c.journal.counts),
@@ -174,6 +190,8 @@ def verify(root, binary, receipt):
                   ending_commit=ending['commit'], ending_store_roots=ending['native_commit_info'],
                   ending_block_hash=ending['block_hash'], actual_unexecuted_next_header=history.completion['unexecuted_next_header'],
                   source_whole_complete=True, financial_admission=False, global_books_tax_acceptance=False,
+                  native_stake_asset_blocks=asset_blocks, native_stake_asset_fact_rows=asset_rows,
+                  native_stake_asset_facts_sha256=asset_hash, stake_asset_tax_classification='unclassified',
                   capture_sha256=sha(root / 'capture.private.json'), native_proof_sha256=sha(receipt.parent / 'native-proof.private.json'), native_helper_sha256=sha(binary))
     with receipt.open('x') as stream:
         json.dump(result, stream, indent=2, sort_keys=True)
@@ -184,7 +202,11 @@ if __name__ == '__main__':
     parser.add_argument('--directory', required=True, type=Path)
     parser.add_argument('--native-helper', required=True, type=Path)
     parser.add_argument('--receipt', required=True, type=Path)
+    parser.add_argument('--validator-history', type=Path)
+    parser.add_argument('--validator-history-sha256', default='')
+    parser.add_argument('--evidence-cache', type=Path)
+    parser.add_argument('--evidence-capture-sha256', default='')
     a = parser.parse_args()
     os.umask(0o077)
-    r = verify(a.directory, a.native_helper, a.receipt)
+    r = verify(a.directory, a.native_helper, a.receipt, a.validator_history, a.validator_history_sha256, a.evidence_cache, a.evidence_capture_sha256)
     print(json.dumps({k: r[k] for k in ('first', 'through', 'heights', 'transactions', 'financial_admission')}))
