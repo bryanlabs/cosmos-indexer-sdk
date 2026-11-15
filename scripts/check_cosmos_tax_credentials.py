@@ -38,7 +38,12 @@ def findings(text, suffix):
             def walk(value):
                 if isinstance(value, dict):
                     if re.fullmatch(SENSITIVE, str(value.get('name', ''))) and 'value' in value:
-                        result.append(value['name'])
+                        secret_ref = value.get('valueFrom', {}).get('secretKeyRef', {})
+                        deletes_old_literal = (value['value'] is None
+                                               and bool(secret_ref.get('name'))
+                                               and bool(secret_ref.get('key')))
+                        if not deletes_old_literal:
+                            result.append(value['name'])
                     for child in value.values():
                         walk(child)
                 elif isinstance(value, list):
