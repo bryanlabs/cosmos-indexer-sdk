@@ -78,6 +78,19 @@ class ClosedStreamDiagnostics(unittest.TestCase):
             self.assertFalse(receipt.exists())
         return result, error, dest
 
+    def test_zero_exit_with_more_than_pipe_buffer_pending_is_fully_drained(self):
+        noise = random.Random(2547221).randbytes(256000).hex()
+        data = self.stream([{'kind': 'synthetic', 'noise': noise},
+                            {'kind': 'history_completed', 'height': 42}])
+        self.assertGreater(len(data), 128 << 10)
+        # The process reports exit0 before stdout is consumed. Pending stdout
+        # remains authoritative through EOF, not a poll/exit-code shortcut.
+        with patch.object(FakeProcess, 'poll', return_value=0, create=True):
+            result, error, _ = self.run_stream(data, code=0)
+        self.assertIsNone(error)
+        self.assertEqual(result['compressed_bytes'], len(data))
+        self.assertEqual(result['records'], 2)
+
     def test_success_preserves_existing_receipt_contract(self):
         result, error, _ = self.run_stream(self.stream())
         self.assertIsNone(error)
