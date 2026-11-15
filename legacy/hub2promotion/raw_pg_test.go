@@ -33,12 +33,12 @@ func rawFixture(t *testing.T, populate bool) (fixture, fixture) {
 	id := randomID()
 	s := Scope{Schema: "h2p_s_" + id, Loader: "h2p_l_" + id, ViewOwner: "h2p_v_" + id, LockOwner: "h2p_k_" + id, ChainID: "cosmoshub-1", RawStage: true}
 	require.NoError(t, InstallScope(context.Background(), f.owner, s))
-	mustExec(t, f.owner, "ALTER ROLE "+s.Loader+" PASSWORD 'synthetic-fixture-only'")
+	mustExec(t, f.owner, "ALTER ROLE "+s.Loader+" PASSWORD '${PRESERVATION_REDACTED}'")
 	c, e := pgx.ParseConfig(os.Getenv("LEGACY_STORE_TEST_ADMIN_DSN"))
 	require.NoError(t, e)
 	c.Database = f.m.Destination.Database
 	c.User = s.Loader
-	c.Password = "synthetic-fixture-only"
+	c.Password = "${PRESERVATION_REDACTED}"
 	loader := stdlib.OpenDB(*c)
 	t.Cleanup(func() { loader.Close() })
 	f.loader = loader
