@@ -1,7 +1,35 @@
-# Private Hub2 atomic promotion candidate
+# Atomic Hub1/Hub2 promotion
 
-NOT READY FOR PRODUCTION APPROVAL. No production execution adapter, DSN option,
-schema migration deployment or serving change is supplied here. The existing
+Dan approved independent Hub1 and Hub2 live loads on Nov15 15:49: “yes, load
+hub one hub two and production when their balance checks pass”. This replaces
+old approval-packet requirements. Complete financial source coverage and strict
+all-account/all-denomination balance equality still must actually pass.
+
+`cmd/legacy-approved-load` is the shared production adapter, with only static
+cosmoshub-1 and cosmoshub-2 scopes. It uses the original tested atomic core, not
+the private global-empty importer. `ApprovedLoad` binds the actual canonical
+native export and next genesis. The final financial acceptance binds every SQL
+projection, source/component, build/binary, genuine genesis and canonical payout
+hash/count. No new approval signature or receipt service is required.
+
+Hub2 additionally uses `cmd/hub2-migrate036`, an isolated dependency module that
+calls the official SDK v0.37.4 v036 migration. The real migration removes two
+old governance base accounts from the transformed state and creates six module
+accounts with coins calculated from the exported fee, staking, governance and
+distribution state. Original files and SQL evidence are never deleted. The
+adapter recomputes and verifies the pinned transformation, then demands zero
+missing accounts, extra accounts and denomination mismatches against the actual
+retained Hub3 genesis. It never waives differences or compares the later tail.
+The financial report also binds `migrated_export_sha` and `migration_binary_sha`.
+
+Live operations are `validate`, `scope-sql`, coordinated `install-scope`, `load`
+and read-only `audit`, with an explicit pinned manifest, private0600 connection
+file and fresh physical runtime identity. No environment DSN fallback. Scope
+installation first verifies the actual server identity in its transaction.
+Do not install production metadata while the Auth export-cache rebuild is active;
+coordinate credentials with that owner afterward. Actual loading remains blocked
+until full source and balance checks pass, not until another approval packet.
+No serving or publication change is supplied here. The existing
 `cmd/hub2-private-rehearsal`, `legacy/schema`, decoder and `legacy/ledger` are
 unchanged. This package never calls the old batch-committing ledger writer.
 
@@ -139,13 +167,15 @@ Run the exact `-race -count=1` package targets with a private0600 fixture env
 file and NEW0700 retained `HUB2_PROMOTION_ARTIFACT_ROOT` plus persistent TMPDIR.
 No DSN belongs in shell output, logs, Git or an approval packet.
 
-## Still required before any production question
+## Historical private implementation requirements (approval now superseded)
 
 The independent final complete financial/canonical seals and full final SQL
 projection; one populated-destination 1.4M SQL scale proof and measurements;
 explicitly reviewed full-root private scale Job diff before any large launch;
 reviewed signed reproducible binary; refreshed production destination and
 concurrency inventory; actual production backup and exact isolated restore;
-and Dan YES for that exact production packet. Schema/ACL installation, loading,
-serving/publication, Hub1/native/commission work and offsite work are separate.
-No runnable production command is supplied while any item is missing.
+The old Dan-YES-for-a-new-packet requirement is superseded by the Nov15 approval.
+Schema/ACL installation is coordinated with Auth, while serving/publication,
+native/commission changes and offsite work remain separate. Never claim complete
+production acceptance until actual source coverage, balances and physical SQL
+readback pass.

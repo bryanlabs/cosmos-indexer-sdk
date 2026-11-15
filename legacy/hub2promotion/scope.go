@@ -20,9 +20,22 @@ type Scope struct {
 	Loader    string `json:"loader"`
 	ViewOwner string `json:"view_owner"`
 	LockOwner string `json:"lock_owner"`
+	ChainID   string `json:"chain_id,omitempty"`
+}
+
+// Empty means the original Hub2-only profile. Only these two human-approved
+// chains can ever be interpolated into the fixed SQL boundary.
+func (s Scope) chain() string {
+	if s.ChainID == "" {
+		return Chain
+	}
+	return s.ChainID
 }
 
 func (s Scope) valid() error {
+	if s.chain() != "cosmoshub-1" && s.chain() != "cosmoshub-2" {
+		return errors.New("only Hub1 or Hub2 scope is permitted")
+	}
 	seen := map[string]bool{}
 	for _, n := range []string{s.Schema, s.Loader, s.ViewOwner, s.LockOwner} {
 		if !objectRE.MatchString(n) || seen[n] || !strings.HasPrefix(n, "h2p_") {
@@ -45,7 +58,7 @@ func (s Scope) SQL() (string, error) {
 	}
 	var views strings.Builder
 	for _, t := range inserts {
-		fmt.Fprintf(&views, "CREATE VIEW %s.%s AS SELECT %s FROM legacy.%s WHERE chain_id = 'cosmoshub-2' WITH CASCADED CHECK OPTION;\nALTER VIEW %s.%s OWNER TO %s;\nREVOKE ALL ON %s.%s FROM PUBLIC;\nGRANT SELECT, INSERT ON %s.%s TO %s;\n", s.Schema, t.name, quotedColumns(t.columns), t.name, s.Schema, t.name, s.ViewOwner, s.Schema, t.name, s.Schema, t.name, s.Loader)
+		fmt.Fprintf(&views, "CREATE VIEW %s.%s AS SELECT %s FROM legacy.%s WHERE chain_id = '%s' WITH CASCADED CHECK OPTION;\nALTER VIEW %s.%s OWNER TO %s;\nREVOKE ALL ON %s.%s FROM PUBLIC;\nGRANT SELECT, INSERT ON %s.%s TO %s;\n", s.Schema, t.name, quotedColumns(t.columns), t.name, s.chain(), s.Schema, t.name, s.ViewOwner, s.Schema, t.name, s.Schema, t.name, s.Loader)
 	}
 	return strings.NewReplacer("{{scope}}", s.Schema, "{{loader}}", s.Loader, "{{view_owner}}", s.ViewOwner, "{{lock_owner}}", s.LockOwner, "{{all_tables}}", relationList(allTables), "{{insert_tables}}", relationList(inserts), "{{views}}", views.String(), "{{view_tables}}", scopeRelations(s)).Replace(scopeScript), nil
 }
@@ -213,7 +226,7 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 			}
 			fields[i] = c
 		}
-		expected := "SELECT " + strings.Join(fields, ",") + " FROM legacy." + t.name + " WHERE chain_id = 'cosmoshub-2'::text;"
+		expected := "SELECT " + strings.Join(fields, ",") + " FROM legacy." + t.name + " WHERE chain_id = '" + s.chain() + "'::text;"
 		if normalize(def) != normalize(expected) || owner != s.ViewOwner || options != "{check_option=cascaded}" {
 			return fmt.Errorf("view definition/owner/check-option drift: %s", t.name)
 		}

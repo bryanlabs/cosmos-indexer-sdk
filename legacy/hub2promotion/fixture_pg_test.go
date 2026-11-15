@@ -84,7 +84,8 @@ func fixtureRow(name, chain, genSHA string) map[string]any {
 	}
 	panic(name)
 }
-func newFixture(t *testing.T) fixture {
+func newFixture(t *testing.T) fixture { return newFixtureForChain(t, Chain) }
+func newFixtureForChain(t *testing.T, chain string) fixture {
 	t.Helper()
 	require.NotEmpty(t, os.Getenv("LEGACY_STORE_TEST_ADMIN_DSN"), "private fixture endpoint required, no skipped PG groups")
 	d := pgtest.OpenRetained(t)
@@ -92,7 +93,7 @@ func newFixture(t *testing.T) fixture {
 	require.NoError(t, e)
 	dir := artifactDir(t)
 	id := randomID()
-	s := Scope{"h2p_s_" + id, "h2p_l_" + id, "h2p_v_" + id, "h2p_k_" + id}
+	s := Scope{"h2p_s_" + id, "h2p_l_" + id, "h2p_v_" + id, "h2p_k_" + id, chain}
 	require.NoError(t, InstallScope(context.Background(), owner, s))
 	_, e = owner.Exec("ALTER ROLE " + s.Loader + " PASSWORD 'synthetic-fixture-only'")
 	require.NoError(t, e)
@@ -130,7 +131,7 @@ func newFixture(t *testing.T) fixture {
 	m := Manifest{Version: 1, Profile: FixtureProfile, Fixture: true, First: 1, Last: 5, Canonical: 3, MigrationLast: 3, TailFirst: 4, TailLast: 5, BuildSHA: digest([]byte("synthetic-source")), BinarySHA: digest([]byte("synthetic-binary")), BuildIdentity: generic, Source: generic, Financial: generic, Genesis: gen, Hub3GenesisSHA: digest([]byte("cosmoshub-3")), Hub4GenesisSHA: digest([]byte("cosmoshub-4")), Scope: s, Components: []Component{{1, 5, generic, digest([]byte("opening")), digest([]byte("closing")), true}}}
 	for _, tb := range inserts {
 		var out strings.Builder
-		row := fixtureRow(tb.name, Chain, gen.SHA256)
+		row := fixtureRow(tb.name, chain, gen.SHA256)
 		if tb.name == "blocks" {
 			for h := int64(1); h <= 5; h++ {
 				row["height"] = h
@@ -161,7 +162,7 @@ func newFixture(t *testing.T) fixture {
 	m.Destination, e = ProbeIdentity(context.Background(), tx, s, runtime)
 	require.NoError(t, e)
 	require.NoError(t, tx.Rollback())
-	m.Protected, e = snapshot(context.Background(), owner, true, true)
+	m.Protected, e = snapshotChain(context.Background(), owner, chain, true, true)
 	require.NoError(t, e)
 	require.NoError(t, m.ValidateFixture())
 	b, e := json.MarshalIndent(m, "", "  ")
@@ -181,17 +182,17 @@ func refreshIdentity(t *testing.T, f *fixture) {
 func fixtureInsert(t *testing.T, f fixture, name string) {
 	t.Helper()
 	if name == "balance_days" {
-		_, e := f.owner.Exec(`INSERT INTO legacy.balance_days VALUES ('cosmoshub-2','synthetic-account','2020-01-01',1,'{}')`)
+		_, e := f.owner.Exec(`INSERT INTO legacy.balance_days VALUES ($1,'synthetic-account','2020-01-01',1,'{}')`, f.m.Scope.chain())
 		require.NoError(t, e)
 		return
 	}
 	if name == "reconciliation" {
-		_, e := f.owner.Exec(`INSERT INTO legacy.reconciliation VALUES ('cosmoshub-2','synthetic-account','liquid',0,0,0,'exact')`)
+		_, e := f.owner.Exec(`INSERT INTO legacy.reconciliation VALUES ($1,'synthetic-account','liquid',0,0,0,'exact')`, f.m.Scope.chain())
 		require.NoError(t, e)
 		return
 	}
 	if name == "import_ranges" {
-		_, e := f.owner.Exec(`INSERT INTO legacy.import_ranges(chain_id,from_height,to_height,status,next_height) VALUES('cosmoshub-2',1,5,'done',6)`)
+		_, e := f.owner.Exec(`INSERT INTO legacy.import_ranges(chain_id,from_height,to_height,status,next_height) VALUES($1,1,5,'done',6)`, f.m.Scope.chain())
 		require.NoError(t, e)
 		return
 	}
@@ -205,7 +206,7 @@ func fixtureInsert(t *testing.T, f fixture, name string) {
 		if name == "tx_inclusions" || name == "block_events" {
 			fixtureInsert(t, f, "blocks")
 		}
-		raw := canonicalRow(t, f.owner, tb, fixtureRow(name, Chain, f.m.Genesis.SHA256))
+		raw := canonicalRow(t, f.owner, tb, fixtureRow(name, f.m.Scope.chain(), f.m.Genesis.SHA256))
 		_, e := f.owner.Exec("INSERT INTO legacy."+tb.name+" SELECT * FROM pg_catalog.jsonb_populate_record(NULL::legacy."+tb.name+",$1::jsonb)", raw)
 		require.NoError(t, e)
 		return

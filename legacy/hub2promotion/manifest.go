@@ -149,31 +149,32 @@ func (b BuildReceipt) validate(m Manifest) error {
 }
 
 type Manifest struct {
-	Version                int          `json:"version"`
-	Profile                string       `json:"profile"`
-	Fixture                bool         `json:"fixture"`
-	First                  int64        `json:"first"`
-	Last                   int64        `json:"last"`
-	Canonical              int64        `json:"canonical"`
-	MigrationLast          int64        `json:"migration_last"`
-	TailFirst              int64        `json:"tail_first"`
-	TailLast               int64        `json:"tail_last"`
-	BuildSHA               string       `json:"build_sha"`
-	BinarySHA              string       `json:"binary_sha"`
-	BuildIdentity          Pin          `json:"build_identity"`
-	Source                 Pin          `json:"source"`
-	Financial              Pin          `json:"financial"`
-	FinancialSignature     Pin          `json:"financial_signature"`
-	Genesis                Pin          `json:"genesis"`
-	Hub3GenesisSHA         string       `json:"hub3_genesis_sha"`
-	Hub4GenesisSHA         string       `json:"hub4_genesis_sha"`
-	Destination            Identity     `json:"destination"`
-	Scope                  Scope        `json:"scope"`
-	Components             []Component  `json:"components"`
-	Tables                 []Projection `json:"tables"`
-	Protected              Snapshot     `json:"protected_non_hub2_physical"`
-	CanonicalRows          int64        `json:"canonical_rows"`
-	CanonicalProjectionSHA string       `json:"canonical_projection_sha"`
+	Version                int           `json:"version"`
+	Profile                string        `json:"profile"`
+	Fixture                bool          `json:"fixture"`
+	First                  int64         `json:"first"`
+	Last                   int64         `json:"last"`
+	Canonical              int64         `json:"canonical"`
+	MigrationLast          int64         `json:"migration_last"`
+	TailFirst              int64         `json:"tail_first"`
+	TailLast               int64         `json:"tail_last"`
+	BuildSHA               string        `json:"build_sha"`
+	BinarySHA              string        `json:"binary_sha"`
+	BuildIdentity          Pin           `json:"build_identity"`
+	Source                 Pin           `json:"source"`
+	Financial              Pin           `json:"financial"`
+	FinancialSignature     Pin           `json:"financial_signature"`
+	Genesis                Pin           `json:"genesis"`
+	Hub3GenesisSHA         string        `json:"hub3_genesis_sha"`
+	Hub4GenesisSHA         string        `json:"hub4_genesis_sha"`
+	Destination            Identity      `json:"destination"`
+	Scope                  Scope         `json:"scope"`
+	Components             []Component   `json:"components"`
+	Tables                 []Projection  `json:"tables"`
+	Protected              Snapshot      `json:"protected_non_hub2_physical"`
+	CanonicalRows          int64         `json:"canonical_rows"`
+	CanonicalProjectionSHA string        `json:"canonical_projection_sha"`
+	Approved               *ApprovedLoad `json:"approved_load,omitempty"`
 }
 
 func readPinnedBytes(p Pin, limit int64) ([]byte, error) {
@@ -276,7 +277,12 @@ func validateIdentity(i Identity) error {
 
 // ValidateComplete never accepts a fixture. Validation does not authorize execution.
 // Component receipts are pinned inputs owned by the independent financial pipeline.
-func (m Manifest) ValidateComplete() error { return m.validate(false) }
+func (m Manifest) ValidateComplete() error {
+	if m.Profile != CompleteProfile || m.Scope.chain() != Chain {
+		return errors.New("original Hub2 complete profile required")
+	}
+	return m.validate(false)
+}
 
 // ValidateFixture is deliberately separate and cannot attest whole-chain coverage.
 func (m Manifest) ValidateFixture() error {
@@ -293,6 +299,7 @@ func (m Manifest) ValidatePrivateScale() error {
 }
 func (m Manifest) validate(fixture bool) error {
 	scale := fixture && m.Profile == PrivateScaleProfile
+	approved := !fixture && m.Profile == ApprovedProfile
 	if m.Version != 1 || m.Fixture != fixture || m.First != 1 || m.Last < m.First {
 		return errors.New("wrong version/coverage/mode")
 	}
@@ -300,14 +307,14 @@ func (m Manifest) validate(fixture bool) error {
 		if m.Last != 1400000 || m.Canonical != 0 || m.MigrationLast != 0 || m.TailFirst != 0 || m.TailLast != 0 || m.CanonicalRows != 0 || m.CanonicalProjectionSHA != valueEmptySHA() {
 			return errors.New("private prefix is not a canonical migration")
 		}
-	} else if m.Canonical < 1 || m.MigrationLast != m.Canonical || m.TailFirst != m.Canonical+1 || m.TailLast != m.Last {
+	} else if !approved && (m.Canonical < 1 || m.MigrationLast != m.Canonical || m.TailFirst != m.Canonical+1 || m.TailLast != m.Last) {
 		return errors.New("wrong canonical/tail policy")
 	}
 	if fixture {
 		if (!scale && (m.Profile != FixtureProfile || m.Last > 100)) || !strings.HasPrefix(m.Destination.Database, "legacy_replay_rehearsal_") {
 			return errors.New("fixture profile/destination refused")
 		}
-	} else if m.Profile != CompleteProfile || m.Last != FinalHeight || m.Canonical != CanonicalHeight {
+	} else if !approved && (m.Scope.chain() != Chain || m.Profile != CompleteProfile || m.Last != FinalHeight || m.Canonical != CanonicalHeight) {
 		return errors.New("complete chain receipt required")
 	}
 	if e := validateIdentity(m.Destination); e != nil {
@@ -363,7 +370,7 @@ func (m Manifest) validate(fixture bool) error {
 	if m.Tables[0].Rows != 1 {
 		return errors.New("one genuine genesis required")
 	}
-	if !fixture {
+	if !fixture && !approved {
 		var r FinancialReceipt
 		if e := readPinnedJSON(m.Financial, &r); e != nil {
 			return e
@@ -482,6 +489,9 @@ func (m Manifest) verifyOfflineProjection() error {
 
 // Recheck pins immediately before COMMIT as well as before streaming.
 func (m Manifest) Recheck() error {
+	if m.Profile == ApprovedProfile {
+		return m.ValidateApproved()
+	}
 	if m.Fixture {
 		if m.Profile == PrivateScaleProfile {
 			return m.ValidatePrivateScale()

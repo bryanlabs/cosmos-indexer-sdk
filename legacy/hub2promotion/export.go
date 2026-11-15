@@ -27,6 +27,12 @@ func ExportPrivateScaleProjection(ctx context.Context, source *sql.DB, expected 
 }
 
 func exportProjection(ctx context.Context, source *sql.DB, expected Identity, dir string, scale bool) ([]Projection, error) {
+	return exportProjectionChain(ctx, source, expected, dir, scale, Chain)
+}
+func exportProjectionChain(ctx context.Context, source *sql.DB, expected Identity, dir string, scale bool, chain string) ([]Projection, error) {
+	if _, _, _, e := boundaries(chain); e != nil {
+		return nil, e
+	}
 	if !strings.HasPrefix(expected.Database, "legacy_replay_rehearsal_") || !filepath.IsAbs(dir) {
 		return nil, errors.New("private staging identity and absolute NEW directory required")
 	}
@@ -55,7 +61,7 @@ func exportProjection(ctx context.Context, source *sql.DB, expected Identity, di
 	}
 	var out []Projection
 	for _, t := range inserts {
-		rows, e := tx.QueryContext(ctx, "SELECT pg_catalog.to_jsonb(r)::pg_catalog.text FROM legacy."+t.name+" r WHERE chain_id='cosmoshub-2' ORDER BY "+quotedColumns(t.key))
+		rows, e := tx.QueryContext(ctx, "SELECT pg_catalog.to_jsonb(r)::pg_catalog.text FROM legacy."+t.name+" r WHERE chain_id=$1 ORDER BY "+quotedColumns(t.key), chain)
 		if e != nil {
 			return nil, e
 		}

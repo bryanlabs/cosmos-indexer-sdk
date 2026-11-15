@@ -43,10 +43,16 @@ func fingerprint(ctx context.Context, q querier, t table, where string, physical
 	return Fingerprint{n, hex.EncodeToString(h.Sum(nil))}, nil
 }
 func snapshot(ctx context.Context, q querier, nonHub2 bool, physical bool) (Snapshot, error) {
+	return snapshotChain(ctx, q, Chain, nonHub2, physical)
+}
+func snapshotChain(ctx context.Context, q querier, chain string, exclude bool, physical bool) (Snapshot, error) {
+	if chain != "cosmoshub-1" && chain != "cosmoshub-2" {
+		return nil, errors.New("unapproved chain")
+	}
 	out := Snapshot{}
 	where := "true"
-	if nonHub2 {
-		where = "chain_id <> 'cosmoshub-2'"
+	if exclude {
+		where = "chain_id <> '" + chain + "'"
 	}
 	for _, t := range allTables {
 		w := where
@@ -72,18 +78,22 @@ func equalSnapshot(a, b Snapshot) bool {
 	}
 	return true
 }
-func emptyHub2(ctx context.Context, q querier) error {
+func emptyHub2(ctx context.Context, q querier) error { return emptyChain(ctx, q, Chain) }
+func emptyChain(ctx context.Context, q querier, chain string) error {
+	if chain != "cosmoshub-1" && chain != "cosmoshub-2" {
+		return errors.New("unapproved chain")
+	}
 	for _, t := range allTables {
 		if t.name == "eras" {
 			continue
 		}
 		var yes bool
-		e := q.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM legacy."+t.name+" WHERE chain_id='cosmoshub-2')").Scan(&yes)
+		e := q.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM legacy."+t.name+" WHERE chain_id=$1)", chain).Scan(&yes)
 		if e != nil {
 			return e
 		}
 		if yes {
-			return fmt.Errorf("preexisting unowned Hub2 cohort: %s", t.name)
+			return fmt.Errorf("preexisting unowned chain cohort: %s", t.name)
 		}
 	}
 	return nil
@@ -165,7 +175,7 @@ func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 		if t.name == "eras" {
 			continue
 		}
-		fp, e := fingerprint(ctx, q, t, "chain_id='cosmoshub-2'", false)
+		fp, e := fingerprint(ctx, q, t, "chain_id='"+m.Scope.chain()+"'", false)
 		if e != nil {
 			return e
 		}
@@ -186,7 +196,7 @@ func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 	}
 	var genesisSHA string
 	var accounts, delegations, unbondings, validators, withdraws int64
-	if e := q.QueryRowContext(ctx, `SELECT sha256,accounts,delegations,unbonding_entries,validators,withdraw_addresses FROM legacy.genesis_files WHERE chain_id='cosmoshub-2'`).Scan(&genesisSHA, &accounts, &delegations, &unbondings, &validators, &withdraws); e != nil {
+	if e := q.QueryRowContext(ctx, `SELECT sha256,accounts,delegations,unbonding_entries,validators,withdraw_addresses FROM legacy.genesis_files WHERE chain_id=$1`, m.Scope.chain()).Scan(&genesisSHA, &accounts, &delegations, &unbondings, &validators, &withdraws); e != nil {
 		return e
 	}
 	expectedCounts := map[string]int64{}
@@ -197,21 +207,21 @@ func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 		return errors.New("genuine genesis/count projection mismatch")
 	}
 	var wrongTxCount int64
-	if e := q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.blocks b WHERE b.chain_id='cosmoshub-2' AND b.tx_count<>(SELECT count(*) FROM legacy.tx_inclusions tx WHERE tx.chain_id=b.chain_id AND tx.height=b.height)`).Scan(&wrongTxCount); e != nil {
+	if e := q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.blocks b WHERE b.chain_id=$1 AND b.tx_count<>(SELECT count(*) FROM legacy.tx_inclusions tx WHERE tx.chain_id=b.chain_id AND tx.height=b.height)`, m.Scope.chain()).Scan(&wrongTxCount); e != nil {
 		return e
 	}
 	if wrongTxCount != 0 {
 		return errors.New("transaction inclusion/header count mismatch")
 	}
 	var headers, min, max, distinct int64
-	if e := q.QueryRowContext(ctx, `SELECT count(*),coalesce(min(height),0),coalesce(max(height),0),count(DISTINCT height) FROM legacy.blocks WHERE chain_id='cosmoshub-2'`).Scan(&headers, &min, &max, &distinct); e != nil {
+	if e := q.QueryRowContext(ctx, `SELECT count(*),coalesce(min(height),0),coalesce(max(height),0),count(DISTINCT height) FROM legacy.blocks WHERE chain_id=$1`, m.Scope.chain()).Scan(&headers, &min, &max, &distinct); e != nil {
 		return e
 	}
 	if headers != m.Last || distinct != headers || min != 1 || max != m.Last {
 		return errors.New("header gap/duplicate/tail")
 	}
 	var payout int64
-	if e := q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.taxable_events WHERE chain_id='cosmoshub-2' AND (phase=4 OR amount_source='export_payout') AND NOT (phase=4 AND amount_source='export_payout' AND height=$1)`, m.Canonical).Scan(&payout); e != nil {
+	if e := q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.taxable_events WHERE chain_id=$2 AND (phase=4 OR amount_source='export_payout') AND NOT (phase=4 AND amount_source='export_payout' AND height=$1)`, m.Canonical, m.Scope.chain()).Scan(&payout); e != nil {
 		return e
 	}
 	if payout != 0 {
@@ -223,7 +233,7 @@ func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 			t = v
 		}
 	}
-	fp, e := fingerprint(ctx, q, t, "chain_id='cosmoshub-2' AND phase=4", false)
+	fp, e := fingerprint(ctx, q, t, "chain_id='"+m.Scope.chain()+"' AND phase=4", false)
 	if e != nil {
 		return e
 	}
@@ -231,7 +241,7 @@ func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 		return errors.New("canonical payout missing/duplicate/unbound")
 	}
 	var bad int64
-	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.taxable_events e WHERE e.chain_id='cosmoshub-2' AND e.height>0 AND NOT EXISTS(SELECT 1 FROM legacy.blocks b WHERE b.chain_id=e.chain_id AND b.height=e.height)`).Scan(&bad); e != nil {
+	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.taxable_events e WHERE e.chain_id=$1 AND e.height>0 AND NOT EXISTS(SELECT 1 FROM legacy.blocks b WHERE b.chain_id=e.chain_id AND b.height=e.height)`, m.Scope.chain()).Scan(&bad); e != nil {
 		return e
 	}
 	if bad != 0 {
@@ -251,7 +261,7 @@ const (
 // AuditOutcome never adopts, repairs or retries. Even an empty result is only a
 // report. A new attempt requires independent re-admission by an operator.
 func AuditOutcome(ctx context.Context, audit *sql.DB, m Manifest, runtime Identity) (Outcome, error) {
-	tx, e := beginAuditBudget(ctx, audit, m.Profile == PrivateScaleProfile)
+	tx, e := beginAuditBudget(ctx, audit, m.scanBudget())
 	if e != nil {
 		return OutcomeConflict, e
 	}
@@ -269,14 +279,14 @@ func AuditOutcome(ctx context.Context, audit *sql.DB, m Manifest, runtime Identi
 	if e = erasAndGenesis(ctx, tx, m); e != nil {
 		return OutcomeConflict, e
 	}
-	protected, e := snapshot(ctx, tx, true, true)
+	protected, e := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
 	if e != nil {
 		return OutcomeConflict, e
 	}
 	if !equalSnapshot(protected, m.Protected) {
 		return OutcomeConflict, nil
 	}
-	if emptyHub2(ctx, tx) == nil {
+	if emptyChain(ctx, tx, m.Scope.chain()) == nil {
 		return OutcomeEmpty, nil
 	}
 	if verifyProjection(ctx, tx, m) != nil {
@@ -286,7 +296,7 @@ func AuditOutcome(ctx context.Context, audit *sql.DB, m Manifest, runtime Identi
 }
 
 func freshScopeAudit(ctx context.Context, auditor *sql.DB, m Manifest, runtime Identity) error {
-	tx, e := beginAuditBudget(ctx, auditor, m.Profile == PrivateScaleProfile)
+	tx, e := beginAuditBudget(ctx, auditor, m.scanBudget())
 	if e != nil {
 		return e
 	}
@@ -301,7 +311,7 @@ func freshScopeAudit(ctx context.Context, auditor *sql.DB, m Manifest, runtime I
 	if e = CheckScope(ctx, tx, m.Scope); e != nil {
 		return e
 	}
-	p, e := snapshot(ctx, tx, true, true)
+	p, e := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
 	if e != nil {
 		return e
 	}

@@ -17,6 +17,7 @@ import (
 
 var ErrCommitUnknown = errors.New("COMMIT outcome unknown; fresh read-only audit required; never auto-retry")
 var ErrProductionDisabled = errors.New("production execution disabled; this command is approval-plan/private-fixture only")
+var ErrCommittedUnverified = errors.New("load committed but fresh physical readback is not exact; preserve data, never retry or delete")
 
 type Result struct {
 	BackendPID        int           `json:"backend_pid"`
@@ -106,7 +107,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if _, err = tx.ExecContext(ctx, `SET LOCAL lock_timeout='250ms'; SET LOCAL statement_timeout='30s'; SET LOCAL synchronous_commit=on`); err != nil {
 		return r, err
 	}
-	if m.Profile == PrivateScaleProfile {
+	if m.scanBudget() {
 		if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='10min'`); err != nil {
 			return r, err
 		}
@@ -137,7 +138,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	// its LOCK runs. Never assume otherwise. The authoritative baseline is read
 	// by a fresh READ ONLY auditor AFTER every lock, then compared to RR. A commit
 	// that slipped between those points causes refusal, never stale admission.
-	baseline, err := beginAuditBudget(ctx, auditor, m.Profile == PrivateScaleProfile)
+	baseline, err := beginAuditBudget(ctx, auditor, m.scanBudget())
 	if err != nil {
 		return r, err
 	}
@@ -161,17 +162,17 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err = erasAndGenesis(ctx, tx, m); err != nil {
 		return r, err
 	}
-	if err = emptyHub2(ctx, baseline); err != nil {
+	if err = emptyChain(ctx, baseline, m.Scope.chain()); err != nil {
 		return r, err
 	}
-	if err = emptyHub2(ctx, tx); err != nil {
+	if err = emptyChain(ctx, tx, m.Scope.chain()); err != nil {
 		return r, err
 	}
-	before, err := snapshot(ctx, baseline, true, true)
+	before, err := snapshotChain(ctx, baseline, m.Scope.chain(), true, true)
 	if err != nil {
 		return r, err
 	}
-	localBefore, err := snapshot(ctx, tx, true, true)
+	localBefore, err := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
 	if err != nil {
 		return r, err
 	}
@@ -249,7 +250,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err = verifyProjection(ctx, tx, m); err != nil {
 		return r, err
 	}
-	after, err := snapshot(ctx, tx, true, true)
+	after, err := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
 	if err != nil {
 		return r, err
 	}
@@ -281,6 +282,13 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err != nil {
 		return r, ErrCommitUnknown
 	}
+	if m.Profile == ApprovedProfile {
+		// Keep the same session's advisory locks until fresh physical readback,
+		// so the other independently approved chain cannot race this audit.
+		if err = verifyCommitted(ctx, auditor, m, runtime); err != nil {
+			return r, err
+		}
+	}
 	return r, nil
 }
 func validateRow(raw []byte, t table, m Manifest) error {
@@ -300,8 +308,8 @@ func validateRow(raw []byte, t table, m Manifest) error {
 		}
 	}
 	var chain string
-	if json.Unmarshal(row["chain_id"], &chain) != nil || chain != Chain {
-		return errors.New("projection is not Hub2")
+	if json.Unmarshal(row["chain_id"], &chain) != nil || chain != m.Scope.chain() {
+		return errors.New("projection chain differs from fixed scope")
 	}
 	if v, ok := row["height"]; ok {
 		var height int64
