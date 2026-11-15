@@ -83,7 +83,7 @@ func open(t *testing.T, retained bool) Database {
 		c := config.Copy()
 		c.Database = name
 		c.User = user
-		c.Password = password
+		c.Password = ${PRESERVATION_REDACTED}
 		// The typed config drives connections; the canonical URL is retained
 		// for command-path tests that intentionally reconnect via the CLI.
 		u := url.URL{Scheme: "postgres", Host: net.JoinHostPort(c.Host, strconv.Itoa(int(c.Port))), User: url.UserPassword(c.User, c.Password), Path: "/" + c.Database, RawQuery: "sslmode=disable"}
@@ -123,7 +123,7 @@ func open(t *testing.T, retained bool) Database {
 	require.NoError(t, owner.Omit(clause.Associations).Create(&models.Tx{Hash: strings.Repeat("AB", 32), BlockID: block.ID, Memo: "synthetic memo"}).Error)
 
 	require.NoError(t, schema.Migrate(owner, role))
-	require.NoError(t, owner.Exec("ALTER ROLE "+role+" PASSWORD 'importer-test'").Error)
+	require.NoError(t, owner.Exec("ALTER ROLE "+role+" PASSWORD '${PRESERVATION_REDACTED}'").Error)
 	importer, err = connect(role, "importer-test")
 	require.NoError(t, err)
 	return Database{Owner: owner, Importer: importer, Role: role}

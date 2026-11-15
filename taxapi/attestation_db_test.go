@@ -20,7 +20,7 @@ func TestAttestationScanner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resource, err := pool.Run("postgres", "15-alpine", []string{"POSTGRES_USER=test", "POSTGRES_PASSWORD=test", "POSTGRES_DB=test"})
+	resource, err := pool.Run("postgres", "15-alpine", []string{"POSTGRES_USER=test", "POSTGRES_PASSWORD=${PRESERVATION_REDACTED}", "POSTGRES_DB=test"})
 	if err != nil {
 		t.Fatal(err)
 	}

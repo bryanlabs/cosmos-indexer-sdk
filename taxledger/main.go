@@ -65,7 +65,7 @@ func main() {
 		env("DB_PORT", "5432"),
 		env("DB_NAME", "indexer"),
 		env("DB_USER", "postgres"),
-		env("DB_PASS", "postgres"),
+		env("DB_PASS", "${PRESERVATION_REDACTED}"),
 		env("DB_LOG_LEVEL", "warn"),
 	)
 	if err != nil {
