@@ -224,7 +224,7 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 		if err := guard.withReadSnapshot(func(*Server) error { return nil }); err != nil {
 			return err
 		}
-		e.PrivateProfile = &CommissionPrivateProfileEvidence{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, ParserSHA256: p.ParserSHA256, EconomicProofSHA256: p.EconomicProofSHA256}
+		e.PrivateProfile = &CommissionPrivateProfileEvidence{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, ParserSHA256: p.ParserSHA256, EconomicProofSHA256: p.EconomicProofSHA256, UnjailSourcesSHA256: append([]string(nil), p.UnjailSourcesSHA256...)}
 	}
 	if p := o.SourceCorrections; p != nil {
 		for _, r := range e.SourceCorrectionReads {

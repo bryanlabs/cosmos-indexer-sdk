@@ -246,17 +246,18 @@ func (s *Server) classificationReadiness(chain string, addresses []string, start
 			return r, fmt.Errorf("private projection scope mismatch")
 		}
 		var reclassified int64
-		if err := count(&reclassified, "JOIN (SELECT DISTINCT m.tx_id FROM message_parser_errors mpe JOIN messages m ON m.id=mpe.message_id WHERE mpe.id=10262 AND m.id=27907375 AND m.tx_id=18802568) parser_scope ON parser_scope.tx_id=t.id"); err != nil {
+		scope, maximum := p.privateParserScope()
+		if err := count(&reclassified, scope); err != nil {
 			return r, err
 		}
-		if reclassified > 1 || reclassified > r.ParserErrors {
+		if reclassified < 0 || reclassified > maximum || reclassified > r.ParserErrors {
 			return r, fmt.Errorf("private projection error cardinality mismatch")
 		}
 		r.ReclassifiedParserErrors = reclassified
 		r.RemainingParserErrors -= reclassified
 		r.PrivateProfileSHA256 = p.digest
 		if reclassified != 0 && s.privateProjectionReceipts != nil {
-			s.privateProjectionReceipts.retain(addresses, start, end, CommissionPrivateProjectionReceipt{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, Snapshot: s.privateProjectionSnapshot, OriginalParserErrors: r.ParserErrors, ReclassifiedParserErrors: reclassified, RemainingParserErrors: r.RemainingParserErrors})
+			s.privateProjectionReceipts.retain(addresses, start, end, CommissionPrivateProjectionReceipt{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, UnjailSourcesSHA256: append([]string(nil), p.UnjailSourcesSHA256...), Snapshot: s.privateProjectionSnapshot, OriginalParserErrors: r.ParserErrors, ReclassifiedParserErrors: reclassified, RemainingParserErrors: r.RemainingParserErrors})
 		}
 	}
 	r.ParserDecodeComplete = r.RemainingParserErrors == 0 && r.DecodeErrors == 0 && r.OpaqueMessages == 0 && r.UnreviewedMessages == 0

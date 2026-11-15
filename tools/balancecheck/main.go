@@ -38,7 +38,7 @@ func main() {
 		}
 		days = append(days, t)
 	}
-	db, err := indexerDB.PostgresDbConnect(env("DB_HOST", "localhost"), env("DB_PORT", "5432"), env("DB_NAME", "cosmostax"), env("DB_USER", "postgres"), env("DB_PASS", "postgres"), "warn")
+	db, err := indexerDB.PostgresDbConnect(env("DB_HOST", "localhost"), env("DB_PORT", "5432"), env("DB_NAME", "cosmostax"), env("DB_USER", "postgres"), env("DB_PASS", "${PRESERVATION_REDACTED}"), "warn")
 	if err != nil {
 		log.Fatalf("db: %v", err)
 	}

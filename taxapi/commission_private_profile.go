@@ -54,6 +54,7 @@ type CommissionPrivateProfile struct {
 	EconomicProofSHA256 string    `json:"economic_proof_sha256"`
 	From                time.Time `json:"from"`
 	AsOf                time.Time `json:"as_of"`
+	UnjailSourcesSHA256 []string  `json:"unjail_sources_sha256,omitempty"`
 	digest              string
 }
 
@@ -77,7 +78,7 @@ func LoadCommissionPrivateProfile(path, expectedSHA string) (*CommissionPrivateP
 	if err = d.Decode(&p); err != nil {
 		return nil, fmt.Errorf("private profile decode failed")
 	}
-	if p.Schema != "commission-readonly-authz-projection-v1" || p.SourceSHA256 != privateSourceSealSHA || p.ParserSHA256 != privateParserSourceSHA || p.EconomicProofSHA256 != privateEconomicProofSHA || p.From.Format(time.DateOnly) != "2024-03-21" || p.AsOf.Format(time.DateOnly) != "2026-11-13" || !p.From.Equal(flowDay(p.From)) || !p.AsOf.Equal(flowDay(p.AsOf)) {
+	if !p.validSchema() || p.SourceSHA256 != privateSourceSealSHA || p.ParserSHA256 != privateParserSourceSHA || p.EconomicProofSHA256 != privateEconomicProofSHA || p.From.Format(time.DateOnly) != "2024-03-21" || p.AsOf.Format(time.DateOnly) != "2026-11-13" || !p.From.Equal(flowDay(p.From)) || !p.AsOf.Equal(flowDay(p.AsOf)) {
 		return nil, fmt.Errorf("private profile source, parser, economics or window mismatch")
 	}
 	p.digest = expectedSHA
@@ -91,11 +92,13 @@ type CommissionPrivateProfileEvidence struct {
 	SourceSHA256        string
 	ParserSHA256        string
 	EconomicProofSHA256 string
+	UnjailSourcesSHA256 []string `json:",omitempty"`
 }
 
 type CommissionPrivateProjectionReceipt struct {
 	ProfileSHA256            string
 	SourceSHA256             string
+	UnjailSourcesSHA256      []string `json:",omitempty"`
 	Snapshot                 string
 	WalletScopeSHA256        string
 	Start                    time.Time
@@ -110,7 +113,7 @@ func (s *Server) validatePrivateProjection() error {
 	if p == nil {
 		return nil
 	}
-	if p.SourceSHA256 != privateSourceSealSHA || p.ParserSHA256 != privateParserSourceSHA || p.EconomicProofSHA256 != privateEconomicProofSHA || len(p.digest) != 64 {
+	if !p.validSchema() || p.SourceSHA256 != privateSourceSealSHA || p.ParserSHA256 != privateParserSourceSHA || p.EconomicProofSHA256 != privateEconomicProofSHA || len(p.digest) != 64 {
 		return fmt.Errorf("private projection profile changed")
 	}
 	if !s.readOnlyLedger || s.readSnapshotStarted.IsZero() {
@@ -135,6 +138,17 @@ func (s *Server) validatePrivateProjection() error {
 	}
 	if err := validatePrivateSourceParse([]byte(rows[0].Source)); err != nil {
 		return err
+	}
+	if p.Schema == privateUnjailSchema {
+		for _, source := range privateUnjailSources {
+			var extra []struct{ Source string }
+			if err := s.db.Raw(privateUnjailSourceSQL(source)).Scan(&extra).Error; err != nil {
+				return err
+			}
+			if len(extra) != 1 || validatePrivateUnjailSource([]byte(extra[0].Source), source) != nil {
+				return fmt.Errorf("private unjail original source changed")
+			}
+		}
 	}
 	s.privateProjectionSnapshot = guard.Snapshot
 	return nil
