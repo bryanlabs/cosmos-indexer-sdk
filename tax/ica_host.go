@@ -10,6 +10,7 @@ import (
 
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/gogoproto/proto"
 	icatypes "github.com/cosmos/ibc-go/v7/modules/apps/27-interchain-accounts/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
@@ -20,20 +21,17 @@ import (
 // that execution, so the ICA account's own messages are classified from it.
 const icaHostPort = "icahost"
 
-const (
-	typeURLBankSend      = "/cosmos.bank.v1beta1.MsgSend"
-	typeURLBankMultiSend = "/cosmos.bank.v1beta1.MsgMultiSend"
-)
-
 // icaHostEvents classifies a successful EXECUTE_TX packet as if the ICA account
-// had signed its inner message itself. The stored log merges same-type events
-// across messages, so a packet with several inner messages cannot be split per
-// message and is reported as unresolved instead, except for bank sends, which
-// are classified from the message alone.
+// had signed its inner messages itself. Multi-message packets are classified
+// only after their event evidence has been separated without ambiguity.
 func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classificationState, depth int) []TaxableEvent {
+	if depth >= maxAuthzDepth {
+		state.issues = append(state.issues, "ica host packet: nesting limit exceeded")
+		return nil
+	}
 	executed, known := icaHostExecuted(log)
 	if !known {
-		state.issues = append(state.issues, "ica host packet: no ics27_packet result or acknowledgement")
+		state.issues = append(state.issues, "ica host packet: missing or contradictory execution result/acknowledgement")
 		return nil
 	}
 	if !executed {
@@ -52,22 +50,35 @@ func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classi
 		state.issues = append(state.issues, fmt.Sprintf("ica host packet: decode CosmosTx: %v", err))
 		return nil
 	}
+	if len(tx.Messages) > maxAuthzMessages-state.inners {
+		state.issues = append(state.issues, "ica host packet: inner message budget exceeded")
+		return nil
+	}
+	state.inners += len(tx.Messages)
+	inners := make([]sdk.Msg, len(tx.Messages))
+	for i, a := range tx.Messages {
+		inner, err := unpackAuthzInner(a)
+		if err != nil {
+			state.issues = append(state.issues, fmt.Sprintf("ica/%d: %v", i, err))
+			return nil
+		}
+		inners[i] = inner
+	}
+	subs := make([]*txlog.LogMessage, len(inners))
+	if len(inners) == 1 {
+		subs[0] = log
+	} else if len(inners) > 1 {
+		var err error
+		subs, err = icaHostSubLogs(tx.Messages, inners, log)
+		if err != nil {
+			state.issues = append(state.issues, fmt.Sprintf("ica host packet: %d inner messages share one event log (%s; coins moved %t): %v", len(inners), icaTypeSummary(tx.Messages), authzMovedCoins(log), err))
+			return nil
+		}
+	}
 	var out []TaxableEvent
 	for i, a := range tx.Messages {
 		path := "ica/" + strconv.Itoa(i)
-		inner, err := unpackAuthzInner(a)
-		if err != nil {
-			state.issues = append(state.issues, fmt.Sprintf("ica %s: %v", path, err))
-			return nil
-		}
-		if len(tx.Messages) > 1 {
-			if !messageOnlyClassification(a.TypeUrl) {
-				state.issues = append(state.issues, fmt.Sprintf("ica host packet: %d inner messages share one event log (%s; coins moved %t)", len(tx.Messages), icaTypeSummary(tx.Messages), authzMovedCoins(log)))
-				return nil
-			}
-			out = append(out, classifyWithState(inner, &txlog.LogMessage{}, state, depth+1, path)...)
-			continue
-		}
+		inner, sub := inners[i], subs[i]
 		supported := false
 		for _, url := range MessageTypeURLs {
 			if a.TypeUrl == url {
@@ -75,14 +86,14 @@ func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classi
 				break
 			}
 		}
-		if !supported && authzNoTaxEffect[a.TypeUrl] && !authzMovedCoins(log) {
+		if !supported && authzNoTaxEffect[a.TypeUrl] && !authzMovedCoins(sub) {
 			continue
 		}
 		if !supported {
 			state.issues = append(state.issues, fmt.Sprintf("ica %s: unsupported inner %s", path, a.TypeUrl))
 			return nil
 		}
-		out = append(out, classifyWithState(inner, log, state, depth+1, path)...)
+		out = append(out, classifyWithState(inner, sub, state, depth+1, path)...)
 	}
 	return out
 }
@@ -106,25 +117,31 @@ func icaTypeSummary(msgs []*codectypes.Any) string {
 	return strings.Join(parts, ", ")
 }
 
-// Bank sends are booked from the message fields alone, so each inner send of
-// a batch is classified without the shared log.
-func messageOnlyClassification(typeURL string) bool {
-	return typeURL == typeURLBankSend || typeURL == typeURLBankMultiSend
-}
-
 // icaHostExecuted reports whether the host committed the packet's messages.
 // ibc-go emits ics27_packet success from v6 on; older packets carry only the
 // acknowledgement, which is an error when execution was reverted.
 func icaHostExecuted(log *txlog.LogMessage) (executed, known bool) {
+	conflict := false
+	record := func(success bool) {
+		if known && executed != success {
+			conflict = true
+		}
+		executed, known = success, true
+	}
 	for _, e := range log.Events {
 		if e.Type != "ics27_packet" {
 			continue
 		}
-		switch attrMap(e)[attributeSuccess] {
-		case attributeTrue:
-			return true, true
-		case "false":
-			return false, true
+		for _, a := range e.Attributes {
+			if a.Key != attributeSuccess {
+				continue
+			}
+			switch a.Value {
+			case attributeTrue:
+				record(true)
+			case "false":
+				record(false)
+			}
 		}
 	}
 	for _, e := range log.Events {
@@ -143,14 +160,19 @@ func icaHostExecuted(log *txlog.LogMessage) (executed, known bool) {
 		if json.Unmarshal(raw, &ack) != nil {
 			continue
 		}
+		var result []byte
+		hasResult := json.Unmarshal(ack.Result, &result) == nil && len(result) > 0
 		if ack.Error != "" {
-			return false, true
+			record(false)
 		}
-		if len(ack.Result) != 0 {
-			return true, true
+		if hasResult {
+			record(true)
 		}
 	}
-	return false, false
+	if conflict {
+		return false, false
+	}
+	return executed, known
 }
 
 // icaPacketTx returns the CosmosTx bytes of an EXECUTE_TX packet. Controllers
