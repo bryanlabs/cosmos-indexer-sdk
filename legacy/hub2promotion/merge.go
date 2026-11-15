@@ -46,7 +46,7 @@ func DestinationLock(i Identity) int64 {
 // has a separate named entry point; complete-chain plan admission is separate.
 // A later reviewed approval adapter must reuse this core.
 func MergeFixture(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Identity) (Result, error) {
-	if !m.Fixture || m.Profile != FixtureProfile {
+	if !m.Fixture || (m.Profile != FixtureProfile && m.Profile != RawFixtureProfile && m.Profile != PrivateRawProfile) {
 		return Result{}, ErrProductionDisabled
 	}
 	return merge(ctx, loader, auditor, m, runtime, hooks{})
@@ -162,17 +162,17 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err = erasAndGenesis(ctx, tx, m); err != nil {
 		return r, err
 	}
-	if err = emptyChain(ctx, baseline, m.Scope.chain()); err != nil {
+	if err = m.emptyTarget(ctx, baseline); err != nil {
 		return r, err
 	}
-	if err = emptyChain(ctx, tx, m.Scope.chain()); err != nil {
+	if err = m.emptyTarget(ctx, tx); err != nil {
 		return r, err
 	}
-	before, err := snapshotChain(ctx, baseline, m.Scope.chain(), true, true)
+	before, err := m.protectedSnapshot(ctx, baseline)
 	if err != nil {
 		return r, err
 	}
-	localBefore, err := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
+	localBefore, err := m.protectedSnapshot(ctx, tx)
 	if err != nil {
 		return r, err
 	}
@@ -185,7 +185,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err = baseline.Rollback(); err != nil {
 		return r, err
 	}
-	for n, t := range inserts {
+	for n, t := range m.Scope.insertTables() {
 		p := m.Tables[n]
 		f, e := openPinned(p.File)
 		if e != nil {
@@ -250,7 +250,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err = verifyProjection(ctx, tx, m); err != nil {
 		return r, err
 	}
-	after, err := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
+	after, err := m.protectedSnapshot(ctx, tx)
 	if err != nil {
 		return r, err
 	}
@@ -282,7 +282,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	if err != nil {
 		return r, ErrCommitUnknown
 	}
-	if m.Profile == ApprovedProfile {
+	if m.Profile == ApprovedProfile || m.Profile == ApprovedRawProfile || m.Profile == PrivateRawProfile {
 		// Keep the same session's advisory locks until fresh physical readback,
 		// so the other independently approved chain cannot race this audit.
 		if err = verifyCommitted(ctx, auditor, m, runtime); err != nil {
@@ -292,6 +292,11 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 	return r, nil
 }
 func validateRow(raw []byte, t table, m Manifest) error {
+	if m.Scope.RawStage {
+		if _, e := decodeUnique(raw); e != nil {
+			return e
+		}
+	}
 	var row map[string]json.RawMessage
 	d := json.NewDecoder(bytes.NewReader(raw))
 	if e := d.Decode(&row); e != nil {

@@ -21,6 +21,29 @@ type Scope struct {
 	ViewOwner string `json:"view_owner"`
 	LockOwner string `json:"lock_owner"`
 	ChainID   string `json:"chain_id,omitempty"`
+	RawStage  bool   `json:"raw_stage,omitempty"`
+}
+
+func (s Scope) insertTables() []table {
+	if !s.RawStage {
+		return inserts
+	}
+	return []table{inserts[6], inserts[8]}
+}
+func (s Scope) baseRelation(t table) string {
+	if s.RawStage {
+		return s.Schema + ".raw_" + t.name
+	}
+	return "legacy." + t.name
+}
+func (s Scope) lockRelations() string {
+	out := relationList(allTables)
+	if s.RawStage {
+		for _, t := range s.insertTables() {
+			out += ", " + s.baseRelation(t)
+		}
+	}
+	return out
 }
 
 // Empty means the original Hub2-only profile. Only these two human-approved
@@ -35,6 +58,9 @@ func (s Scope) chain() string {
 func (s Scope) valid() error {
 	if s.chain() != "cosmoshub-1" && s.chain() != "cosmoshub-2" {
 		return errors.New("only Hub1 or Hub2 scope is permitted")
+	}
+	if s.RawStage && s.chain() != "cosmoshub-1" {
+		return errors.New("raw stage currently supports Hub1 only")
 	}
 	seen := map[string]bool{}
 	for _, n := range []string{s.Schema, s.Loader, s.ViewOwner, s.LockOwner} {
@@ -57,17 +83,33 @@ func (s Scope) SQL() (string, error) {
 		return "", e
 	}
 	var views strings.Builder
-	for _, t := range inserts {
-		fmt.Fprintf(&views, "CREATE VIEW %s.%s AS SELECT %s FROM legacy.%s WHERE chain_id = '%s' WITH CASCADED CHECK OPTION;\nALTER VIEW %s.%s OWNER TO %s;\nREVOKE ALL ON %s.%s FROM PUBLIC;\nGRANT SELECT, INSERT ON %s.%s TO %s;\n", s.Schema, t.name, quotedColumns(t.columns), t.name, s.chain(), s.Schema, t.name, s.ViewOwner, s.Schema, t.name, s.Schema, t.name, s.Loader)
+	var rawTables strings.Builder
+	var targets []string
+	for _, t := range s.insertTables() {
+		targets = append(targets, s.baseRelation(t))
+		if s.RawStage {
+			fmt.Fprintf(&rawTables, "CREATE TABLE %s (LIKE legacy.%s INCLUDING ALL);\nALTER TABLE %s OWNER TO %s;\nREVOKE ALL ON %s FROM PUBLIC;\nGRANT SELECT ON %s TO %s;\nGRANT UPDATE ON %s TO %s;\n", s.baseRelation(t), t.name, s.baseRelation(t), s.ViewOwner, s.baseRelation(t), s.baseRelation(t), s.Loader, s.baseRelation(t), s.LockOwner)
+		}
+		fmt.Fprintf(&views, "CREATE VIEW %s.%s AS SELECT %s FROM %s WHERE chain_id = '%s' WITH CASCADED CHECK OPTION;\nALTER VIEW %s.%s OWNER TO %s;\nREVOKE ALL ON %s.%s FROM PUBLIC;\nGRANT SELECT, INSERT ON %s.%s TO %s;\n", s.Schema, t.name, quotedColumns(t.columns), s.baseRelation(t), s.chain(), s.Schema, t.name, s.ViewOwner, s.Schema, t.name, s.Schema, t.name, s.Loader)
 	}
-	return strings.NewReplacer("{{scope}}", s.Schema, "{{loader}}", s.Loader, "{{view_owner}}", s.ViewOwner, "{{lock_owner}}", s.LockOwner, "{{all_tables}}", relationList(allTables), "{{insert_tables}}", relationList(inserts), "{{views}}", views.String(), "{{view_tables}}", scopeRelations(s)).Replace(scopeScript), nil
+	if s.RawStage {
+		rawTables.WriteString("ALTER TABLE " + s.Schema + ".raw_block_events ADD FOREIGN KEY (chain_id,height) REFERENCES " + s.Schema + ".raw_blocks(chain_id,height);\n")
+		for _, t := range s.insertTables() {
+			rawTables.WriteString("CREATE TRIGGER written_once_rows BEFORE UPDATE OR DELETE ON " + s.baseRelation(t) + " FOR EACH ROW EXECUTE FUNCTION legacy.refuse_change();\n")
+			rawTables.WriteString("CREATE TRIGGER written_once_table BEFORE TRUNCATE ON " + s.baseRelation(t) + " FOR EACH STATEMENT EXECUTE FUNCTION legacy.refuse_change();\n")
+		}
+	}
+	text := strings.NewReplacer("{{scope}}", s.Schema, "{{loader}}", s.Loader, "{{view_owner}}", s.ViewOwner, "{{lock_owner}}", s.LockOwner, "{{all_tables}}", relationList(allTables), "{{insert_tables}}", strings.Join(targets, ", "), "{{views}}", views.String(), "{{view_tables}}", scopeRelations(s)).Replace(scopeScript)
+	if s.RawStage {
+		text = strings.Replace(text, "GRANT SELECT, INSERT ON ", rawTables.String()+"GRANT SELECT, INSERT ON ", 1)
+		text = strings.Replace(text, "LOCK TABLE "+relationList(allTables)+" IN SHARE ROW EXCLUSIVE MODE", "LOCK TABLE "+s.lockRelations()+" IN SHARE ROW EXCLUSIVE MODE", 1)
+	}
+	return text, nil
 }
 func scopeRelations(s Scope) string {
 	var names []string
-	for _, t := range allTables {
-		if inserted(t.name) {
-			names = append(names, s.Schema+"."+t.name)
-		}
+	for _, t := range s.insertTables() {
+		names = append(names, s.Schema+"."+t.name)
 	}
 	return strings.Join(names, ", ")
 }
@@ -145,7 +187,16 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 		if own || upd || other {
 			return errors.New("loader ownership/rewrite privilege")
 		}
-		if ns == s.Schema && inserted(name) && kind == "v" {
+		if s.RawStage && ns == s.Schema && (name == "raw_blocks" || name == "raw_block_events") {
+			allowedBase = true
+		}
+		allowedView := false
+		for _, t := range s.insertTables() {
+			if name == t.name {
+				allowedView = true
+			}
+		}
+		if ns == s.Schema && allowedView && kind == "v" {
 			if !sel || !ins {
 				return errors.New("missing view privilege")
 			}
@@ -162,7 +213,11 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 	if e = rows.Err(); e != nil {
 		return e
 	}
-	if base != 14 || views != 10 {
+	expectedBase := 14
+	if s.RawStage {
+		expectedBase += 2
+	}
+	if base != expectedBase || views != len(s.insertTables()) {
 		return errors.New("fixed relation set missing")
 	}
 	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname NOT LIKE 'pg_temp_%' AND pg_catalog.has_schema_privilege($1,oid,'CREATE')`, s.Loader).Scan(&n); e != nil {
@@ -193,11 +248,20 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 		return errors.New("alternate callable function")
 	}
 	// No insert trigger/rule may bypass a view CHECK OPTION or rewrite target.
-	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace ns ON ns.oid=c.relnamespace WHERE ns.nspname IN ('legacy',$1) AND NOT t.tgisinternal AND ((t.tgtype & 4)<>0 OR ns.nspname=$1)`, s.Schema).Scan(&n); e != nil {
+	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace ns ON ns.oid=c.relnamespace WHERE ns.nspname IN ('legacy',$1) AND NOT t.tgisinternal AND ((t.tgtype & 4)<>0 OR ns.nspname=$1)
+ AND NOT ($2 AND ns.nspname=$1 AND c.relname IN ('raw_blocks','raw_block_events') AND t.tgfoid='legacy.refuse_change()'::pg_catalog.regprocedure AND t.tgenabled='O' AND t.tgnargs=0 AND t.tgqual IS NULL AND t.tgattr=''::pg_catalog.int2vector AND ((t.tgname='written_once_rows' AND t.tgtype=27) OR (t.tgname='written_once_table' AND t.tgtype=34)))`, s.Schema, s.RawStage).Scan(&n); e != nil {
 		return e
 	}
 	if n != 0 {
 		return errors.New("insert/view trigger refused")
+	}
+	if s.RawStage {
+		if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace ns ON ns.oid=c.relnamespace WHERE ns.nspname=$1 AND c.relname IN ('raw_blocks','raw_block_events') AND NOT t.tgisinternal AND t.tgfoid='legacy.refuse_change()'::pg_catalog.regprocedure AND t.tgenabled='O' AND t.tgnargs=0 AND t.tgqual IS NULL AND t.tgattr=''::pg_catalog.int2vector AND ((t.tgname='written_once_rows' AND t.tgtype=27) OR (t.tgname='written_once_table' AND t.tgtype=34))`, s.Schema).Scan(&n); e != nil {
+			return e
+		}
+		if n != 4 {
+			return errors.New("raw written-once trigger protection missing")
+		}
 	}
 	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class c ON c.oid=r.ev_class JOIN pg_catalog.pg_namespace ns ON ns.oid=c.relnamespace WHERE ns.nspname IN ('legacy',$1) AND NOT (ns.nspname=$1 AND c.relkind='v' AND r.rulename='_RETURN')`, s.Schema).Scan(&n); e != nil {
 		return e
@@ -213,7 +277,7 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 			return r
 		}, v)
 	}
-	for _, t := range inserts {
+	for _, t := range s.insertTables() {
 		var def, owner, options string
 		e = q.QueryRowContext(ctx, `SELECT pg_catalog.pg_get_viewdef(c.oid,true),r.rolname,c.reloptions::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid=c.relnamespace JOIN pg_catalog.pg_roles r ON r.oid=c.relowner WHERE ns.nspname=$1 AND c.relname=$2 AND c.relkind='v'`, s.Schema, t.name).Scan(&def, &owner, &options)
 		if e != nil {
@@ -226,7 +290,7 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 			}
 			fields[i] = c
 		}
-		expected := "SELECT " + strings.Join(fields, ",") + " FROM legacy." + t.name + " WHERE chain_id = '" + s.chain() + "'::text;"
+		expected := "SELECT " + strings.Join(fields, ",") + " FROM " + s.baseRelation(t) + " WHERE chain_id = '" + s.chain() + "'::text;"
 		if normalize(def) != normalize(expected) || owner != s.ViewOwner || options != "{check_option=cascaded}" {
 			return fmt.Errorf("view definition/owner/check-option drift: %s", t.name)
 		}
@@ -239,7 +303,7 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 	if e != nil {
 		return e
 	}
-	expected := "\nBEGIN\n    LOCK TABLE " + relationList(allTables) + " IN SHARE ROW EXCLUSIVE MODE;\n    LOCK TABLE " + scopeRelations(s) + " IN ROW EXCLUSIVE MODE;\nEND\n"
+	expected := "\nBEGIN\n    LOCK TABLE " + s.lockRelations() + " IN SHARE ROW EXCLUSIVE MODE;\n    LOCK TABLE " + scopeRelations(s) + " IN ROW EXCLUSIVE MODE;\nEND\n"
 	if body != expected || owner != s.LockOwner || lang != "plpgsql" || config != "{search_path=pg_catalog}" || !sec || nargs != 0 {
 		return errors.New("lock helper body/owner/config drift")
 	}

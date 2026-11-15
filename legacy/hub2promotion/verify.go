@@ -18,11 +18,14 @@ type Fingerprint struct {
 type Snapshot map[string]Fingerprint
 
 func fingerprint(ctx context.Context, q querier, t table, where string, physical bool) (Fingerprint, error) {
+	return fingerprintRelation(ctx, q, t, "legacy."+t.name, where, physical)
+}
+func fingerprintRelation(ctx context.Context, q querier, t table, relation, where string, physical bool) (Fingerprint, error) {
 	expr := "pg_catalog.to_jsonb(r)::pg_catalog.text"
 	if physical {
 		expr = "r.xmin::pg_catalog.text || ':' || r.ctid::pg_catalog.text || ':' || " + expr
 	}
-	rows, e := q.QueryContext(ctx, "SELECT "+expr+" FROM legacy."+t.name+" r WHERE "+where+" ORDER BY "+quotedColumns(t.key))
+	rows, e := q.QueryContext(ctx, "SELECT "+expr+" FROM "+relation+" r WHERE "+where+" ORDER BY "+quotedColumns(t.key))
 	if e != nil {
 		return Fingerprint{}, e
 	}
@@ -171,6 +174,9 @@ func verifyLocalIdentity(ctx context.Context, q querier, m Manifest) error {
 	return CheckScope(ctx, q, m.Scope)
 }
 func verifyProjection(ctx context.Context, q querier, m Manifest) error {
+	if m.Scope.RawStage {
+		return m.verifyRawSQL(ctx, q)
+	}
 	for _, t := range allTables {
 		if t.name == "eras" {
 			continue
@@ -279,14 +285,14 @@ func AuditOutcome(ctx context.Context, audit *sql.DB, m Manifest, runtime Identi
 	if e = erasAndGenesis(ctx, tx, m); e != nil {
 		return OutcomeConflict, e
 	}
-	protected, e := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
+	protected, e := m.protectedSnapshot(ctx, tx)
 	if e != nil {
 		return OutcomeConflict, e
 	}
 	if !equalSnapshot(protected, m.Protected) {
 		return OutcomeConflict, nil
 	}
-	if emptyChain(ctx, tx, m.Scope.chain()) == nil {
+	if m.emptyTarget(ctx, tx) == nil {
 		return OutcomeEmpty, nil
 	}
 	if verifyProjection(ctx, tx, m) != nil {
@@ -311,7 +317,7 @@ func freshScopeAudit(ctx context.Context, auditor *sql.DB, m Manifest, runtime I
 	if e = CheckScope(ctx, tx, m.Scope); e != nil {
 		return e
 	}
-	p, e := snapshotChain(ctx, tx, m.Scope.chain(), true, true)
+	p, e := m.protectedSnapshot(ctx, tx)
 	if e != nil {
 		return e
 	}

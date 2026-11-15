@@ -82,7 +82,7 @@ func run() error {
 		return e
 	}
 	if *op == "validate" {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"validated": true, "production_rows_written": 0})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"validated": true, "profile": m.Profile, "raw_stage": m.Scope.RawStage, "production_rows_written": 0})
 	}
 	if *op == "scope-sql" {
 		text, e := m.Scope.SQL()
@@ -149,7 +149,7 @@ func run() error {
 		}
 		return errors.New("atomic load refused; new rows rolled back before commit, inspect retained private failure")
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"committed": true, "readback": p.OutcomeExact, "rows": result.Rows, "duration_ns": result.Duration})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"committed": true, "profile": m.Profile, "raw_stage": m.Scope.RawStage, "financial_complete": !m.Scope.RawStage, "readback": p.OutcomeExact, "rows": result.Rows, "duration_ns": result.Duration})
 }
 func main() {
 	if e := run(); e != nil {

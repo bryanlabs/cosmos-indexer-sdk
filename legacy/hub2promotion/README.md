@@ -37,6 +37,38 @@ Priority: accuracy first, then speed. Do not sacrifice accounting correctness,
 existing coverage or evidence. Equally, do not turn that priority into endless
 preparation, artificial approval loops or monitoring without implementation.
 
+## Unpublished lossless Hub1 raw staging
+
+`approved-hub1-lossless-raw-stage-v1` is a distinct mode of the same CLI and
+atomic core. It does not waive or satisfy full financial admission. Its scope
+sets `raw_stage=true`, `chain_id=cosmoshub-1`, and creates only two new evidence
+tables, `raw_blocks` and `raw_block_events`, behind the same confined insert
+views. Every live `legacy` row, including existing Hub1 rows, is physically
+fingerprinted and preserved. No source financial table receives any insert.
+The raw loader has no INSERT, UPDATE, DELETE or TRUNCATE on legacy. New evidence
+tables have the same exact written-once row/table triggers as legacy, checked
+alongside their permissions, definitions and physical identities.
+
+The actual retained four-component source manifest is pinned in code. Admission
+restores every raw native line and all43 source artifacts against the original
+bytes, verifies all500015 headers and20228 signed transactions, and compares
+the original500000 canonical export to the accepted Hub2 genesis. Exact native
+nanosecond timestamps remain in raw evidence; the separate typed header uses
+PostgreSQL's actual microsecond conversion. Derived inclusions, fee-charge
+classification and tax amounts remain explicitly deferred. Financial fields and
+canonical payout rows are absent, not zero-filled. Later complete imports use
+untouched legacy tables and never overwrite, adopt or delete the raw stage.
+
+Scope installation changes real legacy ACL catalog entries, even for raw scopes.
+Install all currently ready scopes under the Auth owner's before/after guards
+BEFORE probing and pinning destination identities. If another authorized scope
+is installed later, confirm the exact intended catalog change and full data
+preservation with that owner, then obtain a fresh destination identity for the
+next load. Never remove ACLs from catalog verification, bypass a mismatch or
+change the public report's source fingerprint. Preserve all earlier manifests
+and receipts. `CaptureApprovedProtected` captures all14 live legacy relations
+for raw staging, not the non-target-only baseline of full financial imports.
+
 ## Entry points and evidence
 
 `cmd/hub2-load-plan` is offline. It requires an absolute manifest path and an

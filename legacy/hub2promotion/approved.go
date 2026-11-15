@@ -31,7 +31,7 @@ type ApprovedLoad struct {
 }
 
 func (m Manifest) scanBudget() bool {
-	return m.Profile == PrivateScaleProfile || m.Profile == ApprovedProfile
+	return m.Profile == PrivateScaleProfile || m.Profile == ApprovedProfile || m.Profile == ApprovedRawProfile || m.Profile == PrivateRawProfile
 }
 
 func boundaries(chain string) (canonical, last int64, next string, err error) {
@@ -46,6 +46,12 @@ func boundaries(chain string) (canonical, last int64, next string, err error) {
 }
 
 func (m Manifest) ValidateApproved() error {
+	if m.Profile == ApprovedRawProfile || m.Profile == PrivateRawProfile {
+		return m.validateApprovedRaw()
+	}
+	if m.Scope.RawStage || m.RawHistory != nil {
+		return errors.New("raw evidence cannot satisfy complete financial profile")
+	}
 	if m.Fixture || m.Profile != ApprovedProfile || m.Approved == nil {
 		return errors.New("approved complete load required")
 	}

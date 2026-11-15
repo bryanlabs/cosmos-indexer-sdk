@@ -99,7 +99,7 @@ func TestBuildIdentityRejectsCounterfeitCleanAndUnboundClosure(t *testing.T) {
 	require.Error(t, good.validate(m))
 }
 func TestStaticScopeSQLHasNoExistingSchemaRewrite(t *testing.T) {
-	s := Scope{"h2p_s_synthetic", "h2p_l_synthetic", "h2p_v_synthetic", "h2p_k_synthetic", ""}
+	s := Scope{Schema: "h2p_s_synthetic", Loader: "h2p_l_synthetic", ViewOwner: "h2p_v_synthetic", LockOwner: "h2p_k_synthetic"}
 	text, e := s.SQL()
 	require.NoError(t, e)
 	for _, bad := range []string{"CREATE OR REPLACE", "ALTER TABLE legacy.", "DROP ", "TRUNCATE ", "DELETE ", "UPDATE legacy.", "REVOKE TEMP", "GRANT UPDATE ON {{all_tables}} TO {{loader}}"} {

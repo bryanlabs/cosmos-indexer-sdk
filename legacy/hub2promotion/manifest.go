@@ -149,32 +149,33 @@ func (b BuildReceipt) validate(m Manifest) error {
 }
 
 type Manifest struct {
-	Version                int           `json:"version"`
-	Profile                string        `json:"profile"`
-	Fixture                bool          `json:"fixture"`
-	First                  int64         `json:"first"`
-	Last                   int64         `json:"last"`
-	Canonical              int64         `json:"canonical"`
-	MigrationLast          int64         `json:"migration_last"`
-	TailFirst              int64         `json:"tail_first"`
-	TailLast               int64         `json:"tail_last"`
-	BuildSHA               string        `json:"build_sha"`
-	BinarySHA              string        `json:"binary_sha"`
-	BuildIdentity          Pin           `json:"build_identity"`
-	Source                 Pin           `json:"source"`
-	Financial              Pin           `json:"financial"`
-	FinancialSignature     Pin           `json:"financial_signature"`
-	Genesis                Pin           `json:"genesis"`
-	Hub3GenesisSHA         string        `json:"hub3_genesis_sha"`
-	Hub4GenesisSHA         string        `json:"hub4_genesis_sha"`
-	Destination            Identity      `json:"destination"`
-	Scope                  Scope         `json:"scope"`
-	Components             []Component   `json:"components"`
-	Tables                 []Projection  `json:"tables"`
-	Protected              Snapshot      `json:"protected_non_hub2_physical"`
-	CanonicalRows          int64         `json:"canonical_rows"`
-	CanonicalProjectionSHA string        `json:"canonical_projection_sha"`
-	Approved               *ApprovedLoad `json:"approved_load,omitempty"`
+	Version                int             `json:"version"`
+	Profile                string          `json:"profile"`
+	Fixture                bool            `json:"fixture"`
+	First                  int64           `json:"first"`
+	Last                   int64           `json:"last"`
+	Canonical              int64           `json:"canonical"`
+	MigrationLast          int64           `json:"migration_last"`
+	TailFirst              int64           `json:"tail_first"`
+	TailLast               int64           `json:"tail_last"`
+	BuildSHA               string          `json:"build_sha"`
+	BinarySHA              string          `json:"binary_sha"`
+	BuildIdentity          Pin             `json:"build_identity"`
+	Source                 Pin             `json:"source"`
+	Financial              Pin             `json:"financial"`
+	FinancialSignature     Pin             `json:"financial_signature"`
+	Genesis                Pin             `json:"genesis"`
+	Hub3GenesisSHA         string          `json:"hub3_genesis_sha"`
+	Hub4GenesisSHA         string          `json:"hub4_genesis_sha"`
+	Destination            Identity        `json:"destination"`
+	Scope                  Scope           `json:"scope"`
+	Components             []Component     `json:"components"`
+	Tables                 []Projection    `json:"tables"`
+	Protected              Snapshot        `json:"protected_non_hub2_physical"`
+	CanonicalRows          int64           `json:"canonical_rows"`
+	CanonicalProjectionSHA string          `json:"canonical_projection_sha"`
+	Approved               *ApprovedLoad   `json:"approved_load,omitempty"`
+	RawHistory             *RawHistoryLoad `json:"raw_history,omitempty"`
 }
 
 func readPinnedBytes(p Pin, limit int64) ([]byte, error) {
@@ -298,6 +299,9 @@ func (m Manifest) ValidatePrivateScale() error {
 	return m.validate(true)
 }
 func (m Manifest) validate(fixture bool) error {
+	if m.Scope.RawStage || m.RawHistory != nil {
+		return errors.New("raw stage is not complete financial evidence")
+	}
 	scale := fixture && m.Profile == PrivateScaleProfile
 	approved := !fixture && m.Profile == ApprovedProfile
 	if m.Version != 1 || m.Fixture != fixture || m.First != 1 || m.Last < m.First {
@@ -423,7 +427,7 @@ func (m Manifest) validate(fixture bool) error {
 func (m Manifest) verifyOfflineProjection() error {
 	var headers, payout int64
 	payoutHash := sha256.New()
-	for i, t := range inserts {
+	for i, t := range m.Scope.insertTables() {
 		p := m.Tables[i]
 		f, e := openPinned(p.File)
 		if e != nil {
@@ -489,8 +493,14 @@ func (m Manifest) verifyOfflineProjection() error {
 
 // Recheck pins immediately before COMMIT as well as before streaming.
 func (m Manifest) Recheck() error {
-	if m.Profile == ApprovedProfile {
+	if m.Profile == ApprovedProfile || m.Profile == ApprovedRawProfile || m.Profile == PrivateRawProfile {
 		return m.ValidateApproved()
+	}
+	if m.Profile == RawFixtureProfile {
+		return m.validateRawFixture()
+	}
+	if m.Scope.RawStage {
+		return errors.New("raw scope requires explicit raw profile")
 	}
 	if m.Fixture {
 		if m.Profile == PrivateScaleProfile {

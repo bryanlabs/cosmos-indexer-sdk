@@ -93,7 +93,7 @@ func newFixtureForChain(t *testing.T, chain string) fixture {
 	require.NoError(t, e)
 	dir := artifactDir(t)
 	id := randomID()
-	s := Scope{"h2p_s_" + id, "h2p_l_" + id, "h2p_v_" + id, "h2p_k_" + id, chain}
+	s := Scope{Schema: "h2p_s_" + id, Loader: "h2p_l_" + id, ViewOwner: "h2p_v_" + id, LockOwner: "h2p_k_" + id, ChainID: chain}
 	require.NoError(t, InstallScope(context.Background(), owner, s))
 	_, e = owner.Exec("ALTER ROLE " + s.Loader + " PASSWORD 'synthetic-fixture-only'")
 	require.NoError(t, e)
