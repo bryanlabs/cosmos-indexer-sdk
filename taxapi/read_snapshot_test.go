@@ -111,12 +111,12 @@ func TestSnapshotEvidenceIncludesClassificationAndPacketDependenciesPostgres(t *
 	}
 }
 
-// A genuinely disposable Docker PostgreSQL instance, with real tables visible
-// to two independent connections. Never use COSMOS_TAX_TEST_DSN here: those
-// native fixtures deliberately use connection-local TEMP tables instead.
+// Disposable Docker or explicitly isolated loopback PostgreSQL, with real
+// tables visible to two independent connections. Never use COSMOS_TAX_TEST_DSN
+// here: those native fixtures use connection-local TEMP tables instead.
 func TestDirectExportSnapshotConcurrentReplayDocker(t *testing.T) {
-	if os.Getenv("COSMOS_TAX_SNAPSHOT_DOCKER") != "1" {
-		t.Skip("set COSMOS_TAX_SNAPSHOT_DOCKER=1 with Docker for disposable two-connection MVCC regression")
+	if os.Getenv("COSMOS_TAX_SNAPSHOT_DOCKER") != "1" && os.Getenv("COSMOS_TAX_TEST_ISOLATED_DSN") == "" {
+		t.Skip("set COSMOS_TAX_SNAPSHOT_DOCKER=1 or COSMOS_TAX_TEST_ISOLATED_DSN for disposable two-connection MVCC regression")
 	}
 	s, db, wallet, _ := assetReviewFixture(t)
 	require.NoError(t, db.Exec("INSERT INTO tx_signer_addresses(tx_id,address_id) VALUES (1,1)").Error)

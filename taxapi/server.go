@@ -35,12 +35,14 @@ type Server struct {
 	oracle *Oracle
 	native NativeAsset
 	// Private trace readers may derive fee outcomes but never persist ledger data.
-	readOnlyLedger             bool
-	privateReadSnapshotTimeout time.Duration
-	readSnapshotStarted        time.Time
-	commissionPrivateProfile   *CommissionPrivateProfile
-	privateProjectionSnapshot  string
-	privateProjectionReceipts  *commissionProjectionJournal
+	readOnlyLedger              bool
+	privateReadSnapshotTimeout  time.Duration
+	readSnapshotStarted         time.Time
+	commissionPrivateProfile    *CommissionPrivateProfile
+	privateProjectionSnapshot   string
+	privateProjectionReceipts   *commissionProjectionJournal
+	commissionSourceCorrections *CommissionSourceCorrections
+	sourceCorrectionReceipts    *commissionCorrectionJournal
 
 	attestOnce sync.Once
 	attest     *attestationCache
@@ -339,10 +341,11 @@ func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 // against its address/denom/tx/block. Named at package scope (not local to
 // rowsFor) so prewarmPrices can share the type.
 type feeRec struct {
-	Amount string
-	Denom  string
-	Ts     time.Time
-	Hash   string
+	Amount        string
+	Denom         string
+	Ts            time.Time
+	Hash          string
+	commissionKey *flowKey
 }
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),

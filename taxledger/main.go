@@ -88,11 +88,16 @@ func main() {
 	flowsArchive := flag.String("commission-archive-config", "", "optional Secret-mounted probe.toml containing exact historical archive RPC")
 	flowsProfile := flag.String("commission-private-profile", "", "source-bound read-only private staging profile; never enables ordinary readiness")
 	flowsProfileSHA := flag.String("commission-private-profile-sha256", "", "exact immutable staging profile digest")
+	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
+	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
 	if (*flowsProfile != "" || *flowsProfileSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsProfileSHA == "") {
 		log.Fatal("private profile requires versioned commission collection and exact digest")
+	}
+	if (*flowsCorrections != "" || *flowsCorrectionsSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsCorrections == "" || *flowsCorrectionsSHA == "") {
+		log.Fatal("native source corrections require exact manifests and private versioned commission collection")
 	}
 	if err := validateCommissionReadTimeout(*flows, *flowsVersion, *flowsReadTimeout); err != nil {
 		log.Fatal(err)
@@ -122,7 +127,14 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile)
+		var corrections *taxapi.CommissionSourceCorrections
+		if *flowsCorrections != "" {
+			corrections, err = taxapi.LoadCommissionSourceCorrections(*flowsCorrections, *flowsCorrectionsSHA)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections)
 		return
 	}
 	if *daysAppend {
@@ -200,7 +212,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections) {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -236,7 +248,7 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 			log.Fatal("commission archive configuration has no RPC endpoint")
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile}); err != nil {
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
 }

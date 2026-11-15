@@ -60,7 +60,7 @@ func refundCachePGFixture(t *testing.T) *Server {
 		"CREATE TEMP TABLE block_event_attribute_keys (id bigint, key text)",
 		"CREATE TEMP TABLE report_jobs (id bigserial PRIMARY KEY, key text UNIQUE, chain text, addresses text, format text, status text, csv text, row_count bigint, readiness_json text, review_fingerprint text, computed_through timestamptz, error text, created_at timestamptz, updated_at timestamptz)",
 		"INSERT INTO pg_temp.chains VALUES (1,'cosmoshub-4'),(2,'provider-1')",
-		"INSERT INTO pg_temp.blocks VALUES (1,1,'2025-12-30T12:00:00Z'),(2,1,'2025-12-31T12:00:00Z'),(3,1,'2026-01-02T12:00:00Z'),(4,1,'2026-01-03T12:00:00Z')",
+		"INSERT INTO pg_temp.blocks VALUES (1,1,'2025-12-30T12:00:00Z',1),(2,1,'2025-12-31T12:00:00Z',2),(3,1,'2026-01-02T12:00:00Z',3),(4,1,'2026-01-03T12:00:00Z',4)",
 		"INSERT INTO pg_temp.txes VALUES (1,1,'acquisition',0,''),(2,2,'send',0,''),(3,3,'refund',0,''),(4,4,'spend',0,'')",
 		"INSERT INTO pg_temp.messages VALUES (1,1,false),(2,2,false),(3,3,false),(4,4,false)",
 		"INSERT INTO pg_temp.addresses VALUES (1,'wallet'),(2,'other-wallet')",

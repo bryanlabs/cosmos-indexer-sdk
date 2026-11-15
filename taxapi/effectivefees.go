@@ -80,6 +80,13 @@ func (s *Server) effectiveWalletFees(chain, addr string, start, end time.Time) (
 	var out []feeRec
 	failed := make(map[uint]bool)
 	for _, r := range rows {
+		deferred, err := s.deferNativeCorrectionFee(chain, addr, r.Hash, r.Ts, start, end)
+		if err != nil {
+			return nil, err
+		}
+		if deferred {
+			continue
+		}
 		if r.Code == 0 {
 			amount, ok := new(big.Int).SetString(r.Amount, 10)
 			if !ok || amount.Sign() < 0 || sdk.ValidateDenom(r.Denom) != nil {
