@@ -22,8 +22,8 @@ missing accounts, extra accounts and denomination mismatches against the actual
 retained Hub3 genesis. It never waives differences or compares the later tail.
 The financial report also binds `migrated_export_sha` and `migration_binary_sha`.
 
-Live operations are `validate`, `scope-sql`, coordinated `install-scope`, `load`
-and read-only `audit`, with an explicit pinned manifest, private0600 connection
+Live operations are `validate`, `scope-sql`, coordinated `install-scope`,
+read-only `preflight`, `load` and read-only `audit`, with an explicit pinned manifest, private0600 connection
 file and fresh physical runtime identity. No environment DSN fallback. Scope
 installation first verifies the actual server identity in its transaction.
 Do not install production metadata while the Auth export-cache rebuild is active;
@@ -68,6 +68,14 @@ next load. Never remove ACLs from catalog verification, bypass a mismatch or
 change the public report's source fingerprint. Preserve all earlier manifests
 and receipts. `CaptureApprovedProtected` captures all14 live legacy relations
 for raw staging, not the non-target-only baseline of full financial imports.
+
+`preflight` writes an exclusive0600 report to `-output`, never overwrites the
+manifest and never adopts data. It requires the known physical server/runtime,
+actual confined installed scope, unchanged unpublished eras/retained genesis,
+empty target and EXACT original protected data fingerprints in one READ ONLY
+snapshot. Only the observed catalog/scope identity may differ after the known
+coordinated installation. Review that expected change before building the final
+manifest; unexpected protected-data drift is an error, never a new baseline.
 
 ## Entry points and evidence
 

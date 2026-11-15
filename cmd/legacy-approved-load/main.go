@@ -64,12 +64,12 @@ func connect(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 func run() error {
-	op := flag.String("operation", "validate", "validate, scope-sql, install-scope, load, audit")
+	op := flag.String("operation", "validate", "validate, scope-sql, install-scope, preflight, load, audit")
 	manifest := flag.String("manifest", "", "absolute manifest path")
 	hash := flag.String("sha256", "", "independently pinned manifest hash")
 	config := flag.String("connections", "", "private 0600 connection file, never printed")
 	runtimeFile := flag.String("runtime", "", "fresh actual Kubernetes destination identity JSON, 0600")
-	output := flag.String("output", "", "NEW retained output file for scope-sql")
+	output := flag.String("output", "", "NEW retained output file for scope-sql or preflight")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected arguments")
@@ -103,7 +103,7 @@ func run() error {
 		}
 		return f.Sync()
 	}
-	if *op != "load" && *op != "audit" && *op != "install-scope" {
+	if *op != "load" && *op != "audit" && *op != "install-scope" && *op != "preflight" {
 		return errors.New("unknown operation")
 	}
 	var c connections
@@ -134,6 +134,24 @@ func run() error {
 		return e
 	}
 	defer auditor.Close()
+	if *op == "preflight" {
+		report, e := p.PreflightApprovedTarget(ctx, auditor, m, runtime)
+		if e != nil {
+			return errors.New("read-only target preflight refused; no baseline adopted")
+		}
+		f, e := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if e != nil {
+			return e
+		}
+		defer f.Close()
+		if e = json.NewEncoder(f).Encode(report); e != nil {
+			return e
+		}
+		if e = f.Sync(); e != nil {
+			return e
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"preflight_observed": true, "target_empty": report.TargetEmpty, "production_rows_written": 0, "manifest_rewritten": false})
+	}
 	if *op == "audit" {
 		outcome, e := p.AuditOutcome(ctx, auditor, m, runtime)
 		if e != nil {
