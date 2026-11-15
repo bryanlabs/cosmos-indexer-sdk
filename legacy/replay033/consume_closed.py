@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 import zlib
 from consume_bounded import Consumer, HistoryWindow, NAMES, RECORD_FIELDS, exact, native_numbers, sha
 from capture_bounded import PROFILES, manifest
@@ -14,7 +15,7 @@ from verify_movement_rehearsal import require, state_values
 SCHEMA = 'native033-closed-source-capture-v1'
 IMAGE = 'ghcr.io/bryanlabs/cosmos-tax-replay033@sha256:ba3fe2827be1057855a40edfa0c2f37bda2b80392e5c0442fa537d33d5abd190'
 
-def closed_lines(root, binding, name):
+def closed_lines(root, binding, name, with_raw=False):
     """Hash every exact byte and require one complete gzip member, no suffix."""
     spec = binding['streams'][name]
     path = root / (name + '.source-closed.gz')
@@ -36,7 +37,7 @@ def closed_lines(root, binding, name):
                 count += 1
                 digest.update(raw)
                 last = native_numbers(strict_json(raw))
-                yield last
+                yield (raw, last) if with_raw else last
     require(decoder.eof and not decoder.unused_data and not pending and last is not None, 'complete source lacks gzip close or ends mid-record')
     require(count == spec['records'] and length == spec['raw_bytes'] and digest.hexdigest() == spec['raw_sha256'], 'complete original raw source binding differs')
     require(last['kind'] == spec['completion_kind'] and int(last['height']) == binding['through'], 'complete source lacks exact actual completion marker')
@@ -141,21 +142,74 @@ def validate_source(root):
         require(not b.get('opening_checkpoint_members_sha256'), 'genesis cannot use synthetic opening')
     return b
 
-def verify(root, binary, receipt):
-    b = validate_source(root)
-    history = ClosedHistory(root, b)
+def verify(root, binary, receipt, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256='', checkpoint_directory=None, seekable_source=None, resume=False, checkpoint_seconds=120):
+    from durable_resume import SeekableRows, code_identity, load_checkpoint, save_checkpoint, validate_derivative
+    require(not resume or (checkpoint_directory is not None and seekable_source is not None), 'resume needs integrated checkpoint and sealed seekable sources')
+    require(checkpoint_directory is None or seekable_source is not None, 'durable checkpoints require seekable source preparation')
+    require(checkpoint_seconds > 0, 'positive checkpoint interval required')
+    restored = None
+    if seekable_source is not None:
+        source_manifest = seekable_source / 'manifest.json'
+        source_spec = json.loads(source_manifest.read_bytes())
+        require(source_spec['schema'] == 'native033-seekable-source-v1' and source_spec['capture_sha256'] == sha(root / 'capture.private.json'), 'seekable source capture identity differs')
+        b = json.loads((root / 'capture.private.json').read_bytes()) if resume else validate_source(root)
+        require(all(source_spec['streams'][n]['original'] == b['streams'][n] for n in ('movements', 'native-history')), 'seekable source original binding differs')
+        if not resume:
+            validate_derivative(seekable_source, source_spec)
+        config = dict(root=str(root.resolve()), first=b['first'], through=b['through'], validator_history_sha256=validator_history_sha256, evidence_capture_sha256=evidence_capture_sha256,
+                      validator_history=str(validator_history.resolve()) if validator_history else None, evidence_cache=str(evidence_cache.resolve()) if evidence_cache else None)
+        identity = code_identity(binary, config, source_manifest)
+        if resume:
+            generation, restored, _ = load_checkpoint(checkpoint_directory, identity)
+    else:
+        b = validate_source(root)
+    if restored is None:
+        history = ClosedHistory(root, b) if seekable_source is None else ClosedHistory.__new__(ClosedHistory)
+        if seekable_source is not None:
+            history.rows = SeekableRows(seekable_source, source_spec, 'native-history')
+            history.anchor = history.validate(next(history.rows), anchor=True)
+            require(history.anchor['height'] == b['first'] - 1, 'closed opening native height differs')
+            history.cache, history.last = {}, history.anchor['height']
+            history.target, history.completion = b['through'], None
+    else:
+        history = ClosedHistory.__new__(ClosedHistory)
+        history.__dict__.update(restored['history'])
+        history.rows = SeekableRows(seekable_source, source_spec, 'native-history', restored['history_cursor'])
     command = [str(binary), '--cache', str(root / 'cache'), '--receipt', str(receipt.parent / 'native-proof.private.json')]
-    if b['first'] > 1:
+    if restored is not None:
+        command += ['--resume-native', str(generation / 'native')]
+    elif b['first'] > 1:
         command += ['--checkpoint-home', str(root / 'opening-checkpoint'), '--working-home', str(receipt.parent / 'native-home')]
-    with (receipt.parent / 'native-consumer.private.log').open('xb') as log:
-        p = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+    if validator_history is not None:
+        require(validator_history_sha256 and sha(validator_history) == validator_history_sha256, 'supplemental native validator history pin differs')
+        command += ['--validator-history', str(validator_history), '--validator-history-sha256', validator_history_sha256]
+    if evidence_cache is not None:
+        require(evidence_capture_sha256 and sha(evidence_cache.parent / 'capture.private.json') == evidence_capture_sha256, 'supplemental evidence capture pin differs')
+        command += ['--evidence-cache', str(evidence_cache), '--evidence-capture-sha256', evidence_capture_sha256]
+    with (receipt.parent / 'native-consumer.private.log').open('ab' if resume else 'xb') as log:
+        p = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE if checkpoint_directory is not None else log, stderr=log)
         def send(q):
             p.stdin.write((json.dumps(q, separators=(',', ':')) + '\n').encode())
         c = ClosedConsumer(send, history, b['through'], b['first'])
-        send(dict(kind='anchor', anchor=history.anchor, through=b['through']))
+        if restored is not None:
+            c.__dict__.update(restored['consumer'])
+            c.journal.__dict__.update(restored['journal'])
+            c.state_commitments = {}
+        else:
+            send(dict(kind='anchor', anchor=history.anchor, through=b['through']))
+        movements = closed_lines(root, b, 'movements') if seekable_source is None else SeekableRows(seekable_source, source_spec, 'movements', restored['movement_cursor'] if restored else None)
+        last_checkpoint = time.monotonic()
+        def checkpoint_native(path, height):
+            send(dict(kind='checkpoint', height=height, checkpoint_path=str(path.resolve())))
+            p.stdin.flush()
+            ack = json.loads(p.stdout.readline())
+            require(ack.get('kind') == 'checkpoint' and ack.get('height') == height and ack.get('checkpoint_path') == str(path.resolve()) and ack.get('native_sha256') == sha(path / 'native.json'), 'native durable boundary acknowledgement differs')
         try:
-            for r in closed_lines(root, b, 'movements'):
+            for r in movements:
                 c.accept(r)
+                if checkpoint_directory is not None and r['kind'] == 'height_completed' and time.monotonic() - last_checkpoint >= checkpoint_seconds:
+                    save_checkpoint(checkpoint_directory, identity, c, history, movements, checkpoint_native)
+                    last_checkpoint = time.monotonic()
             require(c.closed and c.heights == b['through'] and c.journal.heights == b['through'] - b['first'] + 1 and history.completion is not None, 'complete source financial/journal/next-header closure missing')
             send(dict(kind='bounded_end', height=c.heights))
             p.stdin.close()
@@ -167,6 +221,16 @@ def verify(root, binary, receipt):
                 pass
             p.wait(timeout=30)
             raise
+    native = native_numbers(strict_json((receipt.parent / 'native-proof.private.json').read_bytes()))
+    asset_blocks = native.get('native_stake_asset_blocks', 0)
+    asset_rows = native.get('native_stake_asset_fact_rows', 0)
+    asset_hash = native.get('native_stake_asset_facts_sha256', '')
+    asset_file = receipt.parent / 'native-stake-reductions.private.jsonl'
+    require(isinstance(asset_blocks, int) and isinstance(asset_rows, int) and asset_blocks >= 0 and asset_rows >= 0, 'native asset counts invalid')
+    if asset_blocks:
+        require(asset_file.is_file() and sha(asset_file) == asset_hash, 'native asset facts missing or changed')
+    else:
+        require(not asset_file.exists() and not asset_hash and not asset_rows, 'unbound native asset facts')
     ending = history.cache[b['through']]
     result = dict(schema='native033-complete-profile-financial-v1', first=b['first'], through=c.heights,
                   heights=c.journal.heights, transactions=c.transactions, phases=dict(c.counts), journal_counts=dict(c.journal.counts),
@@ -174,6 +238,8 @@ def verify(root, binary, receipt):
                   ending_commit=ending['commit'], ending_store_roots=ending['native_commit_info'],
                   ending_block_hash=ending['block_hash'], actual_unexecuted_next_header=history.completion['unexecuted_next_header'],
                   source_whole_complete=True, financial_admission=False, global_books_tax_acceptance=False,
+                  native_stake_asset_blocks=asset_blocks, native_stake_asset_fact_rows=asset_rows,
+                  native_stake_asset_facts_sha256=asset_hash, stake_asset_tax_classification='unclassified',
                   capture_sha256=sha(root / 'capture.private.json'), native_proof_sha256=sha(receipt.parent / 'native-proof.private.json'), native_helper_sha256=sha(binary))
     with receipt.open('x') as stream:
         json.dump(result, stream, indent=2, sort_keys=True)
@@ -184,7 +250,24 @@ if __name__ == '__main__':
     parser.add_argument('--directory', required=True, type=Path)
     parser.add_argument('--native-helper', required=True, type=Path)
     parser.add_argument('--receipt', required=True, type=Path)
+    parser.add_argument('--validator-history', type=Path)
+    parser.add_argument('--validator-history-sha256', default='')
+    parser.add_argument('--evidence-cache', type=Path)
+    parser.add_argument('--evidence-capture-sha256', default='')
+    parser.add_argument('--checkpoint-directory', type=Path)
+    parser.add_argument('--seekable-source', type=Path)
+    parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--checkpoint-seconds', type=float, default=120)
+    parser.add_argument('--prepare-sources', action='store_true')
     a = parser.parse_args()
     os.umask(0o077)
-    r = verify(a.directory, a.native_helper, a.receipt)
+    if a.prepare_sources:
+        from durable_resume import prepare_sources
+        require(a.seekable_source is not None and not a.resume, 'exclusive seekable destination required')
+        b = validate_source(a.directory)
+        prepare_sources(a.directory, b, a.seekable_source, closed_lines)
+        print(json.dumps(dict(seekable_sources_prepared=True, financial_admission=False)))
+        raise SystemExit(0)
+    r = verify(a.directory, a.native_helper, a.receipt, a.validator_history, a.validator_history_sha256, a.evidence_cache, a.evidence_capture_sha256,
+               a.checkpoint_directory, a.seekable_source, a.resume, a.checkpoint_seconds)
     print(json.dumps({k: r[k] for k in ('first', 'through', 'heights', 'transactions', 'financial_admission')}))
