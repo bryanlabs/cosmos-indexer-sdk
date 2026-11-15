@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -196,9 +197,6 @@ func (m Manifest) validateApprovedRaw() error {
 			return rawRefusal()
 		}
 	}
-	if e = m.verifyOfflineProjection(); e != nil {
-		return e
-	}
 	return m.verifyRawBytes(source)
 }
 
@@ -256,6 +254,50 @@ func CaptureApprovedProtected(ctx context.Context, q *sql.DB, m Manifest) (Snaps
 	return m.protectedSnapshot(ctx, tx)
 }
 
+// Raw SQL rows contain only scalars and arrays of string pairs. Decode each
+// top-level value without recursively tokenizing large base64 strings, while
+// still refusing duplicate/missing/extra fields and trailing JSON. Typed row
+// decoding below checks every nested value, including duplicate attributes.
+func rawRowShape(raw []byte, t table) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	token, e := d.Token()
+	if e != nil || token != json.Delim('{') {
+		return rawRefusal()
+	}
+	seen := map[string]bool{}
+	for d.More() {
+		key, e := d.Token()
+		if e != nil {
+			return rawRefusal()
+		}
+		name, ok := key.(string)
+		if !ok || seen[name] {
+			return rawRefusal()
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if e = d.Decode(&value); e != nil || bytes.Equal(value, []byte("null")) {
+			return rawRefusal()
+		}
+	}
+	if _, e = d.Token(); e != nil {
+		return rawRefusal()
+	}
+	if _, e = d.Token(); e != io.EOF {
+		return rawRefusal()
+	}
+	columns := projectionColumns(t)
+	if len(seen) != len(columns) {
+		return rawRefusal()
+	}
+	for _, c := range columns {
+		if !seen[c] {
+			return rawRefusal()
+		}
+	}
+	return nil
+}
+
 // rawSQLTime mirrors PostgreSQL's ParseFractionalSecond: strtod followed by
 // rint(frac * USECS_PER_SEC). Native nanoseconds remain byte-exact in evidence;
 // only the separate timestamptz header uses the database's microsecond value.
@@ -283,14 +325,16 @@ func (m Manifest) verifyRawBytes(source rawSource) error {
 		return e
 	}
 	defer blocks.Close()
-	headers := bufio.NewScanner(blocks)
+	blockHash := sha256.New()
+	headers := bufio.NewScanner(io.TeeReader(blocks, blockHash))
 	headers.Buffer(make([]byte, 65536), 16<<20)
 	events, e := openPinned(m.Tables[1].File)
 	if e != nil {
 		return e
 	}
 	defer events.Close()
-	rows := bufio.NewScanner(events)
+	eventHash := sha256.New()
+	rows := bufio.NewScanner(io.TeeReader(events, eventHash))
 	rows.Buffer(make([]byte, 65536), 16<<20)
 	component := -1
 	var input *os.File
@@ -310,7 +354,7 @@ func (m Manifest) verifyRawBytes(source rawSource) error {
 	}()
 	artifactIndex, chunkIndex := 0, 0
 	var artifactBytes int64
-	var heightCount int64
+	var heightCount, eventCount int64
 	var previousHeight int64 = -1
 	previousIndex := -1
 	statuses := 0
@@ -339,6 +383,10 @@ func (m Manifest) verifyRawBytes(source rawSource) error {
 		return nil
 	}
 	for rows.Scan() {
+		eventCount++
+		if e = rawRowShape(rows.Bytes(), inserts[8]); e != nil {
+			return e
+		}
 		var row struct {
 			Chain      string     `json:"chain_id"`
 			Height     int64      `json:"height"`
@@ -453,6 +501,9 @@ func (m Manifest) verifyRawBytes(source rawSource) error {
 					Proposer string `json:"proposer"`
 					TxCount  int    `json:"tx_count"`
 				}
+				if e = rawRowShape(headers.Bytes(), inserts[6]); e != nil {
+					return e
+				}
 				if e = json.Unmarshal(headers.Bytes(), &block); e != nil {
 					return rawRefusal()
 				}
@@ -542,8 +593,14 @@ func (m Manifest) verifyRawBytes(source rawSource) error {
 	if e = finishComponent(); e != nil {
 		return e
 	}
-	if component != 3 || heightCount != m.Last || headers.Scan() {
+	if component != 3 || heightCount != m.Last || heightCount != m.Tables[0].Rows || eventCount != m.Tables[1].Rows || headers.Scan() {
 		return rawRefusal()
 	}
-	return headers.Err()
+	if e = headers.Err(); e != nil {
+		return e
+	}
+	if hex.EncodeToString(blockHash.Sum(nil)) != m.Tables[0].File.SHA256 || hex.EncodeToString(eventHash.Sum(nil)) != m.Tables[1].File.SHA256 {
+		return rawRefusal()
+	}
+	return nil
 }

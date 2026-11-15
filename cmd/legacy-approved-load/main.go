@@ -78,8 +78,12 @@ func run() error {
 	if e != nil {
 		return errors.New("pinned manifest unreadable")
 	}
-	if e = m.ValidateApproved(); e != nil {
-		return e
+	// Raw loading validates all source bytes inside the core before its first
+	// connection and before COMMIT. Other operations retain offline admission.
+	if *op != "load" || m.Profile != p.ApprovedRawProfile {
+		if e = m.ValidateApproved(); e != nil {
+			return e
+		}
 	}
 	if *op == "validate" {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"validated": true, "profile": m.Profile, "raw_stage": m.Scope.RawStage, "production_rows_written": 0})

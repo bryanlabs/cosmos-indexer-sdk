@@ -162,6 +162,11 @@ func (m Manifest) ValidateApproved() error {
 // Complete source and every-account equality are checked before a connection
 // is acquired and again before the one transaction commits.
 func MergeApproved(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Identity) (Result, error) {
+	if m.Profile == ApprovedRawProfile && !m.Fixture {
+		// merge rechecks complete source before acquiring the first session and
+		// again before COMMIT. Do not add redundant full58GB admission passes.
+		return merge(ctx, loader, auditor, m, runtime, hooks{})
+	}
 	if e := m.ValidateApproved(); e != nil {
 		return Result{}, e
 	}

@@ -293,7 +293,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 }
 func validateRow(raw []byte, t table, m Manifest) error {
 	if m.Scope.RawStage {
-		if _, e := decodeUnique(raw); e != nil {
+		if e := rawRowShape(raw, t); e != nil {
 			return e
 		}
 	}

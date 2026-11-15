@@ -70,6 +70,24 @@ func rawByteFixture(t *testing.T) (Manifest, rawSource, []map[string]any) {
 	m.Tables = []Projection{{Table: "blocks", Columns: projectionColumns(inserts[6]), Rows: 4, File: savePin(t, dir, "blocks.ndjson", []byte(blocks.String()))}, {Table: "block_events", Columns: projectionColumns(inserts[8]), Rows: int64(len(events)), File: savePin(t, dir, "block_events.ndjson", []byte(out.String()))}}
 	return m, source, events
 }
+func TestRawRowShapeRejectsDuplicateUnknownMissingNullAndTrailing(t *testing.T) {
+	m, source, events := rawByteFixture(t)
+	valid, e := json.Marshal(events[0])
+	require.NoError(t, e)
+	require.NoError(t, rawRowShape(valid, inserts[8]))
+	for _, raw := range [][]byte{
+		append(append([]byte{}, valid...), []byte(` {}`)...),
+		[]byte(strings.Replace(string(valid), `"phase":1`, `"phase":1,"phase":1`, 1)),
+		[]byte(strings.Replace(string(valid), `"phase":1`, `"phase":null`, 1)),
+		[]byte(strings.Replace(string(valid), `"phase":1`, `"unexpected":1`, 1)),
+	} {
+		require.Error(t, rawRowShape(raw, inserts[8]))
+	}
+	wrong := cloneManifest(m)
+	wrong.Tables[1].Rows++
+	require.Error(t, wrong.verifyRawBytes(source))
+}
+
 func TestRawBytesPreserveUnknownFieldsFailuresAndAllArtifactBytes(t *testing.T) {
 	m, source, _ := rawByteFixture(t)
 	require.NoError(t, m.verifyRawBytes(source))

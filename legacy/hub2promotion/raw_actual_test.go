@@ -111,8 +111,8 @@ func TestPrivateActualHub1RawStageDriver(t *testing.T) {
 	require.NoError(t, e)
 	savePin(t, root, "private-manifest.json", manifest)
 	phase("strict_actual_source_admission", map[string]any{"private_database": m.Destination.Database})
-	require.NoError(t, m.Recheck())
-	phase("actual_atomic_sql_merge", nil)
+	// merge performs complete admission before acquiring its first session.
+	phase("actual_atomic_sql_merge_and_source_admission", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Hour)
 	defer cancel()
 	chunks := 0
