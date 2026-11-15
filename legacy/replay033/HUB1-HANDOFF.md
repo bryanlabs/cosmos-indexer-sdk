@@ -65,7 +65,9 @@ Latest historical diagnostic and native package tests passed in the isolated
 scratch worktree. Tests include wrong before-state and unknown after-leaf
 refusals, exact ownership/rounding, changing shares, new/deleted owners,
 unbonding-entry burns, missing share coverage, H+2 validator updates and source
-pin mismatch. Seven closed-consumer Python tests passed. SDK staking slash and
+pin mismatch. Eight closed-consumer Python tests passed, including native JSON number
+normalization and fact-hash validation. A parser-number compatibility defect was
+found during resume integration and fixed in this branch. SDK staking slash and
 slashing BeginBlock tests passed. All Go builds/tests used GOMAXPROCS=2 and -p1;
 new tests are serialized through the shared scratch test lock.
 
@@ -116,14 +118,21 @@ Actual Hub3 importer Job wall time was6691 seconds (Nov13 13:07:03..14:58:34),
 container6687 seconds. This is end-to-end importer time, not isolated SQL time.
 Hub3 liquid closes took20 and25 container seconds, but those do not establish
 full financial acceptance, which omitted delegation/unbonding comparisons.
-A complete Hub3 financial-acceptance duration remains unknown. Do not invent a
-2h allowance or call liquid closure full acceptance.
+OPS-814 comment07060247-267b-432e-9dfe-a04c561654d3 supplies a conservative
+post-record acceptance proxy:111 minutes importer time, then147 minutes from
+import completion14:58 to adjusted close17:25, including waiting and Proposal29
+work. This is not measured acceptance CPU. Hub3 loaded before closure; Hub1's
+strict gate requires acceptance before load. The full Hub1 durations remain
+unmeasured;147 minutes is a chronology-based planning proxy, not a bound.
 
-For illustration only, start S plus21h43m is ten-way compute, acceptance is
-S+21h43m+A, and load is S+23h34m31s+A using Hub3 importer duration as a reference,
-where A is unmeasured strict financial acceptance. Source preparation, resume
-checkpoint overhead, concurrency contention and changed Hub1 load size remain
-additional unmeasured terms. S is not an authorized start. No22:30 launch.
+Counterfactual only: if Claude started a reviewed ten-way50k plan at Nov16 01:00,
+old .67 financial rate plus the measured100-height warmup extrapolation gives
+compute Nov16 22:43, acceptance Nov17 01:10 using147 minutes, and load Nov17 03:01
+using111 minutes. Add unmeasured source preparation, checkpoint/seal overhead,
+concurrency contention and Hub1-size scaling. Ten-way resource approval and
+resumability are not established. The separate old full-restart example of
+record Nov19 09:25, acceptance11:52, load13:43 is likewise counterfactual.
+Neither example is an authorized start or current ETA. No22:30 launch.
 
 Detailed live identities, exact test logs, hashes, helper inventory and safe
 receipts remain at `/Users/danb/.cache/cosmos-tax-reboot-20261115/`.

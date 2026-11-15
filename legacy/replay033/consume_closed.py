@@ -141,6 +141,20 @@ def validate_source(root):
         require(not b.get('opening_checkpoint_members_sha256'), 'genesis cannot use synthetic opening')
     return b
 
+def validate_native_assets(directory):
+    native = native_numbers(strict_json((directory / 'native-proof.private.json').read_bytes()))
+    blocks = native.get('native_stake_asset_blocks', 0)
+    rows = native.get('native_stake_asset_fact_rows', 0)
+    digest = native.get('native_stake_asset_facts_sha256', '')
+    facts = directory / 'native-stake-reductions.private.jsonl'
+    require(type(blocks) is int and type(rows) is int and blocks >= 0 and rows >= 0, 'native asset counts invalid')
+    if blocks:
+        require(facts.is_file() and sha(facts) == digest, 'native asset facts missing or changed')
+    else:
+        require(not facts.exists() and not digest and not rows, 'unbound native asset facts')
+    return blocks, rows, digest
+
+
 def verify(root, binary, receipt, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256=''):
     b = validate_source(root)
     history = ClosedHistory(root, b)
@@ -173,16 +187,7 @@ def verify(root, binary, receipt, validator_history=None, validator_history_sha2
                 pass
             p.wait(timeout=30)
             raise
-    native = strict_json((receipt.parent / 'native-proof.private.json').read_bytes())
-    asset_blocks = native.get('native_stake_asset_blocks', 0)
-    asset_rows = native.get('native_stake_asset_fact_rows', 0)
-    asset_hash = native.get('native_stake_asset_facts_sha256', '')
-    asset_file = receipt.parent / 'native-stake-reductions.private.jsonl'
-    require(isinstance(asset_blocks, int) and isinstance(asset_rows, int) and asset_blocks >= 0 and asset_rows >= 0, 'native asset counts invalid')
-    if asset_blocks:
-        require(asset_file.is_file() and sha(asset_file) == asset_hash, 'native asset facts missing or changed')
-    else:
-        require(not asset_file.exists() and not asset_hash and not asset_rows, 'unbound native asset facts')
+    asset_blocks, asset_rows, asset_hash = validate_native_assets(receipt.parent)
     ending = history.cache[b['through']]
     result = dict(schema='native033-complete-profile-financial-v1', first=b['first'], through=c.heights,
                   heights=c.journal.heights, transactions=c.transactions, phases=dict(c.counts), journal_counts=dict(c.journal.counts),

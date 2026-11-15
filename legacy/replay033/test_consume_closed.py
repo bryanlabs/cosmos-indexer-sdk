@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from consume_closed import ClosedConsumer, closed_lines, validate_source
+from consume_closed import ClosedConsumer, closed_lines, validate_source, validate_native_assets
 from reconcile_whole import check_profiles
 
 NAMES = ('main','acc','staking','slashing','mint','distr','gov','fee','params')
@@ -53,6 +53,25 @@ class ClosedBytes(unittest.TestCase):
             (root/'capture.private.json').write_text(json.dumps(dict(schema='native033-bounded-in-progress-capture-v1',first=1)))
             with self.assertRaises(ValueError):
                 validate_source(root)
+
+class NativeAssets(unittest.TestCase):
+    def test_native_json_number_counts_and_fact_hash(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            receipt = root / 'native-proof.private.json'
+            receipt.write_text(json.dumps(dict(native_stake_asset_blocks=0, native_stake_asset_fact_rows=0, native_stake_asset_facts_sha256='')))
+            self.assertEqual(validate_native_assets(root), (0, 0, ''))
+            facts = root / 'native-stake-reductions.private.jsonl'
+            facts.write_bytes(b'{}\n')
+            digest = hashlib.sha256(facts.read_bytes()).hexdigest()
+            receipt.write_text(json.dumps(dict(native_stake_asset_blocks=1, native_stake_asset_fact_rows=1, native_stake_asset_facts_sha256=digest)))
+            self.assertEqual(validate_native_assets(root), (1, 1, digest))
+            facts.write_bytes(b'changed\n')
+            with self.assertRaises(ValueError):
+                validate_native_assets(root)
+            receipt.write_text(json.dumps(dict(native_stake_asset_blocks=True, native_stake_asset_fact_rows=0)))
+            with self.assertRaises(ValueError):
+                validate_native_assets(root)
 
 class FinalAnchors(unittest.TestCase):
     def test_final_marker_needs_all_nine_actual_final_states(self):
