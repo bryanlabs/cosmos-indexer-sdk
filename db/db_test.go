@@ -1,6 +1,8 @@
 package db
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"log"
 	"testing"
 	"time"
@@ -69,7 +71,12 @@ func SetupTestDatabase() (func(), *gorm.DB, error) {
 		return nil, nil, err
 	}
 
-	resource, err := pool.Run("postgres", "15-alpine", []string{"POSTGRES_USER=test", "POSTGRES_PASSWORD=test", "POSTGRES_DB=test"})
+	var passwordBytes [32]byte
+	if _, err := rand.Read(passwordBytes[:]); err != nil {
+		return nil, nil, err
+	}
+	password := hex.EncodeToString(passwordBytes[:])
+	resource, err := pool.Run("postgres", "15-alpine", []string{"POSTGRES_USER=test", "POSTGRES_PASSWORD=" + password, "POSTGRES_DB=test"})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -77,7 +84,7 @@ func SetupTestDatabase() (func(), *gorm.DB, error) {
 	var db *gorm.DB
 	if err := pool.Retry(func() error {
 		var err error
-		db, err = PostgresDbConnect(resource.GetBoundIP("5432/tcp"), resource.GetPort("5432/tcp"), "test", "test", "test", "debug")
+		db, err = PostgresDbConnect(resource.GetBoundIP("5432/tcp"), resource.GetPort("5432/tcp"), "test", "test", password, "debug")
 		if err != nil {
 			return err
 		}

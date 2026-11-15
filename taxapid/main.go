@@ -6,6 +6,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,13 +23,29 @@ func env(k, d string) string {
 	return d
 }
 
+func databaseCredentialsFromEnv() (string, string, error) {
+	user, password := os.Getenv("DB_USER"), os.Getenv("DB_PASS")
+	if user == "" {
+		return "", "", fmt.Errorf("DB_USER is required")
+	}
+	if password == "" {
+		return "", "", fmt.Errorf("DB_PASS is required")
+	}
+	return user, password, nil
+}
+
 func main() {
+	dbUser, dbPass, err := databaseCredentialsFromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
 		env("DB_NAME", "indexer"),
-		env("DB_USER", "postgres"),
-		env("DB_PASS", "postgres"),
+		dbUser,
+		dbPass,
 		env("DB_LOG_LEVEL", "warn"),
 	)
 	if err != nil {

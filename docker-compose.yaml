@@ -9,8 +9,8 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - postgres:/var/lib/postgresql/data
     environment:
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}
+      - POSTGRES_USER=${POSTGRES_USER:?POSTGRES_USER must be supplied}
       - POSTGRES_DB=${POSTGRES_DB}
     ports:
       - 5432:5432/tcp
@@ -42,11 +42,20 @@ services:
     environment:
       - EXTENDED_ARGS=""
       - LOG_LEVEL="info"
+      - DB_USER=${POSTGRES_USER:?POSTGRES_USER must be supplied}
+      - DB_PASS=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be supplied}
+    tmpfs:
+      - /run/cosmos-indexer:mode=1777
     command:
     - /bin/sh
     - -c
     - |
-      cosmos-indexer index \
+      umask 077
+      : "$${DB_USER:?DB_USER is required}" "$${DB_PASS:?DB_PASS is required}"
+      case "$$DB_USER$$DB_PASS" in *[!A-Za-z0-9_+=/-]*) exit 64 ;; esac
+      config=$$(mktemp /run/cosmos-indexer/database.XXXXXX)
+      printf '[database]\nuser = "%s"\npassword = "%s"\n' "$$DB_USER" "$$DB_PASS" > "$$config"
+      cosmos-indexer index --config "$$config" \
       --log.pretty=${PRETTY_LOG} \
       --log.level=${LOG_LEVEL} \
       --base.index-transactions=${INDEX_TRANSACTIONS} \
@@ -63,8 +72,6 @@ services:
       --probe.chain-name=${CHAIN_NAME} \
       --database.host=postgres \
       --database.database=${POSTGRES_DB} \
-      --database.user=${POSTGRES_USER} \
-      --database.password=${POSTGRES_PASSWORD} \
       ${EXTENDED_ARGS}
 
 volumes:
