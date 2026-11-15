@@ -34,8 +34,8 @@ Amounts are totals over all wallets.
 | Hub 3 importer (`cmd/legacy-import`, `legacy/ledger`) | Built. Two full private runs (the second with 0 heights held), then the production run. |
 | Validator removal and fee state proofs (`cmd/legacy-removals`) | Built. 224 removal verdicts and 2 fee state verdicts for Hub 3, each proven on two archives. |
 | Books close 3 to 4, spendable balance (`cmd/legacy-close`, `legacy/books`) | Built. On the private copy and in production: 183,949 wallets close exactly, 14 close only with the Proposal 29 genesis change, 0 do not close. |
-| Delegation and unbonding comparison per wallet (the rest of D3) | Designed, not built. |
-| Hub 2 and Hub 1 tax rows, restart payout rows, their closes | Not built. Decoder, signature check and genesis rows exist. |
+| Delegation and unbonding handover (the rest of D3) | Built in `legacy/stake037`, signed `bea49b9`. Complete dual-archive terminal state matches Hub 4 genesis: 268 validators, 76,776 delegation pairs, 8,575 unbonding pairs / 9,033 entries, zero differences. This checks the boundary, not the transaction staking ledger. |
+| Hub 2 and Hub 1 tax rows, restart payout rows, their closes | Replay Jobs running on pinned releases. Hub 2 observe-only recorder/exporter `545be31` completed a historical sample: 6,001 committed heights, state hashes verified through 6,000, 2,258 transactions; actual export leaves source DB bytes unchanged. Final causal instrumentation and historical mapper proof still in progress. Three retained-Postgres test cases passed, including the actual guarded command path on a synthetic fixture. No production approval or full-chain accounting acceptance. |
 | API union, report routing, daily balances for the old hubs | Not built, not on this branch. |
 
 ## Hub 3: what ran, in order
@@ -204,8 +204,33 @@ evidence in `/scratch/out2` and `/scratch/out4`.
 
 State of Hub 3 in production: imported, and the spendable balance of every
 wallet closes against the cosmoshub-4 genesis, 14 of them only with the
-published Proposal 29 change. It is not verified beyond that (see the end),
-not shown on the website, and not accepted for tax.
+published Proposal 29 change. The complete staking-state handover also matches
+Hub 4 genesis (proof below). It is not shown on the website or accepted for tax.
+
+### Complete staking-state handover, November 13
+
+Signed `bea49b9` (`legacy/stake037`) compared both archives at export height
+5,200,790 with the pinned Hub 4 genesis. All 268 validators, 76,776 delegation
+pairs, and 9,033 open unbonding entries across 8,575 pairs match exactly.
+Validator tokens/shares/status/jailed, delegation shares and SDK token valuation,
+and every unbonding field/order are checked, including original creation heights.
+Hub 4 continues at initial height 5,200,791, not zero.
+
+The old SDK's subspace query ignores historical height. The proof therefore
+verifies the whole staking-store root is unchanged between 5,200,790 and the
+fixed archive tip 5,200,791, before and after complete prefix enumeration. IAVL
+and multistore proofs anchor the export root in the retained next block header's
+application hash. Both archives agree field-for-field. All 256 address-byte
+partitions of delegations and unbondings are included, not sampled.
+
+Private raw replies, decoded snapshots, source header and universe, failed first
+comparison, final-code receipts and digests are preserved under
+`/scratch/hub3-staking-20261113` on the rehearsal claim. The 1,040 raw evidence
+hashes were verified there. Initial Opus review found two issues, both fixed;
+final Opus review was unavailable due to quota and independent Astra review
+found no defects. A committed-code read-only evidence recheck also passed.
+No financial database row was written by this step. This proves the terminal
+staking handover, not each transaction's staking ledger.
 
 ## Measured numbers
 
@@ -613,8 +638,9 @@ cache, an archive or a private database.
 
 ## Not verified
 
-- Delegation shares and open unbonding entries per wallet against genesis
-  4. Only the spendable balance is closed.
+- Per-transaction reconstruction of staking positions. Terminal delegation
+  shares and every open unbonding entry now match genesis 4 exactly; that
+  boundary proof does not by itself verify each historical staking row.
 - The seven signatures the whole hub pass reported as not verifying. A
   second look at every signer of a failure with an unproven fee (2,121), with
   the sequence the stored history gives each: 2,116 verify at that

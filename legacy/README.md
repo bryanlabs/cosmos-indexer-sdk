@@ -92,7 +92,7 @@ The Postgres tests (`legacy/schema`, `legacy/genesis`, `legacy/ledger`,
 without one. They refuse port 15432.
 
 ```
-LEGACY_STORE_TEST_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=postgres sslmode=disable" \
+LEGACY_STORE_TEST_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=${PRESERVATION_REDACTED} dbname=postgres sslmode=disable" \
 GOPROXY=off GOMAXPROCS=2 go test -p 1 ./legacy/... -count=1
 ```
 
@@ -147,7 +147,7 @@ stops. It prints a progress line and aggregate counts only. Hub 1 and Hub 2
 are refused until their tags have a classifier.
 
 ```
-LEGACY_IMPORT_DSN="host=<host> port=<port> user=legacy_importer password=<password> dbname=<name> sslmode=disable" \
+LEGACY_IMPORT_DSN="host=<host> port=<port> user=legacy_importer password=${PRESERVATION_REDACTED} dbname=<name> sslmode=disable" \
 legacy-import --cache /path/to/cache --chain cosmoshub-3 --from 1 --to 5200790 --workers 8 --resolutions verdicts.txt
 ```
 
@@ -272,7 +272,7 @@ writer calls it before its first write and refuses to run on any finding.
 
 ```
 legacy-schema --print                 # the whole migration, for review
-LEGACY_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=legacy_<name> sslmode=disable" \
+LEGACY_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=${PRESERVATION_REDACTED} dbname=legacy_<name> sslmode=disable" \
 legacy-schema --apply                 # private loopback database only
 LEGACY_DSN="... user=legacy_importer ..." legacy-schema --check
 ```
@@ -297,6 +297,6 @@ LEGACY_DSN="... user=legacy_importer ..." legacy-genesis --file genesis.cosmoshu
 The Postgres tests need a private server and skip without one:
 
 ```
-LEGACY_STORE_TEST_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=<password> dbname=postgres sslmode=disable" \
+LEGACY_STORE_TEST_ADMIN_DSN="host=127.0.0.1 port=<port> user=<user> password=${PRESERVATION_REDACTED} dbname=postgres sslmode=disable" \
 go test ./legacy/schema/... ./legacy/genesis/...
 ```
