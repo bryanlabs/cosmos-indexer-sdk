@@ -19,7 +19,7 @@ def call(args, data=None):
 
 
 def cgroup(pod):
-    script = ('for f in cpu.stat cpu.max memory.stat memory.current memory.max; '
+    script = ('for f in cpu.stat cpu.max memory.stat memory.current memory.max memory.events memory.pressure; '
               'do printf "FILE:%s\\n" "$f"; while IFS= read -r line; '
               'do printf "%s\\n" "$line"; done <"/sys/fs/cgroup/$f"; done')
     text = call(["exec", pod, "--", "sh", "-c", script]).decode()
@@ -117,7 +117,11 @@ def main():
                     available = int(call(["exec", pod, "--", "sh", "-c", script])) * 1024
                     receipt = dict(ObservedAt=observed_at, SampleDuration=int(duration * 1e9),
                         PGQuotaCores=quota / period, PGUsedCores=used,
-                        PGResidentBytes=sum(int(memory[x]) for x in ("anon", "shmem", "kernel")),
+                        PGResidentBytes=max(0, int(pg["memory.current"])-int(memory["inactive_file"])),
+                        PGMemoryCurrentBytes=int(pg["memory.current"]), PGInactiveFileBytes=int(memory["inactive_file"]),
+                        PGAnonBytes=int(memory["anon"]), PGShmemBytes=int(memory["shmem"]), PGKernelBytes=int(memory["kernel"]),
+                        PGOOMKills=int(pairs(pg["memory.events"])["oom_kill"]),
+                        PGMemoryPressureFullAvg10=float(pg["memory.pressure"].splitlines()[1].split()[1].split("=")[1]),
                         PGMemoryLimitBytes=int(pg["memory.max"]),
                         JobUsedBytes=int(local["memory.current"]), JobMemoryLimitBytes=int(local["memory.max"]),
                         NodeAvailableBytes=available, AdmissionGranted=True,

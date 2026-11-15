@@ -129,18 +129,25 @@ func MarshalCommissionCaptureReference(ref CommissionCaptureReference) ([]byte, 
 // CommissionAccelerationHeadroom is a fresh observer sample, not a node CPU
 // percentage. Policy limits belong to the candidate and do not change PG quota.
 type CommissionAccelerationHeadroom struct {
-	ObservedAt          time.Time
-	SampleDuration      time.Duration
-	PGQuotaCores        float64
-	PGUsedCores         float64
-	PGResidentBytes     int64
-	PGMemoryLimitBytes  int64
-	JobUsedBytes        int64
-	JobMemoryLimitBytes int64
-	NodeAvailableBytes  int64
-	AdmissionGranted    bool
-	PublicHealthy       bool
-	ReplayHealthy       bool
+	ObservedAt                time.Time
+	SampleDuration            time.Duration
+	PGQuotaCores              float64
+	PGUsedCores               float64
+	PGResidentBytes           int64
+	PGMemoryCurrentBytes      int64
+	PGInactiveFileBytes       int64
+	PGAnonBytes               int64
+	PGShmemBytes              int64
+	PGKernelBytes             int64
+	PGOOMKills                int64
+	PGMemoryPressureFullAvg10 float64
+	PGMemoryLimitBytes        int64
+	JobUsedBytes              int64
+	JobMemoryLimitBytes       int64
+	NodeAvailableBytes        int64
+	AdmissionGranted          bool
+	PublicHealthy             bool
+	ReplayHealthy             bool
 }
 
 // Allow refuses stale, invalid or exhausted headroom. A caller must continuously
@@ -149,6 +156,7 @@ func (h CommissionAccelerationHeadroom) Allow(now time.Time, reserveCores float6
 	age := now.Sub(h.ObservedAt)
 	return age >= 0 && age <= 5*time.Second && h.SampleDuration >= time.Second && h.SampleDuration <= 30*time.Second && reserveCores > 0 && reserveBytes > 0 &&
 		h.PGQuotaCores > 0 && h.PGUsedCores >= 0 && h.PGUsedCores+reserveCores <= h.PGQuotaCores &&
-		h.PGResidentBytes >= 0 && h.PGResidentBytes <= h.PGMemoryLimitBytes-reserveBytes &&
+		h.PGMemoryCurrentBytes >= h.PGInactiveFileBytes && h.PGInactiveFileBytes >= 0 && h.PGResidentBytes == h.PGMemoryCurrentBytes-h.PGInactiveFileBytes &&
+		h.PGResidentBytes >= 0 && h.PGResidentBytes <= h.PGMemoryLimitBytes-reserveBytes && h.PGOOMKills == 0 && h.PGMemoryPressureFullAvg10 >= 0 && h.PGMemoryPressureFullAvg10 <= 10 &&
 		h.JobUsedBytes >= 0 && h.JobUsedBytes <= h.JobMemoryLimitBytes-reserveBytes && h.NodeAvailableBytes >= 8<<30 && h.AdmissionGranted && h.PublicHealthy && h.ReplayHealthy
 }

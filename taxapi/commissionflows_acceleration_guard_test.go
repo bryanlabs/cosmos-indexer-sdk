@@ -14,7 +14,7 @@ import (
 )
 
 func accelerationGoodSample() CommissionAccelerationHeadroom {
-	return CommissionAccelerationHeadroom{ObservedAt: time.Now(), SampleDuration: time.Second, PGQuotaCores: 10, PGUsedCores: 8, PGResidentBytes: 5 << 30, PGMemoryLimitBytes: 24 << 30, JobUsedBytes: 1 << 30, JobMemoryLimitBytes: 8 << 30, NodeAvailableBytes: 50 << 30, AdmissionGranted: true, PublicHealthy: true, ReplayHealthy: true}
+	return CommissionAccelerationHeadroom{ObservedAt: time.Now(), SampleDuration: time.Second, PGQuotaCores: 10, PGUsedCores: 8, PGResidentBytes: 5 << 30, PGMemoryCurrentBytes: 24 << 30, PGInactiveFileBytes: 19 << 30, PGMemoryLimitBytes: 24 << 30, JobUsedBytes: 1 << 30, JobMemoryLimitBytes: 8 << 30, NodeAvailableBytes: 50 << 30, AdmissionGranted: true, PublicHealthy: true, ReplayHealthy: true}
 }
 func TestCommissionAccelerationGuardCancelsNewContext(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())

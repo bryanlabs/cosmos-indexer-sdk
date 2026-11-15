@@ -104,9 +104,9 @@ func TestCommissionCaptureUnionPreservesOverlaps(t *testing.T) {
 }
 func TestCommissionAccelerationHeadroom(t *testing.T) {
 	now := time.Now()
-	good := CommissionAccelerationHeadroom{ObservedAt: now, SampleDuration: 10 * time.Second, PGQuotaCores: 10, PGUsedCores: 8, PGResidentBytes: 5 << 30, PGMemoryLimitBytes: 24 << 30, JobUsedBytes: 1 << 30, JobMemoryLimitBytes: 8 << 30, NodeAvailableBytes: 50 << 30, AdmissionGranted: true, PublicHealthy: true, ReplayHealthy: true}
+	good := CommissionAccelerationHeadroom{ObservedAt: now, SampleDuration: 10 * time.Second, PGQuotaCores: 10, PGUsedCores: 8, PGResidentBytes: 5 << 30, PGMemoryCurrentBytes: 24 << 30, PGInactiveFileBytes: 19 << 30, PGMemoryLimitBytes: 24 << 30, JobUsedBytes: 1 << 30, JobMemoryLimitBytes: 8 << 30, NodeAvailableBytes: 50 << 30, AdmissionGranted: true, PublicHealthy: true, ReplayHealthy: true}
 	require.True(t, good.Allow(now, 1, 1<<30))
-	for _, kind := range []string{"saturated", "stale", "future", "pg-memory", "job-memory", "public", "replay", "missing-quota", "zero-interval"} {
+	for _, kind := range []string{"saturated", "stale", "future", "pg-memory", "job-memory", "public", "replay", "missing-quota", "zero-interval", "oom", "memory-pressure", "memory-accounting"} {
 		t.Run(kind, func(t *testing.T) {
 			h := good
 			switch kind {
@@ -128,6 +128,12 @@ func TestCommissionAccelerationHeadroom(t *testing.T) {
 				h.PGQuotaCores = 0
 			case "zero-interval":
 				h.SampleDuration = 0
+			case "oom":
+				h.PGOOMKills = 1
+			case "memory-pressure":
+				h.PGMemoryPressureFullAvg10 = 11
+			case "memory-accounting":
+				h.PGInactiveFileBytes = h.PGMemoryCurrentBytes + 1
 			}
 			require.False(t, h.Allow(now, 1, 1<<30))
 		})
