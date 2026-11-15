@@ -7,10 +7,63 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 import zlib
 import capture_bounded as bounded
 from consume_closed import SCHEMA, validate_source
 from source_reader import Reader, completed_manifest
+
+
+class ClosedStreamError(ValueError):
+    """Safe predicate metadata only; source records and exception text stay private."""
+
+    def __init__(self, diagnostic):
+        self.diagnostic = diagnostic
+        super().__init__('closed stream failed: ' + ', '.join(diagnostic['failures']))
+
+
+def _stream_failure(dest, name, diagnostic):
+    receipt = dest / (name + '.capture-failure.private.json')
+    try:
+        with receipt.open('x') as out:
+            os.chmod(receipt, 0o600)
+            json.dump(diagnostic, out, sort_keys=True)
+    except OSError:
+        # Never replace prior evidence or mask the original failed predicates
+        # if a full disk or permissions also prevent writing the receipt.
+        diagnostic['failures'].append('failure_receipt_io')
+    raise ClosedStreamError(diagnostic) from None
+
+
+class _StderrSummary:
+    """Drain the pipe without deadlock, retaining no arbitrary remote output."""
+
+    LIMIT = 4096
+    SIGNATURES = (b'permission denied', b'no such file', b'connection reset',
+                  b'connection refused', b'unexpected eof', b'error executing command')
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.bytes = 0
+        self.sample = bytearray()
+        self.complete = False
+
+    def drain(self):
+        try:
+            for chunk in iter(lambda: self.stream.read(4096), b''):
+                self.bytes += len(chunk)
+                self.sample.extend(chunk[:max(0, self.LIMIT - len(self.sample))])
+            self.complete = True
+        except OSError:
+            pass
+        finally:
+            self.stream.close()
+
+    def metadata(self):
+        sample = bytes(self.sample).lower()
+        return dict(bytes_observed=self.bytes, sample_limit=self.LIMIT,
+                    sample_truncated=self.bytes > self.LIMIT, drain_complete=self.complete,
+                    categories=[s.decode().replace(' ', '_') for s in self.SIGNATURES if s in sample])
 
 
 def closed_stream(dest, name, target, completion, reader, completed):
@@ -22,32 +75,123 @@ def closed_stream(dest, name, target, completion, reader, completed):
     pending = b''
     count = length = compressed = 0
     last = None
-    p = subprocess.Popen(reader.base + reader.args(['dd', 'if=' + remote, 'bs=1048576']), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    try:
-        with path.open('xb') as out:
+    failures = []
+
+    def fail(reason):
+        if reason not in failures:
+            failures.append(reason)
+
+    # Exclusive creation precedes transport so an existing failed copy is never
+    # replaced, appended to, or accompanied by another remote capture attempt.
+    with path.open('xb') as out:
+        os.chmod(path, 0o600)
+        try:
+            p = subprocess.Popen(reader.base + reader.args(['dd', 'if=' + remote, 'bs=1048576']), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as exc:
+            _stream_failure(dest, name, dict(schema='closed-stream-failure-v1',
+                            failures=['transport_start'], remote_exit_code=None,
+                            expected_compressed_bytes=source_size, compressed_bytes=0,
+                            transport_errno=exc.errno))
+        stderr = _StderrSummary(p.stderr)
+        drain = threading.Thread(target=stderr.drain, daemon=True)
+        drain.start()
+        parsing = True
+        try:
             for chunk in iter(lambda: p.stdout.read(65536), b''):
-                if decoder.eof:
-                    raise ValueError('trailing or concatenated source gzip')
+                # Keep every received byte even if gzip/record validation fails.
                 out.write(chunk)
                 compressed += len(chunk)
-                pending += decoder.decompress(chunk)
-                if decoder.unused_data or len(pending) > 16 << 20:
-                    raise ValueError('trailing source gzip or incomplete record')
+                if not parsing:
+                    continue
+                if decoder.eof:
+                    fail('gzip_trailing_data')
+                    parsing = False
+                    continue
+                try:
+                    pending += decoder.decompress(chunk)
+                except zlib.error:
+                    fail('gzip_decode_or_footer')
+                    parsing = False
+                    continue
+                if decoder.unused_data:
+                    fail('gzip_trailing_data')
+                    parsing = False
+                    continue
+                if len(pending) > 16 << 20:
+                    fail('record_buffer_limit')
+                    parsing = False
+                    continue
                 while b'\n' in pending:
                     line, pending = pending.split(b'\n', 1)
                     digest.update(line + b'\n')
                     length += len(line) + 1
                     count += 1
-                    last = json.loads(line)
+                    try:
+                        last = json.loads(line)
+                    except (ValueError, UnicodeError, RecursionError):
+                        fail('record_json')
+                        parsing = False
+                        break
             out.flush()
             os.fsync(out.fileno())
-    finally:
-        p.stdout.close()
-        code = p.wait(timeout=30)
-    if code != 0 or compressed != source_size or bounded.sha(path) != source_hash or not decoder.eof or decoder.unused_data or pending or not last or last['kind'] != completion or int(last['height']) != target:
-        raise ValueError('source not wholly closed at exact target')
-    if int(reader.command(['stat', '-c', '%s', remote])) != source_size:
-        raise ValueError('original closed source changed during capture')
+        except OSError:
+            fail('copy_io')
+        finally:
+            p.stdout.close()
+            try:
+                code = p.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                code = None
+                fail('remote_wait_timeout')
+            drain.join(timeout=1)
+        if code != 0:
+            fail('remote_exit')
+    if compressed != source_size:
+        fail('copy_length')
+    try:
+        actual_hash = bounded.sha(path)
+    except OSError:
+        actual_hash = None
+        fail('checksum_io')
+    if actual_hash != source_hash:
+        fail('checksum')
+    not_evaluated = []
+    if not parsing:
+        if not decoder.eof:
+            not_evaluated.append('gzip_footer')
+        not_evaluated.extend(['record_termination', 'completion_trailer', 'completion_target'])
+    else:
+        if not decoder.eof:
+            fail('gzip_footer_missing')
+        if pending:
+            fail('record_unterminated')
+        if not isinstance(last, dict) or last.get('kind') != completion:
+            fail('completion_trailer')
+        try:
+            target_matches = isinstance(last, dict) and int(last['height']) == target
+        except (KeyError, ValueError, TypeError, OverflowError):
+            target_matches = False
+        if not target_matches:
+            fail('completion_target')
+    if decoder.unused_data:
+        fail('gzip_trailing_data')
+    # A second stat remains mandatory, including when another predicate failed.
+    try:
+        final_size = int(reader.command(['stat', '-c', '%s', remote]))
+        if final_size != source_size:
+            fail('source_size_changed')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        final_size = None
+        fail('source_restat')
+    if failures:
+        diagnostic = dict(schema='closed-stream-failure-v1', failures=failures,
+                          not_evaluated=not_evaluated,
+                          expected_compressed_bytes=source_size, compressed_bytes=compressed,
+                          final_source_bytes=final_size, remote_exit_code=code,
+                          expected_sha256=source_hash, actual_sha256=actual_hash,
+                          gzip_eof=decoder.eof, records_seen=count,
+                          raw_bytes_seen=length, stderr=stderr.metadata())
+        _stream_failure(dest, name, diagnostic)
     return dict(source_path=remote, compressed_bytes=compressed, sha256=source_hash, records=count, raw_bytes=length, raw_sha256=digest.hexdigest(), completion_kind=completion)
 
 

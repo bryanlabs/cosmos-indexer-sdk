@@ -571,7 +571,7 @@ func checkHistory(cache string, h history, next tm.Header, prior []byte) {
 	var results ctypes.ResultBlockResults
 	must(c.UnmarshalJSON(rawCache(cache, h.Height, "-block_results.raw.gz"), &results))
 	need(results.Height == h.Height && results.Results != nil, "raw native result identity differs")
-	need(equal(h.Deliver, results.Results.DeliverTx) && equal(h.Begin, results.Results.BeginBlock) && equal(h.End, results.Results.EndBlock), "complete native ABCI result differs")
+	need(sameABCIResponses(h.Begin, h.Deliver, h.End, results.Results.BeginBlock, results.Results.DeliverTx, results.Results.EndBlock), "complete native ABCI result differs")
 	need(len(h.Transactions) == len(block.Block.Data.Txs), "signed transaction coverage differs")
 	for i, tx := range h.Transactions {
 		need(bytes.Equal(tx, block.Block.Data.Txs[i]), "signed bytes differ")
