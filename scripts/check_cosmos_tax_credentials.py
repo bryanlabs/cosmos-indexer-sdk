@@ -7,9 +7,12 @@ import re
 import subprocess
 
 SENSITIVE = r'(?:DB_PASS|DB_PASSWORD|PGPASSWORD|POSTGRES_PASSWORD|DATABASE_PASSWORD)'
-ENV_NAME = re.compile(r'\bname\s*:\s*[\"\']?(' + SENSITIVE + r')\b')
-INLINE_VALUE = re.compile(r'\bvalue\s*:\s*([^\n,}]+)')
+ENV_NAME = re.compile(r'[\"\']?\bname[\"\']?\s*:\s*[\"\']?(' + SENSITIVE + r')\b')
+INLINE_VALUE = re.compile(r'[\"\']?\bvalue[\"\']?\s*:\s*([^\n,}]+)')
 RULES = [
+    ('password-assignment', re.compile(r'\b' + SENSITIVE + r'\s*=\s*([A-Za-z0-9+/][A-Za-z0-9_+/.=-]*)')),
+    ('quoted-password-assignment', re.compile(r'(?m)(?:^|[ \t])' + SENSITIVE + r'\s*=\s*[\"\']([^\"\'\n]+)[\"\']')),
+    ('sql-password', re.compile(r'\bPASSWORD\s+\'([^\'\n]+)\'', re.I)),
     ('password-bearing-url', re.compile(r'postgres(?:ql)?://[^\s/:@]+:([^\s@]+)@', re.I)),
     ('password-config', re.compile(r'^\s*password\s*=\s*[\"\']([^\"\']+)[\"\']', re.M | re.I)),
     ('password-default', re.compile(r'env\(\s*[\"\'](?:DB_PASS|PGPASSWORD|POSTGRES_PASSWORD)[\"\']\s*,\s*[\"\']([^\"\']+)[\"\']')),
@@ -56,14 +59,16 @@ def findings(text, suffix):
             if value:
                 result.append(name.group(1))
                 continue
+            if re.search(r'[\"\']?\bvalueFrom[\"\']?\s*:', line):
+                continue
             indent = len(line) - len(line.lstrip())
             for following in lines[i + 1:]:
-                if following.strip() and len(following) - len(following.lstrip()) <= indent:
-                    break
-                if re.search(r'\bvalueFrom\s*:', following):
+                if re.search(r'[\"\']?\bvalueFrom[\"\']?\s*:', following):
                     break
                 if INLINE_VALUE.search(following):
                     result.append(name.group(1))
+                    break
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
                     break
     return sorted(set(result))
 
