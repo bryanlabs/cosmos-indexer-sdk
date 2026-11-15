@@ -141,8 +141,10 @@ func (s *Server) validatePrivateProjection() error {
 }
 
 type commissionProjectionJournal struct {
-	mu   sync.Mutex
-	rows map[string]CommissionPrivateProjectionReceipt
+	mu                sync.Mutex
+	rows              map[string]CommissionPrivateProjectionReceipt
+	checkpointPending []CommissionPrivateProjectionReceipt
+	checkpointEnabled bool
 }
 
 func (j *commissionProjectionJournal) retain(addresses []string, start, end time.Time, r CommissionPrivateProjectionReceipt) {
@@ -150,11 +152,14 @@ func (j *commissionProjectionJournal) retain(addresses []string, start, end time
 	sort.Strings(scope)
 	b, _ := json.Marshal(scope)
 	r.WalletScopeSHA256 = privateSHA(b)
-	r.Start = start
-	r.End = end
-	key := r.WalletScopeSHA256 + start.String() + end.String() + r.Snapshot
+	r.Start = start.UTC()
+	r.End = end.UTC()
+	key := r.WalletScopeSHA256 + r.Start.String() + r.End.String() + r.Snapshot
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if _, exists := j.rows[key]; !exists && j.checkpointEnabled {
+		j.checkpointPending = append(j.checkpointPending, r)
+	}
 	j.rows[key] = r
 }
 func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoader) {
@@ -167,7 +172,7 @@ func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoa
 	if r.commissionSourceCorrections != nil {
 		r.sourceCorrectionReceipts = newCorrectionJournal()
 	}
-	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, archive: base.archive, progress: base.progress, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
+	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, archive: base.archive, progress: base.progress, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}, checkpointOptions: base.checkpointOptions, checkpointSettings: base.checkpointSettings, checkpointEpochBound: base.checkpointEpochBound}
 	base.mu.Lock()
 	for k, v := range base.labels {
 		l.labels[k] = v
@@ -184,6 +189,9 @@ func (j *commissionProjectionJournal) merge(pending *commissionProjectionJournal
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	for k, v := range pending.rows {
+		if _, exists := j.rows[k]; !exists && j.checkpointEnabled {
+			j.checkpointPending = append(j.checkpointPending, v)
+		}
 		j.rows[k] = v
 	}
 }

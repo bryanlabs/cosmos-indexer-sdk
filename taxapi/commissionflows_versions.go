@@ -57,6 +57,7 @@ type CommissionFlowBuildOptions struct {
 	ReadSnapshotTimeout time.Duration
 	PrivateProfile      *CommissionPrivateProfile
 	SourceCorrections   *CommissionSourceCorrections
+	Checkpoint          *CommissionFlowCheckpointOptions
 }
 
 func (o CommissionFlowBuildOptions) profileSHA() string {
@@ -152,9 +153,10 @@ type CommissionFlowReadPrefix struct {
 }
 
 type CommissionFlowEvidence struct {
-	ReadFailure             *CommissionReadFailure         `json:",omitempty"`
-	ReadPrefix              []CommissionFlowReadPrefix     `json:",omitempty"`
-	Wallets                 []CommissionFlowWalletEvidence `json:",omitempty"`
+	Checkpoint              *CommissionFlowCheckpointEvidence `json:",omitempty"`
+	ReadFailure             *CommissionReadFailure            `json:",omitempty"`
+	ReadPrefix              []CommissionFlowReadPrefix        `json:",omitempty"`
+	Wallets                 []CommissionFlowWalletEvidence    `json:",omitempty"`
 	Labels                  []AddressLabel
 	Channels                map[string]string
 	Archive                 []FlowArchiveReceipt
@@ -203,14 +205,6 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 	if rows == nil {
 		rows = []CommissionFlow{}
 	}
-	r, err := json.Marshal(run)
-	if err != nil {
-		return err
-	}
-	f, err := json.Marshal(rows)
-	if err != nil {
-		return err
-	}
 	e := CommissionFlowEvidence{}
 	if len(evidence) == 1 {
 		e = evidence[0]
@@ -234,14 +228,12 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 		}
 		e.SourceCorrectionProfile = &CommissionSourceCorrectionProfileEvidence{ProfileSHA256: p.digest, BaseProfileSHA256: p.BaseProfileSHA256, FiveAuthoritySHA256: p.FiveAuthoritySHA256, SevenAuthoritySHA256: p.SevenAuthoritySHA256, SixAuthoritySHA256: p.SixAuthoritySHA256, NormalizerSHA256: p.NormalizerSHA256}
 	}
-	b, err := json.Marshal(e)
+	snapshot := CommissionFlowVersion{Version: o.Version, Chain: run.Chain, Validator: run.Validator, Build: o.Build, PrivateProfileSHA256: o.profileSHA(), ComputedAt: run.ComputedAt}
+	spool, err := spoolCommissionFlow(os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"), snapshot, run, rows, e)
 	if err != nil {
 		return err
 	}
-	snapshot := CommissionFlowVersion{Version: o.Version, Chain: run.Chain, Validator: run.Validator, Build: o.Build, PrivateProfileSHA256: o.profileSHA(), ComputedAt: run.ComputedAt, RunJSON: string(r), RowsJSON: string(f), EvidenceJSON: string(b)}
-	if err := captureCommissionFlowPayload(os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"), snapshot); err != nil {
-		return err
-	}
+	defer spool.close()
 	// Create is intentionally not an upsert: even a retry must not change
 	// evidence already stored under this version and validator.
 	return s.db.Session(&gorm.Session{Logger: logger.Discard}).Transaction(func(tx *gorm.DB) error {
@@ -256,7 +248,7 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 		if stored.PrivateProfileSHA256 != generation.PrivateProfileSHA256 || stored.Build != generation.Build || !stored.FromDay.Equal(generation.FromDay) || !stored.AsOf.Equal(generation.AsOf) {
 			return fmt.Errorf("commission output version already belongs to a different build or window")
 		}
-		if err := storeCommissionFlowPayloads(tx, &snapshot); err != nil {
+		if err := storeCommissionSpools(tx, &snapshot, spool); err != nil {
 			return err
 		}
 		return tx.Create(&snapshot).Error

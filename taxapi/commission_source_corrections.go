@@ -354,8 +354,10 @@ type CommissionSourceEffectReceipt struct {
 	SourceRowsSHA256        string   `json:",omitempty"`
 }
 type commissionCorrectionJournal struct {
-	mu   sync.Mutex
-	rows map[string]CommissionSourceCorrectionReceipt
+	mu                sync.Mutex
+	rows              map[string]CommissionSourceCorrectionReceipt
+	checkpointPending []CommissionSourceCorrectionReceipt
+	checkpointEnabled bool
 }
 
 func newCorrectionJournal() *commissionCorrectionJournal {
@@ -365,7 +367,11 @@ func (j *commissionCorrectionJournal) retain(r CommissionSourceCorrectionReceipt
 	b, _ := json.Marshal(r)
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.rows[privateSHA(b)] = r
+	key := privateSHA(b)
+	if _, exists := j.rows[key]; !exists && j.checkpointEnabled {
+		j.checkpointPending = append(j.checkpointPending, r)
+	}
+	j.rows[key] = r
 }
 func (j *commissionCorrectionJournal) merge(other *commissionCorrectionJournal) {
 	for _, r := range other.receipts() {

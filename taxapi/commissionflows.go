@@ -212,15 +212,19 @@ const (
 
 // dbFlowLoader reads a trace's wallets from the index.
 type dbFlowLoader struct {
-	s        *Server
-	chain    string
-	node     *ledgerNode
-	labels   map[string]AddressLabel
-	mu       *sync.Mutex
-	chans    map[string]string
-	private  bool
-	archive  *flowArchive
-	progress func(commissionFlowProgress)
+	s                    *Server
+	chain                string
+	node                 *ledgerNode
+	labels               map[string]AddressLabel
+	mu                   *sync.Mutex
+	chans                map[string]string
+	private              bool
+	archive              *flowArchive
+	progress             func(commissionFlowProgress)
+	checkpointPending    *CommissionFlowEvidence
+	checkpointOptions    *CommissionFlowCheckpointOptions
+	checkpointSettings   string
+	checkpointEpochBound bool
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -523,6 +527,9 @@ func (l *dbFlowLoader) stop(addr string) (flowStop, error) {
 		}
 		l.mu.Lock()
 		l.labels[addr] = lab
+		if l.checkpointPending != nil {
+			l.checkpointPending.Labels = append(l.checkpointPending.Labels, lab)
+		}
 		l.mu.Unlock()
 		return flowStop{Class: flowExchangeLike, Detail: flowMemoHeuristic}, nil
 	}
@@ -586,6 +593,9 @@ func (l *dbFlowLoader) channelChain(port, channel string) string {
 	}
 	l.mu.Lock()
 	l.chans[key] = v
+	if l.checkpointPending != nil {
+		l.checkpointPending.Channels[key] = v
+	}
 	l.mu.Unlock()
 	return v
 }
@@ -714,6 +724,14 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		}
 	}
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
+	if len(options) == 1 && options[0].Checkpoint != nil {
+		loader.checkpointOptions = options[0].Checkpoint
+		settings, err := json.Marshal([]any{options[0].Version, options[0].Build, options[0].profileSHA(), options[0].ReadSnapshotTimeout, privateSHA([]byte(options[0].ArchiveRPC))})
+		if err != nil {
+			return err
+		}
+		loader.checkpointSettings = privateSHA(settings)
+	}
 	var progressSink *commissionProgressSink
 	if root := os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"); loader.private && root != "" {
 		progressSink, err = newCommissionProgressSink(root, validators, 5*time.Second)
@@ -815,6 +833,9 @@ const (
 var flowDriftTolerance = decimal.NewFromInt(1000000)
 
 func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, validator string, from, asOf time.Time, save func(CommissionFlowRun, []CommissionFlow, CommissionFlowEvidence) error) (CommissionFlowRun, error) {
+	if loader.checkpointOptions != nil && !loader.checkpointEpochBound {
+		return s.traceCommissionCheckpoint(chain, loader, validator, from, asOf, save)
+	}
 	if s.commissionPrivateProfile != nil || s.commissionSourceCorrections != nil {
 		s, loader = s.privateProjectionTrace(loader)
 	}
@@ -826,8 +847,13 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	}
 	tr.reportProgress("root_started", "", -1)
 	var walletEvidence []CommissionFlowWalletEvidence
+	var checkpoint *checkpointFlowLoader
 	fail := func(err error) (CommissionFlowRun, error) {
 		run.Status, run.Reason = flowStatusError, err.Error()
+		if loader.checkpointOptions != nil {
+			tr.reportProgress("checkpoint_attempt_incomplete", "", -1)
+			return run, err
+		}
 		if errors.Is(err, errAwaitingCorrection) {
 			run.Reason = "a receiving wallet has rows awaiting a methodology correction"
 		}
@@ -851,6 +877,18 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	if err != nil {
 		return fail(err)
 	}
+	if loader.checkpointOptions != nil {
+		for i := range receivers {
+			receivers[i].FirstAt = receivers[i].FirstAt.UTC()
+			receivers[i].LastAt = receivers[i].LastAt.UTC()
+		}
+		sort.Slice(receivers, func(i, j int) bool {
+			if receivers[i].FirstAt.Equal(receivers[j].FirstAt) {
+				return receivers[i].Address < receivers[j].Address
+			}
+			return receivers[i].FirstAt.Before(receivers[j].FirstAt)
+		})
+	}
 	group := []string{}
 	seen := map[string]bool{}
 	for _, r := range receivers {
@@ -863,6 +901,13 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		group = append(group, op)
 	}
 	run.Receivers = len(receivers)
+	if loader.checkpointOptions != nil {
+		checkpoint, err = loader.openCheckpoint(validator, from, asOf, receivers, group)
+		if err != nil {
+			return fail(err)
+		}
+		tr.load = checkpoint
+	}
 	if err := tr.run(group); err != nil {
 		return fail(err)
 	}
@@ -885,7 +930,11 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 			total[r] = total[r].Add(w.Overdraw[r])
 		}
 		tr.reportProgress("closing_started", w.Addr, len(tr.order)-i)
-		actual, known, err := loader.holdingsAt(w.Addr, asOfDay)
+		closing := loader.holdingsAt
+		if checkpoint != nil {
+			closing = checkpoint.holdingsAt
+		}
+		actual, known, err := closing(w.Addr, asOfDay)
 		if err != nil || !known {
 			if loader.private {
 				return fail(fmt.Errorf("commission closing requires exact archive state"))
@@ -941,12 +990,22 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	if loader.archive != nil {
 		evidence.Archive = loader.archive.evidence(tr.attempted)
 	}
+	if checkpoint != nil {
+		if err := checkpoint.check(); err != nil {
+			return fail(err)
+		}
+		evidence.Checkpoint = checkpoint.completedEvidence()
+	}
 	tr.reportProgress("saving_started", "", 0)
 	if err := save(run, rows, evidence); err != nil {
 		tr.reportProgress("save_failed", "", 0)
 		return run, err
 	}
-	tr.reportProgress("saved", "", 0)
+	if checkpoint != nil {
+		tr.reportProgress("checkpoint_final_capture", "", 0)
+	} else {
+		tr.reportProgress("saved", "", 0)
+	}
 	return run, nil
 }
 
