@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
 )
 
@@ -98,7 +97,7 @@ func main() {
 		fmt.Println("private candidate configuration validated; no database or native execution")
 		return
 	}
-	for _, key := range []string{"DB_HOST", "DB_NAME", "DB_USER", "DB_PASS"} {
+	for _, key := range requiredDBEnvironment() {
 		if os.Getenv(key) == "" {
 			fail()
 		}
@@ -107,7 +106,7 @@ func main() {
 	if port == "" {
 		port = "5432"
 	}
-	db, err := indexerDB.PostgresDbConnect(os.Getenv("DB_HOST"), port, os.Getenv("DB_NAME"), os.Getenv("DB_USER"), os.Getenv("DB_PASS"), "silent", "default_transaction_read_only=on", "statement_timeout=60000", "max_parallel_workers_per_gather=0")
+	db, err := connectDatabase(os.Getenv("DB_HOST"), port, os.Getenv("DB_NAME"), os.Getenv("DB_USER"), os.Getenv("DB_PASS"))
 	if err != nil {
 		fail()
 	}
@@ -135,6 +134,11 @@ func main() {
 	}
 	fmt.Println("private candidate queue complete; financial_acceptance=false public_promotion=false")
 }
+
+// A password is optional input, not an authentication-policy bypass. The
+// server still decides which authentication is required. Existing callers
+// supplying DB_PASS retain the same behavior; no fallback value is invented.
+func requiredDBEnvironment() []string { return []string{"DB_HOST", "DB_NAME", "DB_USER"} }
 
 func validateNative(path, digest string) error {
 	if !filepath.IsAbs(path) || len(digest) != 64 {
