@@ -24,6 +24,7 @@ type config struct {
 	Version, Build, Chain, From, AsOf                                          string
 	SourceVersions                                                             []string
 	ComputeOnly                                                                bool
+	LegacyTrustPasswordOptional                                                bool
 	CanonicalFile, CanonicalSHA256, QueueFile, QueueSHA256                     string
 	ProfileFile, ProfileSHA256, CorrectionsFile, CorrectionsSHA256             string
 	ArchiveConfig, OutputDirectory, ResourceSample, NativeBinary, NativeSHA256 string
@@ -97,16 +98,7 @@ func main() {
 		fmt.Println("private candidate configuration validated; no database or native execution")
 		return
 	}
-	for _, key := range requiredDBEnvironment() {
-		if os.Getenv(key) == "" {
-			fail()
-		}
-	}
-	port := os.Getenv("DB_PORT")
-	if port == "" {
-		port = "5432"
-	}
-	db, err := connectDatabase(os.Getenv("DB_HOST"), port, os.Getenv("DB_NAME"), os.Getenv("DB_USER"), os.Getenv("DB_PASS"))
+	db, err := initializeDatabaseFromEnvironment(c, connectDatabase)
 	if err != nil {
 		fail()
 	}
@@ -135,10 +127,14 @@ func main() {
 	fmt.Println("private candidate queue complete; financial_acceptance=false public_promotion=false")
 }
 
-// A password is optional input, not an authentication-policy bypass. The
-// server still decides which authentication is required. Existing callers
-// supplying DB_PASS retain the same behavior; no fallback value is invented.
-func requiredDBEnvironment() []string { return []string{"DB_HOST", "DB_NAME", "DB_USER"} }
+// Legacy password omission is explicit. It never changes server authentication.
+func requiredDBEnvironment(legacy bool) []string {
+	keys := []string{"DB_HOST", "DB_NAME", "DB_USER"}
+	if !legacy {
+		keys = append(keys, "DB_PASS")
+	}
+	return keys
+}
 
 func validateNative(path, digest string) error {
 	if !filepath.IsAbs(path) || len(digest) != 64 {

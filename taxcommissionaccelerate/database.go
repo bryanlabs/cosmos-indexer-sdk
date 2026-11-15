@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,7 +17,10 @@ import (
 // Optional password input is not an authentication-policy change. The server
 // remains authoritative. An absent DB_PASS omits URL password material and
 // cannot silently pick up a different password from ambient env or passfiles.
-func databaseConfig(host, port, database, user, password string) (*pgx.ConnConfig, error) {
+func databaseConfig(host, port, database, user, password string, legacy bool) (*pgx.ConnConfig, error) {
+	if password == "" && !legacy {
+		return nil, fmt.Errorf("password required unless explicit legacy operator mode")
+	}
 	u := url.URL{Scheme: "postgresql", Host: net.JoinHostPort(host, port), Path: "/" + database, User: url.User(user)}
 	if password != "" {
 		u.User = url.UserPassword(user, password)
@@ -29,8 +34,24 @@ func databaseConfig(host, port, database, user, password string) (*pgx.ConnConfi
 	cfg.ConnectTimeout = 5 * time.Second
 	return cfg, nil
 }
-func connectDatabase(host, port, database, user, password string) (*gorm.DB, error) {
-	cfg, err := databaseConfig(host, port, database, user, password)
+
+type databaseOpener func(string, string, string, string, string, bool) (*gorm.DB, error)
+
+// This is the normal startup path, also exercised directly by startup tests.
+func initializeDatabaseFromEnvironment(c config, open databaseOpener) (*gorm.DB, error) {
+	for _, key := range requiredDBEnvironment(c.LegacyTrustPasswordOptional) {
+		if os.Getenv(key) == "" {
+			return nil, fmt.Errorf("required database environment missing")
+		}
+	}
+	port := os.Getenv("DB_PORT")
+	if port == "" {
+		port = "5432"
+	}
+	return open(os.Getenv("DB_HOST"), port, os.Getenv("DB_NAME"), os.Getenv("DB_USER"), os.Getenv("DB_PASS"), c.LegacyTrustPasswordOptional)
+}
+func connectDatabase(host, port, database, user, password string, legacy bool) (*gorm.DB, error) {
+	cfg, err := databaseConfig(host, port, database, user, password, legacy)
 	if err != nil {
 		return nil, err
 	}
