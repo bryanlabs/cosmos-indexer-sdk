@@ -56,9 +56,14 @@ type CommissionFlowBuildOptions struct {
 	// ReadSnapshotTimeout overrides only private versioned reads. Zero keeps 30s.
 	ReadSnapshotTimeout time.Duration
 	PrivateProfile      *CommissionPrivateProfile
+	SourceCorrections   *CommissionSourceCorrections
 }
 
 func (o CommissionFlowBuildOptions) profileSHA() string {
+	if o.SourceCorrections != nil {
+		b, _ := json.Marshal([]string{o.PrivateProfile.digest, o.SourceCorrections.digest})
+		return privateSHA(b)
+	}
 	if o.PrivateProfile != nil {
 		return o.PrivateProfile.digest
 	}
@@ -75,8 +80,16 @@ func (o CommissionFlowBuildOptions) validate() error {
 	if o.PrivateProfile == nil && strings.Contains(o.Version, "-profile") {
 		return fmt.Errorf("profile-named generation requires exact private profile")
 	}
-	if o.PrivateProfile != nil && (o.PrivateProfile.digest == "" || !o.AsOf.Equal(o.PrivateProfile.AsOf) || !strings.Contains(o.Version, "-profile"+o.PrivateProfile.digest[:12])) {
+	if o.PrivateProfile != nil && (!correctionHash(o.PrivateProfile.digest) || !o.AsOf.Equal(o.PrivateProfile.AsOf) || !strings.Contains(o.Version, "-profile"+o.PrivateProfile.digest[:12])) {
 		return fmt.Errorf("private profile requires its own immutable version and window")
+	}
+	if o.SourceCorrections == nil && strings.Contains(o.Version, "-sources") {
+		return fmt.Errorf("source-correction generation requires its exact private manifest")
+	}
+	if p := o.SourceCorrections; p != nil {
+		if o.PrivateProfile == nil || !correctionHash(p.digest) || p.BaseProfileSHA256 != o.PrivateProfile.digest || !p.From.Equal(o.PrivateProfile.From) || !p.AsOf.Equal(o.AsOf) || !strings.Contains(o.Version, "-sources"+p.digest[:12]) {
+			return fmt.Errorf("native source corrections require an exact separate private generation and window")
+		}
 	}
 	if !o.AsOf.Equal(flowDay(o.AsOf)) {
 		return fmt.Errorf("commission as-of must be midnight UTC")
@@ -139,14 +152,16 @@ type CommissionFlowReadPrefix struct {
 }
 
 type CommissionFlowEvidence struct {
-	ReadFailure        *CommissionReadFailure         `json:",omitempty"`
-	ReadPrefix         []CommissionFlowReadPrefix     `json:",omitempty"`
-	Wallets            []CommissionFlowWalletEvidence `json:",omitempty"`
-	Labels             []AddressLabel
-	Channels           map[string]string
-	Archive            []FlowArchiveReceipt
-	PrivateProjections []CommissionPrivateProjectionReceipt `json:",omitempty"`
-	PrivateProfile     *CommissionPrivateProfileEvidence    `json:",omitempty"`
+	ReadFailure             *CommissionReadFailure         `json:",omitempty"`
+	ReadPrefix              []CommissionFlowReadPrefix     `json:",omitempty"`
+	Wallets                 []CommissionFlowWalletEvidence `json:",omitempty"`
+	Labels                  []AddressLabel
+	Channels                map[string]string
+	Archive                 []FlowArchiveReceipt
+	PrivateProjections      []CommissionPrivateProjectionReceipt       `json:",omitempty"`
+	PrivateProfile          *CommissionPrivateProfileEvidence          `json:",omitempty"`
+	SourceCorrectionReads   []CommissionSourceCorrectionReceipt        `json:",omitempty"`
+	SourceCorrectionProfile *CommissionSourceCorrectionProfileEvidence `json:",omitempty"`
 }
 
 func (e *CommissionFlowEvidence) retainReadFailure(err error, order []*flowWallet) {
@@ -164,6 +179,9 @@ func (l *dbFlowLoader) evidence() CommissionFlowEvidence {
 	e := CommissionFlowEvidence{Channels: map[string]string{}}
 	if l.s.privateProjectionReceipts != nil {
 		e.PrivateProjections = l.s.privateProjectionReceipts.receipts()
+	}
+	if l.s.sourceCorrectionReceipts != nil {
+		e.SourceCorrectionReads = l.s.sourceCorrectionReceipts.receipts()
 	}
 	for _, label := range l.labels {
 		e.Labels = append(e.Labels, label)
@@ -207,6 +225,14 @@ func (s *Server) saveCommissionFlowVersion(o CommissionFlowBuildOptions, run Com
 			return err
 		}
 		e.PrivateProfile = &CommissionPrivateProfileEvidence{ProfileSHA256: p.digest, SourceSHA256: p.SourceSHA256, ParserSHA256: p.ParserSHA256, EconomicProofSHA256: p.EconomicProofSHA256}
+	}
+	if p := o.SourceCorrections; p != nil {
+		for _, r := range e.SourceCorrectionReads {
+			if r.ProfileSHA256 != p.digest {
+				return fmt.Errorf("native correction receipt belongs to another profile")
+			}
+		}
+		e.SourceCorrectionProfile = &CommissionSourceCorrectionProfileEvidence{ProfileSHA256: p.digest, BaseProfileSHA256: p.BaseProfileSHA256, FiveAuthoritySHA256: p.FiveAuthoritySHA256, SevenAuthoritySHA256: p.SevenAuthoritySHA256, SixAuthoritySHA256: p.SixAuthoritySHA256, NormalizerSHA256: p.NormalizerSHA256}
 	}
 	b, err := json.Marshal(e)
 	if err != nil {

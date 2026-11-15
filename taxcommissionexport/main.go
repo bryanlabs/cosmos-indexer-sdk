@@ -35,6 +35,8 @@ func main() {
 	output := flag.String("output", "", "new private export file, never stdout or overwrite")
 	profilePath := flag.String("private-profile", "", "exact source-bound private generation profile")
 	profileSHA := flag.String("private-profile-sha256", "", "exact immutable private profile digest")
+	correctionsPath := flag.String("commission-source-corrections", "", "exact retained native source correction manifest")
+	correctionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native source correction digest")
 	timeout := flag.Duration("timeout", 60*time.Second, "whole read/export budget, not a provider restriction")
 	flag.Parse()
 	if *output == "" || *members == "" || *timeout <= 0 {
@@ -46,6 +48,13 @@ func main() {
 		profile, err = taxapi.LoadCommissionPrivateProfile(*profilePath, *profileSHA)
 		if err != nil {
 			fail("private export profile mismatch")
+		}
+	}
+	var corrections *taxapi.CommissionSourceCorrections
+	if *correctionsPath != "" || *correctionsSHA != "" {
+		corrections, err = taxapi.LoadCommissionSourceCorrections(*correctionsPath, *correctionsSHA)
+		if err != nil {
+			fail("private export native source correction mismatch")
 		}
 	}
 	from, err := time.Parse(time.DateOnly, *fromText)
@@ -94,7 +103,7 @@ func main() {
 	}
 	hash := sha256.New()
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
-	err = srv.ExportCommissionFlowVersions(taxapi.CommissionFlowBuildOptions{Version: *version, Build: *build, AsOf: asOf, PrivateProfile: profile}, *chain, from, validators, io.MultiWriter(partial, hash))
+	err = srv.ExportCommissionFlowVersions(taxapi.CommissionFlowBuildOptions{Version: *version, Build: *build, AsOf: asOf, PrivateProfile: profile, SourceCorrections: corrections}, *chain, from, validators, io.MultiWriter(partial, hash))
 	if err != nil {
 		_ = partial.Close()
 		fail("private export incomplete, partial file retained and no complete file published")

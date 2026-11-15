@@ -12,9 +12,10 @@ import (
 const readSnapshotTimeout = 30 * time.Second
 
 type walletRows struct {
-	Events []tax.TaxableEvent
-	Fees   []feeRec
-	Memos  map[string]string
+	Events                []tax.TaxableEvent
+	Fees                  []feeRec
+	Memos                 map[string]string
+	CommissionCorrections []flowEvent
 }
 
 type reportInput struct {
@@ -38,6 +39,10 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 	started := time.Now()
 	ctx, cancel := s.readSnapshotContext()
 	defer cancel()
+	var pendingCorrections *commissionCorrectionJournal
+	if s.commissionSourceCorrections != nil && s.sourceCorrectionReceipts != nil {
+		pendingCorrections = newCorrectionJournal()
+	}
 	var pending *commissionProjectionJournal
 	if s.commissionPrivateProfile != nil && s.privateProjectionReceipts != nil {
 		pending = &commissionProjectionJournal{rows: map[string]CommissionPrivateProjectionReceipt{}}
@@ -49,7 +54,7 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
 			return err
 		}
-		reader := &Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started, commissionPrivateProfile: s.commissionPrivateProfile, privateProjectionReceipts: pending}
+		reader := &Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started, commissionPrivateProfile: s.commissionPrivateProfile, privateProjectionReceipts: pending, commissionSourceCorrections: s.commissionSourceCorrections, sourceCorrectionReceipts: pendingCorrections}
 		if err := reader.validatePrivateProjection(); err != nil {
 			return err
 		}
@@ -57,6 +62,9 @@ func (s *Server) withReadSnapshot(fn func(*Server) error) error {
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err == nil && pending != nil {
 		s.privateProjectionReceipts.merge(pending)
+	}
+	if err == nil && pendingCorrections != nil {
+		s.sourceCorrectionReceipts.merge(pendingCorrections)
 	}
 	return err
 }
@@ -90,6 +98,11 @@ func (s *Server) readReportInput(chain string, addresses []string, start, end ti
 		for _, addr := range addresses {
 			phases.next("wallet_rows")
 			rows, err := reader.loadWalletRows(chain, addr, start, end, refundPairs)
+			if err != nil {
+				return err
+			}
+			phases.next("native_source_corrections")
+			rows, err = reader.applyCommissionSourceCorrections(chain, addr, start, end, rows)
 			if err != nil {
 				return err
 			}

@@ -44,6 +44,16 @@ Both successful and failed private snapshots scope receipts to wallets that
 trace actually attempted, not every wallet touched by concurrent workers. This is
 source evidence, not a cryptographically verified application proof.
 
+## Scoped native source corrections
+
+A separate optional correction manifest applies already-proven native rewards
+and actual fee payer/charged/refund corrections in memory inside each private
+read snapshot. It does not repair the shared ledger or replace the original
+source records. Its exact hash participates in the immutable generation and
+export identity, separately from the existing private classification profile.
+See [COMMISSION-SOURCE-CORRECTIONS.md](COMMISSION-SOURCE-CORRECTIONS.md) for
+scope, actual read-time applicability receipts and verification boundaries.
+
 ## Acceptance and operations
 
 Reconcile each version's validator set, build, dates, native commission
