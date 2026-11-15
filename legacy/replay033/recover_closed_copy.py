@@ -21,19 +21,32 @@ def reconstruct(dest, name, target, completion, reader, completed, prefix, scann
     remote = bounded.ROOT + '/' + name + '.ndjson.gz'
     expected = int(reader.command(['stat', '-c', '%s', remote]))
     path = dest / (name + '.source-closed.gz')
-    offset = prefix.stat().st_size if prefix else 0
+    prefix_before = prefix.stat() if prefix else None
+    offset = prefix_before.st_size if prefix else 0
     if not 0 <= offset < expected:
         raise ValueError('retained prefix length invalid')
     with path.open('xb') as out:
         os.chmod(path, 0o600)
         if prefix:
             with prefix.open('rb') as source:
-                shutil.copyfileobj(source, out, 1 << 20)
+                remaining = offset
+                while remaining:
+                    chunk = source.read(min(remaining, 1 << 20))
+                    if not chunk:
+                        raise ValueError('retained prefix shortened during reconstruction')
+                    out.write(chunk); remaining -= len(chunk)
+            after = prefix.stat()
+            if (after.st_size, after.st_mtime_ns, after.st_ino) != (prefix_before.st_size, prefix_before.st_mtime_ns, prefix_before.st_ino):
+                raise ValueError('retained prefix changed during reconstruction')
+            out.flush()
         # Keep slow validation off the remote stdout path. The lower transport
         # cause remains unproven; exact length and hash still detect every loss.
         args = ['dd', 'if=' + remote, 'bs=1048576', 'skip=' + str(offset), 'iflag=skip_bytes']
         with tempfile.TemporaryFile() as errors:
-            result = subprocess.run(reader.base + reader.args(args), stdout=out, stderr=errors, timeout=1800)
+            try:
+                result = subprocess.run(reader.base + reader.args(args), stdout=out, stderr=errors, timeout=max(1800, expected // (1 << 20)))
+            except subprocess.TimeoutExpired:
+                closed._stream_failure(dest, name, dict(schema='closed-stream-failure-v1', failures=['transport_timeout']))
         out.flush(); os.fsync(out.fileno())
     size = path.stat().st_size
     actual = bounded.sha(path)
@@ -48,7 +61,10 @@ def reconstruct(dest, name, target, completion, reader, completed, prefix, scann
             expected_compressed_bytes=expected, compressed_bytes=size, final_source_bytes=final,
             remote_exit_code=result.returncode, actual_sha256=actual, expected_sha256=completed[remote]))
     # Scanner emits only counts, digests and the completion kind/height.
-    result = subprocess.run([str(scanner), str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=1800)
+    try:
+        result = subprocess.run([str(scanner), str(path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=max(1800, expected // (1 << 20)))
+    except subprocess.TimeoutExpired:
+        closed._stream_failure(dest, name, dict(schema='closed-stream-failure-v1', failures=['scan_timeout']))
     if result.returncode:
         closed._stream_failure(dest, name, dict(schema='closed-stream-failure-v1', failures=['full_record_gzip_scan'], remote_exit_code=result.returncode))
     metadata = json.loads(result.stdout)
