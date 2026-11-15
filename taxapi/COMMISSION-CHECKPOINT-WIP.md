@@ -96,6 +96,33 @@ passing test/subtest actions, and targeted checkpoint/SAVE race tests passed.
 See the handoff artifact for exact
 commands and counts. No large original private source case was rerun.
 
+## Independent review, unresolved defects
+
+The new Opus reproduce review completed. It reproduced two checkpoint defects:
+
+1. One events result is still one bounded record. A permitted 300,000-event
+   wallet exceeds 64 MiB and stalls on every resume. Chunked logical reads are
+   NOT implemented. Increasing a limit is not a completeness proof.
+2. SIGTERM during a pending-file commit leaves an unexpected file, and the
+   journal rejects the attempt. Rejection preserves the requested fail-closed
+   torn/corrupt policy, but the adapter has no per-root fresh-attempt namespace;
+   its directory currently derives only from the root hash. Automatic pending
+   deletion/salvage was NOT added. The process test kills after committed reads,
+   not during the durable-write window.
+
+Both remain unresolved in this WIP. A 100,000-record ceiling may also be too
+small for a very large root once opening/events/stop/closing units are counted;
+no old large-root case is claimed supported or silently excluded.
+
+The reviewer could not reproduce snapshot-token reuse without real PostgreSQL,
+or check writable temporary storage in the deployed container. These are not
+cleared. Binding the actual imported MVCC snapshot, rather than only its export
+token/database identity, still needs adversarial live proof. The independent
+review found no reproduced streaming-SAVE, receipt/cache restoration, partial-
+root-save, or SQL-rollback defect. Main review is still pending. The review used
+a throwaway copy of the code before final delta-order/idempotent-close hardening;
+those small later changes have local tests but are not independently reviewed.
+
 ## Full queue and retained scope
 
 The exact corrected-flow scope remains 324 original members. The capacity
