@@ -18,7 +18,7 @@ func omitPassword(t *testing.T) {
 	t.Helper()
 	t.Setenv("DB_PASS", "")
 	_ = os.Unsetenv("DB_PASS")
-	t.Setenv("PGPASSWORD", "fixture-ambient-password-must-not-be-used")
+	t.Setenv("PGPASSWORD", "${PRESERVATION_REDACTED}")
 	t.Setenv("PGPASSFILE", "/dev/null")
 }
 func startupEnvironment(t *testing.T, host, port, database, user string) {
@@ -117,7 +117,7 @@ func TestWrapperNormalStartupLegacyFailsClosedWhenServerDemandsPassword(t *testi
 		password, ok := msg.(*pgproto3.PasswordMessage)
 		backend.Send(&pgproto3.ErrorResponse{Severity: "FATAL", Code: "28P01", Message: "fixture authentication rejected"})
 		_ = backend.Flush()
-		done <- ok && password.Password == ""
+		done <- ok && password.Password =${PRESERVATION_REDACTED} ""
 	}()
 	addr := listener.Addr().(*net.TCPAddr)
 	startupEnvironment(t, "127.0.0.1", strconv.Itoa(addr.Port), "query_proof_scratch_fake", "fixture-user")
