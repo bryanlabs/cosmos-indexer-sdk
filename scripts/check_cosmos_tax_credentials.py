@@ -11,12 +11,14 @@ ENV_NAME = re.compile(r'[\"\']?\bname[\"\']?\s*:\s*[\"\']?(' + SENSITIVE + r')\b
 INLINE_VALUE = re.compile(r'[\"\']?\bvalue[\"\']?\s*:\s*([^\n,}]+)')
 RULES = [
     ('password-assignment', re.compile(r'\b' + SENSITIVE + r'\s*=\s*([A-Za-z0-9+/][A-Za-z0-9_+/.=-]*)')),
-    ('quoted-password-assignment', re.compile(r'(?m)(?:^|[ \t])' + SENSITIVE + r'\s*=\s*[\"\']([^\"\'\n]+)[\"\']')),
+    ('quoted-password-assignment', re.compile(r'\b' + SENSITIVE + r'\s*=\s*[\"\']([^\s\"\'$%{][^\"\'\n]*)[\"\']')),
+    ('password-key', re.compile(r'(?m)^\s*[\"\']?' + SENSITIVE + r'[\"\']?\s*:\s*[\"\']?([^\s\"\'{}\n,]+)')),
+    ('password-dsn', re.compile(r'\bpassword\s*=\s*[\"\']?([^\s\"\'\\]+)', re.I)),
     ('sql-password', re.compile(r'\bPASSWORD\s+\'([^\'\n]+)\'', re.I)),
     ('password-bearing-url', re.compile(r'postgres(?:ql)?://[^\s/:@]+:([^\s@]+)@', re.I)),
     ('password-config', re.compile(r'^\s*password\s*=\s*[\"\']([^\"\']+)[\"\']', re.M | re.I)),
     ('password-default', re.compile(r'env\(\s*[\"\'](?:DB_PASS|PGPASSWORD|POSTGRES_PASSWORD)[\"\']\s*,\s*[\"\']([^\"\']+)[\"\']')),
-    ('password-argument', re.compile(r'--database\.password=([^\s\\]+)')),
+    ('password-argument', re.compile(r'--database\.password(?:\s*=\s*|\s+|[\"\']\s*,\s*)[\"\']?([^\s\\\"\'\],}]+)')),
     ('password-dict', re.compile(r'[\"\']' + SENSITIVE + r'[\"\']\s*:\s*[\"\']([^\"\']+)[\"\']')),
 ]
 
@@ -31,50 +33,72 @@ def findings(text, suffix):
     result = []
     for field, pattern in RULES:
         for match in pattern.finditer(text):
+            if field == 'password-dsn':
+                start = text.rfind('\n', 0, match.start()) + 1
+                end = text.find('\n', match.end())
+                line = text[start:end if end != -1 else len(text)]
+                if not re.search(r'\b(?:host|user|dbname)\s*=|DATABASE_URL|\bDSN\b', line, re.I):
+                    continue
             if not dynamic(match.group(1)):
                 result.append(field)
-    if suffix == '.json':
+    json_text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+    parsed_json = None
+    if suffix == '.json' or json_text.lstrip().startswith(('{', '[')):
         try:
-            def walk(value):
-                if isinstance(value, dict):
-                    if re.fullmatch(SENSITIVE, str(value.get('name', ''))) and 'value' in value:
-                        secret_ref = value.get('valueFrom', {}).get('secretKeyRef', {})
-                        deletes_old_literal = (value['value'] is None
-                                               and bool(secret_ref.get('name'))
-                                               and bool(secret_ref.get('key')))
-                        if not deletes_old_literal:
-                            result.append(value['name'])
-                    for child in value.values():
-                        walk(child)
-                elif isinstance(value, list):
-                    for child in value:
-                        walk(child)
-            walk(json.loads(text))
+            parsed_json = json.loads(json_text)
         except ValueError:
-            result.append('invalid-json')
+            if suffix == '.json':
+                result.append('invalid-json')
+    if parsed_json is not None:
+        def walk(value):
+            if isinstance(value, dict):
+                if re.fullmatch(SENSITIVE, str(value.get('name', ''))) and 'value' in value:
+                    secret_ref = value.get('valueFrom', {}).get('secretKeyRef', {})
+                    deletes_old_literal = (value['value'] is None
+                                           and bool(secret_ref.get('name'))
+                                           and bool(secret_ref.get('key')))
+                    if not deletes_old_literal:
+                        result.append(value['name'])
+                for key, child in value.items():
+                    if re.fullmatch(SENSITIVE, key) and isinstance(child, str) and not dynamic(child):
+                        result.append('password-key')
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+        walk(parsed_json)
     else:
         lines = text.splitlines()
         for i, line in enumerate(lines):
             name = ENV_NAME.search(line)
             if not name:
                 continue
-            # Flow mappings have the value on the same line. Block mappings
-            # end before the next env item or an equally indented sibling.
-            value = INLINE_VALUE.search(line)
-            if value:
-                result.append(name.group(1))
-                continue
-            if re.search(r'[\"\']?\bvalueFrom[\"\']?\s*:', line):
-                continue
+            # Find the owning YAML sequence item, regardless of key order.
             indent = len(line) - len(line.lstrip())
-            for following in lines[i + 1:]:
-                if re.search(r'[\"\']?\bvalueFrom[\"\']?\s*:', following):
+            start = i
+            item_indent = indent
+            if not line.lstrip().startswith('-') and '{' not in line:
+                for previous in range(i - 1, -1, -1):
+                    candidate = lines[previous]
+                    depth = len(candidate) - len(candidate.lstrip())
+                    if candidate.strip() and depth < indent:
+                        if candidate.lstrip().startswith('-'):
+                            start, item_indent = previous, depth
+                        break
+            end = i + 1
+            while end < len(lines):
+                candidate = lines[end]
+                if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= item_indent:
                     break
-                if INLINE_VALUE.search(following):
+                end += 1
+            block = '\n'.join(lines[start:end])
+            value = INLINE_VALUE.search(block)
+            if value:
+                scalar = value.group(1).strip().strip('\"\'')
+                deletes_old_literal = (scalar in ('null', '~')
+                                       and 'valueFrom' in block and 'secretKeyRef' in block)
+                if not deletes_old_literal:
                     result.append(name.group(1))
-                    break
-                if following.strip() and len(following) - len(following.lstrip()) <= indent:
-                    break
     return sorted(set(result))
 
 
