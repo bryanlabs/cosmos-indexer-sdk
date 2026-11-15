@@ -49,6 +49,10 @@ asset-state changes, not income or deductible-loss classifications. Partial
 facts remain private partial artifacts. Final fact publication is exclusive and
 occurs only after the complete verified height sequence; the receipt binds its
 hash. The final publication/resume combination still requires integration review.
+The resume branch is a divergent earlier slash snapshot. Its three-height kill/
+restart fixtures pass at checkpoints1,2,3 with matching final receipts, but emit
+no slash facts. Nonempty facts are covered only by native checkpoint unit tests.
+The120-second default is a design interval, not a proven production loss bound.
 
 At 219358, a retained dead-attempt copy has the exact 219357 application root.
 Genuine Gaia BeginBlock leaves form the independent after-state reference. The
@@ -107,6 +111,13 @@ Do not silently change that guard. Physical pool is87% written with1.698 TB free
 volume promises exceed physical space. Agent-home available space was126.6 GB.
 Ramp only after a reviewed resumable single-window equivalence test and measured
 CPU/RSS/H2/Tia headroom. No resource setting was changed.
+
+A metadata-only size check found218161458173 raw bytes across the three original
+movement/history sources, versus35453398876 compressed bytes. The current resume
+prototype writes uncompressed seekable chunks. Preparing all derivatives would
+exceed the126.6 GB available on agent-home. A losslessly compressed chunk format
+or separately reviewed storage plan is needed; neither is implemented or
+approved here. Do not run full preparation under the halt order.
 
 ## Clock basis
 
