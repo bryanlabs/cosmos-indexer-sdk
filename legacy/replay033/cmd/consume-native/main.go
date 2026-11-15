@@ -678,8 +678,13 @@ func run() {
 		must(e)
 		defer db.Close()
 		committed = nativeDB(db)
-	} else {
-		need(*working == "", "working checkpoint cannot replace genuine genesis")
+	} else if *working != "" {
+		must(os.Mkdir(*working, 0700))
+		db, e := dbm.NewGoLevelDBWithOpts("application", *working, &opt.Options{BlockCacheCapacity: 8 << 20, WriteBuffer: 4 << 20, OpenFilesCacheCapacity: 2000, Filter: filter.NewBloomFilter(10)})
+		must(e)
+		defer db.Close()
+		committed = nativeDB(db)
+		need(committed.cms.LastCommitID().Version == 0 && len(committed.cms.LastCommitID().Hash) == 0, "genuine genesis requires an empty working store")
 	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
 	var height, first, through, phases, transactions int64

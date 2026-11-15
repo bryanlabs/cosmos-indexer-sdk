@@ -161,6 +161,8 @@ def verify(root, binary, receipt, validator_history=None, validator_history_sha2
     command = [str(binary), '--cache', str(root / 'cache'), '--receipt', str(receipt.parent / 'native-proof.private.json')]
     if b['first'] > 1:
         command += ['--checkpoint-home', str(root / 'opening-checkpoint'), '--working-home', str(receipt.parent / 'native-home')]
+    else:
+        command += ['--working-home', str(receipt.parent / 'native-home')]
     if validator_history is not None:
         require(validator_history_sha256 and sha(validator_history) == validator_history_sha256, 'supplemental native validator history pin differs')
         command += ['--validator-history', str(validator_history), '--validator-history-sha256', validator_history_sha256]
