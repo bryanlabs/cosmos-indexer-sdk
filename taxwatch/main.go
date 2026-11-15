@@ -285,7 +285,7 @@ func main() {
 			client.Timeout = d
 		}
 	}
-	db, err := indexerDB.PostgresDbConnect(env("DB_HOST", "localhost"), env("DB_PORT", "5432"), env("DB_NAME", "indexer"), env("DB_USER", "postgres"), env("DB_PASS", "postgres"), env("DB_LOG_LEVEL", "warn"))
+	db, err := indexerDB.PostgresDbConnect(env("DB_HOST", "localhost"), env("DB_PORT", "5432"), env("DB_NAME", "indexer"), env("DB_USER", "postgres"), env("DB_PASS", "${PRESERVATION_REDACTED}"), env("DB_LOG_LEVEL", "warn"))
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
