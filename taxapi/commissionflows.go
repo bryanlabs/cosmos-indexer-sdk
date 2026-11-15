@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -211,14 +212,15 @@ const (
 
 // dbFlowLoader reads a trace's wallets from the index.
 type dbFlowLoader struct {
-	s       *Server
-	chain   string
-	node    *ledgerNode
-	labels  map[string]AddressLabel
-	mu      *sync.Mutex
-	chans   map[string]string
-	private bool
-	archive *flowArchive
+	s        *Server
+	chain    string
+	node     *ledgerNode
+	labels   map[string]AddressLabel
+	mu       *sync.Mutex
+	chans    map[string]string
+	private  bool
+	archive  *flowArchive
+	progress func(commissionFlowProgress)
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -696,6 +698,18 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		}
 	}
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
+	var progressSink *commissionProgressSink
+	if root := os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"); loader.private && root != "" {
+		progressSink, err = newCommissionProgressSink(root, validators, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("initialize private progress snapshots: %w", err)
+		}
+		defer progressSink.close()
+		loader.progress = func(p commissionFlowProgress) {
+			p.Version, p.Build = options[0].Version, options[0].Build
+			progressSink.update(p)
+		}
+	}
 	if len(options) == 1 && options[0].ArchiveRPC != "" {
 		var err error
 		loader.archive, err = newFlowArchive(options[0].ArchiveRPC)
@@ -755,10 +769,16 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 	}
 	close(jobs)
 	wg.Wait()
-	if failed > 0 {
-		return fmt.Errorf("%d of %d validators failed", failed, len(validators))
+	var progressErr error
+	if progressSink != nil {
+		if err := progressSink.close(); err != nil {
+			progressErr = fmt.Errorf("private progress snapshots: %w", err)
+		}
 	}
-	return nil
+	if failed > 0 {
+		return errors.Join(fmt.Errorf("%d of %d validators failed", failed, len(validators)), progressErr)
+	}
+	return progressErr
 }
 
 const (
@@ -780,6 +800,10 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	run := CommissionFlowRun{Chain: chain, Validator: validator, FromDay: from, AsOf: asOf.AddDate(0, 0, -1), ComputedAt: nowUTC(), Overdraw: "{}", Commission: "{}", Untracked: "{}", DriftBase: "0"}
 	tr := newFlowTrace(validator, from, asOf, loader)
 	tr.strict = loader.private
+	if loader.private {
+		tr.progress = loader.progress
+	}
+	tr.reportProgress("root_started", "", -1)
 	var walletEvidence []CommissionFlowWalletEvidence
 	fail := func(err error) (CommissionFlowRun, error) {
 		run.Status, run.Reason = flowStatusError, err.Error()
@@ -794,9 +818,12 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		if loader.archive != nil {
 			evidence.Archive = loader.archive.evidence(tr.attempted)
 		}
+		tr.reportProgress("saving_error_started", "", -1)
 		if saveErr := save(run, nil, evidence); saveErr != nil {
+			tr.reportProgress("save_failed", "", -1)
 			return run, errors.Join(err, saveErr)
 		}
+		tr.reportProgress("error_saved", "", -1)
 		return run, err
 	}
 	receivers, err := s.commissionReceivers(chain, validator)
@@ -825,7 +852,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	var total [flowRules]decimal.Decimal
 	drift := decimal.Zero
 	asOfDay := asOf.AddDate(0, 0, -1)
-	for _, w := range tr.order {
+	for i, w := range tr.order {
 		run.Wallets++
 		if !w.Known {
 			run.OpeningUnknown++
@@ -836,6 +863,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		for r := 0; r < flowRules; r++ {
 			total[r] = total[r].Add(w.Overdraw[r])
 		}
+		tr.reportProgress("closing_started", w.Addr, len(tr.order)-i)
 		actual, known, err := loader.holdingsAt(w.Addr, asOfDay)
 		if err != nil || !known {
 			if loader.private {
@@ -843,6 +871,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 			}
 			continue
 		}
+		tr.reportProgress("closing_complete", w.Addr, len(tr.order)-i-1)
 		drift = drift.Add(w.simulated().Sub(actual.total()).Abs())
 		if loader.private {
 			e := commissionFlowWalletEvidence(w, actual, asOfDay)
@@ -890,7 +919,13 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	if loader.archive != nil {
 		evidence.Archive = loader.archive.evidence(tr.attempted)
 	}
-	return run, save(run, rows, evidence)
+	tr.reportProgress("saving_started", "", 0)
+	if err := save(run, rows, evidence); err != nil {
+		tr.reportProgress("save_failed", "", 0)
+		return run, err
+	}
+	tr.reportProgress("saved", "", 0)
+	return run, nil
 }
 
 // saveCommissionFlows replaces a validator's stored result. A failed run

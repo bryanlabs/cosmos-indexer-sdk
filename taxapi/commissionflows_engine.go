@@ -358,6 +358,12 @@ type flowTrace struct {
 	strict    bool
 	attempted map[string]bool
 
+	progress            func(commissionFlowProgress)
+	started             time.Time
+	progressSequence    int
+	appliedQueuedEvents int
+	discoveryComplete   bool
+
 	Wallets    map[string]*flowWallet
 	order      []*flowWallet
 	queue      flowQueue
@@ -370,7 +376,7 @@ type flowTrace struct {
 
 func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flowTrace {
 	return &flowTrace{
-		Validator: validator, From: from, AsOf: asOf, load: load,
+		Validator: validator, From: from, AsOf: asOf, load: load, started: time.Now(),
 		Wallets: map[string]*flowWallet{}, stops: map[string]flowStop{}, attempted: map[string]bool{},
 		Fates: map[FlowFateKey]decimal.Decimal{}, Commission: map[string]decimal.Decimal{},
 	}
@@ -388,8 +394,14 @@ func (t *flowTrace) run(group []string) error {
 		if err := t.apply(q.wallet, q.event, true); err != nil {
 			return err
 		}
+		t.appliedQueuedEvents++
+		if t.appliedQueuedEvents%1000 == 0 {
+			t.reportProgress("events_applied", "", -1)
+		}
 	}
 	t.settle()
+	t.discoveryComplete = true
+	t.reportProgress("discovery_complete", "", len(t.order))
 	return nil
 }
 
@@ -410,6 +422,7 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 		w.pools[r] = newFlowPools(r)
 		w.Overdraw[r] = decimal.Zero
 	}
+	t.reportProgress("opening_started", addr, -1)
 	h, known, err := t.load.opening(addr, start.AddDate(0, 0, -1))
 	if err != nil {
 		return err
@@ -417,6 +430,7 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 	if t.strict && !known {
 		return fmt.Errorf("commission opening requires exact archive state")
 	}
+	t.reportProgress("opening_complete", addr, -1)
 	w.Known = known
 	w.OpeningSource = h.Source
 	if known {
@@ -431,12 +445,14 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 			}
 		}
 	}
+	t.reportProgress("events_started", addr, -1)
 	events, err := t.load.events(addr, start, t.AsOf)
 	if err != nil {
 		return err
 	}
 	t.Wallets[addr] = w
 	t.order = append(t.order, w)
+	t.reportProgress("events_loaded", addr, -1)
 	for _, e := range events {
 		if cursor != nil && e.Key.before(*cursor) {
 			if err := t.apply(w, e, false); err != nil {
@@ -447,6 +463,7 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 		t.seq++
 		heap.Push(&t.queue, flowQueued{key: e.Key, seq: t.seq, wallet: w, event: e})
 	}
+	t.reportProgress("wallet_loaded", addr, -1)
 	return nil
 }
 

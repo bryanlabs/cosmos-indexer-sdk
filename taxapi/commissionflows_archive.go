@@ -29,6 +29,8 @@ type FlowArchiveReceipt struct {
 	RequestData string
 	SHA256      string
 	Response    string
+	// Reused marks an exact-height header shared from this endpoint's cache.
+	Reused bool `json:",omitempty"`
 }
 
 type flowArchive struct {
@@ -36,6 +38,7 @@ type flowArchive struct {
 	mu       sync.Mutex
 	receipts []FlowArchiveReceipt
 	holdings map[string]flowHoldings
+	headers  flowHeaderCache
 }
 
 func newFlowArchive(origin string) (*flowArchive, error) {
@@ -51,14 +54,7 @@ func (a *flowArchive) response(addr string, height int64, method string, q url.V
 	if err := a.rpc.GetJSON(method, q, &raw); err != nil {
 		return fmt.Errorf("commission archive %s request failed", method)
 	}
-	hash := sha256.Sum256(raw)
-	receipt := FlowArchiveReceipt{Address: addr, Height: height, Method: method, QueryPath: q.Get("path"), RequestData: q.Get("data"), SHA256: hex.EncodeToString(hash[:]), Response: string(raw)}
-	a.mu.Lock()
-	a.receipts = append(a.receipts, receipt)
-	a.mu.Unlock()
-	for _, dst := range local {
-		*dst = append(*dst, receipt)
-	}
+	a.retainResponse(addr, height, method, q, string(raw), false, local...)
 	var envelope struct{ Error json.RawMessage }
 	if err := json.Unmarshal(raw, &envelope); err != nil || (len(envelope.Error) > 0 && string(envelope.Error) != "null") {
 		return fmt.Errorf("invalid commission archive %s envelope", method)
@@ -69,8 +65,41 @@ func (a *flowArchive) response(addr string, height int64, method string, q url.V
 	return nil
 }
 
+func (a *flowArchive) retainResponse(addr string, height int64, method string, q url.Values, raw string, reused bool, local ...*[]FlowArchiveReceipt) {
+	hash := sha256.Sum256([]byte(raw))
+	receipt := FlowArchiveReceipt{Address: addr, Height: height, Method: method, QueryPath: q.Get("path"), RequestData: q.Get("data"), SHA256: hex.EncodeToString(hash[:]), Response: raw, Reused: reused}
+	a.mu.Lock()
+	a.receipts = append(a.receipts, receipt)
+	a.mu.Unlock()
+	for _, dst := range local {
+		*dst = append(*dst, receipt)
+	}
+}
+
 func (a *flowArchive) header(addr string, height int64, local ...*[]FlowArchiveReceipt) (time.Time, error) {
+	q := url.Values{"height": {strconv.FormatInt(height, 10)}}
+	raw, reused, err := a.headers.get(height, func() (string, error) {
+		var body json.RawMessage
+		if err := a.rpc.GetJSON("block", q, &body); err != nil {
+			return "", fmt.Errorf("commission archive block request failed")
+		}
+		_, err := flowArchiveHeader(string(body), height)
+		return string(body), err
+	})
+	// Failed responses and cache hits both retain the exact bytes in every
+	// requesting wallet's evidence, not just the first caller's receipts.
+	if raw != "" {
+		a.retainResponse(addr, height, "block", q, raw, reused, local...)
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return flowArchiveHeader(raw, height)
+}
+
+func flowArchiveHeader(raw string, height int64) (time.Time, error) {
 	var body struct {
+		Error  json.RawMessage
 		Result struct {
 			Block struct {
 				Header struct {
@@ -81,8 +110,8 @@ func (a *flowArchive) header(addr string, height int64, local ...*[]FlowArchiveR
 			} `json:"block"`
 		} `json:"result"`
 	}
-	if err := a.response(addr, height, "block", url.Values{"height": {strconv.FormatInt(height, 10)}}, &body, local...); err != nil {
-		return time.Time{}, err
+	if err := json.Unmarshal([]byte(raw), &body); err != nil || (len(body.Error) > 0 && string(body.Error) != "null") {
+		return time.Time{}, fmt.Errorf("invalid commission archive block envelope")
 	}
 	h := body.Result.Block.Header
 	if h.ChainID != "cosmoshub-4" || h.Height != strconv.FormatInt(height, 10) || h.Time.IsZero() {

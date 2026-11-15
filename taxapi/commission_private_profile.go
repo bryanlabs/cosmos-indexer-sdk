@@ -163,7 +163,7 @@ func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoa
 	r.privateReadSnapshotTimeout = s.privateReadSnapshotTimeout
 	r.commissionPrivateProfile = s.commissionPrivateProfile
 	r.privateProjectionReceipts = &commissionProjectionJournal{rows: map[string]CommissionPrivateProjectionReceipt{}}
-	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, archive: base.archive, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
+	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, archive: base.archive, progress: base.progress, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
 	base.mu.Lock()
 	for k, v := range base.labels {
 		l.labels[k] = v
