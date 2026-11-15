@@ -42,7 +42,7 @@ class Reader:
         if args[0] == 'sh':
             require(len(args) == 5 and args[:4] == ['sh','-c',EXISTS_SCRIPT,'readback-exists'] and args[4].startswith('/'), 'only fixed read-only existence probe shell allowed')
         if args[0] == 'dd':
-            require(all(arg.startswith(('if=','bs=','count=')) for arg in args[1:]) and any(arg.startswith('if=') for arg in args[1:]), 'source dd output or unknown option refused')
+            require(all(arg.startswith(('if=','bs=','count=','skip=')) or arg == 'iflag=skip_bytes' for arg in args[1:]) and any(arg.startswith('if=') for arg in args[1:]), 'source dd output or unknown option refused')
         if args[0] == 'tar':
             require('-cf' in args and args[args.index('-cf') + 1] == '-' and not any(arg.startswith(('-x','--extract','--delete')) for arg in args[1:]), 'source tar must write only stdout')
         if args[0] == 'xargs':
