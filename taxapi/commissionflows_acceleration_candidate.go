@@ -18,11 +18,15 @@ import (
 // Existing V2 queues remain untouched and CAN later overlap this queue. Reuse
 // is checked immediately before work, and every overlap stays separate evidence.
 // A dedicated capped read-only pool is required. No migration is performed here.
-func (s *Server) RunCommissionCaptureCandidate(parent context.Context, target CommissionFlowBuildOptions, sources, canonical, roots []string, chain string, from time.Time, output, samplePath string, runRoot func(context.Context, string) error) error {
+type CommissionCaptureCandidateOptions struct{ ComputeOnly bool }
+
+// ValidateCommissionCaptureCandidate is the shared CLI/runtime validation path.
+// ComputeOnly is explicit and forbids cross-generation source adoption.
+func ValidateCommissionCaptureCandidate(target CommissionFlowBuildOptions, sources, canonical, roots []string, policy CommissionCaptureCandidateOptions) error {
 	if err := target.validate(); err != nil {
 		return err
 	}
-	if target.PrivateProfile == nil || target.SourceCorrections == nil || len(canonical) != 324 || len(roots) == 0 || runRoot == nil {
+	if target.PrivateProfile == nil || target.SourceCorrections == nil || len(canonical) != 324 || len(roots) == 0 {
 		return fmt.Errorf("candidate requires exact corrected profile and complete canonical membership")
 	}
 	allowed := map[string]bool{}
@@ -39,8 +43,8 @@ func (s *Server) RunCommissionCaptureCandidate(parent context.Context, target Co
 		}
 		selected[v] = true
 	}
-	if len(sources) == 0 || len(sources) > 8 {
-		return fmt.Errorf("explicit bounded source versions required")
+	if len(sources) > 8 || (!policy.ComputeOnly && len(sources) == 0) || (policy.ComputeOnly && len(sources) != 0) {
+		return fmt.Errorf("explicit compute-only mode requires no sources; reuse mode requires one to eight exact sources")
 	}
 	seen := map[string]bool{target.Version: true}
 	for _, v := range sources {
@@ -48,6 +52,20 @@ func (s *Server) RunCommissionCaptureCandidate(parent context.Context, target Co
 			return fmt.Errorf("invalid candidate source allowlist")
 		}
 		seen[v] = true
+	}
+	return nil
+}
+
+func (s *Server) RunCommissionCaptureCandidate(parent context.Context, target CommissionFlowBuildOptions, sources, canonical, roots []string, chain string, from time.Time, output, samplePath string, runRoot func(context.Context, string) error, options ...CommissionCaptureCandidateOptions) error {
+	if len(options) > 1 || runRoot == nil {
+		return fmt.Errorf("one candidate policy and native executor required")
+	}
+	policy := CommissionCaptureCandidateOptions{}
+	if len(options) == 1 {
+		policy = options[0]
+	}
+	if err := ValidateCommissionCaptureCandidate(target, sources, canonical, roots, policy); err != nil {
+		return err
 	}
 	pool, err := s.db.DB()
 	if err != nil || pool.Stats().MaxOpenConnections < 1 || pool.Stats().MaxOpenConnections > 2 {
@@ -69,16 +87,18 @@ func (s *Server) RunCommissionCaptureCandidate(parent context.Context, target Co
 		if ownErr == nil && exists {
 			continue
 		}
-		ref, err := reader.ResolveCommissionCapture(target, sources, chain, v, from)
-		if err != nil {
-			failed++
-			continue
-		}
-		if ref != nil {
-			if err := retainCommissionAdoption(output, *ref); err != nil {
-				return err
+		if !policy.ComputeOnly {
+			ref, err := reader.ResolveCommissionCapture(target, sources, chain, v, from)
+			if err != nil {
+				failed++
+				continue
 			}
-			continue
+			if ref != nil {
+				if err := retainCommissionAdoption(output, *ref); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		if ownErr != nil {
 			failed++

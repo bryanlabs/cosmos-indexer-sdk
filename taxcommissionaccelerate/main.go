@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +24,7 @@ import (
 type config struct {
 	Version, Build, Chain, From, AsOf                                          string
 	SourceVersions                                                             []string
+	ComputeOnly                                                                bool
 	CanonicalFile, CanonicalSHA256, QueueFile, QueueSHA256                     string
 	ProfileFile, ProfileSHA256, CorrectionsFile, CorrectionsSHA256             string
 	ArchiveConfig, OutputDirectory, ResourceSample, NativeBinary, NativeSHA256 string
@@ -51,6 +54,7 @@ func members(path, digest string) ([]string, error) {
 }
 func main() {
 	path := flag.String("config", "", "private reviewed immutable candidate config")
+	validateOnly := flag.Bool("validate-only", false, "validate exact inputs and pinned native before any DB connection or execution")
 	flag.Parse()
 	b, err := bounded(*path, 32768)
 	if err != nil {
@@ -59,7 +63,7 @@ func main() {
 	var c config
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&c) != nil {
+	if dec.Decode(&c) != nil || dec.Decode(new(any)) != io.EOF {
 		fail()
 	}
 	canonical, err := members(c.CanonicalFile, c.CanonicalSHA256)
@@ -86,6 +90,14 @@ func main() {
 	if err != nil {
 		fail()
 	}
+	target := taxapi.CommissionFlowBuildOptions{Version: c.Version, Build: c.Build, AsOf: asOf, PrivateProfile: profile, SourceCorrections: corrections}
+	if c.Chain != "mainnet" || !from.Equal(profile.From) || taxapi.ValidateCommissionCaptureCandidate(target, c.SourceVersions, canonical, roots, taxapi.CommissionCaptureCandidateOptions{ComputeOnly: c.ComputeOnly}) != nil || !filepath.IsAbs(c.OutputDirectory) || !filepath.IsAbs(c.ResourceSample) || validateNative(c.NativeBinary, c.NativeSHA256) != nil {
+		fail()
+	}
+	if *validateOnly {
+		fmt.Println("private candidate configuration validated; no database or native execution")
+		return
+	}
 	for _, key := range []string{"DB_HOST", "DB_NAME", "DB_USER", "DB_PASS"} {
 		if os.Getenv(key) == "" {
 			fail()
@@ -106,7 +118,6 @@ func main() {
 	defer pool.Close()
 	pool.SetMaxOpenConns(1)
 	pool.SetMaxIdleConns(1)
-	target := taxapi.CommissionFlowBuildOptions{Version: c.Version, Build: c.Build, AsOf: asOf, PrivateProfile: profile, SourceCorrections: corrections}
 	args := []string{"--commission-flows", "--chain=" + c.Chain, "--commission-flows-from=" + c.From, "--commission-as-of=" + c.AsOf, "--commission-output-version=" + c.Version, "--commission-build=" + c.Build, "--commission-source-corrections=" + c.CorrectionsFile, "--commission-source-corrections-sha256=" + c.CorrectionsSHA256, "--commission-private-profile=" + c.ProfileFile, "--commission-private-profile-sha256=" + c.ProfileSHA256, "--commission-read-snapshot-timeout=60s", "--commission-archive-config=" + c.ArchiveConfig}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -118,9 +129,29 @@ func main() {
 			var results []bool
 			return db.WithContext(cancelCtx).Raw("SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE application_name = ? AND backend_type = 'client backend' AND pid <> pg_backend_pid()", application).Scan(&results).Error
 		})
-	})
+	}, taxapi.CommissionCaptureCandidateOptions{ComputeOnly: c.ComputeOnly})
 	if err != nil {
 		fail()
 	}
 	fmt.Println("private candidate queue complete; financial_acceptance=false public_promotion=false")
+}
+
+func validateNative(path, digest string) error {
+	if !filepath.IsAbs(path) || len(digest) != 64 {
+		return fmt.Errorf("invalid native identity")
+	}
+	st, err := os.Lstat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 256<<20 || st.Mode().Perm()&0111 == 0 {
+		return fmt.Errorf("invalid native executable")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("native executable unreadable")
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil || hex.EncodeToString(h.Sum(nil)) != digest {
+		return fmt.Errorf("native executable digest mismatch")
+	}
+	return nil
 }
