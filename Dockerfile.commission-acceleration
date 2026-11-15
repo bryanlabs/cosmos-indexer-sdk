@@ -1,0 +1,17 @@
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
+WORKDIR /src
+ENV GOTOOLCHAIN=local GOMAXPROCS=2 GOFLAGS="-p=1"
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod go mod download
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
+    --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/taxcommissionaccelerate ./taxcommissionaccelerate
+FROM ghcr.io/bryanlabs/cosmos-tax-sdk:commission-page-82a6192f-20261115@sha256:fc277f445a4257a8855bce376c44cc71cc90a51417f72be8cba5e141d0abafd4
+COPY --from=build /out/taxcommissionaccelerate /usr/local/bin/taxcommissionaccelerate
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
+LABEL cosmos-tax.native-source="82a6192fb1551e0301e9219cd490ff3afbba3a1b"
+LABEL cosmos-tax.native-binary-sha256="f83d234ed73871df49100b0f40619bb9a603a5efbe9de879f11c0cfea2f72459"
+USER tax
+ENTRYPOINT ["/usr/local/bin/taxcommissionaccelerate"]
