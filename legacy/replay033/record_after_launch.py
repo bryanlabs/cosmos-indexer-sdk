@@ -120,7 +120,7 @@ def record(first, through, proof, launch, build, trimpath, entry, helper, built_
     tmp = out / 'tmp'
     tmp.mkdir(mode=0o700)
     env = dict(os.environ, TMPDIR=str(tmp), GOTMPDIR=str(tmp), GOMAXPROCS='2', GOMEMLIMIT='512MiB', GOFLAGS='-mod=readonly')
-    arguments = ['go', 'build'] + (['-trimpath'] if trimpath else []) + ['-o', str(out / 'consume-native.rebuilt'), './cmd/consume-native']
+    arguments = ['go', 'build', '-p', '2'] + (['-trimpath'] if trimpath else []) + ['-o', str(out / 'consume-native.rebuilt'), './cmd/consume-native']
     if trimpath:
         env['CGO_ENABLED'] = info['cgo']
     tested = tests / 'legacy/replay033'
@@ -139,7 +139,7 @@ def record(first, through, proof, launch, build, trimpath, entry, helper, built_
         else:
             log.write(('# No byte-for-byte rebuild: %s is no longer a clean checkout of %s, and the helper embeds that path.\n' % (build, commit)).encode())
             log.flush()
-        subprocess.run(['go', 'test', './cmd/consume-native'], cwd=tested, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+        subprocess.run(['go', 'test', '-p', '2', './cmd/consume-native'], cwd=tested, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
         subprocess.run([sys.executable, '-B', '-m', 'unittest'] + names_of_tests, cwd=tested, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
     if rebuilt:
         helper_proof = 'rebuilt_byte_identical_from_commit'

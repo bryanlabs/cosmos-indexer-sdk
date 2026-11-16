@@ -57,7 +57,7 @@ def optional(part, name):
     return Path(part[name]) if part.get(name) else None
 
 
-def prepare(plan, part):
+def prepare(plan, part, controls_too=True):
     """The after-launch record, then the refusal controls. Both depend only on the source and the helper, not on the part having finished."""
     out = record_dir(plan, part)
     Path(plan['record_root']).mkdir(mode=0o700, exist_ok=True)
@@ -74,7 +74,7 @@ def prepare(plan, part):
     done = [f for f in folders if (f / 'actual-negative-controls.private.json').exists()]
     fresh = next(f for f in folders if not f.exists()) if not done else done[0]
     controls = Path(part['controls']) if part.get('controls') else fresh / 'actual-negative-controls.private.json'
-    if not controls.exists():
+    if controls_too and not controls.exists():
         require(not part.get('controls'), 'named controls do not exist yet')
         from actual_full_controls import run
         prefix = 'opening_checkpoint' in started
@@ -120,7 +120,8 @@ def join(plan):
         witness = Path(plan['cross_build_witness'])
         config['cross_build_witness'] = dict(path=str(witness), sha256=sha(witness / 'complete-component.private.json'))
     root = Path(plan['record_root'])
-    with (root / 'join-config.private.json').open('x') as out:
+    # A refused join leaves its inputs on record and a later attempt writes its own.
+    with (root / ('join-config-%s.private.json' % datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))).open('x') as out:
         json.dump(config, out, indent=2, sort_keys=True)
     def progress(name, index, total):
         print(json.dumps(dict(rehashed=index, of=total, seal=name)), flush=True)
@@ -251,6 +252,7 @@ if __name__ == '__main__':
     parser.add_argument('--through', type=int)
     parser.add_argument('--part', type=int, help='mini only: the plan part whose source, helper and launch worktree to use')
     parser.add_argument('--directory', type=Path)
+    parser.add_argument('--record-only', action='store_true', help='prepare only: write the launch record now and leave the controls for later')
     a = parser.parse_args()
     if a.step == 'plan':
         catalog = json.loads(a.catalog.read_bytes())
@@ -265,7 +267,7 @@ if __name__ == '__main__':
     background(Path(plan['record_root']) / 'tmp')
     clean_at(TOOL, subprocess.check_output(['git', '-C', str(TOOL), 'rev-parse', 'HEAD'], text=True).strip(), 'sealing tool tree is not clean')
     if a.step == 'prepare':
-        prepare(plan, part_of(plan, a.first))
+        prepare(plan, part_of(plan, a.first), not a.record_only)
     elif a.step == 'seal':
         seal_part(plan, part_of(plan, a.first))
     elif a.step == 'join':
