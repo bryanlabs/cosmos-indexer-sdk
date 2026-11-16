@@ -22,7 +22,7 @@ const hub1Lines = `{"before":[{"key":"AA==","value":"AQ=="}],"unit":"native_stor
 {"kind":"accounting","code":0,"height":7,"tx":0,"message":-1,"phase":"transaction","label":"","status":"committed","address":"","denom":"","amount":""}
 {"kind":"accounting","code":0,"height":7,"tx":-1,"message":-1,"phase":"end_block","label":"","status":"committed","address":"","denom":"","amount":""}
 {"kind":"height_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"block","label":"","status":"committed","address":"","denom":"","amount":""}
-{"before":[{"key":"AA==","value":"Ag=="}],"unit":"native_store_bytes","kind":"native_state_checkpoint","code":0,"height":7,"tx":-1,"message":-1,"phase":"block","label":"segment_final/store:main:main","status":"committed","address":"","denom":"","amount":""}
+{"before":[{"key":"AA==","value":"Ag=="}],"unit":"native_store_bytes","kind":"native_state_checkpoint","code":0,"height":7,"tx":-1,"message":-1,"phase":"segment","label":"segment_final/store:main:main","status":"committed","address":"","denom":"","amount":""}
 {"kind":"observation_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"segment","label":"","status":"committed","address":"","denom":"","amount":""}
 `
 

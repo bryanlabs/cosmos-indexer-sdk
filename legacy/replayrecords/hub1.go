@@ -112,7 +112,7 @@ func ScanHub1(r io.Reader, p Proof, visit func(Height) error) (Hub1Counts, error
 			inside := x.Height == current.Number && x.Height <= p.Through
 			// The closing store checkpoints follow the last height.
 			final := !p.Export && x.Kind == "native_state_checkpoint" && strings.HasPrefix(x.Label, "segment_final/") && x.Height == p.Through &&
-				current.Number == p.Through+1 && len(current.Records) == 0 && x.Phase == "block" && x.Tx == -1 && x.Message == -1
+				current.Number == p.Through+1 && len(current.Records) == 0 && x.Phase == "segment" && x.Tx == -1 && x.Message == -1
 			if strings.HasPrefix(x.Label, "segment_final/") {
 				inside = false
 			}
