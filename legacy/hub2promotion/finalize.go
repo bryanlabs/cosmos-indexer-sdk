@@ -394,10 +394,10 @@ func readComponent(chain string, n int, in ComponentInput, prior *SealedComponen
 			first, ok1 := whole(config, "first")
 			last, ok2 := whole(config, "last")
 			seal, _ := config["prior_seal"].(string)
-			if !ok1 || !ok2 || first != out.First || last != out.Last || prior == nil || filepath.Clean(seal) != prior.Acceptance.Path {
-				return out, refuse(name, "this root records a different earlier seal than the part listed before it")
+			if !ok1 || !ok2 || first != out.First || last != out.Last || seal == "" {
+				return out, refuse(name, "this root's recorded range or earlier seal does not match its receipt")
 			}
-			out.PriorSeal = seal
+			out.PriorSeal = filepath.Clean(seal)
 		}
 		if e = opening(); e != nil {
 			return out, e
@@ -522,6 +522,9 @@ func verifyComponents(spec FinalizeSpec, b finalBounds) (ComponentChain, error) 
 		}
 		if c.continues != "" && (prior == nil || c.continues != prior.Acceptance.SHA256) {
 			return out, refuse(name, "receipt continues from a different earlier receipt than the one listed before it")
+		}
+		if c.PriorSeal != "" && (prior == nil || c.PriorSeal != filepath.Clean(prior.Acceptance.Path)) {
+			return out, refuse(name, "this root records a different earlier seal than the part listed before it")
 		}
 		if prior != nil && (c.Opening == "" || c.Opening != prior.Closing) {
 			return out, refuse(name, "seam at height %d: this part's start state differs from the previous part's end state", prior.Last)
