@@ -209,6 +209,12 @@ func beforeManifest(op, chain string, server p.Pin, config, runtimeFile, output 
 		}
 		return pin, nil
 	}
+	if op != "install-scope" {
+		// Refuse before the long read, not after it.
+		if _, e := os.Lstat(output); output == "" || e == nil {
+			return errors.New("output must be a NEW file; nothing is overwritten")
+		}
+	}
 	if op == "install-scope" {
 		owner, e := connect(c.Owner)
 		if e != nil {

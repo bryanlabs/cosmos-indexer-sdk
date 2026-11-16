@@ -313,7 +313,7 @@ func TestWholeChainHub2RealRehearsalFinalizes(t *testing.T) {
 		if r.Label == "validator_commission/bank.add" {
 			category, to = "commission", "operator-of-validator"
 		}
-		line, e := json.Marshal(syntheticRow(inserts[9], "cosmoshub-2", map[string]any{"height": canonical, "phase": 4, "tx_index": -1, "msg_index": -1, "sub_index": sub, "category": category, "amount": r.Amount, "denom": r.Denom, "to_addr": to, "validator_address": r.Validator, "amount_source": "export_payout"}))
+		line, e := json.Marshal(syntheticRow(inserts[9], "cosmoshub-2", map[string]any{"height": canonical, "phase": 4, "tx_index": 0, "msg_index": 0, "sub_index": sub, "category": category, "amount": r.Amount, "denom": r.Denom, "to_addr": to, "validator_address": r.Validator, "amount_source": "export_payout"}))
 		require.NoError(t, e)
 		withPayout.Write(line)
 		withPayout.WriteString("\n")

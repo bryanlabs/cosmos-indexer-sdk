@@ -101,9 +101,9 @@ func newWholeChain(t *testing.T, chain string) *wholeChain {
 	w.payouts = []exportRecord{record("accounting", "delegator_reward", "synthetic-val", "synthetic-a", ""), record("movement", "delegator_reward/bank.add", "synthetic-val", "synthetic-a", "5"), record("movement", "delegator_reward/bank.add", "synthetic-val", "synthetic-b", "5"), record("movement", "validator_commission/bank.add", "synthetic-val", "", "3"), record("export_completed", "", "", "", "")}
 	w.taxRows = []map[string]any{
 		{"height": 2, "phase": 2, "tx_index": 0, "msg_index": 0, "sub_index": 0, "category": "transfer", "amount": "9", "amount_source": "message"},
-		{"height": 6, "phase": 4, "tx_index": -1, "msg_index": -1, "sub_index": 0, "category": "reward", "amount": "5", "denom": "uatom", "to_addr": "synthetic-a", "validator_address": "synthetic-val", "amount_source": "export_payout"},
-		{"height": 6, "phase": 4, "tx_index": -1, "msg_index": -1, "sub_index": 1, "category": "reward", "amount": "5", "denom": "uatom", "to_addr": "synthetic-b", "validator_address": "synthetic-val", "amount_source": "export_payout"},
-		{"height": 6, "phase": 4, "tx_index": -1, "msg_index": -1, "sub_index": 2, "category": "commission", "amount": "3", "denom": "uatom", "to_addr": "synthetic-operator", "validator_address": "synthetic-val", "amount_source": "export_payout"},
+		{"height": 6, "phase": 4, "tx_index": 0, "msg_index": 0, "sub_index": 0, "category": "reward", "amount": "5", "denom": "uatom", "to_addr": "synthetic-a", "validator_address": "synthetic-val", "amount_source": "export_payout"},
+		{"height": 6, "phase": 4, "tx_index": 0, "msg_index": 0, "sub_index": 1, "category": "reward", "amount": "5", "denom": "uatom", "to_addr": "synthetic-b", "validator_address": "synthetic-val", "amount_source": "export_payout"},
+		{"height": 6, "phase": 4, "tx_index": 0, "msg_index": 0, "sub_index": 2, "category": "commission", "amount": "3", "denom": "uatom", "to_addr": "synthetic-operator", "validator_address": "synthetic-val", "amount_source": "export_payout"},
 	}
 	return w
 }
