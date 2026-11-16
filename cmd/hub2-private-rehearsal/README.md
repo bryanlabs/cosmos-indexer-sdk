@@ -31,6 +31,8 @@ Any prefix is valid: 7 components (1,400,000), 10 (2,000,000), all 15.
 | `add` | imports every listed component that is not completely stored |
 | `import` | the same, but refuses a database that already holds rows |
 | `fingerprint` | hashes all 14 legacy tables in key order, optionally `-through` a height |
+| `receipt` | reads every part again from its sealed files, then writes the staging receipt |
+| `verify-receipt` | recomputes the receipt and refuses on any difference |
 | `snapshot`, `refuse-retry` | the 1.4M rehearsal's retry proof, unchanged |
 
 `-database` and `-port` select the staging database. `-parallel` (1 to 4)
@@ -72,6 +74,32 @@ After the components it checks each seam (the first block of a new component
 names the stored last block of the one before), no gap or duplicate header,
 transaction counts, payout placement and count, and no tax row after the
 export. The receipt directory must be new.
+
+## Staging receipt
+
+The finalizer proves the exported rows are complete and balance. The staging
+receipt (`hub2-staging-receipt-v1`) proves where they came from. Per part, in
+order: the seal's sha256, the sealed source digest, and the count and
+key-ordered hash of the rows that part put in `blocks`, `tx_inclusions`,
+`block_events` and `taxable_events`. Then the restart payout rows bound to
+the export digest, the tail rows, the ten loader tables hashed as the export
+writes them, and the 14 table fingerprint.
+
+```sh
+hub2-private-rehearsal -mode receipt -database NAME -port PORT \
+  -manifest MANIFEST.json -out /abs/NEW.receipt.json
+hub2-private-rehearsal -mode verify-receipt -database NAME -port PORT \
+  -manifest MANIFEST.json -receipt /abs/NEW.receipt.json
+```
+
+`receipt` sets the session read-only, runs the whole-database checks, hashes
+the stored rows in one snapshot, then derives every height of every part
+again from the sealed files and requires it to equal the stored height. Only
+then is the file created, mode 0600, never over an existing path. It holds no
+clock time or database name, so it is reproducible byte for byte.
+`verify-receipt` does the same work and compares; `-hashes-only` skips
+reading the sealed files again. Payout rows are phase 4 with transaction
+index 0 and message index 0; the receipt states it and refuses otherwise.
 
 ## Why one at a time equals one run
 
