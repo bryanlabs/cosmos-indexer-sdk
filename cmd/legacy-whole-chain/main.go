@@ -131,13 +131,13 @@ func run() error {
 		if e != nil {
 			return e
 		}
-		return show(map[string]any{"full_chain_books_tax_acceptance": r.Accepted, "chain": r.Chain, "first": r.First, "last": r.Last, "parts": len(r.Components), "restart_payout_rows": r.CanonicalRows, "accounts_compared": r.Balance.AccountsChecked, "differences": 0, "report": pin})
+		return show(map[string]any{"full_chain_books_tax_acceptance": r.Accepted, "chain": r.Chain, "first": r.First, "last": r.Last, "parts": len(r.Components), "restart_payout_rows": r.CanonicalRows, "accounts_compared": r.Balance.AccountsChecked, "differences": 0, "staging_receipt_sha256": r.StagingReceiptSHA, "report": pin})
 	case "manifest":
 		m, pin, e := p.AssembleManifest(p.AssembleSpec{Report: p.Pin{Path: *report, SHA256: *reportSHA}, Destination: p.Pin{Path: *destination, SHA256: *destinationSHA}, ApprovalSource: *approval}, *output)
 		if e != nil {
 			return e
 		}
-		return show(map[string]any{"assembled": true, "profile": m.Profile, "chain": m.Scope.ChainID, "manifest": pin, "loader_validation": "passed"})
+		return show(map[string]any{"assembled": true, "profile": m.Profile, "chain": m.Scope.ChainID, "manifest": pin, "staging_receipt_sha256": m.Approved.StagingReceipt.SHA256, "loader_validation": "passed"})
 	}
 	return errors.New("unknown operation")
 }
