@@ -116,7 +116,7 @@ def join(plan):
     config = dict(profiles=[dict(path=str(p), sha256=sha(p)) for p in seals], terminal_seal=plan['terminal_seal'], canonical_boundary=plan['canonical_boundary'])
     if plan.get('both_builds_stretch'):
         config['both_builds_stretch'] = [dict(path=str(d), sha256=sha(Path(d) / 'complete-component.private.json')) for d in plan['both_builds_stretch']]
-    if len({json.loads(p.read_bytes())['signed_source_commit'] for p in seals}) > 1:
+    if plan.get('cross_build_witness'):
         witness = Path(plan['cross_build_witness'])
         config['cross_build_witness'] = dict(path=str(witness), sha256=sha(witness / 'complete-component.private.json'))
     root = Path(plan['record_root'])
