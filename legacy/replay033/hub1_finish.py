@@ -233,6 +233,9 @@ def make_plan(catalog):
             if chosen.get(name):
                 part[name] = chosen[name]
         origin = Path(chosen['opening_checkpoint']).with_suffix('.from') if chosen.get('resume_opening') else None
+        if origin is not None and not origin.is_file():
+            # A run reopened from a savepoint names that savepoint beside its own list of the opening files.
+            origin = Path(chosen['opening_manifest']).with_name('opening.from')
         if origin is not None and origin.is_file():
             part['interrupted_run'] = origin.read_text().strip()
         for known in catalog.get('known_controls', []):
@@ -241,7 +244,7 @@ def make_plan(catalog):
                 part['controls'] = known
         part['earlier_attempts'] = [dict(proof=a['proof'], state=a['state'], exit=a['exit'], first=a['first'], last_verified_height=a['last_verified_height'],
                                          contributed_recorded_output='heights %d to %d only, through its savepoint, sealed as their own part' % (a['first'], a['saved_through']) if a.get('saved_through') else False)
-                                    for a in attempts if a is not chosen and a['proof'] != chosen.get('attempt_proof') and a['state'] != 'finished' and (a['first'] == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
+                                    for a in attempts if a is not chosen and a['proof'] != chosen.get('attempt_proof') and a['state'] != 'finished' and (a['first'] == chosen['first'] or a.get('saved_through', -1) + 1 == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
         parts.append(part)
         at = chosen['through'] + 1
     plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches') if k in catalog}
