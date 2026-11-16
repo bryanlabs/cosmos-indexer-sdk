@@ -114,6 +114,8 @@ def join(plan):
     missing = [str(p) for p in seals if not p.exists()]
     require(not missing, 'parts not sealed yet: ' + ', '.join(missing))
     config = dict(profiles=[dict(path=str(p), sha256=sha(p)) for p in seals], terminal_seal=plan['terminal_seal'], canonical_boundary=plan['canonical_boundary'])
+    if plan.get('both_builds_stretch'):
+        config['both_builds_stretch'] = [dict(path=str(d), sha256=sha(Path(d) / 'complete-component.private.json')) for d in plan['both_builds_stretch']]
     if len({json.loads(p.read_bytes())['signed_source_commit'] for p in seals}) > 1:
         witness = Path(plan['cross_build_witness'])
         config['cross_build_witness'] = dict(path=str(witness), sha256=sha(witness / 'complete-component.private.json'))
@@ -210,7 +212,7 @@ def make_plan(catalog):
                                     for a in attempts if a is not chosen and a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first'] and a['state'] != 'finished']
         parts.append(part)
         at = chosen['through'] + 1
-    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness') if k in catalog}
+    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch') if k in catalog}
     plan.update(parts=parts, covered_through=at - 1, complete=at == 500001, made_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     return plan
 
@@ -227,6 +229,8 @@ def mini(plan, part, first, through, directory):
                '--native-helper', str(helper), '--receipt', str(proof / 'complete-component.private.json')]
     if part.get('opening_checkpoint'):
         command += ['--opening-checkpoint', part['opening_checkpoint'], '--opening-manifest', part['opening_manifest']] + (['--resume-opening'] if part.get('resume_opening') else [])
+    if part.get('savepoint_every'):
+        command += ['--savepoint-every', str(part['savepoint_every'])]
     if part.get('validator_history'):
         command += ['--validator-history', part['validator_history'], '--validator-history-sha256', sha(Path(part['validator_history']))]
     (directory / 'launcher.private.txt').write_text(json.dumps(dict(checked_before_start=True, signed_source_commit=commit, launch_worktree=str(launch), helper_sha256=sha(helper),

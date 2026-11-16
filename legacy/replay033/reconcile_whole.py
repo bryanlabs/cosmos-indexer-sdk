@@ -44,6 +44,25 @@ BUILD_DIFFERENCES = {
 }
 
 
+# The second reviewed pair. Some relaunched parts run a build that can also save
+# its state every so many heights; the others run the build just before it.
+# The two commits differ in exactly these two files, and only by this:
+# - main.go gains a "savepoint" message. On it the helper copies its committed
+#   state to a new folder and writes a side receipt there. The message handler
+#   reads the working state and writes nothing to it. The final receipt is
+#   built by the same expression as before, moved into a function.
+# - consume_split.py gains --savepoint-every, which sends that message, and
+#   builds its receipt with the same fields, moved into a function.
+# Reading the change is not treated as enough. The join also requires one
+# stretch of heights recorded by both builds from the same opening, the newer
+# one taking at least one savepoint on the way, with identical receipts.
+BEFORE_SAVE, WITH_SAVE = '2630a0d16aeaa02124bf1e70274f1d34d59a6136', '26a4e0c3f6e15eaabb8e7dcbd9514ea0e3724ccd'
+SAVE_DIFFERENCES = {
+    'legacy/replay033/cmd/consume-native/main.go': ('32dba21cad4c6bba5e918d2ff0b0910a96d4125db0b20ece48cc9259783c7511', 'dfb6dc33ea42423253d1168ffe8d62e3495e470d70c351d088da1cd22444c5d0'),
+    'legacy/replay033/consume_split.py': ('d8915f29c0085b28bb7b7a4e81e634998a37ba10c103ce3b6997b9a1f3299d33', 'a50d443dce28772a0719b5ba9faee79b1af79f0bba2ce850a07f1c39d7c2a92c'),
+}
+
+
 def pinned(path, digest):
     require(path.is_file() and not path.is_symlink() and sha(path) == digest, 'changed, missing or nonregular sealed artifact')
     return json.loads(path.read_bytes())
@@ -102,7 +121,25 @@ def records_nothing(name):
         'run_closed_profile.py', 'run_whole.py', 'actual_full_controls.py', 'actual_bounded_controls.py', 'actual_checkpoint_controls.py', 'verify_source_preservation.py')
 
 
-def check_builds(sealed, witness):
+def same_recording(pair, helpers):
+    """One stretch of heights recorded by both builds, with nothing different but the helper that made it."""
+    require(pair is not None and len(pair) == 2, 'a stretch recorded by both builds is required')
+    runs = []
+    for witness in pair:
+        directory = Path(witness['path'])
+        run = pinned(directory / 'complete-component.private.json', witness['sha256'])
+        native = pinned(directory / 'native-proof.private.json', run['native_proof_sha256'])
+        require(json.loads((directory / 'exit.private.json').read_bytes())['exit'] == 0 and run['schema'] == 'native033-split-range-financial-v1' and run['heights'] >= 100, 'cross-build stretch did not finish or is too short')
+        saved = sorted(d.name for d in (directory / 'savepoints').iterdir() if (d / 'part.private.json').is_file()) if (directory / 'savepoints').is_dir() else []
+        comparable = dict(run, native_helper_sha256='', fast_forward=dict(run['fast_forward'], seconds=0))
+        runs.append((run['native_helper_sha256'], comparable, native, saved))
+    require({r[0] for r in runs} == set(helpers.values()) and len(set(helpers.values())) == 2, 'cross-build stretch was not recorded by the two helpers being joined')
+    require(runs[0][1] == runs[1][1] and runs[0][2] == runs[1][2], 'the two builds recorded the same heights differently')
+    require(all(bool(r[3]) is (r[0] == helpers[WITH_SAVE]) for r in runs), 'the saving build took no savepoint on the cross-build stretch')
+    return dict(first=runs[0][1]['first'], through=runs[0][1]['through'], savepoints=sorted(set(runs[0][3] + runs[1][3]), key=int))
+
+
+def check_builds(sealed, witness, pair=None):
     """All parts from one recorder, or from recorders whose every difference is accounted for."""
     by_commit = {}
     for result, seal, _ in sealed:
@@ -111,7 +148,7 @@ def check_builds(sealed, witness):
         require(all(s['signed_code_pins'] == parts[0][1]['signed_code_pins'] and s['native_helper_sha256'] == parts[0][1]['native_helper_sha256'] for _, s in parts), 'parts of one commit differ in code or helper')
     reference = NEWER if NEWER in by_commit else sorted(by_commit)[0]
     b = by_commit[reference][0][1]['signed_code_pins']
-    reviewed = False
+    reviewed = saving = False
     for commit, parts in sorted(by_commit.items()):
         a = parts[0][1]['signed_code_pins']
         differing = sorted(name for name in set(a) | set(b) if a.get(name) != b.get(name) and not records_nothing(name))
@@ -119,12 +156,21 @@ def check_builds(sealed, witness):
             # Same recorder and same helper sources. Only a build setting may differ, and a different binary of identical source is refused.
             require(parts[0][1]['native_helper_sha256'] == by_commit[reference][0][1]['native_helper_sha256'], 'same recording source built into different helpers: ' + commit)
             continue
+        if {commit, reference} == {BEFORE_SAVE, WITH_SAVE}:
+            old, new = (a, b) if commit == BEFORE_SAVE else (b, a)
+            for name in set(a) | set(b):
+                if a.get(name) != b.get(name):
+                    require(SAVE_DIFFERENCES.get(name) == (old.get(name), new.get(name)), 'unreviewed source difference between the two builds: ' + name)
+            same_recording(pair, {c: by_commit[c][0][1]['native_helper_sha256'] for c in (BEFORE_SAVE, WITH_SAVE)})
+            saving = True
+            continue
         require(commit == OLDER and reference == NEWER, 'unreviewed difference in recording code between parts, commit %s: %s' % (commit, ', '.join(differing)))
         for name in set(a) | set(b):
             if a.get(name) != b.get(name):
                 require(BUILD_DIFFERENCES.get(name) == (a.get(name), b.get(name)), 'unreviewed source difference between the two builds: ' + name)
         require(len(parts) == 1 and parts[0][0]['schema'] == 'native033-complete-profile-financial-v1' and parts[0][0]['first'] == 400001 and parts[0][0]['through'] == 500000, 'only the whole 400001 range may come from the older build')
         reviewed = True
+    require(saving or pair is None, 'stretch recorded by both builds given where no such pair is joined')
     if not reviewed:
         require(witness is None, 'cross-build witness given where no reviewed build pair is joined')
         return sorted(by_commit)
@@ -201,10 +247,10 @@ def check_profiles(profiles):
 
 
 def verify(config, repo, progress=None, facts_path=None):
-    require({'profiles', 'terminal_seal', 'canonical_boundary'} <= set(config) <= {'profiles', 'terminal_seal', 'canonical_boundary', 'cross_build_witness'}, 'unknown whole assembly input')
+    require({'profiles', 'terminal_seal', 'canonical_boundary'} <= set(config) <= {'profiles', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch'}, 'unknown whole assembly input')
     sealed = [signed_profile(Path(p['path']), p['sha256'], repo, progress, with_seal=True) for p in config['profiles']]
     profiles = [result for result, _, _ in sealed]
-    builds = check_builds(sealed, config.get('cross_build_witness'))
+    builds = check_builds(sealed, config.get('cross_build_witness'), config.get('both_builds_stretch'))
     summary = check_profiles(profiles)
     fact_blocks, fact_bytes = join_facts(sealed)
     boundary = canonical_boundary(config['canonical_boundary'])
@@ -233,7 +279,7 @@ def verify(config, repo, progress=None, facts_path=None):
                 all_historical_sources_and_coinflows_reconciled=True, financial_admission=False, books_tax_acceptance=False,
                 production_import_or_public_promotion_authorized=False, input_config_sha256=hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),
                 profile_seals=config['profiles'], accepted_terminal_seal_sha256=TERMINAL_SHA,
-                signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'),
+                signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'), both_builds_stretch=config.get('both_builds_stretch'),
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
                 stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(), stake_asset_tax_classification='unclassified',
                 launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}),

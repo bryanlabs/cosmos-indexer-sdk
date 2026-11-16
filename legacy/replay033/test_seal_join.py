@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from reconcile_whole import BUILD_DIFFERENCES, NEWER, OLDER, PENALTY_HEIGHTS, check_builds, join_facts
+from reconcile_whole import BEFORE_SAVE, BUILD_DIFFERENCES, NEWER, OLDER, PENALTY_HEIGHTS, SAVE_DIFFERENCES, WITH_SAVE, check_builds, join_facts
 from seal_closed import FACTS, bound_facts, stake_facts
 
 WHOLE, SPLIT = 'native033-complete-profile-financial-v1', 'native033-split-range-financial-v1'
@@ -142,6 +142,58 @@ class TwoBuilds(unittest.TestCase):
                 check_builds(parts, witness)
             parts[0] = build('1' * 40, SPLIT, 1, 100000, self.new)
             self.assertEqual(len(check_builds(parts, witness)), 3)
+
+
+class SavingBuild(unittest.TestCase):
+    def setUp(self):
+        same = {'legacy/replay033/consume_closed.py': 'aa', 'legacy/replay033/cmd/consume-native/slash_native.go': 'bb'}
+        self.old = dict(same, **{k: v[0] for k, v in SAVE_DIFFERENCES.items()})
+        self.new = dict(same, **{k: v[1] for k, v in SAVE_DIFFERENCES.items()})
+
+    def parts(self):
+        return [build(BEFORE_SAVE, SPLIT, 1, 19792, self.old, 'h-plain'), build(WITH_SAVE, SPLIT, 19793, 100000, self.new, 'h-save')]
+
+    def stretch(self, d, helper, saved, **change):
+        directory = Path(d) / helper
+        directory.mkdir()
+        (directory / 'native-proof.private.json').write_text(json.dumps(dict(first=1, through=100)))
+        run = dict(dict(schema=SPLIT, first=1, through=100, heights=100, transactions=3, fast_forward=dict(heights=0, seconds=len(helper)), ending_commit='e', native_helper_sha256=helper,
+                        native_proof_sha256=hashlib.sha256((directory / 'native-proof.private.json').read_bytes()).hexdigest()), **change)
+        (directory / 'complete-component.private.json').write_text(json.dumps(run))
+        (directory / 'exit.private.json').write_text(json.dumps(dict(exit=0)))
+        if saved:
+            (directory / 'savepoints' / '50').mkdir(parents=True)
+            (directory / 'savepoints' / '50' / 'part.private.json').write_text('{}')
+        return dict(path=str(directory), sha256=hashlib.sha256((directory / 'complete-component.private.json').read_bytes()).hexdigest())
+
+    def test_pair_joins_only_with_one_stretch_recorded_identically_by_both(self):
+        with tempfile.TemporaryDirectory() as d:
+            pair = [self.stretch(d, 'h-plain', False), self.stretch(d, 'h-save', True)]
+            self.assertEqual(check_builds(self.parts(), None, pair), sorted([BEFORE_SAVE, WITH_SAVE]))
+            with self.assertRaises(ValueError):
+                check_builds(self.parts(), None, None)
+            with self.assertRaises(ValueError):
+                check_builds(self.parts(), None, pair[:1] * 2)
+            with self.assertRaises(ValueError):
+                check_builds(self.parts()[:1], None, pair)
+        for change in (dict(ending_commit='other'), dict(transactions=4), dict(heights=50)):
+            with tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(ValueError, msg=str(change)):
+                    check_builds(self.parts(), None, [self.stretch(d, 'h-plain', False), self.stretch(d, 'h-save', True, **change)])
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):
+                check_builds(self.parts(), None, [self.stretch(d, 'h-plain', False), self.stretch(d, 'h-save', False)])
+
+    def test_any_other_difference_between_the_two_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            pair = [self.stretch(d, 'h-plain', False), self.stretch(d, 'h-save', True)]
+            self.new['legacy/replay033/cmd/consume-native/slash_native.go'] = 'changed'
+            with self.assertRaises(ValueError):
+                check_builds(self.parts(), None, pair)
+            self.setUp()
+            self.new['legacy/replay033/cmd/consume-native/main.go'] = 'another-main'
+            with self.assertRaises(ValueError):
+                check_builds(self.parts(), None, pair)
 
 
 class ManyParts(unittest.TestCase):
