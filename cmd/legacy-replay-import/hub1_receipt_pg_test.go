@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy/genesis"
+	rr "github.com/DefiantLabs/cosmos-indexer/legacy/replayrecords"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/schema/pgtest"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
@@ -145,5 +146,28 @@ func TestHub1PartsListRefusals(t *testing.T) {
 		edit(&p)
 		_, err := readHub1Parts(write(p))
 		require.Error(t, err, name)
+	}
+}
+
+// Parts may share one sealed source, but together they must cover that
+// source's own range exactly once.
+func TestHub1PartsSharingASourceCoverItExactlyOnce(t *testing.T) {
+	source := func(dir string, from, through int64) hub1Source {
+		return hub1Source{dir: dir, proof: rr.Proof{From: from, Through: through}}
+	}
+	part := func(dir string, first, last int64) hub1Part { return hub1Part{First: first, Last: last, Source: dir} }
+	sources := []hub1Source{source("/a", 1, 200), source("/b", 201, 500)}
+	good := hub1Parts{Parts: []hub1Part{part("/a", 1, 120), part("/a", 121, 200), part("/b", 201, 300), part("/b", 301, 400), part("/b", 401, 500)}}
+	require.Equal(t, []string{"/a", "/b"}, good.dirs())
+	require.NoError(t, good.bound(sources))
+	require.Len(t, good.slices(), 5)
+	for name, parts := range map[string][]hub1Part{
+		"a part reaching into the next source":  {part("/a", 1, 210), part("/b", 211, 500)},
+		"a source left partly uncovered":        {part("/a", 1, 190), part("/b", 191, 500)},
+		"a source named again later":            {part("/a", 1, 200), part("/b", 201, 400), part("/a", 401, 500)},
+		"a part of a source that was not read":  {part("/a", 1, 200), part("/b", 201, 500), part("/c", 501, 600)},
+		"a part starting before its own source": {part("/a", 1, 150), part("/b", 151, 500)},
+	} {
+		require.Error(t, hub1Parts{Parts: parts}.bound(sources), name)
 	}
 }

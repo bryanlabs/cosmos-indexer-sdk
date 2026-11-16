@@ -58,6 +58,14 @@ type hub1Read struct {
 	Rows                   int64            `json:"rows"`
 	RowsByCategory         map[string]int64 `json:"rows_by_category_and_source"`
 	captures               hash.Hash
+	part                   *hub1Slice
+}
+
+// hub1Slice is what one listed part took from a source it shares with other
+// parts: the capture files of its own heights only.
+type hub1Slice struct {
+	first, last, heights, transactions, files int64
+	captures                                  hash.Hash
 }
 
 func fileSHA256(path string) (string, int64, error) {
@@ -85,6 +93,10 @@ func (m *hub1Read) capture(dir string, height int64) error {
 		}
 		fmt.Fprintf(m.captures, "%s  %s\n", sum, filepath.ToSlash(base+suffix))
 		m.BlockCaptureFiles++
+		if m.part != nil {
+			fmt.Fprintf(m.part.captures, "%s  %s\n", sum, filepath.ToSlash(base+suffix))
+			m.part.files++
+		}
 	}
 	return nil
 }
@@ -195,6 +207,7 @@ type hub1Options struct {
 	compare                            *sql.Conn
 	tail                               *hub1TailSpec
 	bound                              func([]hub1Source) error
+	slices                             []*hub1Slice
 }
 
 type hub1Converted struct {
@@ -305,6 +318,7 @@ func (o hub1Options) run() (done hub1Converted, _ error) {
 	categories := map[string]int{}
 	recorded := map[int64]core.ReplayNet{}
 	parent := ""
+	at := 0
 	for i, s := range sources {
 		receipt, _ := json.Marshal(s.proof)
 		hold := func(n int64, err error) error {
@@ -324,6 +338,16 @@ func (o hub1Options) run() (done hub1Converted, _ error) {
 					return fmt.Errorf("rehearsal destination refused")
 				}
 				destination = d
+			}
+			s.read.part = nil
+			if len(o.slices) != 0 {
+				for at < len(o.slices) && r.Number > o.slices[at].last {
+					at++
+				}
+				if at == len(o.slices) || r.Number < o.slices[at].first {
+					return fmt.Errorf("height %d belongs to no listed part", r.Number)
+				}
+				s.read.part = o.slices[at]
 			}
 			h, err := capture.LoadHeight(filepath.Join(s.dir, "cache"), "cosmoshub-1", r.Number, maxBody)
 			if err == nil {
@@ -383,6 +407,10 @@ func (o hub1Options) run() (done hub1Converted, _ error) {
 			txs += len(b.Inclusions)
 			rows += len(b.Rows)
 			s.read.Heights++
+			if s.read.part != nil {
+				s.read.part.heights++
+				s.read.part.transactions += int64(len(b.Inclusions))
+			}
 			s.read.Transactions += int64(len(b.Inclusions))
 			s.read.Rows += int64(len(b.Rows))
 			for _, row := range b.Rows {
