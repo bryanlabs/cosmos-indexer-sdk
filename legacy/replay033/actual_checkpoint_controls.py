@@ -53,7 +53,7 @@ def fixture(root, output, first=None, opening=None, manifest=None):
             return first
     raise ValueError('complete actual checkpoint first height absent')
 
-def control(root, source, directory, binary, name, checkpoint=None):
+def control(root, source, directory, binary, name, checkpoint=None, resume=False):
     cases = dict(opening_root='normal native application commitment differs',
                  opening_store='complete raw store does not reproduce native IAVL commitment',
                  opening_baseline='normal opening complete raw baseline differs from native checkpoint',
@@ -64,7 +64,7 @@ def control(root, source, directory, binary, name, checkpoint=None):
     changed = False
     logfile = directory / (name + '.refused.private.log')
     receipt = directory / (name + '.must-not-exist.json')
-    command = [str(binary), '--cache', str(root / 'cache'), '--checkpoint-home', str(checkpoint or root / 'opening-checkpoint'), '--working-home', str(directory / (name + '-home')), '--receipt', str(receipt)]
+    command = [str(binary), '--cache', str(root / 'cache'), '--checkpoint-home', str(checkpoint or root / 'opening-checkpoint'), '--working-home', str(directory / (name + '-home')), '--receipt', str(receipt)] + (['--resume-opening'] if resume else [])
     with logfile.open('xb') as log:
         p = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, GOMAXPROCS='2', GOMEMLIMIT='512MiB'))
         try:

@@ -63,8 +63,8 @@ def prepare(plan, part):
     if not (out / 'process.private.json').exists():
         from record_after_launch import record
         record(part['first'], part['through'], Path(part['proof']), Path(part['launch_worktree']), Path(part['build_worktree']), part['trimpath'], part['entry'],
-               Path(part['helper']), Path(part['built_from']), Path(part['launcher']), out, optional(part, 'opening_checkpoint'), optional(part, 'opening_manifest'),
-               optional(part, 'validator_history'), optional(part, 'test_worktree'), part.get('earlier_attempts'))
+               Path(part['helper']), optional(part, 'built_from'), Path(part['launcher']), out, optional(part, 'opening_checkpoint'), optional(part, 'opening_manifest'),
+               optional(part, 'validator_history'), optional(part, 'test_worktree'), part.get('earlier_attempts'), bool(part.get('resume_opening')), part.get('interrupted_run'))
         print(json.dumps(dict(part=part['first'], launch_record=str(out / 'process.private.json'))), flush=True)
     started = json.loads((out / 'process.private.json').read_bytes())
     # Controls depend only on the source, the helper and the opening, so a plan may name ones already made for the same three.
@@ -74,7 +74,7 @@ def prepare(plan, part):
         from actual_full_controls import run
         prefix = 'opening_checkpoint' in started
         r = run(Path(part['source']), out / 'controls', Path(started['helper_copy']), part['first'],
-                Path(started['opening_checkpoint']) if prefix else None, Path(started['opening_manifest']) if prefix else None)
+                Path(started['opening_checkpoint']) if prefix else None, Path(started['opening_manifest']) if prefix else None, started['resumed_from_interrupted_run'])
         print(json.dumps(dict(part=part['first'], controls_refused=len(r['controls']))), flush=True)
     return started, controls
 
@@ -138,7 +138,7 @@ def running():
             continue
         scripts = [a for a in argv if a.endswith(('/consume_split.py', '/consume_closed.py'))]
         if scripts and '--receipt' in argv and 'python' in argv[0]:
-            found[argv[argv.index('--receipt') + 1]] = (scripts[0], {argv[i][2:].replace('-', '_'): argv[i + 1] for i in range(len(argv) - 1) if argv[i].startswith('--')})
+            found[argv[argv.index('--receipt') + 1]] = (scripts[0], dict({argv[i][2:].replace('-', '_'): argv[i + 1] for i in range(len(argv) - 1) if argv[i].startswith('--')}, _flags=argv))
     return found
 
 
@@ -149,6 +149,10 @@ def make_plan(catalog):
     killed or failed are kept, untouched, and named on the part that replaced
     them. Anything the catalog cannot identify is refused by name."""
     live, attempts = running(), []
+    openings = dict(catalog.get('openings', {}))
+    for root in catalog['roots']:
+        for manifest in Path(root['path']).glob('openings/*.sha256'):
+            openings[sha(manifest)] = dict(opening_checkpoint=str(manifest.with_suffix('.home')), opening_manifest=str(manifest))
     for root in catalog['roots']:
         for proof in sorted(Path(root['path']).glob('profile-*/proof')):
             receipt, exit_path = proof / 'complete-component.private.json', proof / 'exit.private.json'
@@ -159,17 +163,17 @@ def make_plan(catalog):
                 source = json.loads((Path(args['directory']) / 'capture.private.json').read_bytes())
                 item.update(state='recording', entry=Path(script).name, launch_worktree=str(Path(script).parents[2]), source=args['directory'], helper_file=args['native_helper'],
                             first=int(args.get('first', source['first'])), through=int(args.get('through', source['through'])), validator_history=args.get('validator_history'),
-                            opening_checkpoint=args.get('opening_checkpoint'), opening_manifest=args.get('opening_manifest'))
+                            opening_checkpoint=args.get('opening_checkpoint'), opening_manifest=args.get('opening_manifest'), resume_opening='--resume-opening' in args['_flags'])
                 item['helper_sha256'] = sha(Path(item['helper_file']))
             elif exited == 0 and receipt.exists():
                 result = json.loads(receipt.read_bytes())
                 split = result['schema'] == 'native033-split-range-financial-v1'
-                opening = catalog['openings'].get(result.get('opening_checkpoint_manifest_sha256') or '', {})
+                opening = openings.get(result.get('opening_checkpoint_manifest_sha256') or '', {})
                 require(split or result['schema'] == 'native033-complete-profile-financial-v1', 'unknown receipt kind in ' + str(proof))
                 require(not result.get('opening_checkpoint_manifest_sha256') or opening, 'catalog does not name the opening checkpoint of ' + str(proof))
                 item.update(state='finished', entry='consume_split.py' if split else 'consume_closed.py', first=result['first'], through=result['through'], helper_sha256=result['native_helper_sha256'],
                             source=catalog['sources'][str(result['source_range'][0] if split else result['first'])], validator_history=catalog.get('validator_history'),
-                            opening_checkpoint=opening.get('opening_checkpoint'), opening_manifest=opening.get('opening_manifest'))
+                            opening_checkpoint=opening.get('opening_checkpoint'), opening_manifest=opening.get('opening_manifest'), resume_opening=result.get('opening_kind') == 'interrupted_run_state')
             else:
                 item.update(state='failed' if exited else 'killed', first=int(proof.parent.name.split('-')[1]))
             attempts.append(item)
@@ -184,9 +188,12 @@ def make_plan(catalog):
         require(helper is not None, 'catalog does not know the helper %s used by %s' % (chosen['helper_sha256'], chosen['proof']))
         require(chosen['state'] == 'finished' or chosen['launch_worktree'] == helper['launch_worktree'], 'recorder runs from a worktree the catalog does not expect: ' + chosen['proof'])
         part = dict(helper, **{k: chosen[k] for k in ('first', 'through', 'proof', 'source', 'entry', 'launcher', 'state') if k in chosen})
-        for name in ('validator_history', 'opening_checkpoint', 'opening_manifest'):
+        for name in ('validator_history', 'opening_checkpoint', 'opening_manifest', 'resume_opening'):
             if chosen.get(name):
                 part[name] = chosen[name]
+        origin = Path(chosen['opening_checkpoint']).with_suffix('.from') if chosen.get('resume_opening') else None
+        if origin is not None and origin.is_file():
+            part['interrupted_run'] = origin.read_text().strip()
         part['earlier_attempts'] = [dict(proof=a['proof'], state=a['state'], exit=a['exit'], first=a['first'], last_verified_height=a['last_verified_height'], contributed_recorded_output=False)
                                     for a in attempts if a is not chosen and a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first'] and a['state'] != 'finished']
         parts.append(part)
@@ -199,15 +206,15 @@ def make_plan(catalog):
 def mini(plan, part, first, through, directory):
     """A short real slice recorded by the launch helper from the launch commit, checked before it starts."""
     launch, helper = Path(part['launch_worktree']), Path(part['helper'])
-    commit = Path(part['built_from']).read_text().strip()
+    commit = build_info(helper)['revision']
     clean_at(launch, commit, 'launch worktree is not the helper commit')
-    require(build_info(helper)['revision'] == commit and part['entry'] == 'consume_split.py', 'a short slice needs the split recorder and its own helper')
+    require(part['entry'] == 'consume_split.py', 'a short slice needs the split recorder')
     proof = directory / 'proof'
     proof.mkdir(mode=0o700, parents=True)
     command = [sys.executable, '-B', str(launch / 'legacy/replay033/consume_split.py'), '--directory', part['source'], '--first', str(first), '--through', str(through),
                '--native-helper', str(helper), '--receipt', str(proof / 'complete-component.private.json')]
     if part.get('opening_checkpoint'):
-        command += ['--opening-checkpoint', part['opening_checkpoint'], '--opening-manifest', part['opening_manifest']]
+        command += ['--opening-checkpoint', part['opening_checkpoint'], '--opening-manifest', part['opening_manifest']] + (['--resume-opening'] if part.get('resume_opening') else [])
     if part.get('validator_history'):
         command += ['--validator-history', part['validator_history'], '--validator-history-sha256', sha(Path(part['validator_history']))]
     (directory / 'launcher.private.txt').write_text(json.dumps(dict(checked_before_start=True, signed_source_commit=commit, launch_worktree=str(launch), helper_sha256=sha(helper),

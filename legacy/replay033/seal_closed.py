@@ -91,30 +91,51 @@ def bound_facts(proof, result, native):
     return entries
 
 
+PYTHON_PROOFS = ('launch_worktree_equal_to_commit_when_recorded', 'launcher_checked_clean_commit_and_every_later_edit_postdates_start')
+HELPER_PROOFS = ('rebuilt_byte_identical_from_commit', 'toolchain_stamp_of_unmodified_commit_and_launcher_pinned_hash')
+
+
 def validate_start(repo, start_path):
     started = json.loads(start_path.read_bytes())
     commit = started['signed_source_commit']
     require(len(commit) == 40 and all(c in '0123456789abcdef' for c in commit), 'literal signed source commit required')
-    # The Python that ran was read from this worktree. It must still be the
-    # launch commit, clean, and byte-equal to the signed commit.
-    launch = Path(started.get('launch_worktree') or repo)
-    require(git(launch, 'rev-parse', 'HEAD').strip() == commit, 'consumer HEAD differs from actual run-start signed source')
-    expected_python = {name for name in code_list(launch, commit) if name.endswith('.py')}
+    if started.get('schema') is not None:
+        # Written after launch: the record already compared the worktree the Python ran from with the commit, and says how.
+        # Here its pins must be exactly the commit's files. The worktree may have moved on since and is not read again.
+        checkout = Path(started['test_worktree'])
+        require(set(started['python_source_pins']) == {name for name in code_list(checkout, commit) if name.endswith('.py')}, 'run-start Python source coverage missing')
+        for name, digest in started['python_source_pins'].items():
+            require(blob_sha(checkout, commit, name) == digest, 'recorded Python source differs from the signed commit')
+        require(started['python_source_proof'] in PYTHON_PROOFS, 'launch record does not say how the Python that ran was tied to the commit')
+        if started['python_source_proof'] == PYTHON_PROOFS[1]:
+            require(started['launcher_checked_before_start']['commit'] is True and started['launcher_checked_before_start']['clean_tree'] is True and started['python_files_edited_after_launch'], 'launch record claims a launcher check it did not find')
+        else:
+            require(not started['python_files_edited_after_launch'], 'launch record misstates the worktree')
+        return commit
+    # Written by the supervisor before the proof: the Python was read from this
+    # worktree, which must still be the launch commit and byte-equal to it.
+    require(git(repo, 'rev-parse', 'HEAD').strip() == commit, 'consumer HEAD differs from actual run-start signed source')
+    expected_python = {name for name in code_list(repo, commit) if name.endswith('.py')}
     require(set(started['python_source_pins']) == expected_python, 'run-start Python source coverage missing')
     for name, digest in started['python_source_pins'].items():
-        require(sha(launch/name) == digest and blob_sha(launch, commit, name) == digest, 'executed Python source differs from actual signed run start')
+        require(sha(repo/name) == digest and blob_sha(repo, commit, name) == digest, 'executed Python source differs from actual signed run start')
     return commit
 
 
 def after_launch(started, commit, helper, result):
-    """A record written after launch proves the helper by rebuilding it, never by claiming a pre-launch check."""
+    """A record written after launch never claims a pre-launch check. It must say how the helper was tied to the commit."""
     require(started['schema'] == 'native033-launch-record-after-launch-v1' and started['checked_before_launch'] is False and started['first'] == result['first'] and started['through'] == result['through'], 'after-launch record does not describe this part')
     info = build_info(helper)
-    require(started['helper_sha256'] == started['rebuilt_helper_sha256'] == sha(helper) and info['revision'] == commit == started['helper_build']['revision'] and info['modified'] == 'false' == started['helper_build']['modified'], 'helper that ran is not a clean rebuildable build of the launch commit')
-    require(started['launcher_names_commit_and_helper'] is True and utc(started['produced_utc']) > utc(started['launched_utc']), 'after-launch record misstates when it was produced')
-    build = Path(started['build_worktree'])
-    clean_at(build, commit, 'rebuild worktree differs from the launch commit')
-    return build
+    require(started['helper_sha256'] == sha(helper) and info['revision'] == commit == started['helper_build']['revision'] and info['modified'] == 'false' == started['helper_build']['modified'], 'helper that ran is not stamped as a clean build of the launch commit')
+    require(started['helper_proof'] in HELPER_PROOFS, 'launch record does not say how the helper was tied to the commit')
+    if started['helper_proof'] == HELPER_PROOFS[0]:
+        require(started['rebuilt_helper_sha256'] == started['helper_sha256'], 'rebuilt helper differs from the helper that ran')
+    else:
+        require(not started['rebuilt_helper_sha256'] and started['launcher_checked_before_start']['helper_hash'] is True, 'launch record claims a launcher pin it did not find')
+    require(utc(started['produced_utc']) > utc(started['launched_utc']), 'after-launch record misstates when it was produced')
+    checkout = Path(started['test_worktree'])
+    clean_at(checkout, commit, 'checkout used for tests and compiled sources differs from the launch commit')
+    return checkout
 
 
 def seal(root, proof, helper, controls_path, preservation_path, repo, output, start_path):
@@ -150,15 +171,19 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
     if facts:
         paths.append(proof/FACTS)
     commit = validate_start(repo, start_path)
-    launch = Path(started.get('launch_worktree') or repo)
-    clean_at(launch, commit, 'consumer HEAD differs from actual run-start signed source')
-    subprocess.run(['git','-C',str(launch),'verify-commit',commit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
     reconstructed = started.get('schema') is not None
-    build = after_launch(started, commit, helper, result) if reconstructed else launch
+    if not reconstructed:
+        clean_at(repo, commit, 'consumer HEAD differs from actual run-start signed source')
+    build = after_launch(started, commit, helper, result) if reconstructed else repo
+    subprocess.run(['git','-C',str(build),'verify-commit',commit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
     code = {}
-    for name in code_list(launch, commit):
-        require(blob_sha(launch, commit, name) == sha(launch/name), 'actual consumer source differs from signed code')
-        code[name] = sha(launch/name)
+    for name in code_list(build, commit):
+        require(blob_sha(build, commit, name) == sha(build/name), 'actual consumer source differs from signed code')
+        code[name] = sha(build/name)
+    kind = ('saved_checkpoint' if prefix else 'source_range_start') if not split else result.get('opening_kind', 'saved_checkpoint' if prefix else 'source_range_start')
+    require(kind in ('source_range_start', 'saved_checkpoint', 'interrupted_run_state') and (kind == 'source_range_start') is (not prefix), 'part does not say where its opening state came from')
+    require(not reconstructed or (started['opening_kind'] == kind and started['resumed_from_interrupted_run'] is (kind == 'interrupted_run_state')), 'launch record and receipt disagree on the opening of this part')
+    require(reconstructed or kind != 'interrupted_run_state', 'supervised run cannot open from an interrupted run')
     compiled_path = record / 'compiled-go-source-pins.private.json'
     compiled = json.loads(compiled_path.read_bytes())
     require(len(compiled) > 100 and all(str(build/name) in compiled for name in code if name.startswith(HELPER) and name.endswith('.go') and not name.endswith('_test.go') and name != HELPER + 'anchor_allow_splitproof.go'), 'actual compiled native source pins missing')
@@ -173,7 +198,7 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
         paths.append(history)
     require(not native.get('supplemental_evidence_capture_sha256'), 'supplemental evidence capture is not retained by this seal')
     if reconstructed:
-        paths += [Path(started[k]) for k in ('launcher', 'built_from')]
+        paths.append(Path(started['launcher']))
     pins = {}
     for path in paths:
         rel = os.path.relpath(path,output.parent)
@@ -198,6 +223,7 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
         from consume_split import opening_manifest
         opening, manifest = Path(started.get('opening_checkpoint') or ''), Path(started.get('opening_manifest') or '')
         require(reconstructed and opening.is_dir() and opening_manifest(opening, manifest) == result['opening_checkpoint_manifest_sha256'] == controls.get('opening_checkpoint_manifest_sha256'), 'saved opening checkpoint of this part is not retained')
+        require(controls.get('opening_is_interrupted_run_state', False) is (kind == 'interrupted_run_state'), 'controls opened this part differently from its recording')
         for path in [manifest] + sorted(p for p in opening.rglob('*') if not p.is_dir()):
             relname = os.path.relpath(path, output.parent)
             require('..' not in Path(relname).parts, 'opening checkpoint escapes retained seal root')
@@ -214,8 +240,9 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
                   exit_path=rel(exit_path),exit_sha256=sha(exit_path),native_helper_sha256=sha(helper),
                   launch_record='written_after_launch_from_rebuild' if reconstructed else 'written_by_supervisor_before_proof',
                   launch_record_path=rel(start_path),sealing_tool_commit=tool_commit,
-                  # Both recorders write their receipt only after one process has checked every height of the part, so no known receipt is a resumed one.
-                  recorded_in_one_run_from_its_opening=True,resumed_from_saved_state=False,earlier_attempts=started.get('earlier_attempts',[]),
+                  # Every part checks all of its own heights in one run. A resumed part differs only in where its opening state came from.
+                  opening_kind=kind,resumed_from_interrupted_run=kind=='interrupted_run_state',interrupted_run=started.get('interrupted_run',''),earlier_attempts=started.get('earlier_attempts',[]),
+                  python_source_proof=started.get('python_source_proof','supervisor_pinned_before_proof'),helper_proof=started.get('helper_proof','built_by_supervisor_from_pinned_tree'),
                   stake_asset_facts_path=rel(proof/FACTS) if facts else '',stake_asset_facts_sha256=sha(proof/FACTS) if facts else '',stake_asset_fact_blocks=facts,
                   stake_asset_tax_classification='unclassified',
                   source_preserved_after_proof=True,actual_negative_controls_passed=True,historical_blocks_executed=0,

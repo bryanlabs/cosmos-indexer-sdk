@@ -80,7 +80,8 @@ def signed_profile(path, expected_sha, repo, progress=None, with_seal=False):
     require(native['schema'] == 'native033-independent-bounded-financial-v1' and native['normal_opening_height'] == result['first'] - 1, 'independent native opening schema differs')
     require(result['first'] == native['first'] and result['through'] == native['through'] and result['transactions'] == native['transactions'] and result['heights'] == native['native_iavl_heights'] and sum(result['phases'].values()) == native['typed_financial_phases'] and native['financial_admission'] is False and native['global_books_tax_acceptance'] is False, 'independent native component coverage differs')
     require(seal['source_preserved_after_proof'] is True and seal['actual_negative_controls_passed'] is True and seal['historical_blocks_executed'] == 0, 'complete source preservation or independent controls absent')
-    require(seal['resumed_from_saved_state'] is False and seal['recorded_in_one_run_from_its_opening'] is True, 'a part resumed from saved state needs its own reviewed proof of the resume point')
+    kind = seal['opening_kind']
+    require(kind == result.get('opening_kind', kind) and seal['resumed_from_interrupted_run'] is (kind == 'interrupted_run_state') and (kind == 'source_range_start') is (not result.get('opening_checkpoint_manifest_sha256')), 'seal misstates where the opening state of this part came from')
     # Penalty facts are re-read from the sealed bytes, not trusted from the seal.
     facts = bound_facts((path.parent / seal['result_path']).parent, result, native)
     require(facts == seal['stake_asset_fact_blocks'] and seal['stake_asset_tax_classification'] == 'unclassified', 'sealed penalty facts differ from the retained fact file')
@@ -236,7 +237,7 @@ def verify(config, repo, progress=None, facts_path=None):
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
                 stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(), stake_asset_tax_classification='unclassified',
                 launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}),
-                parts=[dict(first=r['first'], through=r['through'], signed_source_commit=s['signed_source_commit'], launch_record=s['launch_record'], resumed_from_saved_state=s['resumed_from_saved_state'], earlier_attempts=s['earlier_attempts']) for r, s, _ in sealed])
+                parts=[dict(first=r['first'], through=r['through'], signed_source_commit=s['signed_source_commit'], launch_record=s['launch_record'], opening_kind=s['opening_kind'], resumed_from_interrupted_run=s['resumed_from_interrupted_run'], interrupted_run=s['interrupted_run'], python_source_proof=s['python_source_proof'], helper_proof=s['helper_proof'], earlier_attempts=s['earlier_attempts']) for r, s, _ in sealed])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
