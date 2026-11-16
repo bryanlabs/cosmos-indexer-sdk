@@ -181,6 +181,9 @@ func (w *wholeChain) build() {
 				}
 				if tail {
 					in.Profile = "hub2-tail-v1"
+					receipt["schema"], receipt["complete_scope"], receipt["canonical_migration_height"] = "hub2-historical-tail-seal-v1", []int64{first, last}, b.canonical
+					receipt["terminal_next_header_proof"], receipt["rehearsal"] = false, false
+					receipt["opening_state_proof"] = map[string]any{"path": in.Opening.Path, "sha256": in.Opening.SHA256}
 				} else {
 					in.Closing = w.proof(name+"/closing.json", last)
 					sealsExport[in.Closing.Path] = in.Closing.SHA256
@@ -500,4 +503,49 @@ func TestWholeChainAbandonedAttemptBesideAcceptedSecondAttempt(t *testing.T) {
 	w.rewrite(&other.Acceptance, func(v map[string]any) { v["note"] = "another sealing run" })
 	offer(other)
 	w.refused("component 4", "continues from a different earlier receipt")
+}
+
+func TestWholeChainHub2TailSealIsStrict(t *testing.T) {
+	tail := func(w *wholeChain) *ComponentInput { return &w.spec.Components[len(w.spec.Components)-1] }
+	change := func(key string, value any) func(w *wholeChain) {
+		return func(w *wholeChain) { w.rewrite(&tail(w).Acceptance, func(v map[string]any) { v[key] = value }) }
+	}
+	cases := []struct {
+		name, reason string
+		after        func(w *wholeChain)
+	}{
+		{"rehearsal receipt", "a rehearsal or any other kind of receipt is not accepted", change("rehearsal", true)},
+		{"rehearsal flag absent", "a rehearsal or any other kind of receipt is not accepted", func(w *wholeChain) {
+			w.rewrite(&tail(w).Acceptance, func(v map[string]any) { delete(v, "rehearsal") })
+		}},
+		{"another schema", "a rehearsal or any other kind of receipt is not accepted", change("schema", "hub2-continuation-seal-v1")},
+		{"scope stops short", "does not cover exactly heights 7 to 8", change("complete_scope", []int64{7, 7})},
+		{"scope starts at the migration height", "does not cover exactly heights 7 to 8", change("complete_scope", []int64{6, 8})},
+		{"another migration height", "after the migration height 6", change("canonical_migration_height", 5)},
+		{"claims a later block", "claims a later block that does not exist", change("terminal_next_header_proof", true)},
+		{"not accepted", "tail seal is not accepted", change("component_accepted", false)},
+		{"opens from another proof", "opens from a different state proof", change("opening_state_proof", map[string]any{"sha256": digest([]byte("other"))})},
+		{"closing proof supplied", "the tail has no closing state proof", func(w *wholeChain) { tail(w).Closing = w.proof("tail-closing.json", 8) }},
+		{"opening proof not listed", "opens from a different state proof", func(w *wholeChain) { tail(w).Opening = nil }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWholeChain(t, "cosmoshub-2")
+			w.build()
+			c.after(w)
+			w.refused("component 4", c.reason)
+		})
+	}
+	t.Run("real rehearsal tail receipt", func(t *testing.T) {
+		path := "/Users/danb/.cache/cosmos-tax-claude-20261116/hub2-component-chain/REHEARSAL-tail-mechanics-2000002-20261116T0523Z/2000002/REHEARSAL-mechanics-only.json"
+		raw, e := os.ReadFile(path)
+		if e != nil {
+			t.Skip("rehearsal tail receipt is not on this machine")
+		}
+		w := newWholeChain(t, "cosmoshub-2")
+		w.build()
+		sum := sha256.Sum256(raw)
+		tail(w).Acceptance = Pin{Path: path, SHA256: hex.EncodeToString(sum[:])}
+		w.refused("component 4", "a rehearsal or any other kind of receipt is not accepted")
+	})
 }

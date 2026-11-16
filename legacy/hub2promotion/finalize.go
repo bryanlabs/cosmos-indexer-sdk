@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -379,6 +380,26 @@ func readComponent(chain string, n int, in ComponentInput, prior *SealedComponen
 			return out, e
 		}
 	case "hub2-continuation-v1", "hub2-tail-v1":
+		if in.Profile == "hub2-tail-v1" {
+			if a["rehearsal"] != false || a["schema"] != "hub2-historical-tail-seal-v1" {
+				return out, refuse(name, "receipt is not the sealed Hub 2 tail: a rehearsal or any other kind of receipt is not accepted here")
+			}
+			scope, _ := a["complete_scope"].([]any)
+			at, ok := whole(a, "canonical_migration_height")
+			if len(scope) != 2 || scope[0] != json.Number(strconv.FormatInt(b.canonical+1, 10)) || scope[1] != json.Number(strconv.FormatInt(b.last, 10)) || !ok || at != b.canonical {
+				return out, refuse(name, "tail seal does not cover exactly heights %d to %d after the migration height %d", b.canonical+1, b.last, b.canonical)
+			}
+			if a["terminal_next_header_proof"] != false || a["component_accepted"] != true {
+				return out, refuse(name, "tail seal is not accepted, or claims a later block that does not exist")
+			}
+			proof, _ := a["opening_state_proof"].(map[string]any)
+			if in.Opening == nil || proof["sha256"] != in.Opening.SHA256 {
+				return out, refuse(name, "tail seal opens from a different state proof than the one listed")
+			}
+			if in.Closing != nil {
+				return out, refuse(name, "the tail has no closing state proof: no block exists after the final height")
+			}
+		}
 		if e = counted("component_accepted"); e != nil {
 			return out, e
 		}
@@ -402,7 +423,7 @@ func readComponent(chain string, n int, in ComponentInput, prior *SealedComponen
 		if e = opening(); e != nil {
 			return out, e
 		}
-		if in.Profile == "hub2-tail-v1" && in.Closing == nil {
+		if in.Profile == "hub2-tail-v1" {
 			out.Closing = in.Acceptance.SHA256
 			out.ClosingBoundBy = "no next block exists after the final height, so the tail is closed by its receipt hash"
 		} else if e = closing(); e != nil {
