@@ -62,8 +62,10 @@ def prepare(plan, part):
                optional(part, 'validator_history'), optional(part, 'test_worktree'))
         print(json.dumps(dict(part=part['first'], launch_record=str(out / 'process.private.json'))), flush=True)
     started = json.loads((out / 'process.private.json').read_bytes())
-    controls = out / 'controls' / 'actual-negative-controls.private.json'
+    # Controls depend only on the source, the helper and the opening, so a plan may name ones already made for the same three.
+    controls = Path(part['controls']) if part.get('controls') else out / 'controls' / 'actual-negative-controls.private.json'
     if not controls.exists():
+        require(not part.get('controls'), 'named controls do not exist yet')
         from actual_full_controls import run
         prefix = 'opening_checkpoint' in started
         r = run(Path(part['source']), out / 'controls', Path(started['helper_copy']), part['first'],
