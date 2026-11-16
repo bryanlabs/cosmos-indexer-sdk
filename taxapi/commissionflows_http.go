@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -317,18 +318,19 @@ func (s *Server) handleValidatorCommissionFlows(w http.ResponseWriter, r *http.R
 	chain := chainParam(q.Get(apiChain))
 	rule := flowRuleParam(q.Get("rule"))
 	start, end := flowMonthParam(q.Get(apiStart)), flowMonthParam(q.Get(apiEnd))
-	var run CommissionFlowRun
-	res := s.db.Where("chain = ? AND validator = ?", chain, val).Limit(1).Find(&run)
-	if res.Error != nil {
-		http.Error(w, res.Error.Error(), http.StatusInternalServerError)
+	served, err := s.servedCommissionFlows(chain, val)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if res.RowsAffected == 0 {
+	sv, ok := served[val]
+	if !ok {
 		http.Error(w, "no commission trace for this validator yet; traces are rebuilt daily for every validator that has withdrawn commission", http.StatusNotFound)
 		return
 	}
-	var flows []CommissionFlow
-	if err := s.db.Where("chain = ? AND validator = ? AND rule = ?", chain, val, rule).Find(&flows).Error; err != nil {
+	run := sv.Run
+	flows, err := s.servedFlowLines(chain, val, sv, rule)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -500,20 +502,22 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		http.Error(w, "The list of validators that have withdrawn commission is still being read after a restart. Try again in a minute.", http.StatusServiceUnavailable)
 		return
 	}
-	var runs []CommissionFlowRun
-	if err := s.db.Where("chain = ?", chain).Find(&runs).Error; err != nil {
+	served, err := s.servedCommissionFlows(chain, "")
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	// A failed run keeps its last good flows for its own page, and a run whose
 	// rebuilt balances do not match the chain keeps its flows there too, but
 	// the Hub leaves both out of both sides so shares stay whole.
-	var flows []CommissionFlow
-	if err := s.db.Table(CommissionFlow{}.TableName()).
-		Select("month, class, detail, via_unbonding, SUM(amount_base)::text AS amount_base").
-		Where("chain = ? AND rule = ?", chain, rule).
-		Where("validator NOT IN (?)", s.db.Table(CommissionFlowRun{}.TableName()).Select(apiValidator).Where("chain = ? AND status IN ?", chain, flowHubLeftOut)).
-		Group("month, class, detail, via_unbonding").Scan(&flows).Error; err != nil {
+	include := map[string]bool{}
+	for v, sv := range served {
+		if !slices.Contains(flowHubLeftOut, sv.Run.Status) {
+			include[v] = true
+		}
+	}
+	flows, err := s.hubFlowLines(chain, rule, served, include)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -526,7 +530,8 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 	withdrawn := map[string]decimal.Decimal{}
 	unreconciled := decimal.Zero
 	var asOf time.Time
-	for _, run := range runs {
+	for _, sv := range served {
+		run := sv.Run
 		out.Validators++
 		out.Statuses[run.Status]++
 		if expected[run.Validator] {

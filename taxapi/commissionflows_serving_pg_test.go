@@ -1,0 +1,274 @@
+package taxapi
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	flowServeBuild   = "sha256:build-a"
+	flowServeProfile = "profile-a"
+	flowServeFrom    = "2023-01-01"
+	flowServeAsOf    = "2025-03-31"
+	flowServeHalf    = "0.5"
+)
+
+var (
+	flowServeDrifted = flowPGValoper(3)
+	flowServeRetried = flowPGValoper(4)
+	flowServeErrored = flowPGValoper(5)
+)
+
+func flowServeSource(version string) commissionServingSource {
+	return commissionServingSource{Version: version, Build: flowServeBuild, Profile: flowServeProfile, FromDay: flowServeFrom, AsOf: flowServeAsOf}
+}
+
+// flowServeSchema creates the versioned result table as production has it.
+func flowServeSchema(t *testing.T, s *Server) {
+	t.Helper()
+	require.NoError(t, s.db.Exec(`CREATE TABLE tax_commission_flow_versions (
+		version text NOT NULL, chain text NOT NULL, validator text NOT NULL, build text NOT NULL,
+		computed_at timestamptz, run_json jsonb NOT NULL, rows_json jsonb NOT NULL, evidence_json jsonb NOT NULL,
+		private_profile_sha256 text, PRIMARY KEY (version, chain, validator))`).Error)
+}
+
+func flowServeInsert(t *testing.T, s *Server, version, build, profile string, run CommissionFlowRun, rows []CommissionFlow) {
+	t.Helper()
+	if rows == nil {
+		rows = []CommissionFlow{}
+	}
+	r, err := json.Marshal(run)
+	require.NoError(t, err)
+	w, err := json.Marshal(rows)
+	require.NoError(t, err)
+	flowServeInsertRaw(t, s, version, build, profile, run.Validator, string(r), string(w))
+}
+
+func flowServeInsertRaw(t *testing.T, s *Server, version, build, profile, validator, run, rows string) {
+	t.Helper()
+	require.NoError(t, s.db.Exec(`INSERT INTO tax_commission_flow_versions
+		(version, chain, validator, build, computed_at, run_json, rows_json, evidence_json, private_profile_sha256)
+		VALUES (?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, '{"private":"evidence"}'::jsonb, ?)`,
+		version, apiMainnet, validator, build, time.Now().UTC(), run, rows, profile).Error)
+}
+
+func TestCommissionFlowsServeAcceptedVersionsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	flowServeSchema(t, s)
+	retry := flowServeSource("retry")
+	retry.Root = flowValidatorRoot(flowServeRetried)
+	s.flowSources = map[string][]commissionServingSource{apiMainnet: {retry, flowServeSource("shard"), flowServeSource("source"), flowServeSource("late")}}
+	chain := chainParam("cosmoshub")
+	h := s.handleValidatorCommissionFlows
+
+	// Legacy rows: the main validator reconciled, the other drifted, and one
+	// that errored in its versioned attempt.
+	require.NoError(t, s.saveCommissionFlows(flowPGRun(flowPGValidator, flowStatusReconciled, `{"2025-01":"1000000","2025-02":"2500000"}`), flowPGRows(flowPGValidator,
+		[3]string{flowPGJan, flowExchange, "1000000"}, [3]string{flowPGFeb, flowHeld, "2500000"})))
+	require.NoError(t, s.saveCommissionFlows(flowPGRun(flowPGOther, flowStatusDrift, `{"2025-02":"300000"}`), flowPGRows(flowPGOther,
+		[3]string{flowPGFeb, flowExchange, "300000"})))
+	require.NoError(t, s.saveCommissionFlows(flowPGRun(flowServeErrored, flowStatusReconciled, `{"2025-02":"100000"}`), flowPGRows(flowServeErrored,
+		[3]string{flowPGFeb, flowHeld, "100000"})))
+
+	// The main validator's accepted versioned result replaces its legacy one.
+	main := flowPGRun(flowPGValidator, flowStatusReconciled, `{"2025-01":"1000000","2025-02":"2500000"}`)
+	main.Wallets = 9
+	flowServeInsert(t, s, "shard", flowServeBuild, flowServeProfile, main, flowPGRows(flowPGValidator,
+		[3]string{flowPGJan, flowExchange, "1000000"}, [3]string{flowPGFeb, flowHeld, "2000000"}, [3]string{flowPGFeb, flowExchangeLike, "500000"}))
+	// The same result adopted from the source collection is not counted twice.
+	flowServeInsert(t, s, "source", flowServeBuild, flowServeProfile, main, flowPGRows(flowPGValidator, [3]string{flowPGJan, flowFees, "1000000"}))
+	// A stored error is not a result: the legacy run stays.
+	failed := flowPGRun(flowServeErrored, flowStatusError, "{}")
+	failed.Reason = "deadline"
+	flowServeInsert(t, s, "shard", flowServeBuild, flowServeProfile, failed, nil)
+	// A validator only the versioned collections traced, with drift.
+	drift := flowPGRun(flowServeDrifted, flowStatusDrift, `{"2025-02":"700000"}`)
+	drift.DriftBase = "99000000"
+	flowServeInsert(t, s, "shard", flowServeBuild, flowServeProfile, drift, flowPGRows(flowServeDrifted, [3]string{flowPGFeb, flowExchange, "700000"}))
+	// Results the API must not serve: another build, another profile, another
+	// window, a pinned retry for another validator, a run stored under another
+	// validator, a chunked payload, and an unlisted collection.
+	other := flowPGRun(flowServeRetried, flowStatusReconciled, `{"2025-02":"400000"}`)
+	flowServeInsert(t, s, "source", "sha256:other", flowServeProfile, other, nil)
+	flowServeInsert(t, s, "shard", flowServeBuild, "profile-b", other, nil)
+	window := other
+	window.AsOf = time.Date(2025, 4, 30, 0, 0, 0, 0, time.UTC)
+	flowServeInsert(t, s, "late", flowServeBuild, flowServeProfile, window, nil)
+	wrongRoot := flowPGRun(flowPGOther, flowStatusReconciled, `{"2025-02":"300000"}`)
+	flowServeInsert(t, s, "retry", flowServeBuild, flowServeProfile, wrongRoot, nil)
+	r, err := json.Marshal(other)
+	require.NoError(t, err)
+	flowServeInsertRaw(t, s, "shard", flowServeBuild, flowServeProfile, flowPGOther, string(r), "[]")
+	flowServeInsertRaw(t, s, "shard", flowServeBuild, flowServeProfile, "cosmosvaloper1chunked", `"cosmos-commission-payload/v1:run:abc"`, "[]")
+	flowServeInsert(t, s, "unlisted", flowServeBuild, flowServeProfile, other, nil)
+
+	served, err := s.servedCommissionFlows(apiMainnet, "")
+	require.NoError(t, err)
+	require.Len(t, served, 4, "main, other, errored and drifted; nothing else is accepted")
+	require.True(t, served[flowPGValidator].Versioned)
+	require.False(t, served[flowPGOther].Versioned, "no accepted versioned result keeps the legacy run")
+	require.False(t, served[flowServeErrored].Versioned)
+	require.True(t, served[flowServeDrifted].Versioned)
+
+	var got ValidatorCommissionFlows
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowPGValidator, http.StatusOK, &got)
+	require.Equal(t, flowStatusReconciled, got.Status)
+	require.EqualValues(t, 9, got.Reconciliation["wallets"])
+	require.Equal(t, "3.5", got.Total.Withdrawn.String(), "commission is the same in both results")
+	classes := map[string]string{}
+	for _, l := range got.Total.Flows {
+		classes[l.Class] = l.Amount.String()
+	}
+	require.Equal(t, map[string]string{flowExchange: "1", flowHeld: "2", flowExchangeLike: flowServeHalf}, classes, "flows come from the shard's result, not the source's")
+
+	var errored ValidatorCommissionFlows
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowServeErrored, http.StatusOK, &errored)
+	require.Equal(t, flowStatusReconciled, errored.Status, "a stored versioned error never replaces a finished legacy result")
+	require.Equal(t, "0.1", errored.Total.Withdrawn.String())
+
+	var drifted ValidatorCommissionFlows
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowServeDrifted, http.StatusOK, &drifted)
+	require.Equal(t, flowStatusDrift, drifted.Status, "a drift result is served and labelled as drift")
+	require.Equal(t, "99", drifted.Reconciliation["drift"])
+	require.Equal(t, "0.7", drifted.Total.Withdrawn.String())
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowServeRetried, http.StatusNotFound, nil)
+
+	// The Hub counts each validator once and keeps drift out of its totals.
+	flowPGExpect(s, chain, flowPGValidator, flowPGOther, flowServeErrored, flowServeDrifted, flowServeRetried)
+	var hub CommissionFlowsHub
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows", http.StatusOK, &hub)
+	require.Equal(t, 4, hub.Validators)
+	require.Equal(t, 4, hub.Traced)
+	require.False(t, hub.Complete)
+	require.Empty(t, hub.Months)
+	require.Equal(t, map[string]int{flowStatusReconciled: 2, flowStatusDrift: 2}, hub.Statuses)
+	require.Equal(t, 2, hub.Unreconciled.Validators)
+	require.Equal(t, "1", hub.Unreconciled.Withdrawn.String(), "the legacy and the versioned drift results")
+
+	// The retry collection's pinned validator completes the set.
+	retried := flowPGRun(flowServeRetried, flowStatusOK, `{"2025-02":"400000"}`)
+	flowServeInsert(t, s, "retry", flowServeBuild, flowServeProfile, retried, flowPGRows(flowServeRetried, [3]string{flowPGFeb, flowFees, "400000"}))
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows", http.StatusOK, &hub)
+	require.True(t, hub.Complete, "a newly inserted result is read, not a cached set")
+	require.Equal(t, 5, hub.Traced)
+	require.Len(t, hub.Months, 2)
+	require.Equal(t, "1", hub.Months[0].Withdrawn.String())
+	require.Equal(t, "3", hub.Months[1].Withdrawn.String(), "main 2.5, errored legacy 0.1 and retried 0.4; drift left out")
+	feb := map[string]string{}
+	for _, l := range hub.Months[1].Flows {
+		feb[l.Class] = l.Amount.String()
+	}
+	require.Equal(t, map[string]string{flowHeld: "2.1", flowExchangeLike: "0.5", flowFees: "0.4"}, feb, "neither drift result's exchange line is summed")
+	require.Equal(t, "4", hub.Total.Withdrawn.String())
+
+	// Run as a role holding only the columns the API is granted: the API never
+	// needs the private evidence column.
+	role := fmt.Sprintf("flow_serve_api_%d", time.Now().UnixNano())
+	var schema string
+	require.NoError(t, s.db.Raw("SELECT current_schema()").Scan(&schema).Error)
+	for _, sql := range []string{
+		"CREATE ROLE " + role + " NOLOGIN",
+		"GRANT USAGE ON SCHEMA " + schema + " TO " + role,
+		"GRANT SELECT ON ALL TABLES IN SCHEMA " + schema + " TO " + role,
+		"REVOKE SELECT ON tax_commission_flow_versions FROM " + role,
+		"GRANT SELECT (version, chain, validator, build, private_profile_sha256, computed_at, run_json, rows_json) ON tax_commission_flow_versions TO " + role,
+		"SET ROLE " + role,
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	t.Cleanup(func() {
+		_ = s.db.Exec("RESET ROLE").Error
+		_ = s.db.Exec("DROP OWNED BY " + role).Error
+		_ = s.db.Exec("DROP ROLE " + role).Error
+	})
+	require.Error(t, s.db.Exec("SELECT evidence_json FROM tax_commission_flow_versions").Error)
+	s.flowVer = nil
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows", http.StatusOK, &hub)
+	require.Equal(t, "4", hub.Total.Withdrawn.String())
+	got = ValidatorCommissionFlows{}
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowPGValidator, http.StatusOK, &got)
+	require.EqualValues(t, 9, got.Reconciliation["wallets"])
+
+	// Before the role is granted the versioned columns, the page serves the
+	// legacy runs exactly as it did before versioned results existed.
+	require.NoError(t, s.db.Exec("RESET ROLE").Error)
+	require.NoError(t, s.db.Exec("REVOKE SELECT (version, chain, validator, build, private_profile_sha256, computed_at, run_json, rows_json) ON tax_commission_flow_versions FROM "+role).Error)
+	require.NoError(t, s.db.Exec("SET ROLE "+role).Error)
+	s.flowVer = nil
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows", http.StatusOK, &hub)
+	require.Equal(t, 3, hub.Validators)
+	require.Equal(t, map[string]int{flowStatusReconciled: 2, flowStatusDrift: 1}, hub.Statuses)
+	got = ValidatorCommissionFlows{}
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowPGValidator, http.StatusOK, &got)
+	require.EqualValues(t, 3, got.Reconciliation["wallets"], "the legacy run")
+	flowPGGet(t, h, "/validator-commission-flows?validator="+flowServeDrifted, http.StatusNotFound, nil)
+	require.NoError(t, s.db.Exec("RESET ROLE").Error)
+	require.NoError(t, s.db.Exec("DROP TABLE tax_commission_flow_versions").Error)
+	s.flowVer = nil
+	served, err = s.servedCommissionFlows(apiMainnet, "")
+	require.NoError(t, err, "a database without the versioned table serves its legacy runs")
+	require.Len(t, served, 3)
+	require.NoError(t, s.db.Exec("CREATE VIEW tax_commission_flow_versions AS SELECT 1 AS other").Error)
+	_, err = s.servedCommissionFlows(apiMainnet, "")
+	require.Error(t, err, "any other read error fails the request")
+}
+
+func TestAcceptFlowVersionRules(t *testing.T) {
+	src := flowServeSource("v")
+	run := flowPGRun(flowPGValidator, flowStatusReconciled, "{}")
+	encode := func(r CommissionFlowRun, rows []CommissionFlow) flowVersionRow {
+		a, _ := json.Marshal(r)
+		b, _ := json.Marshal(rows)
+		return flowVersionRow{Version: "v", Chain: apiMainnet, Validator: r.Validator, Build: flowServeBuild, PrivateProfileSHA256: flowServeProfile, RunJSON: string(a), RowsJSON: string(b)}
+	}
+	_, ok := acceptFlowVersion(src, encode(run, []CommissionFlow{}), apiMainnet)
+	require.True(t, ok)
+	for _, status := range []string{flowStatusOK, flowStatusDrift} {
+		r := run
+		r.Status = status
+		_, ok = acceptFlowVersion(src, encode(r, nil), apiMainnet)
+		require.True(t, ok, status)
+	}
+	for _, status := range []string{flowStatusError, "", "unknown"} {
+		r := run
+		r.Status = status
+		_, ok = acceptFlowVersion(src, encode(r, nil), apiMainnet)
+		require.False(t, ok, status)
+	}
+	_, ok = acceptFlowVersion(src, encode(run, flowPGRows(flowPGOther, [3]string{flowPGJan, flowHeld, "1"})), apiMainnet)
+	require.False(t, ok, "rows stored for another validator")
+	_, ok = acceptFlowVersion(src, encode(run, flowPGRows(flowPGValidator, [3]string{flowPGJan, flowHeld, "x"})), apiMainnet)
+	require.False(t, ok, "an amount that is not a number")
+	row := encode(run, nil)
+	row.RowsJSON = `"cosmos-commission-payload/v1:rows:abc"`
+	_, ok = acceptFlowVersion(src, row, apiMainnet)
+	require.False(t, ok, "chunked rows")
+	r := run
+	r.FromDay = time.Date(2023, 1, 2, 0, 0, 0, 0, time.UTC)
+	_, ok = acceptFlowVersion(src, encode(r, nil), apiMainnet)
+	require.False(t, ok, "another window")
+	_, ok = acceptFlowVersion(src, encode(run, nil), apiTestnet)
+	require.False(t, ok, "another chain")
+}
+
+func TestDefaultCommissionServingSources(t *testing.T) {
+	seen := map[string]bool{}
+	for _, src := range defaultCommissionServingSources[apiMainnet] {
+		require.False(t, seen[src.Version], src.Version)
+		seen[src.Version] = true
+		require.Equal(t, flowCorrectedFrom, src.FromDay)
+		require.Equal(t, flowCorrectedAsOf, src.AsOf)
+		require.NotEmpty(t, src.Build)
+		require.NotEmpty(t, src.Profile)
+	}
+	require.Len(t, seen, 14)
+	require.Empty(t, defaultCommissionServingSources[apiTestnet])
+}

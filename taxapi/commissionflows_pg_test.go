@@ -106,7 +106,7 @@ func flowPGServer(t *testing.T) *Server {
 		_, _ = w.Write([]byte(`{"usd":10,"found":true}`))
 	}))
 	t.Cleanup(prices.Close)
-	return &Server{db: database, native: DefaultNativeAsset, oracle: NewOracle(prices.URL, "")}
+	return &Server{db: database, native: DefaultNativeAsset, oracle: NewOracle(prices.URL, ""), flowSources: map[string][]commissionServingSource{}}
 }
 
 func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {

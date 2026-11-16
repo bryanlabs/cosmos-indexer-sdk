@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
@@ -45,6 +46,13 @@ type Server struct {
 
 	flowExpMu sync.Mutex
 	flowExp   map[string]*flowExpected
+
+	// flowSources overrides the versioned commission collections served, for tests.
+	flowSources map[string][]commissionServingSource
+	flowVerMu   sync.Mutex
+	flowVer     map[string]flowVersionCache
+	// flowVerDenied records that the denied-read notice was logged once.
+	flowVerDenied atomic.Bool
 
 	statementMaxRows    int64
 	statementTimeout    time.Duration
