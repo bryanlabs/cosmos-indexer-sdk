@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -177,6 +178,37 @@ func (s hub1Source) open() (io.ReadCloser, error) {
 // Hub 2 path it says why it stopped: the height, the record kind and the
 // label, never an address or an amount.
 func runHub1(dirs []string, exportRecords, exportProof, target string, write bool, maxBody int64, manifest string) error {
+	_, err := hub1Options{dirs: dirs, exportRecords: exportRecords, exportProof: exportProof, target: target, write: write, maxBody: maxBody, manifest: manifest}.run()
+	return err
+}
+
+// hub1Options is one conversion. With compare set nothing is written: every
+// height derived from the sealed files must equal what that session already
+// stores. With tail set the blocks after the export height follow as
+// history, with no tax rows.
+type hub1Options struct {
+	dirs                               []string
+	exportRecords, exportProof, target string
+	write                              bool
+	maxBody                            int64
+	manifest                           string
+	compare                            *sql.Conn
+	tail                               *hub1TailSpec
+	bound                              func([]hub1Source) error
+}
+
+type hub1Converted struct {
+	sources    []hub1Source
+	export     *replayrecords.Proof
+	payoutRows int64
+	tailList   string
+}
+
+func (o hub1Options) run() (done hub1Converted, _ error) {
+	dirs, exportRecords, exportProof, target, write, maxBody, manifest := o.dirs, o.exportRecords, o.exportProof, o.target, o.write, o.maxBody, o.manifest
+	if write && o.compare != nil {
+		return done, refused
+	}
 	fail := func(err error) error {
 		fmt.Fprintln(os.Stderr, "hub1:", err)
 		return refused
@@ -185,35 +217,42 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 	for _, dir := range dirs {
 		s, err := hub1Admit(strings.TrimSpace(dir))
 		if err != nil {
-			return fail(err)
+			return done, fail(err)
 		}
 		if len(sources) > 0 && s.proof.From != sources[len(sources)-1].proof.Through+1 {
-			return fail(fmt.Errorf("Hub 1 sources are not consecutive ranges"))
+			return done, fail(fmt.Errorf("Hub 1 sources are not consecutive ranges"))
 		}
 		if s.proof.Through > hub1Export {
-			return fail(fmt.Errorf("Hub 1 source runs past the export height; later blocks are never tax rows"))
+			return done, fail(fmt.Errorf("Hub 1 source runs past the export height; later blocks are never tax rows"))
 		}
 		sources = append(sources, s)
 	}
+	done.sources = sources
+	if o.bound != nil {
+		if err := o.bound(sources); err != nil {
+			return done, fail(err)
+		}
+	}
 	last := sources[len(sources)-1].proof.Through
 	if write && !hub1RehearsalName.MatchString(target) {
-		return fail(fmt.Errorf("Hub 1 rows go only to a database named legacy_replay_rehearsal_hub1_SUFFIX"))
+		return done, fail(fmt.Errorf("Hub 1 rows go only to a database named legacy_replay_rehearsal_hub1_SUFFIX"))
 	}
 	var export *replayrecords.Height
 	var admittedExport *replayrecords.Proof
 	if (exportRecords == "") != (exportProof == "") {
-		return refused
+		return done, refused
 	}
 	if exportRecords != "" {
 		var ep replayrecords.Proof
 		if readJSON(exportProof, &ep, true) != nil || !ep.Export || last != hub1Export || ep.From != hub1Export || ep.Through != hub1Export {
-			return fail(fmt.Errorf("Hub 1 export proof must be the zero-height export of the last source height %d", hub1Export))
+			return done, fail(fmt.Errorf("Hub 1 export proof must be the zero-height export of the last source height %d", hub1Export))
 		}
 		_, err := replayrecords.StreamHub1(func() (io.ReadCloser, error) { return os.Open(exportRecords) }, ep, func(h replayrecords.Height) error { export = &h; return nil })
 		if err != nil || export == nil {
-			return fail(fmt.Errorf("Hub 1 export records: %w", err))
+			return done, fail(fmt.Errorf("Hub 1 export records: %w", err))
 		}
 		admittedExport = &ep
+		done.export = &ep
 	}
 	// Before anything is written every stream is checked whole against its
 	// pin. A run that writes nothing checks each pin at the end of its pass.
@@ -249,7 +288,7 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 	}
 	for i, err := range checked {
 		if err != nil {
-			return fail(fmt.Errorf("source %d: %w", i+1, err))
+			return done, fail(fmt.Errorf("source %d: %w", i+1, err))
 		}
 		if write {
 			admitted(i)
@@ -331,7 +370,11 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 				recorded[r.Number] = want
 			}
 			b.Events = append(b.Events, ledger.Event{Phase: ledger.PhaseBegin, Index: 2, Type: "pinned_replay_receipt", Attributes: attributes})
-			if destination != nil {
+			if o.compare != nil {
+				if n, err := ledger.Write(ctx, o.compare, []ledger.Block{b}); err != nil || n != 0 {
+					return fmt.Errorf("height %d: stored rows are not the rows its sealed source gives", r.Number)
+				}
+			} else if destination != nil {
 				if err = destination.write(ctx, b); err != nil {
 					return fmt.Errorf("height %d: rehearsal write refused", r.Number)
 				}
@@ -343,6 +386,9 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 			s.read.Transactions += int64(len(b.Inclusions))
 			s.read.Rows += int64(len(b.Rows))
 			for _, row := range b.Rows {
+				if row.Source == "export_payout" {
+					done.payoutRows++
+				}
 				categories[row.Category+"/"+row.Source]++
 				s.read.RowsByCategory[row.Category+"/"+row.Source]++
 			}
@@ -350,7 +396,7 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 		}
 		r, err := s.open()
 		if err != nil {
-			return fail(err)
+			return done, fail(err)
 		}
 		counted[i], err = replayrecords.ScanHub1(r, s.proof, visit)
 		if closeErr := r.Close(); err == nil {
@@ -358,7 +404,7 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 		}
 		s.read.BlockCaptureListSHA256 = hex.EncodeToString(s.read.captures.Sum(nil))
 		if err != nil {
-			return fail(fmt.Errorf("source %d: %w", i+1, err))
+			return done, fail(fmt.Errorf("source %d: %w", i+1, err))
 		}
 		if !write {
 			admitted(i)
@@ -372,7 +418,27 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 	fmt.Printf("hub1 converted heights=%d held=%d transactions=%d rows=%d heights_with_balance_change=%d export=%t written=%t\nhub1 rows by category and source: %s\n",
 		heights, held, txs, rows, len(recorded), export != nil, write, strings.Join(names, " "))
 	if held != 0 {
-		return refused
+		return done, refused
+	}
+	if o.tail != nil {
+		if last != hub1Export {
+			return done, fail(errors.New("the tail follows only the export height"))
+		}
+		blocks, list, err := hub1TailBlocks(*o.tail, parent, maxBody)
+		if err != nil {
+			return done, fail(err)
+		}
+		done.tailList = list
+		conn := o.compare
+		if conn == nil && destination != nil {
+			conn = destination.conn
+		}
+		if conn != nil {
+			if n, err := ledger.Write(ctx, conn, blocks); err != nil || (o.compare != nil && n != 0) {
+				return done, fail(errors.New("tail write refused, or the stored tail differs from its captures"))
+			}
+		}
+		fmt.Printf("hub1 tail heights %d to %d: blocks=%d tax_rows=0\n", o.tail.First, o.tail.Last, len(blocks))
 	}
 	record := func() error {
 		if manifest == "" {
@@ -407,9 +473,9 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 	}
 	if destination == nil {
 		if err := record(); err != nil {
-			return fail(err)
+			return done, fail(err)
 		}
-		return nil
+		return done, nil
 	}
 	// Read the stored rows back and prove them, height by height, against
 	// what was recorded. This is the check on the staging rows themselves.
@@ -445,16 +511,16 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 		batch = append(batch, n)
 		if len(batch) == 2000 || n == last {
 			if err := flush(); err != nil {
-				return fail(err)
+				return done, fail(err)
 			}
 		}
 	}
 	fmt.Printf("hub1 stored rows proven against the recording: heights=%d heights_with_balance_change=%d\n", stored, proven)
 	if proven != len(recorded) {
-		return refused
+		return done, refused
 	}
 	if err := record(); err != nil {
-		return fail(err)
+		return done, fail(err)
 	}
-	return nil
+	return done, nil
 }

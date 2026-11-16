@@ -117,7 +117,28 @@ func run() error {
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture")
 	hub1 := flag.String("hub1-sources", "", "comma separated closed Hub 1 recording source directories, in height order")
 	hub1Manifest := flag.String("hub1-manifest", "", "new file to receive the digests of every sealed file a Hub 1 run read, per source")
+	hub1PartsPath := flag.String("hub1-parts", "", "ordered list of sealed Hub 1 parts with their seals, the genesis and the tail; replaces -hub1-sources")
+	hub1ReceiptOut := flag.String("hub1-receipt", "", "new file to receive the staging receipt that binds stored rows to the listed parts; reads the database only")
+	hub1ReceiptCheck := flag.String("hub1-verify-receipt", "", "staging receipt to recompute and compare; reads the database only")
 	flag.Parse()
+	if *hub1PartsPath != "" {
+		if *hub1 != "" || *root != "" || *records != "" || *proof != "" || *status != "" || *differences != "" || *maxBody < 1 || (*hub1ReceiptOut != "" && *hub1ReceiptCheck != "") || (*write && *hub1ReceiptOut+*hub1ReceiptCheck != "") {
+			return refused
+		}
+		parts, err := readHub1Parts(*hub1PartsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hub1:", err)
+			return refused
+		}
+		switch {
+		case *hub1ReceiptOut != "":
+			return writeHub1Receipt(parts, *exportRecords, *exportProof, *target, *maxBody, *hub1Manifest, *hub1ReceiptOut)
+		case *hub1ReceiptCheck != "":
+			return verifyHub1Receipt(parts, *exportRecords, *exportProof, *target, *maxBody, *hub1ReceiptCheck)
+		}
+		_, err = hub1Options{dirs: parts.dirs(), exportRecords: *exportRecords, exportProof: *exportProof, target: *target, write: *write, maxBody: *maxBody, manifest: *hub1Manifest, tail: parts.Tail, bound: parts.bound}.run()
+		return err
+	}
 	if *hub1 != "" {
 		if *root != "" || *records != "" || *proof != "" || *status != "" || *differences != "" || *maxBody < 1 {
 			return refused
