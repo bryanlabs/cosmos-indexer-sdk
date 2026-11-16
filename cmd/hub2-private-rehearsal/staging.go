@@ -639,6 +639,17 @@ func extendManifest(base Manifest, root, tailCache, tailManifest, out string) er
 	if loose(sealPath, &a) != nil || !a.Accepted || a.Held != 0 || a.First != base.Last+1 || a.Rows <= 0 || a.Transactions <= 0 {
 		return why("component is not sealed and accepted, or does not continue the manifest")
 	}
+	// The finalizer's rule: a root that was claimed needs its own accepted
+	// exit. An abandoned attempt beside the accepted one is evidence, not a part.
+	if _, e := os.Lstat(filepath.Join(filepath.Dir(root), "execution-claim.json")); e == nil {
+		var exit struct {
+			Accepted bool  `json:"component_accepted"`
+			Code     int64 `json:"exit_code"`
+		}
+		if loose(filepath.Join(filepath.Dir(root), "execution-exit.json"), &exit) != nil || !exit.Accepted || exit.Code != 0 {
+			return why("this root holds a claim with no accepted exit")
+		}
+	}
 	if a.Prior != "" {
 		found := false
 		for p, h := range base.Pins {

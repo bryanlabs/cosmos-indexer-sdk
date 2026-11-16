@@ -131,8 +131,9 @@ These contracts do not create financial acceptance: real final owner seals and
 full SQL staging are still missing, and synthetic metadata cannot pass complete
 admission. Do not wrap unaccepted data in an envelope and call it proof.
 
-Tail tax rows are preserved as actual Hub2 history. They are not omitted or
-reclassified as migrated Hub3 opening balances. This package performs NO Hub3
+The tail heights after the canonical export are stored as actual Hub2 history
+(headers and transactions) and carry no tax row: they never reached Hub3. They
+are not reclassified as migrated Hub3 opening balances. This package performs NO Hub3
 insert or migration. Only the genuine financially accepted canonical phase4
 payout may enter once, at the canonical height. Intermediate zero-height
 exports remain validation artifacts, never income. Old `books.Close` is not

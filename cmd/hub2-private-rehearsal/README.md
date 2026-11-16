@@ -45,7 +45,11 @@ hub2-private-rehearsal -mode add -database NAME -port PORT \
   -manifest NEXT.json -out NEW_RECEIPT_DIR
 ```
 
-`extend-manifest` only reads. It requires `final-component-acceptance.json`
+Name the component directory explicitly, from an ordered list. Never find it
+by folder name: an abandoned attempt can sit beside the accepted one.
+
+`extend-manifest` only reads. A root that holds `execution-claim.json` must
+also hold an accepted `execution-exit.json`. It requires `final-component-acceptance.json`
 to say the component is accepted with zero held heights, to start at the
 height after the manifest's last, and, when the seal names the previous seal,
 that seal to be pinned already. It pins the records, status, differences,
@@ -86,3 +90,20 @@ column left out is `genesis_files.loaded_at`, the wall clock of the insert.
 components with the canonical height lowered to the second one's end, in a
 throwaway database, to exercise the payout wiring before the real 2,902,000
 component exists. That database is a fixture, never staging.
+
+## What the whole-chain finalizer reads
+
+`legacy/hub2promotion` exports this database and requires what this importer
+writes: the restart payout rows once, phase 4 with `amount_source`
+`export_payout` on 2,902,000; no tax row above 2,902,000; headers 1 to
+2,902,002 without a gap. The database name starts with
+`legacy_replay_rehearsal_` and the port is never 15432.
+
+The tail input here is a capture cache directory of the two heights in the
+same layout as a component cache, plus a `sha256sum` list of its files. Each
+tail height is stored with one `pinned_tail_receipt` event (begin phase,
+index 2). No sealed Hub 2 tail receipt exists yet; this importer does not
+write one.
+
+Keep temporary files off `/tmp`: set `TMPDIR`, `GOTMPDIR` and `GOCACHE` to
+folders on the data volume, and run one import at a time.
