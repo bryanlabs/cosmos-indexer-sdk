@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/DefiantLabs/cosmos-indexer/legacy/replayrecords"
+	"strings"
 	"testing"
 )
 
@@ -132,5 +133,20 @@ func TestStagingTargetNeverTheServingForward(t *testing.T) {
 		if guardTarget(c.name, c.port) == nil {
 			t.Fatal("unsafe staging target admitted")
 		}
+	}
+}
+
+func TestSealOfIsAlwaysAPinnedFile(t *testing.T) {
+	m := chainManifest(3)
+	m.Components[0].Records, m.Components[1].Records, m.Components[2].Records = "/a/prefix/x/records", "/a/600000/candidate/movements.ndjson", "/a/attempt2/800000/candidate/movements.ndjson"
+	m.Pins = map[string]string{"/s/hub2-genesis-prefix-1/final-acceptance.json": strings.Repeat("a", 64), "/a/600000/financial/component-result.json": strings.Repeat("b", 64), "/a/attempt2/800000/final-component-acceptance.json": strings.Repeat("c", 64), "/a/attempt2/800000/financial/component-result.json": strings.Repeat("d", 64), "/a/800000/final-component-acceptance.json": strings.Repeat("e", 64)}
+	for i, want := range []string{"/s/hub2-genesis-prefix-1/final-acceptance.json", "/a/600000/financial/component-result.json", "/a/attempt2/800000/final-component-acceptance.json"} {
+		if got, e := sealOf(m, m.Components[i]); e != nil || got != want {
+			t.Fatal("seal of component", i, got)
+		}
+	}
+	delete(m.Pins, "/a/600000/financial/component-result.json")
+	if _, e := sealOf(m, m.Components[1]); e == nil {
+		t.Fatal("unpinned seal admitted")
 	}
 }

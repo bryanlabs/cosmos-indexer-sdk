@@ -75,6 +75,8 @@ type CanonicalExport struct {
 type Tail struct {
 	First, Last          int64
 	Cache, CacheManifest string
+	// Seal is the tail's own acceptance receipt, when one exists.
+	Seal string `json:",omitempty"`
 }
 
 func fileSHA(p string) string {
@@ -183,7 +185,7 @@ func pins(m Manifest) error {
 	if x := m.CanonicalExport; x != nil && m.Pins[x.Records] != x.Proof.SHA256 {
 		return refused
 	}
-	if t := m.Tail; t != nil && len(m.Pins[t.CacheManifest]) != 64 {
+	if t := m.Tail; t != nil && (len(m.Pins[t.CacheManifest]) != 64 || (t.Seal != "" && len(m.Pins[t.Seal]) != 64)) {
 		return refused
 	}
 	for p, h := range m.Pins {
@@ -405,7 +407,7 @@ func snapshot(out string) error {
 var manifestPath string
 
 func main() {
-	mode := flag.String("mode", "", "prepare/import/add/extend-manifest/fingerprint/snapshot/refuse-retry")
+	mode := flag.String("mode", "", "prepare/import/add/extend-manifest/fingerprint/receipt/verify-receipt/snapshot/refuse-retry")
 	mp := flag.String("manifest", "", "sealed pinned private manifest")
 	out := flag.String("out", "", "new retained receipt path")
 	name := flag.String("database", database, "private staging database, legacy_replay_rehearsal_hub2_SUFFIX")
@@ -414,6 +416,9 @@ func main() {
 	component := flag.String("component", "", "extend-manifest: sealed component directory holding final-component-acceptance.json")
 	tailCache := flag.String("tail-cache", "", "extend-manifest at the canonical end: capture root of heights 2902001 and 2902002")
 	tailManifest := flag.String("tail-cache-manifest", "", "extend-manifest at the canonical end: SHA256 list of the tail captures")
+	tailSeal := flag.String("tail-seal", "", "extend-manifest at the canonical end: the tail's own acceptance receipt, when one exists")
+	receiptPath := flag.String("receipt", "", "verify-receipt: the staging receipt to recompute")
+	hashesOnly := flag.Bool("hashes-only", false, "verify-receipt: compare stored row hashes and pins only, skip reading the sealed files again")
 	through := flag.Int64("through", 0, "fingerprint: only heights up to this one, 0 for all")
 	flag.Parse()
 	if guardTarget(*name, *p) != nil || (*tailCache == "") != (*tailManifest == "") {
@@ -442,7 +447,16 @@ func main() {
 		if readJSON(*mp, &m) != nil || *component == "" || !filepath.IsAbs(*component) {
 			e = refused
 		} else {
-			e = extendManifest(m, filepath.Clean(*component), *tailCache, *tailManifest, *out)
+			e = extendManifest(m, filepath.Clean(*component), *tailCache, *tailManifest, *tailSeal, *out)
+		}
+	case "receipt", "verify-receipt":
+		var m Manifest
+		if readJSON(*mp, &m) != nil {
+			e = refused
+		} else if *mode == "receipt" {
+			e = writeReceipt(m, *out)
+		} else {
+			e = verifyReceipt(m, *receiptPath, *hashesOnly)
 		}
 	case "refuse-retry":
 		var d *rehearsalDestination

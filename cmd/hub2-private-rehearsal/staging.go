@@ -129,7 +129,7 @@ func loadExport(x *CanonicalExport) (*replayrecords.Height, error) {
 	return out, nil
 }
 
-func importComponent(ctx context.Context, conn *sql.Conn, m Manifest, c Component, opening string, export *replayrecords.Height, fresh bool, started time.Time) (componentResult, error) {
+func importComponent(ctx context.Context, conn *sql.Conn, m Manifest, c Component, opening string, export *replayrecords.Height, fresh, check bool, started time.Time) (componentResult, error) {
 	began := time.Now()
 	out := componentResult{First: c.First, Last: c.Last}
 	p, gas, e := admission(c)
@@ -157,6 +157,15 @@ func importComponent(ctx context.Context, conn *sql.Conn, m Manifest, c Componen
 			return nil
 		}
 		n, e := ledger.Write(ctx, conn, batch)
+		if check {
+			// Reading back only: every height must already be stored and
+			// equal to what the sealed files give. The session is read-only.
+			if e != nil || n != 0 {
+				return why("component %d height %d and up: stored rows differ from the sealed source", c.Last, batch[0].Height)
+			}
+			batch = nil
+			return nil
+		}
 		if e != nil || (fresh && n != len(batch)) {
 			return why("component %d write at height %d: stored differs or short insert", c.Last, batch[0].Height)
 		}
@@ -263,7 +272,7 @@ func blockHash(ctx context.Context, conn *sql.Conn, height int64) (string, error
 
 // importTail stores the two heights after the export as headers and
 // transactions. They carry no replay records and produce no tax row.
-func importTail(ctx context.Context, conn *sql.Conn, m Manifest) (int64, error) {
+func importTail(ctx context.Context, conn *sql.Conn, m Manifest, check bool) (int64, error) {
 	t := m.Tail
 	expected, e := cachePins(Component{CacheManifest: t.CacheManifest})
 	if e != nil {
@@ -273,7 +282,7 @@ func importTail(ctx context.Context, conn *sql.Conn, m Manifest) (int64, error) 
 	if e != nil {
 		return 0, why("tail without stored canonical height")
 	}
-	receipt, _ := json.Marshal(map[string]any{"historical_tail": "2902001..2902002", "tax_rows": "none_tail_is_after_the_canonical_export", "cache_manifest_sha256": m.Pins[t.CacheManifest], "source_commit": m.SourceCommit})
+	receipt, _ := json.Marshal(map[string]any{"historical_tail": "2902001..2902002", "tax_rows": "none_tail_is_after_the_canonical_export", "cache_manifest_sha256": m.Pins[t.CacheManifest], "tail_seal_sha256": m.Pins[t.Seal], "source_commit": m.SourceCommit})
 	var blocks []ledger.Block
 	for n := t.First; n <= t.Last; n++ {
 		c := Component{Cache: t.Cache}
@@ -303,8 +312,8 @@ func importTail(ctx context.Context, conn *sql.Conn, m Manifest) (int64, error) 
 		parent = h.Hash
 		blocks = append(blocks, b)
 	}
-	if _, e = ledger.Write(ctx, conn, blocks); e != nil {
-		return 0, why("tail write")
+	if n, e := ledger.Write(ctx, conn, blocks); e != nil || (check && n != 0) {
+		return 0, why("tail write or stored tail differs from its captures")
 	}
 	if n, e := ledger.Write(ctx, conn, blocks); e != nil || n != 0 {
 		return 0, why("tail readback")
@@ -420,7 +429,7 @@ func runAdd(m Manifest, out string, incremental bool, parallel int) error {
 				if c.Last == canonicalHeight {
 					x = export
 				}
-				r, e := importComponent(ctx, conn, m, c, opening.SHA256, x, j.fresh, started)
+				r, e := importComponent(ctx, conn, m, c, opening.SHA256, x, j.fresh, false, started)
 				mu.Lock()
 				if e != nil {
 					failed = e
@@ -459,7 +468,7 @@ func runAdd(m Manifest, out string, incremental bool, parallel int) error {
 	}
 	var tail int64
 	if m.Tail != nil {
-		if tail, e = importTail(ctx, d.conn, m); e != nil {
+		if tail, e = importTail(ctx, d.conn, m, false); e != nil {
 			return refused
 		}
 	}
@@ -615,7 +624,7 @@ func loose(path string, v any) error {
 // extendManifest writes a NEW manifest that lists one more sealed component.
 // It only reads the sealed component directory. base may be the retained
 // 1.4M manifest or any manifest this function wrote.
-func extendManifest(base Manifest, root, tailCache, tailManifest, out string) error {
+func extendManifest(base Manifest, root, tailCache, tailManifest, tailSeal, out string) error {
 	if validateLayout(base) != nil {
 		return why("base manifest layout")
 	}
@@ -719,6 +728,12 @@ func extendManifest(base Manifest, root, tailCache, tailManifest, out string) er
 			m.Tail = &Tail{First: canonicalHeight + 1, Last: tailLast, Cache: tailCache, CacheManifest: tailManifest}
 			if _, e := pin(tailManifest); e != nil {
 				return e
+			}
+			if tailSeal != "" {
+				m.Tail.Seal = tailSeal
+				if _, e := pin(tailSeal); e != nil {
+					return e
+				}
 			}
 		}
 	} else if tailCache != "" {
