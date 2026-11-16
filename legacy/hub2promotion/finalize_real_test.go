@@ -136,6 +136,27 @@ func TestWholeChainHub1RealBoundariesReachLoaderValidate(t *testing.T) {
 	require.NoError(t, e)
 	require.NoError(t, m.ValidateApproved())
 	t.Logf("hub1 manifest assembled and validated: %s", time.Since(started).Round(time.Millisecond))
+	// The manifest carries the staging receipt, and the loader's own
+	// validation refuses a manifest without it, with another receipt, or
+	// whose tables are not the receipt's.
+	require.Equal(t, *w.spec.StagingReceipt, *m.Approved.StagingReceipt)
+	without := m
+	bare := *m.Approved
+	bare.StagingReceipt = nil
+	without.Approved = &bare
+	require.ErrorContains(t, without.ValidateApproved(), "staging receipt missing")
+	another := m
+	swapped := *m.Approved
+	receiptBytes, e := os.ReadFile(w.spec.StagingReceipt.Path)
+	require.NoError(t, e)
+	otherReceipt := savePin(t, w.dir, "another-receipt.json", append(receiptBytes, '\n'))
+	swapped.StagingReceipt = &otherReceipt
+	another.Approved = &swapped
+	require.ErrorContains(t, another.ValidateApproved(), "not the one the whole-chain acceptance names")
+	otherTables := m
+	otherTables.Tables = append([]Projection{}, m.Tables...)
+	otherTables.Tables[9].Rows++
+	require.Error(t, otherTables.ValidateApproved())
 	out, e := exec.Command(loader.Path, "-operation", "validate", "-manifest", manifest, "-sha256", mpin.SHA256).CombinedOutput()
 	require.NoError(t, e, string(out))
 	t.Logf("legacy-approved-load -operation validate: %s", strings.TrimSpace(string(out)))
@@ -349,6 +370,13 @@ func TestWholeChainHub2RealRehearsalFinalizes(t *testing.T) {
 	spec := FinalizeSpec{Chain: "cosmoshub-2", Genesis: genesis, Components: hub2Components(t, tmp, canonical), CanonicalExport: export, ExportBinding: &binding, PayoutRecords: records, PayoutProof: pinFile(t, filepath.Join(range14, "financial", "export-proof.json")),
 		NextGenesis: next, MigratedExport: &migrated, MigrationBinary: &migration, Projection: projection, LoaderBinary: migration, BuildCommit: strings.Repeat("ab", 20)}
 	bounds := finalBounds{chain: "cosmoshub-2", next: "cosmoshub-3", canonical: canonical, last: canonical, genesisSHA: acceptedHub2GenesisSHA, nextGenesisSHA: next.SHA256, migrationBinarySHA: acceptedMigrationBinarySHA, migrates: true}
+	// No importer receipt exists for this rehearsal database, so this one is
+	// made from the export itself. It proves the check runs at this size and
+	// refuses changed rows, not that these rows came from the sealed parts.
+	started = time.Now()
+	receipt := stagingReceiptFor(t, dir, "staging-receipt.made-from-export.json", spec, bounds)
+	spec.StagingReceipt = &receipt
+	t.Logf("receipt made from the export in %s", time.Since(started).Round(time.Second))
 	started = time.Now()
 	r, pin, e := finalize(context.Background(), spec, filepath.Join(dir, "final"), bounds)
 	require.NoError(t, e)
@@ -370,6 +398,18 @@ func TestWholeChainHub2RealRehearsalFinalizes(t *testing.T) {
 		require.Error(t, statErr)
 		t.Logf("refused (%s): %s", name, e)
 	}
+	refusedWith("no-staging-receipt", func(s *FinalizeSpec, _ *finalBounds) { s.StagingReceipt = nil }, "staging receipt: required")
+	// One real tax row left out of an otherwise identical projection: every
+	// other check still passes, only the receipt can tell.
+	refusedWith("one-row-missing", func(s *FinalizeSpec, _ *finalBounds) {
+		text := withPayout.String()
+		short := once
+		short.Tables = append([]Projection{}, once.Tables...)
+		short.Tables[9].File, short.Tables[9].Rows = savePin(t, dir, "taxable_events.one-row-missing.jsonl", []byte(text[strings.Index(text, "\n")+1:])), tax.Rows+expected-1
+		p, e := writeNew(filepath.Join(dir, "projection-index.one-row-missing.json"), short)
+		require.NoError(t, e)
+		s.Projection = p
+	}, "staging receipt: table taxable_events")
 	// Payout counted twice: the same real payout rows appended a second time.
 	refusedWith("payout-twice", func(s *FinalizeSpec, _ *finalBounds) {
 		var twice strings.Builder
@@ -428,4 +468,39 @@ func TestWholeChainHub2RealRehearsalFinalizes(t *testing.T) {
 	}, "not the genuine cosmoshub-2 genesis")
 	refusedWith("unmigrated-export", func(s *FinalizeSpec, _ *finalBounds) { s.MigratedExport = &export }, "does not reproduce it")
 	refusedWith("real-boundaries", func(_ *FinalizeSpec, b *finalBounds) { *b, _ = approvedBounds("cosmoshub-2") }, "sealed history reaches height 1400000, the chain ends at 2902002")
+}
+
+// The importer worker's own development receipt must read under the fields
+// the finalizer relies on, and a partial receipt must never finalize.
+func TestStagingReceiptReadsTheImporterFile(t *testing.T) {
+	cache, _ := realEvidence(t)
+	path := filepath.Join(cache, "cosmos-tax-hub2-full-chain-staging-20261116", "receipt-dev", "scratch-400000.receipt.json")
+	if _, e := os.Stat(path); e != nil {
+		t.Skip("importer development receipt is not on this machine")
+	}
+	r, e := readStagingReceipt(pinFile(t, path))
+	require.NoError(t, e)
+	require.Equal(t, "hub2-staging-receipt-v1", r.Schema)
+	require.Equal(t, "cosmoshub-2", r.Chain)
+	require.Equal(t, int64(2902000), r.CanonicalHeight)
+	require.False(t, r.Complete)
+	require.NotNil(t, r.Unbound)
+	require.Len(t, r.Projection, len(inserts))
+	require.Regexp(t, shaRE, r.Fingerprint)
+	require.Regexp(t, shaRE, r.Genesis.SHA256)
+	require.NotEmpty(t, r.Components)
+	var next int64 = 1
+	for _, c := range r.Components {
+		require.Equal(t, next, c.First)
+		next = c.Last + 1
+		require.Regexp(t, shaRE, c.SealSHA)
+		require.True(t, c.Rederived)
+		for _, table := range splitTables {
+			require.Regexp(t, shaRE, c.Tables[table].SHA256, table)
+		}
+		require.Equal(t, c.Last-c.First+1, c.Tables["blocks"].Rows)
+	}
+	for _, table := range inserts {
+		require.Regexp(t, shaRE, r.Projection[table.name].SHA256, table.name)
+	}
 }

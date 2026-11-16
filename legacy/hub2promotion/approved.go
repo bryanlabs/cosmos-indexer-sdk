@@ -26,6 +26,7 @@ type ApprovedLoad struct {
 	NextGenesis     Pin    `json:"next_genesis"`
 	MigratedExport  *Pin   `json:"migrated_export,omitempty"`
 	MigrationBinary *Pin   `json:"migration_binary,omitempty"`
+	StagingReceipt  *Pin   `json:"staging_receipt,omitempty"`
 }
 
 func (m Manifest) scanBudget() bool {
@@ -94,6 +95,18 @@ func (m Manifest) ValidateApproved() error {
 	}
 	if r["full_chain_books_tax_acceptance"] != true || r["source_preserved"] != true || !integer("first", 1) || !integer("last", last) || !integer("held", 0) || r["canonical_export_sha256"] != a.CanonicalExport.SHA256 || r["projections_sha"] != valueSHA(m.Tables) || r["genesis_sha"] != m.Genesis.SHA256 || r["source_sha"] != m.Source.SHA256 || r["components_sha"] != valueSHA(m.Components) || r["build_sha"] != m.BuildSHA || r["binary_sha"] != m.BinarySHA || r["next_genesis_sha"] != a.NextGenesis.SHA256 || !integer("canonical_rows", m.CanonicalRows) || r["canonical_projection_sha"] != m.CanonicalProjectionSHA {
 		return errors.New("actual complete source financial acceptance missing or not bound to canonical export")
+	}
+	// The rows to load must be the rows the staging importer bound to the
+	// sealed parts, and the whole-chain acceptance must name that same receipt.
+	if a.StagingReceipt == nil || r["staging_receipt_sha256"] != a.StagingReceipt.SHA256 {
+		return errors.New("staging receipt missing or not the one the whole-chain acceptance names")
+	}
+	receipt, e := readStagingReceipt(*a.StagingReceipt)
+	if e != nil {
+		return e
+	}
+	if e = receiptCoversTables(receipt, m.Scope.chain(), m.Tables); e != nil {
+		return e
 	}
 	_, exportRoot, e := readAllAccountCoins(a.CanonicalExport)
 	if e != nil {

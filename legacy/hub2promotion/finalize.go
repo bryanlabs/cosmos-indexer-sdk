@@ -64,6 +64,7 @@ type FinalizeSpec struct {
 	MigratedExport  *Pin             `json:"migrated_export,omitempty"`
 	MigrationBinary *Pin             `json:"migration_binary,omitempty"`
 	Projection      Pin              `json:"projection"`
+	StagingReceipt  *Pin             `json:"staging_receipt,omitempty"`
 	LoaderBinary    Pin              `json:"loader_binary"`
 	BuildCommit     string           `json:"build_commit"`
 }
@@ -603,14 +604,15 @@ type projectionFacts struct {
 	headers, payoutRows int64
 	payoutSHA           string
 	payouts             map[string]int64
+	parts               *partRows
 }
 
 // scanProjection streams every exported row once. It applies the loader's own
 // row checks and adds the two the loader leaves to the source owner: no tax
 // row may sit in the tail above the migration height, and every restart
 // payout row must sit at the migration height.
-func scanProjection(tables []Projection, b finalBounds, genesisSHA string) (projectionFacts, error) {
-	facts := projectionFacts{payouts: map[string]int64{}}
+func scanProjection(tables []Projection, b finalBounds, genesisSHA string, parts []SealedComponent) (projectionFacts, error) {
+	facts := projectionFacts{payouts: map[string]int64{}, parts: newPartRows(parts)}
 	if len(tables) != len(inserts) {
 		return facts, refuse("staging projection", "ten tables required")
 	}
@@ -649,6 +651,18 @@ func scanProjection(tables []Projection, b finalBounds, genesisSHA string) (proj
 					f.Close()
 					return facts, refuse(name, "block %d is missing or duplicated", facts.headers)
 				}
+				if !facts.parts.add(t.name, row.Height, raw) {
+					f.Close()
+					return facts, refuse(name, "row %d sits at a height no listed part covers", rows)
+				}
+			case "tx_inclusions", "block_events":
+				var row struct {
+					Height int64 `json:"height"`
+				}
+				if json.Unmarshal(raw, &row) != nil || !facts.parts.add(t.name, row.Height, raw) {
+					f.Close()
+					return facts, refuse(name, "row %d sits at a height no listed part covers", rows)
+				}
 			case "genesis_files":
 				var row struct {
 					SHA string `json:"sha256"`
@@ -683,6 +697,9 @@ func scanProjection(tables []Projection, b finalBounds, genesisSHA string) (proj
 					facts.payouts[payoutKey(row.Category, row.Validator, row.To, row.Amount, row.Denom)]++
 					payoutHash.Write(raw)
 					payoutHash.Write([]byte("\n"))
+				} else if !facts.parts.add(t.name, row.Height, raw) {
+					f.Close()
+					return facts, refuse(name, "row %d sits at a height no listed part covers", rows)
 				}
 			}
 		}
@@ -806,6 +823,8 @@ type FinalReport struct {
 	MigrationBinarySHA     string            `json:"migration_binary_sha,omitempty"`
 	CanonicalRows          int64             `json:"canonical_rows"`
 	CanonicalProjectionSHA string            `json:"canonical_projection_sha"`
+	StagingReceiptSHA      string            `json:"staging_receipt_sha256"`
+	StagingFingerprintSHA  string            `json:"staging_fingerprint_all_tables_sha256"`
 	PayoutRecords          int64             `json:"restart_payout_records"`
 	PayoutMultisetSHA      string            `json:"restart_payout_multiset_sha"`
 	TaxRowsAboveCanonical  int64             `json:"tax_rows_above_canonical"`
@@ -923,7 +942,7 @@ func finalize(ctx context.Context, spec FinalizeSpec, dir string, b finalBounds)
 	if e = ctx.Err(); e != nil {
 		return none, Pin{}, e
 	}
-	facts, e := scanProjection(index.Tables, b, spec.Genesis.SHA256)
+	facts, e := scanProjection(index.Tables, b, spec.Genesis.SHA256, chain.Components)
 	if e != nil {
 		return none, Pin{}, e
 	}
@@ -1004,6 +1023,16 @@ func finalize(ctx context.Context, spec FinalizeSpec, dir string, b finalBounds)
 	if !commitRE.MatchString(spec.BuildCommit) || hashFile(spec.LoaderBinary) != nil {
 		return none, Pin{}, refuse("loader build", "loader binary missing or build commit not a full commit id")
 	}
+	// Without the importer's receipt nothing ties these rows to the seals:
+	// any well-formed projection would pass under the same sealed parts.
+	if spec.StagingReceipt == nil {
+		return none, Pin{}, refuse("staging receipt", "required: the staging importer's receipt is what ties the exported rows to the sealed parts")
+	}
+	receipt, e := checkStagingReceipt(*spec.StagingReceipt, spec, chain.Components, index.Tables, facts, b)
+	if e != nil {
+		return none, Pin{}, e
+	}
+	inputs["staging_receipt"] = *spec.StagingReceipt
 	if e = os.Mkdir(dir, 0700); e != nil {
 		return none, Pin{}, refuse("output directory", "must not exist yet")
 	}
@@ -1035,6 +1064,7 @@ func finalize(ctx context.Context, spec FinalizeSpec, dir string, b finalBounds)
 	if e != nil {
 		return none, Pin{}, e
 	}
+	report.StagingReceiptSHA, report.StagingFingerprintSHA = spec.StagingReceipt.SHA256, receipt.Fingerprint
 	report.SourceSHA, report.ComponentsSHA, report.ProjectionsSHA = sourcePin.SHA256, valueSHA(report.Components), valueSHA(report.Tables)
 	report.Outputs["source"], report.Outputs["build_identity"] = sourcePin, buildPin
 	if b.migrates {

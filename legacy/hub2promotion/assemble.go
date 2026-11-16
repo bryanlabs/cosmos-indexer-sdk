@@ -98,6 +98,9 @@ func AssembleManifest(spec AssembleSpec, path string) (Manifest, Pin, error) {
 		return Manifest{}, Pin{}, refuse("approval source", "where the standing approval was given must be recorded")
 	}
 	approved := &ApprovedLoad{ApprovalQuote: ApprovalQuote, ApprovalSource: spec.ApprovalSource, CanonicalExport: r.Inputs["canonical_export"], NextGenesis: r.Inputs["next_genesis"]}
+	if receipt, ok := r.Inputs["staging_receipt"]; ok {
+		approved.StagingReceipt = &receipt
+	}
 	if b.migrates {
 		migrated, binary := r.Inputs["migrated_export"], r.Inputs["migration_binary"]
 		approved.MigratedExport, approved.MigrationBinary = &migrated, &binary

@@ -1,6 +1,7 @@
 package hub2promotion
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -34,6 +35,7 @@ type wholeChain struct {
 	next      *Pin
 	canonical *Pin
 	runs      int
+	receipts  int
 }
 
 func (w *wholeChain) state(h int64) string {
@@ -236,6 +238,86 @@ func (w *wholeChain) writeProjection(genesisSHA string) {
 		index.Tables = append(index.Tables, Projection{Table: tb.name, Columns: projectionColumns(tb), Rows: int64(len(rows)), File: savePin(t, w.dir, tb.name+".jsonl", []byte(out.String()))})
 	}
 	w.spec.Projection = w.save("projection-index.json", index)
+	w.receipts++
+	receipt := stagingReceiptFor(t, w.dir, fmt.Sprintf("staging-receipt-%d.json", w.receipts), w.spec, w.b)
+	w.spec.StagingReceipt = &receipt
+}
+
+// stagingReceiptFor writes the receipt a staging importer would give for the
+// listed parts and the given projection. It hashes the files with its own
+// grouping by height, independent of the finalizer's.
+func stagingReceiptFor(t *testing.T, dir, name string, spec FinalizeSpec, b finalBounds) Pin {
+	t.Helper()
+	parts, e := verifyComponents(spec, b)
+	require.NoError(t, e)
+	var index ProjectionIndex
+	require.NoError(t, readPinnedJSON(spec.Projection, &index))
+	type sum struct {
+		n int64
+		h hash.Hash
+	}
+	pair := func(s *sum) map[string]any {
+		return map[string]any{"rows": s.n, "sha256": hex.EncodeToString(s.h.Sum(nil))}
+	}
+	add := func(s *sum, line []byte) { s.n++; s.h.Write(line); s.h.Write([]byte("\n")) }
+	payout, projection, genesis := &sum{h: sha256.New()}, map[string]any{}, map[string]any{}
+	perPart := make([]map[string]*sum, len(parts.Components))
+	for n := range perPart {
+		perPart[n] = map[string]*sum{}
+		for _, table := range splitTables {
+			perPart[n][table] = &sum{h: sha256.New()}
+		}
+	}
+	for _, p := range index.Tables {
+		projection[p.Table] = map[string]any{"rows": p.Rows, "sha256": p.File.SHA256}
+		if strings.HasPrefix(p.Table, "genesis_") {
+			genesis[p.Table] = projection[p.Table]
+			continue
+		}
+		f, e := os.Open(p.File.Path)
+		require.NoError(t, e)
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64<<10), 16<<20)
+		for sc.Scan() {
+			var row struct {
+				Height int64 `json:"height"`
+				Phase  int   `json:"phase"`
+			}
+			require.NoError(t, json.Unmarshal(sc.Bytes(), &row))
+			if p.Table == "taxable_events" && row.Phase == 4 {
+				add(payout, sc.Bytes())
+				continue
+			}
+			for n, c := range parts.Components {
+				if row.Height >= c.First && row.Height <= c.Last {
+					add(perPart[n][p.Table], sc.Bytes())
+				}
+			}
+		}
+		require.NoError(t, sc.Err())
+		require.NoError(t, f.Close())
+	}
+	receipt := map[string]any{"schema": stagingReceiptSchemas[spec.Chain], "chain": spec.Chain, "first": 1, "last": b.last, "canonical_through": b.canonical, "canonical_height": b.canonical, "complete_chain": true,
+		"genesis": map[string]any{"sha256": spec.Genesis.SHA256, "stored_rows_equal_genesis_file": true, "tables": genesis}, "projection_tables": projection, "rows_bound_to_no_listed_part": 0,
+		"fingerprint_all_tables_sha256": digest([]byte("synthetic whole-database fingerprint")), "historical_tail": nil,
+		"restart_payout": map[string]any{"height": b.canonical, "export_records_sha256": spec.PayoutRecords.SHA256, "stored_rows_equal_rows_rederived_from_export": true, "taxable_events_phase4": pair(payout), "every_row_tx_index_0_msg_index_0": true}}
+	var components []any
+	for n, c := range parts.Components {
+		tables := map[string]any{}
+		for _, table := range splitTables {
+			tables[table] = pair(perPart[n][table])
+		}
+		if c.Tail {
+			delete(tables, "taxable_events")
+			receipt["historical_tail"] = map[string]any{"first": c.First, "last": c.Last, "tail_seal_path": c.Acceptance.Path, "tail_seal_sha256": c.Acceptance.SHA256, "stored_rows_equal_rows_rederived_from_captures": true, "tax_rows": 0, "tables": tables}
+			continue
+		}
+		components = append(components, map[string]any{"first": c.First, "last": c.Last, "seal_path": c.Acceptance.Path, "seal_sha256": c.Acceptance.SHA256, "stored_rows_equal_rows_rederived_from_sealed_source": true, "tables": tables})
+	}
+	receipt["components"] = components
+	raw, e := json.MarshalIndent(receipt, "", " ")
+	require.NoError(t, e)
+	return savePin(t, dir, name, append(raw, '\n'))
 }
 func (w *wholeChain) finalize() (FinalReport, Pin, error) {
 	w.runs++
@@ -468,6 +550,9 @@ func TestWholeChainAbandonedAttemptBesideAcceptedSecondAttempt(t *testing.T) {
 	w.spec.Components[2] = accepted
 	// The tail pins the accepted second attempt's seal.
 	w.rewrite(&w.spec.Components[3].Acceptance, func(v map[string]any) { v["prior_acceptance_sha256"] = accepted.Acceptance.SHA256 })
+	// Staging happens after sealing, so its receipt names the seals as they now stand.
+	restaged := stagingReceiptFor(t, w.dir, "staging-receipt-second-attempt.json", w.spec, w.b)
+	w.spec.StagingReceipt = &restaged
 	r, _, e := w.finalize()
 	require.NoError(t, e)
 	require.Equal(t, w.spec.Components[1].Acceptance.Path, r.Sealed[2].PriorSeal)
@@ -548,4 +633,167 @@ func TestWholeChainHub2TailSealIsStrict(t *testing.T) {
 		tail(w).Acceptance = Pin{Path: path, SHA256: hex.EncodeToString(sum[:])}
 		w.refused("component 4", "a rehearsal or any other kind of receipt is not accepted")
 	})
+}
+
+// changeTable rewrites one exported table and its index entry, as someone
+// handing the finalizer a different projection under the same seals would.
+func (w *wholeChain) changeTable(table string, change func(lines []string) []string) {
+	w.t.Helper()
+	var index ProjectionIndex
+	require.NoError(w.t, readPinnedJSON(w.spec.Projection, &index))
+	for n, p := range index.Tables {
+		if p.Table != table {
+			continue
+		}
+		raw, e := os.ReadFile(p.File.Path)
+		require.NoError(w.t, e)
+		lines := change(strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n"))
+		w.receipts++
+		index.Tables[n].Rows = int64(len(lines))
+		index.Tables[n].File = savePin(w.t, w.dir, fmt.Sprintf("%s.changed-%d.jsonl", table, w.receipts), []byte(strings.Join(lines, "\n")+"\n"))
+	}
+	w.spec.Projection = w.save(fmt.Sprintf("projection-index-changed-%d.json", w.receipts), index)
+}
+func changedLine(t *testing.T, line string, change func(row map[string]any)) string {
+	t.Helper()
+	var row map[string]any
+	d := json.NewDecoder(strings.NewReader(line))
+	d.UseNumber()
+	require.NoError(t, d.Decode(&row))
+	change(row)
+	out, e := json.Marshal(row)
+	require.NoError(t, e)
+	return string(out)
+}
+
+// The seals, the staging receipt and the exported rows must be one chain of
+// hashes. A different projection under the same seals, a receipt for other
+// seals, and one altered, extra or missing row must each refuse.
+func TestWholeChainStagingReceiptBindsRowsToSeals(t *testing.T) {
+	both := []string{"cosmoshub-1", "cosmoshub-2"}
+	receipt := func(change func(v map[string]any)) func(w *wholeChain) {
+		return func(w *wholeChain) { w.rewrite(w.spec.StagingReceipt, change) }
+	}
+	object := func(v any, keys ...any) map[string]any {
+		for _, k := range keys {
+			switch key := k.(type) {
+			case string:
+				v = v.(map[string]any)[key]
+			case int:
+				v = v.([]any)[key]
+			}
+		}
+		return v.(map[string]any)
+	}
+	other := digest([]byte("other"))
+	cases := []struct {
+		name, reason string
+		chains       []string
+		after        func(w *wholeChain)
+	}{
+		{"no receipt", "required", both, func(w *wholeChain) { w.spec.StagingReceipt = nil }},
+		{"swapped projection under the same seals", "table taxable_events: the exported rows are not the rows the receipt bound", both, func(w *wholeChain) {
+			kept := w.spec.StagingReceipt
+			w.taxRows[0]["amount"] = "8"
+			w.writeProjection(w.spec.Genesis.SHA256)
+			w.spec.StagingReceipt = kept
+		}},
+		{"one altered row", "table taxable_events: the exported rows are not the rows the receipt bound", both, func(w *wholeChain) {
+			w.changeTable("taxable_events", func(l []string) []string {
+				l[0] = changedLine(w.t, l[0], func(r map[string]any) { r["amount"] = "10" })
+				return l
+			})
+		}},
+		{"one extra row", "table taxable_events: the exported rows are not the rows the receipt bound to the sealed parts (5 exported, 4 in the receipt)", both, func(w *wholeChain) {
+			w.changeTable("taxable_events", func(l []string) []string {
+				extra := changedLine(w.t, l[0], func(r map[string]any) { r["sub_index"] = 1 })
+				return append([]string{l[0], extra}, l[1:]...)
+			})
+		}},
+		{"one missing row", "table taxable_events: the exported rows are not the rows the receipt bound to the sealed parts (3 exported, 4 in the receipt)", both, func(w *wholeChain) {
+			w.changeTable("taxable_events", func(l []string) []string { return l[1:] })
+		}},
+		{"one altered block", "table blocks: the exported rows are not the rows the receipt bound", both, func(w *wholeChain) {
+			w.changeTable("blocks", func(l []string) []string {
+				l[2] = changedLine(w.t, l[2], func(r map[string]any) { r["tx_count"] = 7 })
+				return l
+			})
+		}},
+		{"totals restated but a part's rows differ", "part 1 (heights 1 to 2) table taxable_events: exported rows differ from the rows that sealed part contributed", both, func(w *wholeChain) {
+			kept := w.spec.StagingReceipt
+			w.taxRows[0]["amount"] = "8"
+			w.writeProjection(w.spec.Genesis.SHA256)
+			restated := object(readObject(w.t, *w.spec.StagingReceipt), "projection_tables")
+			w.spec.StagingReceipt = kept
+			w.rewrite(w.spec.StagingReceipt, func(v map[string]any) { v["projection_tables"] = restated })
+		}},
+		{"row moved to another part", "part 1 (heights 1 to 2) table taxable_events", both, func(w *wholeChain) {
+			kept := w.spec.StagingReceipt
+			w.taxRows[0]["height"] = 3
+			w.writeProjection(w.spec.Genesis.SHA256)
+			restated := object(readObject(w.t, *w.spec.StagingReceipt), "projection_tables")
+			w.spec.StagingReceipt = kept
+			w.rewrite(w.spec.StagingReceipt, func(v map[string]any) { v["projection_tables"] = restated })
+		}},
+		{"receipt for another seal", "part 2 (heights 3 to 4) was staged under a different seal", both, receipt(func(v map[string]any) { object(v, "components", 1)["seal_sha256"] = other })},
+		{"receipt for a shorter seal list", "lists 2 sealed parts, 3 are being finalized", both, receipt(func(v map[string]any) { v["components"] = v["components"].([]any)[:2] })},
+		{"receipt for a longer seal list", "lists 4 sealed parts, 3 are being finalized", both, receipt(func(v map[string]any) {
+			v["components"] = append(v["components"].([]any), v["components"].([]any)[2])
+		})},
+		{"receipt lists the seals in another order", "part 1 (heights 1 to 2) was staged under a different seal", both, receipt(func(v map[string]any) {
+			c := v["components"].([]any)
+			c[0], c[1] = c[1], c[0]
+		})},
+		{"part resealed after staging", "part 2 (heights 3 to 4) was staged under a different seal", []string{"cosmoshub-2"}, func(w *wholeChain) {
+			w.rewrite(&w.spec.Components[1].Acceptance, func(v map[string]any) { v["note"] = "sealed again" })
+		}},
+		{"part ranges differ", "part 3 (heights 5 to 6) was staged under a different seal or range", both, receipt(func(v map[string]any) { object(v, "components", 2)["first"] = 4 })},
+		{"part not checked against its recordings", "stored rows were not checked against the sealed recordings", both, receipt(func(v map[string]any) {
+			object(v, "components", 0)["stored_rows_equal_rows_rederived_from_sealed_source"] = false
+		})},
+		{"payout rows from other records", "not bound to the payout records being finalized", both, receipt(func(v map[string]any) { object(v, "restart_payout")["export_records_sha256"] = other })},
+		{"payout rows differ", "exported restart payout rows differ", both, receipt(func(v map[string]any) { object(v, "restart_payout", "taxable_events_phase4")["sha256"] = other })},
+		{"payout rows missing from the receipt", "not bound to the payout records being finalized", both, receipt(func(v map[string]any) { v["restart_payout"] = nil })},
+		{"tail from another seal", "tail rows are not bound to the tail seal being finalized", both, receipt(func(v map[string]any) { object(v, "historical_tail")["tail_seal_sha256"] = other })},
+		{"tail seal not yet recorded", "tail rows are not bound to the tail seal being finalized", both, receipt(func(v map[string]any) { object(v, "historical_tail")["tail_seal_sha256"] = "" })},
+		{"tail missing from the receipt", "tail rows are not bound to the tail seal being finalized", both, receipt(func(v map[string]any) { v["historical_tail"] = nil })},
+		{"tail rows differ", "tail table blocks: exported rows differ", both, receipt(func(v map[string]any) { object(v, "historical_tail", "tables", "blocks")["sha256"] = other })},
+		{"incomplete chain", "does not cover the complete chain", both, receipt(func(v map[string]any) { v["complete_chain"] = false })},
+		{"rows bound to no part", "not bound to any sealed part", both, receipt(func(v map[string]any) { v["rows_bound_to_no_listed_part"] = 1 })},
+		{"receipt for the other chain", "not a staging receipt for", both, receipt(func(v map[string]any) { v["schema"] = "hub9-staging-receipt-v1" })},
+		{"staged from another genesis", "built from a different genesis file", both, receipt(func(v map[string]any) { object(v, "genesis")["sha256"] = other })},
+		{"receipt changed after pinning", "missing or changed since it was pinned", both, func(w *wholeChain) {
+			pin := *w.spec.StagingReceipt
+			w.rewrite(&pin, func(v map[string]any) { v["note"] = "edited" })
+		}},
+	}
+	for _, tc := range cases {
+		for _, chain := range tc.chains {
+			t.Run(tc.name+"/"+chain, func(t *testing.T) {
+				w := newWholeChain(t, chain)
+				w.build()
+				tc.after(w)
+				w.refused("staging receipt", tc.reason)
+			})
+		}
+	}
+	// The report names the receipt, so the manifest can carry it.
+	for _, chain := range both {
+		w := newWholeChain(t, chain)
+		w.build()
+		r, _, e := w.finalize()
+		require.NoError(t, e)
+		require.Equal(t, w.spec.StagingReceipt.SHA256, r.StagingReceiptSHA)
+		require.Equal(t, *w.spec.StagingReceipt, r.Inputs["staging_receipt"])
+	}
+}
+func readObject(t *testing.T, p Pin) map[string]any {
+	t.Helper()
+	raw, e := os.ReadFile(p.Path)
+	require.NoError(t, e)
+	var v map[string]any
+	d := json.NewDecoder(strings.NewReader(string(raw)))
+	d.UseNumber()
+	require.NoError(t, d.Decode(&v))
+	return v
 }
