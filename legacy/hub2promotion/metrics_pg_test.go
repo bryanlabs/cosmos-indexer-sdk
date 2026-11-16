@@ -20,7 +20,7 @@ func TestPG5MeasuredSmallFixtureWALBackendMemoryAndLocks(t *testing.T) {
 	r, e := merge(context.Background(), f.loader, f.owner, f.m, f.runtime, hooks{beforeCommit: func() error {
 		var pid int
 		require.NoError(t, f.owner.QueryRow(`SELECT pid FROM pg_stat_activity WHERE datname=$1 AND usename=$2 AND state='idle in transaction'`, f.m.Destination.Database, f.m.Scope.Loader).Scan(&pid))
-		out, e := exec.Command("kubectl", "--context", "bryanlabs", "-n", "agents", "exec", "pod/stmt2-testpg", "--", "sh", "-c", `while IFS= read -r line; do case "$line" in VmHWM:*|VmRSS:*|VmSize:*) printf '%s\n' "$line";; esac; done < /proc/"$1"/status`, "sh", fmt.Sprint(pid)).Output()
+		out, e := exec.Command("kubectl", "--context", "bryanlabs", "-n", "agents", "exec", helperPod(t), "--", "sh", "-c", `while IFS= read -r line; do case "$line" in VmHWM:*|VmRSS:*|VmSize:*) printf '%s\n' "$line";; esac; done < /proc/"$1"/status`, "sh", fmt.Sprint(pid)).Output()
 		require.NoError(t, e)
 		for _, line := range strings.Split(string(out), "\n") {
 			fields := strings.Fields(line)

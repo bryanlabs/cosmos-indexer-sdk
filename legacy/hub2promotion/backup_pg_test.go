@@ -16,6 +16,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// helperPod names the private pod that runs the test database, from
+// LEGACY_STORE_TEST_HELPER_POD. The backup and memory tests run pg_dump,
+// pg_restore and a /proc read inside it, so it must be the server behind
+// LEGACY_STORE_TEST_ADMIN_DSN. An unset or malformed name fails the test.
+func helperPod(t *testing.T) string {
+	t.Helper()
+	name := os.Getenv("LEGACY_STORE_TEST_HELPER_POD")
+	require.Regexp(t, `^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`, name, "LEGACY_STORE_TEST_HELPER_POD must name the private test database pod")
+	return "pod/" + name
+}
+
 func pgHelper(t *testing.T, ctx context.Context, program, dbname, scope string, input *os.File, output *os.File) []byte {
 	t.Helper()
 	require.True(t, strings.HasPrefix(dbname, "legacy_replay_rehearsal_"))
@@ -26,7 +37,7 @@ func pgHelper(t *testing.T, ctx context.Context, program, dbname, scope string, 
 	if input != nil {
 		args = append(args, "-i")
 	}
-	args = append(args, "pod/stmt2-testpg", "--", "sh", "-c", script, "sh", program)
+	args = append(args, helperPod(t), "--", "sh", "-c", script, "sh", program)
 	switch program {
 	case "pg_dump":
 		args = append(args, "--format=custom", "--schema=legacy", "--schema="+scope, "--dbname="+dbname)
@@ -50,7 +61,7 @@ func pgHelper(t *testing.T, ctx context.Context, program, dbname, scope string, 
 	return out.Bytes()
 }
 func schemaDump(t *testing.T, ctx context.Context, dbname, scope string) []byte {
-	args := []string{"--context", "bryanlabs", "-n", "agents", "exec", "pod/stmt2-testpg", "--", "sh", "-c", `export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_dump -h127.0.0.1 -U"$POSTGRES_USER" --schema-only --no-comments --schema=legacy --schema="$2" --dbname="$1"`, "sh", dbname, scope}
+	args := []string{"--context", "bryanlabs", "-n", "agents", "exec", helperPod(t), "--", "sh", "-c", `export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_dump -h127.0.0.1 -U"$POSTGRES_USER" --schema-only --no-comments --schema=legacy --schema="$2" --dbname="$1"`, "sh", dbname, scope}
 	b, e := exec.CommandContext(ctx, "kubectl", args...).Output()
 	require.NoError(t, e)
 	var keep []string
