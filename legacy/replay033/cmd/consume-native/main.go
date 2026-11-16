@@ -659,6 +659,7 @@ func checkpointHeader(cache string, anchor history) {
 	var results ctypes.ResultBlockResults
 	must(c.UnmarshalJSON(rawCache(cache, anchor.Height, "-block_results.raw.gz"), &results))
 	need(results.Height == anchor.Height && results.Results != nil && bytes.Equal(following.Block.LastResultsHash, tm.NewResults(results.Results.DeliverTx).Hash()), "normal checkpoint previous raw result/header join differs")
+	need(len(anchor.Hash) == 0 || bytes.Equal(anchor.Hash, previous.Block.Hash()), "normal checkpoint block hash differs from raw block")
 }
 func run() {
 	cache := flag.String("cache", "", "bounded immutable native raw cache")
@@ -669,7 +670,9 @@ func run() {
 	validatorHistoryPin := flag.String("validator-history-sha256", "", "explicit supplemental history source pin")
 	evidenceCache := flag.String("evidence-cache", "", "retained raw cache for historical evidence headers")
 	evidenceCapturePin := flag.String("evidence-capture-sha256", "", "explicit supplemental captured-source pin")
+	phaseBase := flag.Int64("progress-phase-base", 0, "typed phases already proved by the preceding split range, shown in progress lines only")
 	flag.Parse()
+	need(*phaseBase >= 0 && (*phaseBase == 0 || *checkpoint != ""), "progress phase base requires a normal checkpoint opening")
 	need(*cache != "" && *receipt != "", "private paths required")
 	phase, committed := newNative(), newNative()
 	if *checkpoint != "" {
@@ -714,7 +717,7 @@ func run() {
 			if *checkpoint == "" {
 				need(r.Anchor.Height == 0, "genuine genesis anchor required")
 			} else {
-				need(r.Anchor.Height == 200000 || r.Anchor.Height == 400000, "unsupported original normal checkpoint")
+				need(allowedAnchor(r.Anchor.Height), "unsupported original normal checkpoint")
 				checkRoots(committed, r.Anchor.Height, r.Anchor.Commit, r.Anchor.Roots)
 				checkpointHeader(*cache, r.Anchor)
 			}
@@ -780,7 +783,7 @@ func run() {
 			prior = id.Hash
 			height = r.Height
 			if height%100 == 0 {
-				fmt.Printf("bounded_native_verified_height=%d typed_phases=%d\n", height, phases)
+				fmt.Printf("bounded_native_verified_height=%d typed_phases=%d\n", height, *phaseBase+phases)
 			}
 			transactions += int64(len(r.History.Transactions))
 		case "bounded_end":
@@ -815,7 +818,7 @@ func run() {
 	f, e := os.OpenFile(*receipt, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	must(e)
 	defer f.Close()
-	must(json.NewEncoder(f).Encode(map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
+	must(json.NewEncoder(f).Encode(map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "progress_phase_base": *phaseBase, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
 	must(f.Sync())
 }
 func main() {

@@ -11,7 +11,7 @@ from consume_bounded import sha
 from consume_closed import validate_source
 from verify_movement_rehearsal import require
 
-CODE = ['legacy/replay033/' + name for name in ('capture_bounded.py','capture_closed.py','consume_bounded.py','consume_closed.py','reconcile_whole.py','seal_closed.py','run_closed_profile.py','run_whole.py','source_reader.py','verify_source_preservation.py','verify_terminal_fifteen.py','actual_full_controls.py','actual_bounded_controls.py','actual_checkpoint_controls.py','terminal_journal.py','compare_zero_export.py','verify_movement_rehearsal.py','test_consume_bounded.py','test_consume_closed.py','test_closed_lifecycle.py','go.mod','go.sum','cmd/consume-native/main.go','cmd/consume-native/main_test.go')]
+CODE = ['legacy/replay033/' + name for name in ('capture_bounded.py','capture_closed.py','consume_bounded.py','consume_closed.py','consume_split.py','reconcile_whole.py','seal_closed.py','run_closed_profile.py','run_whole.py','source_reader.py','verify_source_preservation.py','verify_terminal_fifteen.py','actual_full_controls.py','actual_bounded_controls.py','actual_checkpoint_controls.py','terminal_journal.py','compare_zero_export.py','verify_movement_rehearsal.py','test_consume_bounded.py','test_consume_closed.py','test_closed_lifecycle.py','go.mod','go.sum','cmd/consume-native/main.go','cmd/consume-native/main_test.go')]
 
 def validate_start(repo, start_path):
     started = json.loads(start_path.read_bytes())
@@ -31,11 +31,18 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
     native_path = proof / 'native-proof.private.json'
     exit_path = proof / 'exit.private.json'
     result, native, exited, controls, preserved = [json.loads(p.read_bytes()) for p in (result_path,native_path,exit_path,controls_path,preservation_path)]
-    require(exited['exit'] == 0 and result['schema'] == 'native033-complete-profile-financial-v1' and result['source_whole_complete'] is True and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False and result['capture_sha256'] == sha(root/'capture.private.json'), 'actual complete source financial proof missing')
-    require(result['first'] == native['first'] == b['first'] and result['through'] == native['through'] == b['through'] and result['heights'] == native['native_iavl_heights'] == b['through']-b['first']+1 and result['transactions'] == native['transactions'] and sum(result['phases'].values()) == native['typed_financial_phases'] and result['native_helper_sha256'] == sha(helper) and result['native_proof_sha256'] == sha(native_path), 'complete independent native proof/helper coverage differs')
+    split = result['schema'] == 'native033-split-range-financial-v1'
+    if split:
+        require(result['source_range'] == [b['first'], b['through']] and b['first'] <= result['first'] <= result['through'] <= b['through'] and result['source_closed_at_through'] is (result['through'] == b['through']), 'part lies outside its complete source range or misstates its closure')
+        if result['first'] > b['first']:
+            require(native['progress_phase_base'] == result['progress_phase_base'] == result['fast_forward']['typed_phases'] and result['fast_forward']['heights'] == result['first'] - b['first'] and len(result['opening_checkpoint_manifest_sha256']) == 64, 'part opening was not rebuilt from the range start and checked against a saved native checkpoint')
+    else:
+        require(result['schema'] == 'native033-complete-profile-financial-v1' and result['source_whole_complete'] is True and result['first'] == b['first'] and result['through'] == b['through'], 'actual complete source financial proof missing')
+    require(exited['exit'] == 0 and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False and result['capture_sha256'] == sha(root/'capture.private.json'), 'actual complete source financial proof missing')
+    require(result['first'] == native['first'] and result['through'] == native['through'] and result['heights'] == native['native_iavl_heights'] == result['through']-result['first']+1 and result['transactions'] == native['transactions'] and sum(result['phases'].values()) == native['typed_financial_phases'] and result['native_helper_sha256'] == sha(helper) and result['native_proof_sha256'] == sha(native_path), 'complete independent native proof/helper coverage differs')
     require(preserved['source_capture_sha256'] == sha(root/'capture.private.json') and preserved['source_preserved_after_proof'] is True and preserved['checked_utc'] >= exited['finished_utc'], 'post-proof actual source preservation missing')
-    require(controls['native_helper_sha256'] == sha(helper) and controls['first'] == b['first'] and controls['source_capture_sha256'] == sha(root/'capture.private.json') and controls['historical_blocks_executed'] == 0, 'actual controls not bound to this complete source/helper')
-    expected_controls = {'fee','share','principal','request','root','native_result','native_application_root','native_before'} if b['first'] == 1 else {'opening_root','opening_store','opening_baseline','before','final_root','final_result','next_header'}
+    require(controls['native_helper_sha256'] == sha(helper) and controls['first'] == result['first'] and controls['source_capture_sha256'] == sha(root/'capture.private.json') and controls['historical_blocks_executed'] == 0, 'actual controls not bound to this complete source/helper')
+    expected_controls = {'fee','share','principal','request','root','native_result','native_application_root','native_before'} if result['first'] == 1 else {'opening_root','opening_store','opening_baseline','before','final_root','final_result','next_header'}
     require(len(controls['controls']) == len(expected_controls) and {c['control'] for c in controls['controls']} == expected_controls and all(c['exit'] != 0 and c['expected_refusal'] is True for c in controls['controls']), 'specific actual native controls missing')
     for c in controls['controls']:
         require(sha(Path(c['retained_log_path'])) == c['log_sha256'], 'actual negative control log changed')

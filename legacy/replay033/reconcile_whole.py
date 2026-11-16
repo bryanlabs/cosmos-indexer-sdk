@@ -46,7 +46,7 @@ def signed_profile(path, expected_sha, repo, progress=None):
     result = pinned(path.parent / seal['result_path'], seal['result_sha256'])
     native = pinned(path.parent / seal['native_proof_path'], seal['native_proof_sha256'])
     exit_state = pinned(path.parent / seal['exit_path'], seal['exit_sha256'])
-    require(exit_state['exit'] == 0 and result['schema'] == 'native033-complete-profile-financial-v1' and result['source_whole_complete'] is True and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False, 'failed or bounded source cannot become complete profile')
+    require(exit_state['exit'] == 0 and result['schema'] in ('native033-complete-profile-financial-v1', 'native033-split-range-financial-v1') and (result['schema'] != 'native033-complete-profile-financial-v1' or result['source_whole_complete'] is True) and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False, 'failed or bounded source cannot become complete profile')
     require(result['native_proof_sha256'] == seal['native_proof_sha256'] and result['native_helper_sha256'] == seal['native_helper_sha256'], 'complete component native proof/helper binding differs')
     require(native['schema'] == 'native033-independent-bounded-financial-v1' and native['normal_opening_height'] == result['first'] - 1, 'independent native opening schema differs')
     require(result['first'] == native['first'] and result['through'] == native['through'] and result['transactions'] == native['transactions'] and result['heights'] == native['native_iavl_heights'] and sum(result['phases'].values()) == native['typed_financial_phases'] and native['financial_admission'] is False and native['global_books_tax_acceptance'] is False, 'independent native component coverage differs')
@@ -64,17 +64,37 @@ def named_roots(roots, height):
     return result
 
 
+SPLIT_SEAMS = {100000, 300000}
+
+
 def check_profiles(profiles):
-    require(len(profiles) == 3, 'exactly three whole source profiles required')
-    for p, first in zip(profiles, sorted(PROFILES)):
-        target = PROFILES[first][0]
-        require(p['first'] == first and p['through'] == target and p['heights'] == target - first + 1 and p['source_whole_complete'] is True, 'gap, duplicate, bounded component or missing complete profile')
+    ends = {PROFILES[first][0] for first in PROFILES}
+    require(3 <= len(profiles) <= 3 + len(SPLIT_SEAMS), 'three whole source profiles, or their saved-checkpoint parts, required')
+    require(profiles[0]['first'] == 1 and profiles[-1]['through'] == 500000, 'gap, duplicate, bounded component or missing complete profile')
+    seams = []
+    for p in profiles:
+        first, through = p['first'], p['through']
+        split = p.get('schema') == 'native033-split-range-financial-v1'
+        source_first = max(f for f in PROFILES if f <= first) if first >= 1 else 0
+        require(source_first in PROFILES and through <= PROFILES[source_first][0], 'gap, duplicate, bounded component or missing complete profile')
+        target = PROFILES[source_first][0]
+        if split:
+            require(p['source_range'] == [source_first, target] and (first == source_first or first - 1 in SPLIT_SEAMS) and (through == target or through in SPLIT_SEAMS) and first <= through, 'part does not start and end at a saved native checkpoint of its own source range')
+            require(p['source_closed_at_through'] is (through == target) and p['next_header_is_source_closure'] is (through == target) and p['fast_forward']['heights'] == first - source_first and p['progress_phase_base'] == p['fast_forward']['typed_phases'], 'part source closure or rebuilt opening coverage differs')
+            require(bool(p['opening_checkpoint_manifest_sha256']) == (first > source_first), 'part opening checkpoint binding differs')
+        else:
+            require(first == source_first and through == target and p['source_whole_complete'] is True, 'gap, duplicate, bounded component or missing complete profile')
+        require(p['heights'] == through - first + 1, 'gap, duplicate, bounded component or missing complete profile')
         require(set(p['phases']) <= {'begin_block','ante','message','transaction','end_block','block'} and all(p['phases'].get(k) == p['heights'] for k in ('begin_block','end_block','block')) and p['phases'].get('transaction',0) == p['transactions'], 'complete native phase/transaction coverage differs')
-        require(p['opening_commit']['Version'] == first - 1 and p['ending_commit']['Version'] == target, 'complete profile native opening/ending height differs')
-        named_roots(p['ending_store_roots'],target)
+        require(p['opening_commit']['Version'] == first - 1 and p['ending_commit']['Version'] == through, 'complete profile native opening/ending height differs')
+        named_roots(p['ending_store_roots'],through)
     for left, right in zip(profiles, profiles[1:]):
         require(left['through'] + 1 == right['first'] and exact(left['ending_commit']) == exact(right['opening_commit']) and named_roots(left['ending_store_roots'],left['through']) == named_roots(right['opening_store_roots'],left['through']), 'normal checkpoint financial/native all-nine-store seam differs')
-    return dict(distinct_prefix_heights=sum(p['heights'] for p in profiles), transactions=sum(p['transactions'] for p in profiles), all_nine_normal_checkpoint_seams=[200000,400000])
+        seams.append(left['through'])
+        if right.get('schema') == 'native033-split-range-financial-v1' and right['fast_forward']['heights']:
+            require(left.get('schema') == right['schema'] and left['source_range'] == right['source_range'] and right['progress_phase_base'] == left['progress_phase_base'] + sum(left['phases'].values()), 'rebuilt opening phase count differs from the preceding recorded part')
+    require(set(seams) >= ends - {500000} and set(seams) <= (ends | SPLIT_SEAMS) - {500000} and len(set(seams)) == len(seams), 'gap, duplicate, bounded component or missing complete profile')
+    return dict(distinct_prefix_heights=sum(p['heights'] for p in profiles), transactions=sum(p['transactions'] for p in profiles), all_nine_normal_checkpoint_seams=seams)
 
 
 def verify(config, repo, progress=None):
