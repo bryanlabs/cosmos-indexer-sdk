@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,6 +33,59 @@ var hub1RehearsalName = regexp.MustCompile(`^legacy_replay_rehearsal_hub1_[a-z0-
 type hub1Source struct {
 	dir   string
 	proof replayrecords.Proof
+	read  *hub1Read
+}
+
+// hub1Read lists the sealed files one run read from one source, with the
+// digest of each as it was read, and what the source contributed.
+type hub1Read struct {
+	Source                 string           `json:"source"`
+	From                   int64            `json:"from"`
+	Through                int64            `json:"through"`
+	CaptureReceiptSHA256   string           `json:"capture_receipt_sha256"`
+	CompletionMarkerSHA256 string           `json:"completion_marker_sha256"`
+	CompletionListSHA256   string           `json:"completion_list_sha256,omitempty"`
+	MovementsFileSHA256    string           `json:"movements_file_sha256"`
+	MovementsFileBytes     int64            `json:"movements_file_bytes"`
+	MovementsStreamSHA256  string           `json:"movements_stream_sha256"`
+	MovementsStreamRecords int64            `json:"movements_stream_records"`
+	MovementsStreamBytes   int64            `json:"movements_stream_bytes"`
+	BlockCaptureFiles      int64            `json:"block_capture_files"`
+	BlockCaptureListSHA256 string           `json:"block_capture_list_sha256"`
+	Heights                int64            `json:"heights"`
+	Transactions           int64            `json:"transactions"`
+	Rows                   int64            `json:"rows"`
+	RowsByCategory         map[string]int64 `json:"rows_by_category_and_source"`
+	captures               hash.Hash
+}
+
+func fileSHA256(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	return hex.EncodeToString(h.Sum(nil)), n, err
+}
+
+// capture adds the block capture files of one height to the list digest:
+// one line per file, its path under the source and its digest.
+func (m *hub1Read) capture(dir string, height int64) error {
+	base := filepath.Join("cache", "cosmoshub-1", fmt.Sprint(height/capture.DirSpan), fmt.Sprint(height))
+	for _, suffix := range []string{"-block.raw.gz", "-block_results.raw.gz"} {
+		sum, _, err := fileSHA256(filepath.Join(dir, base+suffix))
+		if errors.Is(err, os.ErrNotExist) && suffix == "-block_results.raw.gz" {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(m.captures, "%s  %s\n", sum, filepath.ToSlash(base+suffix))
+		m.BlockCaptureFiles++
+	}
+	return nil
 }
 
 // hub1Admit reads the capture receipt of one closed recording and builds the
@@ -60,34 +116,67 @@ func hub1Admit(dir string) (hub1Source, error) {
 	if receipt.Schema != "native033-closed-source-capture-v1" || !receipt.Complete || m.Completion != "observation_completed" {
 		return hub1Source{}, fmt.Errorf("Hub 1 source is not a complete closed capture")
 	}
-	return hub1Source{dir: dir, proof: replayrecords.Proof{Chain: "cosmoshub-1", Release: replayrecords.Release033, From: receipt.First, Through: receipt.Through,
+	read := &hub1Read{Source: dir, From: receipt.First, Through: receipt.Through, MovementsStreamSHA256: m.RawSHA256, MovementsStreamRecords: m.Records,
+		MovementsStreamBytes: m.RawBytes, RowsByCategory: map[string]int64{}, captures: sha256.New()}
+	sum := sha256.Sum256(raw)
+	read.CaptureReceiptSHA256 = hex.EncodeToString(sum[:])
+	if read.CompletionMarkerSHA256, _, err = fileSHA256(filepath.Join(dir, "recording-complete.private")); err != nil {
+		return hub1Source{}, fmt.Errorf("Hub 1 source has no completion marker")
+	}
+	if list, _, err := fileSHA256(filepath.Join(dir, "completed.private.sha256")); err == nil {
+		read.CompletionListSHA256 = list
+	}
+	return hub1Source{dir: dir, read: read, proof: replayrecords.Proof{Chain: "cosmoshub-1", Release: replayrecords.Release033, From: receipt.First, Through: receipt.Through,
 		VerifiedThrough: receipt.Through, SHA256: m.RawSHA256, Records: m.Records, RawBytes: m.RawBytes}}, nil
 }
 
 type gzipFile struct {
 	*gzip.Reader
-	file *os.File
+	file   *os.File
+	sum    hash.Hash
+	source hub1Source
 }
 
-func (g gzipFile) Close() error { return g.file.Close() }
+// Close digests whatever the gzip reader left of the file, so the digest is
+// of the whole file as stored, and checks it against any earlier pass.
+func (g gzipFile) Close() error {
+	_, err := io.Copy(g.sum, g.file)
+	if closeErr := g.file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(g.file.Name())
+	if err != nil {
+		return err
+	}
+	got := hex.EncodeToString(g.sum.Sum(nil))
+	if g.source.read.MovementsFileSHA256 != "" && g.source.read.MovementsFileSHA256 != got {
+		return fmt.Errorf("Hub 1 movement file changed between passes")
+	}
+	g.source.read.MovementsFileSHA256, g.source.read.MovementsFileBytes = got, info.Size()
+	return nil
+}
 
 func (s hub1Source) open() (io.ReadCloser, error) {
 	f, err := os.Open(filepath.Join(s.dir, "movements.source-closed.gz"))
 	if err != nil {
 		return nil, fmt.Errorf("Hub 1 movement stream unreadable")
 	}
-	z, err := gzip.NewReader(bufio.NewReaderSize(f, 4<<20))
+	sum := sha256.New()
+	z, err := gzip.NewReader(bufio.NewReaderSize(io.TeeReader(f, sum), 4<<20))
 	if err != nil {
 		f.Close()
 		return nil, fmt.Errorf("Hub 1 movement stream is not gzip")
 	}
-	return gzipFile{z, f}, nil
+	return gzipFile{z, f, sum, s}, nil
 }
 
 // runHub1 converts closed Hub 1 recordings into legacy rows. Unlike the
 // Hub 2 path it says why it stopped: the height, the record kind and the
 // label, never an address or an amount.
-func runHub1(dirs []string, exportRecords, exportProof, target string, write bool, maxBody int64) error {
+func runHub1(dirs []string, exportRecords, exportProof, target string, write bool, maxBody int64, manifest string) error {
 	fail := func(err error) error {
 		fmt.Fprintln(os.Stderr, "hub1:", err)
 		return refused
@@ -143,8 +232,10 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 				checked[i] = err
 				return
 			}
-			defer r.Close()
 			counted[i], checked[i] = replayrecords.ScanHub1(r, s.proof, nil)
+			if err := r.Close(); checked[i] == nil {
+				checked[i] = err
+			}
 		}(i, s)
 	}
 	wg.Wait()
@@ -196,6 +287,9 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 				destination = d
 			}
 			h, err := capture.LoadHeight(filepath.Join(s.dir, "cache"), "cosmoshub-1", r.Number, maxBody)
+			if err == nil {
+				err = s.read.capture(s.dir, r.Number)
+			}
 			if err != nil {
 				return fmt.Errorf("height %d: block capture: %w", r.Number, err)
 			}
@@ -245,8 +339,12 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 			heights++
 			txs += len(b.Inclusions)
 			rows += len(b.Rows)
+			s.read.Heights++
+			s.read.Transactions += int64(len(b.Inclusions))
+			s.read.Rows += int64(len(b.Rows))
 			for _, row := range b.Rows {
 				categories[row.Category+"/"+row.Source]++
+				s.read.RowsByCategory[row.Category+"/"+row.Source]++
 			}
 			return nil
 		}
@@ -255,7 +353,10 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 			return fail(err)
 		}
 		counted[i], err = replayrecords.ScanHub1(r, s.proof, visit)
-		r.Close()
+		if closeErr := r.Close(); err == nil {
+			err = closeErr
+		}
+		s.read.BlockCaptureListSHA256 = hex.EncodeToString(s.read.captures.Sum(nil))
 		if err != nil {
 			return fail(fmt.Errorf("source %d: %w", i+1, err))
 		}
@@ -273,7 +374,41 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 	if held != 0 {
 		return refused
 	}
+	record := func() error {
+		if manifest == "" {
+			return nil
+		}
+		out := struct {
+			Schema  string               `json:"schema"`
+			Chain   string               `json:"chain"`
+			Written bool                 `json:"written"`
+			Target  string               `json:"rehearsal_db,omitempty"`
+			Sources []*hub1Read          `json:"sources"`
+			Export  *replayrecords.Proof `json:"export,omitempty"`
+		}{Schema: "hub1-converter-read-manifest-v1", Chain: "cosmoshub-1", Written: write, Export: admittedExport}
+		if write {
+			out.Target = target
+		}
+		for _, s := range sources {
+			out.Sources = append(out.Sources, s.read)
+		}
+		body, _ := json.MarshalIndent(out, "", "  ")
+		f, err := os.OpenFile(manifest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("manifest file must be new")
+		}
+		if _, err = f.Write(append(body, '\n')); err == nil {
+			err = f.Sync()
+		}
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		return err
+	}
 	if destination == nil {
+		if err := record(); err != nil {
+			return fail(err)
+		}
 		return nil
 	}
 	// Read the stored rows back and prove them, height by height, against
@@ -317,6 +452,9 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 	fmt.Printf("hub1 stored rows proven against the recording: heights=%d heights_with_balance_change=%d\n", stored, proven)
 	if proven != len(recorded) {
 		return refused
+	}
+	if err := record(); err != nil {
+		return fail(err)
 	}
 	return nil
 }

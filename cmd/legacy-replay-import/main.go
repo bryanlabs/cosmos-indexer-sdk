@@ -116,12 +116,13 @@ func run() error {
 	write := flag.Bool("write", false, "write rehearsal instead of validating only")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture")
 	hub1 := flag.String("hub1-sources", "", "comma separated closed Hub 1 recording source directories, in height order")
+	hub1Manifest := flag.String("hub1-manifest", "", "new file to receive the digests of every sealed file a Hub 1 run read, per source")
 	flag.Parse()
 	if *hub1 != "" {
 		if *root != "" || *records != "" || *proof != "" || *status != "" || *differences != "" || *maxBody < 1 {
 			return refused
 		}
-		return runHub1(strings.Split(*hub1, ","), *exportRecords, *exportProof, *target, *write, *maxBody)
+		return runHub1(strings.Split(*hub1, ","), *exportRecords, *exportProof, *target, *write, *maxBody, *hub1Manifest)
 	}
 	if *root == "" || *records == "" || *proof == "" || *status == "" || *maxBody < 1 {
 		return refused

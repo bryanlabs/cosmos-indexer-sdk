@@ -98,6 +98,30 @@ func hub1Invoke(args ...string) error {
 func TestHub1CommandConvertsAClosedRecording(t *testing.T) {
 	root := hub1Fixture(t, nil)
 	require.NoError(t, hub1Invoke("--hub1-sources", root))
+	// The run lists every sealed file it read, with the digest it read.
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	require.NoError(t, hub1Invoke("--hub1-sources", root, "--hub1-manifest", manifest))
+	var listed struct {
+		Sources []hub1Read `json:"sources"`
+	}
+	body, err := os.ReadFile(manifest)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(body, &listed))
+	require.Len(t, listed.Sources, 1)
+	read := listed.Sources[0]
+	file, err := os.ReadFile(filepath.Join(root, "movements.source-closed.gz"))
+	require.NoError(t, err)
+	sum := sha256.Sum256(file)
+	require.Equal(t, hex.EncodeToString(sum[:]), read.MovementsFileSHA256)
+	require.Equal(t, int64(len(file)), read.MovementsFileBytes)
+	require.Len(t, read.MovementsStreamSHA256, 64)
+	require.Len(t, read.CaptureReceiptSHA256, 64)
+	require.Equal(t, int64(2), read.BlockCaptureFiles)
+	require.Equal(t, int64(1), read.Heights)
+	require.Equal(t, int64(1), read.Rows)
+	require.Equal(t, map[string]int64{"transfer/message": 1}, read.RowsByCategory)
+	// A manifest is never overwritten.
+	require.Error(t, hub1Invoke("--hub1-sources", root, "--hub1-manifest", manifest))
 	// Rows go only to a database named for Hub 1 staging.
 	for _, name := range []string{"legacy_replay_rehearsal_synthetic_12345678", "taxindexer", "legacy", ""} {
 		require.Error(t, hub1Invoke("--hub1-sources", root, "--write", "--rehearsal-db", name))
