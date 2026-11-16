@@ -74,7 +74,7 @@ def launch_assertions(text, commit, digest, launch):
                 helper_hash='= ' + digest + ' ]' in text and 'sha256sum' in text)
 
 
-def record(first, through, proof, launch, build, trimpath, entry, helper, built_from, launcher, out, opening=None, manifest=None, history=None, tests=None, earlier=None, resume=False, origin=None):
+def record(first, through, proof, launch, build, trimpath, entry, helper, built_from, launcher, out, opening=None, manifest=None, history=None, tests=None, earlier=None, resume=False, origin=None, saved=False):
     """launch: the worktree the recorder's Python ran from. build: where the helper was compiled (its path is inside a non-trimpath helper).
     tests: any clean checkout of the same commit, for the tests and the compiled-source list."""
     proof, launch, build, helper, launcher, out = [p.resolve() for p in (proof, launch, build, helper, launcher, out)]
@@ -93,7 +93,7 @@ def record(first, through, proof, launch, build, trimpath, entry, helper, built_
     live = observe(proof, launch, entry, helper)
     require('helper' not in live or live['helper']['executing_image_sha256'] == digest, 'executing helper image differs from the named helper')
     finished = (proof / 'exit.private.json').exists()
-    require(finished or 'recorder' in live, 'part is neither finished nor observably running')
+    require(finished or saved or 'recorder' in live, 'part is neither finished nor observably running')
     require('recorder' not in live or ('--resume-opening' in live['recorder']['argv']) == resume, 'running recorder and plan disagree on whether this part opens from an interrupted run')
     born = int(subprocess.check_output(['stat', '-c', '%W', str(proof)], text=True))
     require('recorder' in live or born > 0, 'launch time of a finished part cannot be read')

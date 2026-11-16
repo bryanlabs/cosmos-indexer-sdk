@@ -122,9 +122,9 @@ def validate_start(repo, start_path):
     return commit
 
 
-def after_launch(started, commit, helper, result):
+def after_launch(started, commit, helper, result, saved=False):
     """A record written after launch never claims a pre-launch check. It must say how the helper was tied to the commit."""
-    require(started['schema'] == 'native033-launch-record-after-launch-v1' and started['checked_before_launch'] is False and started['first'] == result['first'] and started['through'] == result['through'], 'after-launch record does not describe this part')
+    require(started['schema'] == 'native033-launch-record-after-launch-v1' and started['checked_before_launch'] is False and started['first'] == result['first'] and (started['through'] >= result['through'] if saved else started['through'] == result['through']), 'after-launch record does not describe this part')
     info = build_info(helper)
     require(started['helper_sha256'] == sha(helper) and info['revision'] == commit == started['helper_build']['revision'] and info['modified'] == 'false' == started['helper_build']['modified'], 'helper that ran is not stamped as a clean build of the launch commit')
     require(started['helper_proof'] in HELPER_PROOFS, 'launch record does not say how the helper was tied to the commit')
@@ -142,10 +142,24 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
     root,proof,helper,controls_path,preservation_path,repo,output,start_path=[p.resolve() for p in (root,proof,helper,controls_path,preservation_path,repo,output,start_path)]
     b = validate_source(root)
     record = start_path.parent
-    result_path = proof / 'complete-component.private.json'
+    # A savepoint is what a run that was later killed had proved up to one height: its own receipt, the helper's receipt and a copy of
+    # the state, written together before the kill. It is sealed as the part first..that height; the killed run gives nothing after it.
+    saved = proof.parent.name == 'savepoints' and (proof / 'part.private.json').is_file()
+    attempt = proof.parent.parent if saved else proof
+    result_path = proof / ('part.private.json' if saved else 'complete-component.private.json')
     native_path = proof / 'native-proof.private.json'
-    exit_path = proof / 'exit.private.json'
-    result, native, exited, controls, preserved, started = [json.loads(p.read_bytes()) for p in (result_path,native_path,exit_path,controls_path,preservation_path,start_path)]
+    exit_path = attempt / 'exit.private.json'
+    result, native, controls, preserved, started = [json.loads(p.read_bytes()) for p in (result_path,native_path,controls_path,preservation_path,start_path)]
+    if saved:
+        require(result.get('savepoint') is True and str(result['through']) == proof.name and not (attempt / 'complete-component.private.json').exists(), 'not a savepoint of a run that stopped before finishing')
+        exited = json.loads(exit_path.read_bytes()) if exit_path.exists() else None
+        require(exited is None or exited['exit'] != 0, 'the run finished: seal the whole part, not its savepoint')
+        ended = result['saved_utc']
+    else:
+        require('savepoint' not in result, 'savepoint receipt in place of a finished part')
+        exited = json.loads(exit_path.read_bytes())
+        require(exited['exit'] == 0, 'actual complete source financial proof missing')
+        ended = exited['finished_utc']
     split = result['schema'] == 'native033-split-range-financial-v1'
     prefix = split and result['first'] > b['first']
     if split:
@@ -154,17 +168,19 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
             require(native['progress_phase_base'] == result['progress_phase_base'] == result['fast_forward']['typed_phases'] and result['fast_forward']['heights'] == result['first'] - b['first'] and len(result['opening_checkpoint_manifest_sha256']) == 64, 'part opening was not rebuilt from the range start and checked against a saved native checkpoint')
     else:
         require(result['schema'] == 'native033-complete-profile-financial-v1' and result['source_whole_complete'] is True and result['first'] == b['first'] and result['through'] == b['through'], 'actual complete source financial proof missing')
-    require(exited['exit'] == 0 and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False and result['capture_sha256'] == sha(root/'capture.private.json'), 'actual complete source financial proof missing')
+    require(result['financial_admission'] is False and result['global_books_tax_acceptance'] is False and result['capture_sha256'] == sha(root/'capture.private.json'), 'actual complete source financial proof missing')
     require(result['first'] == native['first'] and result['through'] == native['through'] and result['heights'] == native['native_iavl_heights'] == result['through']-result['first']+1 and result['transactions'] == native['transactions'] and sum(result['phases'].values()) == native['typed_financial_phases'] and result['native_helper_sha256'] == sha(helper) and result['native_proof_sha256'] == sha(native_path), 'complete independent native proof/helper coverage differs')
     facts = bound_facts(proof, result, native)
-    require(preserved['source_capture_sha256'] == sha(root/'capture.private.json') and preserved['source_preserved_after_proof'] is True and utc(preserved['checked_utc']) >= utc(exited['finished_utc']), 'post-proof actual source preservation missing')
+    require(preserved['source_capture_sha256'] == sha(root/'capture.private.json') and preserved['source_preserved_after_proof'] is True and utc(preserved['checked_utc']) >= utc(ended), 'post-proof actual source preservation missing')
     require(controls['native_helper_sha256'] == sha(helper) and controls['first'] == result['first'] and controls['source_capture_sha256'] == sha(root/'capture.private.json') and controls['historical_blocks_executed'] == 0, 'actual controls not bound to this complete source/helper')
     expected_controls = {'fee','share','principal','request','root','native_result','native_application_root','native_before'} if result['first'] == 1 else {'opening_root','opening_store','opening_baseline','before','final_root','final_result','next_header'}
     require(len(controls['controls']) == len(expected_controls) and {c['control'] for c in controls['controls']} == expected_controls and all(c['exit'] != 0 and c['expected_refusal'] is True for c in controls['controls']), 'specific actual native controls missing')
-    paths = [result_path,native_path,exit_path,helper,controls_path,preservation_path,record/'compiled-go-source-pins.private.json',record/'build-test.private.log',root/'capture.private.json',start_path]
+    paths = [result_path,native_path,helper,controls_path,preservation_path,record/'compiled-go-source-pins.private.json',record/'build-test.private.log',root/'capture.private.json',start_path]
+    if exited is not None:
+        paths.append(exit_path)
     for name in ('native-consumer.private.log', 'consumer.private.log'):
-        require((proof/name).is_file(), 'checker log missing')
-        paths.append(proof/name)
+        require((attempt/name).is_file(), 'checker log missing')
+        paths.append(attempt/name)
     for c in controls['controls']:
         require(sha(Path(c['retained_log_path'])) == c['log_sha256'], 'actual negative control log changed')
         paths.append(Path(c['retained_log_path']))
@@ -174,7 +190,8 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
     reconstructed = started.get('schema') is not None
     if not reconstructed:
         clean_at(repo, commit, 'consumer HEAD differs from actual run-start signed source')
-    build = after_launch(started, commit, helper, result) if reconstructed else repo
+    require(reconstructed or not saved, 'supervised run has no savepoints')
+    build = after_launch(started, commit, helper, result, saved) if reconstructed else repo
     subprocess.run(['git','-C',str(build),'verify-commit',commit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
     code = {}
     for name in code_list(build, commit):
@@ -237,7 +254,9 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
     subprocess.run(['git','-C',str(tool),'verify-commit',tool_commit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
     result = dict(schema='native033-complete-profile-seal-v1',signed_source_commit=commit,signed_code_pins=code,artifact_pins=pins,
                   result_path=rel(result_path),result_sha256=sha(result_path),native_proof_path=rel(native_path),native_proof_sha256=sha(native_path),
-                  exit_path=rel(exit_path),exit_sha256=sha(exit_path),native_helper_sha256=sha(helper),
+                  exit_path=rel(exit_path) if exited is not None else '',exit_sha256=sha(exit_path) if exited is not None else '',native_helper_sha256=sha(helper),
+                  savepoint_of_killed_run=saved,killed_run_proof=rel(attempt) if saved else '',killed_run_exit=(exited['exit'] if exited is not None else 'no exit record') if saved else '',
+                  killed_run_gave_heights=[result['first'], result['through']] if saved else [],
                   launch_record='written_after_launch' if reconstructed else 'written_by_supervisor_before_proof',
                   launch_record_path=rel(start_path),sealing_tool_commit=tool_commit,
                   # Every part checks all of its own heights in one run. A resumed part differs only in where its opening state came from.

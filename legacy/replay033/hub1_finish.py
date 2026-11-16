@@ -63,9 +63,9 @@ def prepare(plan, part, controls_too=True):
     Path(plan['record_root']).mkdir(mode=0o700, exist_ok=True)
     if not (out / 'process.private.json').exists():
         from record_after_launch import record
-        record(part['first'], part['through'], Path(part['proof']), Path(part['launch_worktree']), Path(part['build_worktree']), part['trimpath'], part['entry'],
+        record(part['first'], part['through'], Path(part.get('attempt_proof') or part['proof']), Path(part['launch_worktree']), Path(part['build_worktree']), part['trimpath'], part['entry'],
                Path(part['helper']), optional(part, 'built_from'), Path(part['launcher']), out, optional(part, 'opening_checkpoint'), optional(part, 'opening_manifest'),
-               optional(part, 'validator_history'), optional(part, 'test_worktree'), part.get('earlier_attempts'), bool(part.get('resume_opening')), part.get('interrupted_run'))
+               optional(part, 'validator_history'), optional(part, 'test_worktree'), part.get('earlier_attempts'), bool(part.get('resume_opening')), part.get('interrupted_run'), part['state'] == 'savepoint')
         print(json.dumps(dict(part=part['first'], launch_record=str(out / 'process.private.json'))), flush=True)
     started = json.loads((out / 'process.private.json').read_bytes())
     # Controls depend only on the source, the helper and the opening, so a plan may name ones already made for the same three.
@@ -86,9 +86,12 @@ def prepare(plan, part, controls_too=True):
 
 def seal_part(plan, part):
     proof = Path(part['proof'])
-    exited = json.loads((proof / 'exit.private.json').read_bytes()) if (proof / 'exit.private.json').exists() else None
-    require(exited is not None, 'part %d has not finished: no exit record yet' % part['first'])
-    require(exited['exit'] == 0, 'part %d ended with exit %s: it cannot be sealed, its files are left untouched' % (part['first'], exited['exit']))
+    if part['state'] == 'savepoint':
+        require(str(Path(part['attempt_proof']) / 'complete-component.private.json') not in running(), 'the run that wrote this savepoint is still recording')
+    else:
+        exited = json.loads((proof / 'exit.private.json').read_bytes()) if (proof / 'exit.private.json').exists() else None
+        require(exited is not None, 'part %d has not finished: no exit record yet' % part['first'])
+        require(exited['exit'] == 0, 'part %d ended with exit %s: it cannot be sealed, its files are left untouched' % (part['first'], exited['exit']))
     started, controls = prepare(plan, part)
     out = record_dir(plan, part)
     preservation = out / 'source-preservation.private.json'
@@ -168,11 +171,15 @@ def make_plan(catalog):
     for root in catalog['roots']:
         for manifest in Path(root['path']).glob('openings/*.sha256'):
             openings[sha(manifest)] = dict(opening_checkpoint=str(manifest.with_suffix('.home')), opening_manifest=str(manifest))
+        # A run reopened from a savepoint keeps the list of that savepoint's files in its own folder.
+        for manifest in Path(root['path']).glob('profile-*/opening.sha256'):
+            openings[sha(manifest)] = dict(opening_checkpoint=str(Path((manifest.parent / 'opening.from').read_text().strip()) / 'native-home'), opening_manifest=str(manifest))
     for root in catalog['roots']:
         for proof in sorted(Path(root['path']).glob('profile-*/proof')):
             receipt, exit_path = proof / 'complete-component.private.json', proof / 'exit.private.json'
             exited = json.loads(exit_path.read_bytes())['exit'] if exit_path.exists() else None
-            item = dict(proof=str(proof), launcher=root.get('launcher') or str(proof.parent / root['launcher_in_part']), last_verified_height=last_height(proof), exit=exited)
+            own = proof.parent / 'launcher.private.txt'
+            item = dict(proof=str(proof), launcher=str(own) if own.is_file() else root.get('launcher') or str(proof.parent / root['launcher_in_part']), last_verified_height=last_height(proof), exit=exited)
             if str(receipt) in live:
                 script, args = live[str(receipt)]
                 source = json.loads((Path(args['directory']) / 'capture.private.json').read_bytes())
@@ -191,8 +198,25 @@ def make_plan(catalog):
                             opening_checkpoint=opening.get('opening_checkpoint'), opening_manifest=opening.get('opening_manifest'), resume_opening=result.get('opening_kind') == 'interrupted_run_state')
             else:
                 item.update(state='failed' if exited else 'killed', first=int(proof.parent.name.split('-')[1]))
+                folder = proof / 'savepoints'
+                item['savepoints'] = sorted(int(d.name) for d in folder.iterdir() if d.name.isdigit() and (d / 'part.private.json').is_file()) if folder.is_dir() else []
+            if item['state'] != 'recording' and own.is_file() and own.read_text().lstrip().startswith('{'):
+                item['launch_worktree'] = json.loads(own.read_text())['launch_worktree']
             attempts.append(item)
     usable = [a for a in attempts if a['state'] in ('finished', 'recording')]
+    # A killed run counts for the heights up to its latest savepoint, but only once another run has opened from that savepoint.
+    for a in list(attempts):
+        for height in reversed(a.get('savepoints', [])):
+            if any(u['first'] == height + 1 for u in usable):
+                folder = Path(a['proof']) / 'savepoints' / str(height)
+                result = json.loads((folder / 'part.private.json').read_bytes())
+                opening = openings.get(result.get('opening_checkpoint_manifest_sha256') or '', {})
+                require(result['first'] == a['first'] and result['through'] == height and (not result.get('opening_checkpoint_manifest_sha256') or opening), 'savepoint does not belong to its run, or its opening is unknown: ' + str(folder))
+                usable.append(dict(a, state='savepoint', proof=str(folder), attempt_proof=a['proof'], through=height, entry='consume_split.py', helper_sha256=result['native_helper_sha256'],
+                                   source=catalog['sources'][str(result['source_range'][0])], validator_history=catalog.get('validator_history'),
+                                   opening_checkpoint=opening.get('opening_checkpoint'), opening_manifest=opening.get('opening_manifest'), resume_opening=result.get('opening_kind') == 'interrupted_run_state'))
+                a['saved_through'] = height
+                break
     parts, at = [], 1
     while at <= 500000:
         here = sorted((a for a in usable if a['first'] == at), key=lambda a: (a['state'] != 'finished', -a['through'], -a['last_verified_height']))
@@ -201,21 +225,61 @@ def make_plan(catalog):
         chosen = here[0]
         helper = catalog['helpers'].get(chosen['helper_sha256'])
         require(helper is not None, 'catalog does not know the helper %s used by %s' % (chosen['helper_sha256'], chosen['proof']))
-        require(chosen['state'] == 'finished' or chosen['launch_worktree'] == helper['launch_worktree'], 'recorder runs from a worktree the catalog does not expect: ' + chosen['proof'])
-        part = dict(helper, **{k: chosen[k] for k in ('first', 'through', 'proof', 'source', 'entry', 'launcher', 'state') if k in chosen})
+        require(chosen.get('launch_worktree', helper['launch_worktree']) in (helper['launch_worktree'], helper.get('test_worktree')), 'recorder runs from a worktree the catalog does not expect: ' + chosen['proof'])
+        part = dict(helper, **{k: chosen[k] for k in ('first', 'through', 'proof', 'source', 'entry', 'launcher', 'state', 'attempt_proof', 'launch_worktree') if k in chosen})
         for name in ('validator_history', 'opening_checkpoint', 'opening_manifest', 'resume_opening'):
             if chosen.get(name):
                 part[name] = chosen[name]
         origin = Path(chosen['opening_checkpoint']).with_suffix('.from') if chosen.get('resume_opening') else None
         if origin is not None and origin.is_file():
             part['interrupted_run'] = origin.read_text().strip()
-        part['earlier_attempts'] = [dict(proof=a['proof'], state=a['state'], exit=a['exit'], first=a['first'], last_verified_height=a['last_verified_height'], contributed_recorded_output=False)
-                                    for a in attempts if a is not chosen and a['state'] != 'finished' and (a['first'] == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
+        for known in catalog.get('known_controls', []):
+            made = json.loads(Path(known).read_bytes())
+            if made['first'] == part['first'] and made['native_helper_sha256'] == chosen['helper_sha256'] and (made.get('opening_checkpoint_manifest_sha256') or '') == (sha(Path(part['opening_manifest'])) if part.get('opening_manifest') else ''):
+                part['controls'] = known
+        part['earlier_attempts'] = [dict(proof=a['proof'], state=a['state'], exit=a['exit'], first=a['first'], last_verified_height=a['last_verified_height'],
+                                         contributed_recorded_output='heights %d to %d only, through its savepoint, sealed as their own part' % (a['first'], a['saved_through']) if a.get('saved_through') else False)
+                                    for a in attempts if a is not chosen and a['proof'] != chosen.get('attempt_proof') and a['state'] != 'finished' and (a['first'] == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
         parts.append(part)
         at = chosen['through'] + 1
     plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch') if k in catalog}
     plan.update(parts=parts, covered_through=at - 1, complete=at == 500001, made_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     return plan
+
+
+def reopen(catalog, first, through=None):
+    """Start a new run from the latest savepoint of a killed run. Leaves the killed run exactly as it is.
+
+    The new run gets its own folder, profile-<savepoint height + 1>, beside the
+    killed one. The helper accepts the saved state only after rebuilding the
+    same height from recorded history and finding it equal key for key."""
+    live = running()
+    found = []
+    for root in catalog['roots']:
+        proof = Path(root['path']) / ('profile-%d' % first) / 'proof'
+        saves = sorted(int(d.name) for d in (proof / 'savepoints').iterdir() if d.name.isdigit() and (d / 'part.private.json').is_file()) if (proof / 'savepoints').is_dir() else []
+        if saves:
+            found.append((proof, saves[-1]))
+    require(len(found) == 1, 'exactly one run opening at %d with a savepoint is needed, found %d' % (first, len(found)))
+    proof, height = found[0]
+    require(str(proof / 'complete-component.private.json') not in live and not (proof / 'complete-component.private.json').exists(), 'that run is still recording or has finished: nothing to reopen')
+    saved = proof / 'savepoints' / str(height)
+    result = json.loads((saved / 'part.private.json').read_bytes())
+    known = Path(catalog['record_root']) / ('part-%d' % first) / 'process.private.json'
+    through = through or (json.loads(known.read_bytes())['through'] if known.is_file() else None)
+    require(through is not None and height < through, 'last height of the part is unknown: pass --through')
+    directory = proof.parent.parent / ('profile-%d' % (height + 1))
+    directory.mkdir(mode=0o700)
+    lines = ''.join('%s  ./%s\n' % (sha(f), f.relative_to(saved / 'native-home')) for f in sorted(p for p in (saved / 'native-home').rglob('*') if not p.is_dir()))
+    (directory / 'opening.sha256').write_text(lines)
+    (directory / 'opening.from').write_text(str(saved) + '\n')
+    helper = catalog['helpers'][result['native_helper_sha256']]
+    part = dict(helper, launch_worktree=helper.get('test_worktree') or helper['launch_worktree'], entry='consume_split.py', source=catalog['sources'][str(result['source_range'][0])],
+                opening_checkpoint=str(saved / 'native-home'), opening_manifest=str(directory / 'opening.sha256'), resume_opening=True, savepoint_every=catalog.get('savepoint_every', 2500), recorder_prefix=catalog.get('recorder_prefix', []))
+    if catalog.get('validator_history'):
+        part['validator_history'] = catalog['validator_history']
+    print(json.dumps(dict(reopened_from_savepoint=height, of_run=str(proof), new_run=str(directory), first=height + 1, through=through)), flush=True)
+    return mini(None, part, height + 1, through, directory)
 
 
 def mini(plan, part, first, through, directory):
@@ -226,7 +290,7 @@ def mini(plan, part, first, through, directory):
     require(part['entry'] == 'consume_split.py', 'a short slice needs the split recorder')
     proof = directory / 'proof'
     proof.mkdir(mode=0o700, parents=True)
-    command = [sys.executable, '-B', str(launch / 'legacy/replay033/consume_split.py'), '--directory', part['source'], '--first', str(first), '--through', str(through),
+    command = list(part.get('recorder_prefix', [])) + ['/usr/bin/python3', '-B', str(launch / 'legacy/replay033/consume_split.py'), '--directory', part['source'], '--first', str(first), '--through', str(through),
                '--native-helper', str(helper), '--receipt', str(proof / 'complete-component.private.json')]
     if part.get('opening_checkpoint'):
         command += ['--opening-checkpoint', part['opening_checkpoint'], '--opening-manifest', part['opening_manifest']] + (['--resume-opening'] if part.get('resume_opening') else [])
@@ -245,8 +309,8 @@ def mini(plan, part, first, through, directory):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--plan', type=Path, required=True)
-    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini'))
+    parser.add_argument('--plan', type=Path, help='a plan written earlier; without it the plan is made afresh from --catalog')
+    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini', 'reopen', 'watch'))
     parser.add_argument('--catalog', type=Path, help='plan only: the roots to search and the known helpers, sources and openings')
     parser.add_argument('--first', type=int)
     parser.add_argument('--through', type=int)
@@ -263,8 +327,14 @@ if __name__ == '__main__':
         print(json.dumps(dict(plan=str(a.plan), complete=plan['complete'], covered_through=plan['covered_through'],
                               parts=[[p['first'], p['through'], p['state'], len(p['earlier_attempts'])] for p in plan['parts']])), flush=True)
         sys.exit(0 if plan['complete'] else 3)
-    plan = json.loads(a.plan.read_bytes())
+    if a.step == 'reopen':
+        catalog = json.loads(a.catalog.read_bytes())
+        background(Path(catalog['record_root']) / 'tmp')
+        sys.exit(reopen(catalog, a.first, a.through))
+    plan = json.loads(a.plan.read_bytes()) if a.plan else make_plan(json.loads(a.catalog.read_bytes()))
     background(Path(plan['record_root']) / 'tmp')
+    if a.step == 'watch':
+        sys.exit('the watcher is started as hub1_seal_watch.py')
     clean_at(TOOL, subprocess.check_output(['git', '-C', str(TOOL), 'rev-parse', 'HEAD'], text=True).strip(), 'sealing tool tree is not clean')
     if a.step == 'prepare':
         prepare(plan, part_of(plan, a.first), not a.record_only)

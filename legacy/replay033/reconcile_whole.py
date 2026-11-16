@@ -88,13 +88,19 @@ def signed_profile(path, expected_sha, repo, progress=None, with_seal=False):
         require(artifact.is_file() and not artifact.is_symlink() and sha(artifact) == digest, 'sealed component bytes changed')
         if progress is not None and (index % 1000 == 0 or index == len(seal['artifact_pins'])):
             progress(str(path),index,len(seal['artifact_pins']))
-    for field, digest_field in (('result_path','result_sha256'),('native_proof_path','native_proof_sha256'),('exit_path','exit_sha256')):
+    saved = seal['savepoint_of_killed_run']
+    for field, digest_field in (('result_path','result_sha256'),('native_proof_path','native_proof_sha256')) + ((('exit_path','exit_sha256'),) if seal['exit_path'] else ()):
         require(seal['artifact_pins'].get(seal[field]) == seal[digest_field], 'complete result not in sealed artifact inventory')
     require(seal['native_helper_sha256'] in seal['artifact_pins'].values(), 'complete native helper binary pin missing')
     result = pinned(path.parent / seal['result_path'], seal['result_sha256'])
     native = pinned(path.parent / seal['native_proof_path'], seal['native_proof_sha256'])
-    exit_state = pinned(path.parent / seal['exit_path'], seal['exit_sha256'])
-    require(exit_state['exit'] == 0 and result['schema'] in ('native033-complete-profile-financial-v1', 'native033-split-range-financial-v1') and (result['schema'] != 'native033-complete-profile-financial-v1' or result['source_whole_complete'] is True) and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False, 'failed or bounded source cannot become complete profile')
+    exit_state = pinned(path.parent / seal['exit_path'], seal['exit_sha256']) if seal['exit_path'] else None
+    if saved:
+        # Heights a killed run had proved and saved before it died. Its exit, if it left one, must not be a success, and nothing past the savepoint is taken from it.
+        require(result.get('savepoint') is True and Path(seal['result_path']).name == 'part.private.json' and Path(seal['result_path']).parent.name == str(result['through']) and seal['killed_run_gave_heights'] == [result['first'], result['through']] and (exit_state is None or exit_state['exit'] != 0), 'savepoint seal misstates the killed run')
+    else:
+        require('savepoint' not in result and exit_state is not None and exit_state['exit'] == 0, 'failed or bounded source cannot be assembled as complete')
+    require(result['schema'] in ('native033-complete-profile-financial-v1', 'native033-split-range-financial-v1') and (result['schema'] != 'native033-complete-profile-financial-v1' or result['source_whole_complete'] is True) and result['financial_admission'] is False and result['global_books_tax_acceptance'] is False, 'failed or bounded source cannot become complete profile')
     require(result['native_proof_sha256'] == seal['native_proof_sha256'] and result['native_helper_sha256'] == seal['native_helper_sha256'], 'complete component native proof/helper binding differs')
     require(native['schema'] == 'native033-independent-bounded-financial-v1' and native['normal_opening_height'] == result['first'] - 1, 'independent native opening schema differs')
     require(result['first'] == native['first'] and result['through'] == native['through'] and result['transactions'] == native['transactions'] and result['heights'] == native['native_iavl_heights'] and sum(result['phases'].values()) == native['typed_financial_phases'] and native['financial_admission'] is False and native['global_books_tax_acceptance'] is False, 'independent native component coverage differs')
@@ -283,7 +289,7 @@ def verify(config, repo, progress=None, facts_path=None):
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
                 stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(), stake_asset_tax_classification='unclassified',
                 launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}),
-                parts=[dict(first=r['first'], through=r['through'], signed_source_commit=s['signed_source_commit'], launch_record=s['launch_record'], opening_kind=s['opening_kind'], resumed_from_interrupted_run=s['resumed_from_interrupted_run'], interrupted_run=s['interrupted_run'], python_source_proof=s['python_source_proof'], helper_proof=s['helper_proof'], earlier_attempts=s['earlier_attempts']) for r, s, _ in sealed])
+                parts=[dict(first=r['first'], through=r['through'], signed_source_commit=s['signed_source_commit'], launch_record=s['launch_record'], opening_kind=s['opening_kind'], resumed_from_interrupted_run=s['resumed_from_interrupted_run'], interrupted_run=s['interrupted_run'], savepoint_of_killed_run=s['savepoint_of_killed_run'], killed_run_exit=s['killed_run_exit'], python_source_proof=s['python_source_proof'], helper_proof=s['helper_proof'], earlier_attempts=s['earlier_attempts']) for r, s, _ in sealed])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
