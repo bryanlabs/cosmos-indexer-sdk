@@ -145,11 +145,12 @@ def opening_manifest(directory, manifest):
     return sha(manifest)
 
 
-def verify(root, binary, receipt, first, through, opening=None, manifest=None, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256=''):
+def verify(root, binary, receipt, first, through, opening=None, manifest=None, resume=False, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256=''):
     b = validate_source(root)
     prefix, closed = first > b['first'], through == b['through']
     require(b['first'] <= first <= through <= b['through'], 'part lies outside the complete source range')
-    require(not prefix or first - 1 in SPLITS[b['first']] or os.environ.get('HUB1_SPLIT_PROOF_SLICE') == '1', 'part must open at a saved native checkpoint height')
+    require(not prefix or first - 1 in SPLITS[b['first']] or resume or os.environ.get('HUB1_SPLIT_PROOF_SLICE') == '1', 'part must open at a saved native checkpoint height')
+    require(not resume or prefix, 'only a part that opens mid-range can resume retained working state')
     require(prefix == (opening is not None) == (manifest is not None), 'a later part needs its saved opening checkpoint and manifest, the range start must not have one')
     manifest_sha = opening_manifest(opening, manifest) if prefix else ''
     history = SplitHistory(root, b, first)
@@ -162,7 +163,7 @@ def verify(root, binary, receipt, first, through, opening=None, manifest=None, v
         forward = dict(heights=first - b['first'], typed_phases=phases, seconds=round(time.monotonic() - started, 3))
     command = [str(binary), '--cache', str(root / 'cache'), '--receipt', str(receipt.parent / 'native-proof.private.json'), '--working-home', str(receipt.parent / 'native-home')]
     if prefix:
-        command += ['--checkpoint-home', str(opening), '--progress-phase-base', str(forward['typed_phases'])]
+        command += ['--checkpoint-home', str(opening), '--progress-phase-base', str(forward['typed_phases'])] + (['--resume-opening'] if resume else [])
     elif b['first'] > 1:
         command += ['--checkpoint-home', str(root / 'opening-checkpoint')]
     if validator_history is not None:
@@ -210,7 +211,7 @@ def verify(root, binary, receipt, first, through, opening=None, manifest=None, v
                   ending_commit=ending['commit'], ending_store_roots=ending['native_commit_info'],
                   ending_block_hash=ending['block_hash'], next_header=next_header, next_header_is_source_closure=closed,
                   source_closed_at_through=closed, fast_forward=forward, progress_phase_base=forward['typed_phases'],
-                  opening_checkpoint_manifest_sha256=manifest_sha,
+                  opening_checkpoint_manifest_sha256=manifest_sha, opening_kind=('interrupted_run_state' if resume else 'saved_checkpoint') if prefix else 'source_range_start',
                   financial_admission=False, global_books_tax_acceptance=False,
                   native_stake_asset_blocks=asset_blocks, native_stake_asset_fact_rows=asset_rows,
                   native_stake_asset_facts_sha256=asset_hash, stake_asset_tax_classification='unclassified',
@@ -229,12 +230,13 @@ if __name__ == '__main__':
     parser.add_argument('--through', required=True, type=int)
     parser.add_argument('--opening-checkpoint', type=Path)
     parser.add_argument('--opening-manifest', type=Path)
+    parser.add_argument('--resume-opening', action='store_true')
     parser.add_argument('--validator-history', type=Path)
     parser.add_argument('--validator-history-sha256', default='')
     parser.add_argument('--evidence-cache', type=Path)
     parser.add_argument('--evidence-capture-sha256', default='')
     a = parser.parse_args()
     os.umask(0o077)
-    r = verify(a.directory, a.native_helper, a.receipt, a.first, a.through, a.opening_checkpoint, a.opening_manifest,
+    r = verify(a.directory, a.native_helper, a.receipt, a.first, a.through, a.opening_checkpoint, a.opening_manifest, a.resume_opening,
                a.validator_history, a.validator_history_sha256, a.evidence_cache, a.evidence_capture_sha256)
     print(json.dumps({k: r[k] for k in ('first', 'through', 'heights', 'transactions', 'fast_forward', 'financial_admission')}))

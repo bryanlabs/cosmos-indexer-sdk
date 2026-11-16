@@ -671,7 +671,18 @@ func run() {
 	evidenceCache := flag.String("evidence-cache", "", "retained raw cache for historical evidence headers")
 	evidenceCapturePin := flag.String("evidence-capture-sha256", "", "explicit supplemental captured-source pin")
 	phaseBase := flag.Int64("progress-phase-base", 0, "typed phases already proved by the preceding split range, shown in progress lines only")
+	resumeOpening := flag.Bool("resume-opening", false, "the opening checkpoint is the retained working state of an interrupted run, at any height, still checked against recorded roots, raw headers and the complete raw baseline")
+	homeVersion := flag.String("print-home-version", "", "print the committed height of a private copy of a working state and exit")
 	flag.Parse()
+	if *homeVersion != "" {
+		db, e := dbm.NewGoLevelDBWithOpts("application", *homeVersion, &opt.Options{BlockCacheCapacity: 8 << 20, WriteBuffer: 4 << 20, OpenFilesCacheCapacity: 2000, Filter: filter.NewBloomFilter(10)})
+		must(e)
+		id := nativeDB(db).cms.LastCommitID()
+		db.Close()
+		fmt.Printf("home_version=%d app_hash=%x\n", id.Version, id.Hash)
+		return
+	}
+	need(!*resumeOpening || *checkpoint != "", "resume opening requires the retained working state")
 	need(*phaseBase >= 0 && (*phaseBase == 0 || *checkpoint != ""), "progress phase base requires a normal checkpoint opening")
 	need(*cache != "" && *receipt != "", "private paths required")
 	phase, committed := newNative(), newNative()
@@ -717,7 +728,7 @@ func run() {
 			if *checkpoint == "" {
 				need(r.Anchor.Height == 0, "genuine genesis anchor required")
 			} else {
-				need(allowedAnchor(r.Anchor.Height), "unsupported original normal checkpoint")
+				need(allowedAnchor(r.Anchor.Height) || (*resumeOpening && r.Anchor.Height > 0), "unsupported original normal checkpoint")
 				checkRoots(committed, r.Anchor.Height, r.Anchor.Commit, r.Anchor.Roots)
 				checkpointHeader(*cache, r.Anchor)
 			}
@@ -818,7 +829,7 @@ func run() {
 	f, e := os.OpenFile(*receipt, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	must(e)
 	defer f.Close()
-	must(json.NewEncoder(f).Encode(map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "progress_phase_base": *phaseBase, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
+	must(json.NewEncoder(f).Encode(map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "progress_phase_base": *phaseBase, "resume_opening": *resumeOpening, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
 	must(f.Sync())
 }
 func main() {
