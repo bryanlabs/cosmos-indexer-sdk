@@ -29,7 +29,7 @@ import threading
 import time
 import traceback
 
-from hub1_finish import TOOL, background, join, make_plan, prepare, running, seal_part, seal_path
+from hub1_finish import TOOL, background, join, make_plan, prepare, running, seal_part, seal_path, staging_parts
 from seal_closed import clean_at, git
 
 KIND = 'hub1_seal_watch'
@@ -143,6 +143,8 @@ def watch(catalog_path, once=False, quiet=False):
             if not did and not joined and plan['complete'] and len(sealed) == len(parts):
                 did = attempt(status, tried, 'join', 'joining %d sealed parts' % len(parts), lambda: join(plan))
                 joined = (root / 'whole-join.private.json').exists()
+            if not did and joined and plan.get('staging_parts') and not (root / 'whole-join.staging-parts.private.json').exists():
+                did = attempt(status, tried, 'parts-list', 'writing the parts list for the staging converter', lambda: staging_parts(plan))
             for part in parts:
                 if not did and not joined and not controls_made(plan, part) and (root / ('part-%d' % part['first']) / 'process.private.json').exists():
                     did = attempt(status, tried, 'controls-%d' % part['first'], 'running the refusal controls of part %d' % part['first'], lambda: prepare(plan, part, True))
@@ -151,7 +153,7 @@ def watch(catalog_path, once=False, quiet=False):
                 seal_failed = sum(1 for k in failures if not k.startswith('join'))
                 join_failed = int('join' in failures)
             status.set(sealed=len([p for p in parts if seal_path(plan, p).exists()]), controls_made=sum(1 for p in parts if controls_made(plan, p)),
-                       seal_failed=seal_failed, join_failed=join_failed, joined=int(joined),
+                       seal_failed=seal_failed, join_failed=join_failed, joined=int(joined), parts_list_written=int((root / 'whole-join.staging-parts.private.json').exists()),
                        action='joined: nothing left to do' if joined else 'waiting for a part to finish')
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):

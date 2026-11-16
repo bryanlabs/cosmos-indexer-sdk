@@ -138,6 +138,38 @@ def join(plan):
                           receipt=str(root / 'whole-join.private.json'), receipt_sha256=sha(root / 'whole-join.private.json'), financial_admission=False)), flush=True)
 
 
+def staging_parts(plan):
+    """After the join: the ordered list of sealed parts the Hub 1 staging converter reads (its schema hub1-staging-parts-v1).
+
+    The converter refuses unknown fields, so the tie to the join receipt is
+    kept in a second file beside the list."""
+    root = Path(plan['record_root'])
+    spec = plan.get('staging_parts')
+    require(spec is not None, 'catalog names no decoder commit, genesis file and tail captures for the staging parts list')
+    receipt = root / 'whole-join.private.json'
+    joined = json.loads(receipt.read_bytes())
+    pinned = {p['path']: p['sha256'] for p in joined['profile_seals']}
+    parts = []
+    for part in sorted(plan['parts'], key=lambda p: p['first']):
+        seal, source = seal_path(plan, part), Path(part['source'])
+        require(pinned.get(str(seal)) == sha(seal), 'seal of part %d is not the one the join receipt names' % part['first'])
+        missing = [n for n in ('capture.private.json', 'movements.source-closed.gz', 'cache') if not (source / n).exists()]
+        require(not missing, 'source of part %d lacks %s' % (part['first'], ', '.join(missing)))
+        parts.append(dict(first=part['first'], last=part['through'], source=str(source), seal=dict(path=str(seal), sha256=sha(seal))))
+    require(len(parts) == len(pinned) and parts[0]['first'] == 1 and parts[-1]['last'] == 500000, 'parts list differs from the joined parts')
+    terminal = Path(plan['terminal_seal'])
+    require(sha(terminal) == joined['accepted_terminal_seal_sha256'] and (Path(spec['tail_source']) / 'cache').is_dir(), 'tail seal is not the one the join accepted, or its captures are missing')
+    listed = dict(schema='hub1-staging-parts-v1', decoder_source_commit=spec['decoder_source_commit'], genesis=dict(path=spec['genesis'], sha256=sha(Path(spec['genesis']))), parts=parts,
+                  tail=dict(first=500001, last=500015, source=spec['tail_source'], seal=dict(path=str(terminal), sha256=sha(terminal))))
+    out = root / 'whole-join.staging-parts.private.json'
+    with out.open('x') as f:
+        json.dump(listed, f, indent=2)
+    with (root / 'whole-join.staging-parts.binding.private.json').open('x') as f:
+        json.dump(dict(parts_list=str(out), parts_list_sha256=sha(out), join_receipt=str(receipt), join_receipt_sha256=sha(receipt),
+                       written_utc=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')), f, indent=2)
+    print(json.dumps(dict(staging_parts_list=str(out), sha256=sha(out), parts=len(parts), join_receipt_sha256=sha(receipt))), flush=True)
+
+
 def last_height(proof):
     log = proof / 'native-consumer.private.log'
     if not log.is_file():
@@ -247,7 +279,7 @@ def make_plan(catalog):
                                     for a in attempts if a is not chosen and a['proof'] != chosen.get('attempt_proof') and a['state'] != 'finished' and (a['first'] == chosen['first'] or a.get('saved_through', -1) + 1 == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
         parts.append(part)
         at = chosen['through'] + 1
-    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches') if k in catalog}
+    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches', 'staging_parts') if k in catalog}
     plan.update(parts=parts, covered_through=at - 1, complete=at == 500001, made_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     return plan
 
@@ -315,7 +347,7 @@ def mini(plan, part, first, through, directory):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--plan', type=Path, help='a plan written earlier; without it the plan is made afresh from --catalog')
-    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini', 'reopen'))
+    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini', 'reopen', 'parts-list'))
     parser.add_argument('--catalog', type=Path, help='plan only: the roots to search and the known helpers, sources and openings')
     parser.add_argument('--first', type=int)
     parser.add_argument('--through', type=int)
@@ -345,5 +377,7 @@ if __name__ == '__main__':
         seal_part(plan, part_of(plan, a.first))
     elif a.step == 'join':
         join(plan)
+    elif a.step == 'parts-list':
+        staging_parts(plan)
     else:
         sys.exit(mini(plan, part_of(plan, a.part), a.first, a.through, a.directory.resolve()))

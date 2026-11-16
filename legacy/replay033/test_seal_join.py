@@ -192,6 +192,39 @@ class FirstHeightsRecordedAgain(unittest.TestCase):
                 check_stretches(sealed, {'501': pair})
 
 
+class StagingPartsList(unittest.TestCase):
+    def test_list_follows_the_join_receipt_and_refuses_another_seal(self):
+        import hub1_finish
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'records').mkdir()
+            for name in ('src/cache', 'tail/cache'):
+                (root / name).mkdir(parents=True)
+            for name in ('src/capture.private.json', 'src/movements.source-closed.gz', 'genesis.json', 'terminal.json', 'seal-part-1.private.json', 'seal-part-301.private.json'):
+                (root / name).write_text(name)
+            digest = lambda n: hashlib.sha256((root / n).read_bytes()).hexdigest()
+            plan = dict(record_root=str(root / 'records'), seal_prefix=str(root / 'seal'), terminal_seal=str(root / 'terminal.json'),
+                        parts=[dict(first=301, through=500000, source=str(root / 'src')), dict(first=1, through=300, source=str(root / 'src'))],
+                        staging_parts=dict(decoder_source_commit='c' * 40, genesis=str(root / 'genesis.json'), tail_source=str(root / 'tail')))
+            (root / 'records/whole-join.private.json').write_text(json.dumps(dict(accepted_terminal_seal_sha256=digest('terminal.json'),
+                profile_seals=[dict(path=str(root / ('seal-part-%d.private.json' % n)), sha256=digest('seal-part-%d.private.json' % n)) for n in (1, 301)])))
+            hub1_finish.staging_parts(plan)
+            listed = json.loads((root / 'records/whole-join.staging-parts.private.json').read_bytes())
+            self.assertEqual(sorted(listed), ['decoder_source_commit', 'genesis', 'parts', 'schema', 'tail'])
+            self.assertEqual([(p['first'], p['last']) for p in listed['parts']], [(1, 300), (301, 500000)])
+            self.assertEqual((listed['tail']['first'], listed['tail']['last'], listed['tail']['seal']['sha256']), (500001, 500015, digest('terminal.json')))
+            binding = json.loads((root / 'records/whole-join.staging-parts.binding.private.json').read_bytes())
+            self.assertEqual(binding['join_receipt_sha256'], digest('records/whole-join.private.json'))
+            self.assertEqual(binding['parts_list_sha256'], digest('records/whole-join.staging-parts.private.json'))
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'records').mkdir()
+            (root / 'seal-part-1.private.json').write_text('changed')
+            (root / 'records/whole-join.private.json').write_text(json.dumps(dict(accepted_terminal_seal_sha256='x', profile_seals=[dict(path=str(root / 'seal-part-1.private.json'), sha256='other')])))
+            with self.assertRaises(ValueError):
+                hub1_finish.staging_parts(dict(record_root=str(root / 'records'), seal_prefix=str(root / 'seal'), terminal_seal='t', parts=[dict(first=1, through=500000, source=d)], staging_parts={}))
+
+
 class SavingBuild(unittest.TestCase):
     def setUp(self):
         same = {'legacy/replay033/consume_closed.py': 'aa', 'legacy/replay033/cmd/consume-native/slash_native.go': 'bb'}
