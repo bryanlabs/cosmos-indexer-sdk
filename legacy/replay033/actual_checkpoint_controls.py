@@ -20,8 +20,8 @@ def fixture(root, output, first=None, opening=None, manifest=None):
         # A later part: rebuild the state at its saved checkpoint height from
         # the recorded writes, exactly as the recording of that part did.
         from consume_closed import ClosedConsumer as Consumer
-        from consume_split import SPLITS, SplitHistory, closed_raw_lines, fast_forward, opening_manifest, parse
-        require(binding['schema'] == 'native033-closed-source-capture-v1' and first - 1 in SPLITS[binding['first']] and opening is not None and manifest is not None, 'actual saved-checkpoint part required')
+        from consume_split import SplitHistory, closed_raw_lines, fast_forward, opening_manifest, parse
+        require(binding['schema'] == 'native033-closed-source-capture-v1' and binding['first'] < first <= binding['through'] and opening is not None and manifest is not None, 'actual saved-checkpoint part required')
         opening_manifest(opening, manifest)
         history = SplitHistory(root, binding, first)
         lines = closed_raw_lines(root, binding, 'movements')

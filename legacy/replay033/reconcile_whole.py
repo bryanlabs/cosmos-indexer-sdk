@@ -80,6 +80,7 @@ def signed_profile(path, expected_sha, repo, progress=None, with_seal=False):
     require(native['schema'] == 'native033-independent-bounded-financial-v1' and native['normal_opening_height'] == result['first'] - 1, 'independent native opening schema differs')
     require(result['first'] == native['first'] and result['through'] == native['through'] and result['transactions'] == native['transactions'] and result['heights'] == native['native_iavl_heights'] and sum(result['phases'].values()) == native['typed_financial_phases'] and native['financial_admission'] is False and native['global_books_tax_acceptance'] is False, 'independent native component coverage differs')
     require(seal['source_preserved_after_proof'] is True and seal['actual_negative_controls_passed'] is True and seal['historical_blocks_executed'] == 0, 'complete source preservation or independent controls absent')
+    require(seal['resumed_from_saved_state'] is False and seal['recorded_in_one_run_from_its_opening'] is True, 'a part resumed from saved state needs its own reviewed proof of the resume point')
     # Penalty facts are re-read from the sealed bytes, not trusted from the seal.
     facts = bound_facts((path.parent / seal['result_path']).parent, result, native)
     require(facts == seal['stake_asset_fact_blocks'] and seal['stake_asset_tax_classification'] == 'unclassified', 'sealed penalty facts differ from the retained fact file')
@@ -92,28 +93,48 @@ def signed_profile(path, expected_sha, repo, progress=None, with_seal=False):
     return result
 
 
+# Files that never run while a part records. Two launch commits may differ in
+# these freely; a difference anywhere else must be a reviewed one.
+def records_nothing(name):
+    base = name.rsplit('/', 1)[-1]
+    return base.startswith('test_') or base.endswith('_test.go') or base in ('reconcile_whole.py', 'seal_closed.py', 'hub1_finish.py', 'record_after_launch.py',
+        'run_closed_profile.py', 'run_whole.py', 'actual_full_controls.py', 'actual_bounded_controls.py', 'actual_checkpoint_controls.py', 'verify_source_preservation.py')
+
+
 def check_builds(sealed, witness):
-    """All parts from one commit, or the one reviewed pair of commits with every difference accounted for."""
-    commits = {seal['signed_source_commit'] for _, seal, _ in sealed}
-    if len(commits) == 1:
-        require(witness is None, 'cross-build witness given for a single-build join')
-        return sorted(commits)
-    require(commits == {OLDER, NEWER}, 'parts come from builds whose differences were never reviewed')
-    older = [(r, s) for r, s, _ in sealed if s['signed_source_commit'] == OLDER]
-    newer = [(r, s) for r, s, _ in sealed if s['signed_source_commit'] == NEWER]
-    require(all(r['schema'] == 'native033-complete-profile-financial-v1' and r['first'] == 400001 and r['through'] == 500000 for r, _ in older) and len(older) == 1, 'only the whole 400001 range may come from the older build')
-    a, b = older[0][1]['signed_code_pins'], newer[0][1]['signed_code_pins']
-    require(all(s['signed_code_pins'] == b for _, s in newer) and len({s['native_helper_sha256'] for _, s in newer}) == 1, 'parts of the newer build differ among themselves')
-    for name in set(a) | set(b):
-        if a.get(name) != b.get(name):
-            require(BUILD_DIFFERENCES.get(name) == (a.get(name), b.get(name)), 'unreviewed source difference between the two builds: ' + name)
+    """All parts from one recorder, or from recorders whose every difference is accounted for."""
+    by_commit = {}
+    for result, seal, _ in sealed:
+        by_commit.setdefault(seal['signed_source_commit'], []).append((result, seal))
+    for parts in by_commit.values():
+        require(all(s['signed_code_pins'] == parts[0][1]['signed_code_pins'] and s['native_helper_sha256'] == parts[0][1]['native_helper_sha256'] for _, s in parts), 'parts of one commit differ in code or helper')
+    reference = NEWER if NEWER in by_commit else sorted(by_commit)[0]
+    b = by_commit[reference][0][1]['signed_code_pins']
+    reviewed = False
+    for commit, parts in sorted(by_commit.items()):
+        a = parts[0][1]['signed_code_pins']
+        differing = sorted(name for name in set(a) | set(b) if a.get(name) != b.get(name) and not records_nothing(name))
+        if not differing:
+            # Same recorder and same helper sources. Only a build setting may differ, and a different binary of identical source is refused.
+            require(parts[0][1]['native_helper_sha256'] == by_commit[reference][0][1]['native_helper_sha256'], 'same recording source built into different helpers: ' + commit)
+            continue
+        require(commit == OLDER and reference == NEWER, 'unreviewed difference in recording code between parts, commit %s: %s' % (commit, ', '.join(differing)))
+        for name in set(a) | set(b):
+            if a.get(name) != b.get(name):
+                require(BUILD_DIFFERENCES.get(name) == (a.get(name), b.get(name)), 'unreviewed source difference between the two builds: ' + name)
+        require(len(parts) == 1 and parts[0][0]['schema'] == 'native033-complete-profile-financial-v1' and parts[0][0]['first'] == 400001 and parts[0][0]['through'] == 500000, 'only the whole 400001 range may come from the older build')
+        reviewed = True
+    if not reviewed:
+        require(witness is None, 'cross-build witness given where no reviewed build pair is joined')
+        return sorted(by_commit)
+    older, newer = by_commit[OLDER], by_commit[NEWER]
     require(witness is not None, 'cross-build witness required')
     directory = Path(witness['path'])
     run = pinned(directory / 'complete-component.private.json', witness['sha256'])
     native = pinned(directory / 'native-proof.private.json', run['native_proof_sha256'])
     exited = json.loads((directory / 'exit.private.json').read_bytes())
     require(exited['exit'] == 0 and run['schema'] == 'native033-split-range-financial-v1' and run['first'] == 400001 == native['first'] and run['through'] == native['through'] >= 400100 and run['fast_forward']['heights'] == 0 and run['capture_sha256'] == older[0][0]['capture_sha256'] and run['native_helper_sha256'] == newer[0][1]['native_helper_sha256'] and exact(run['opening_commit']) == exact(older[0][0]['opening_commit']), 'newer build did not pass the same 400001 opening the older build recorded from')
-    return [OLDER, NEWER]
+    return sorted(by_commit)
 
 
 def join_facts(sealed):
@@ -141,12 +162,16 @@ def named_roots(roots, height):
     return result
 
 
-SPLIT_SEAMS = {100000, 300000}
 
 
 def check_profiles(profiles):
     ends = {PROFILES[first][0] for first in PROFILES}
-    require(3 <= len(profiles) <= 3 + len(SPLIT_SEAMS), 'three whole source profiles, or their saved-checkpoint parts, required')
+    # Any number of parts is accepted. What makes a seam safe is not a list of
+    # heights kept here: a part that opens inside a source range must have
+    # rebuilt its opening from the range start and had the helper compare it,
+    # key for key, with a saved native checkpoint, and its opening root and all
+    # nine store roots must equal the ending of the part before it.
+    require(len(profiles) >= 3, 'three whole source profiles, or contiguous parts of them, required')
     require(profiles[0]['first'] == 1 and profiles[-1]['through'] == 500000, 'gap, duplicate, bounded component or missing complete profile')
     seams = []
     for p in profiles:
@@ -156,7 +181,7 @@ def check_profiles(profiles):
         require(source_first in PROFILES and through <= PROFILES[source_first][0], 'gap, duplicate, bounded component or missing complete profile')
         target = PROFILES[source_first][0]
         if split:
-            require(p['source_range'] == [source_first, target] and (first == source_first or first - 1 in SPLIT_SEAMS) and (through == target or through in SPLIT_SEAMS) and first <= through, 'part does not start and end at a saved native checkpoint of its own source range')
+            require(p['source_range'] == [source_first, target] and first <= through, 'part lies outside its own source range')
             require(p['source_closed_at_through'] is (through == target) and p['next_header_is_source_closure'] is (through == target) and p['fast_forward']['heights'] == first - source_first and p['progress_phase_base'] == p['fast_forward']['typed_phases'], 'part source closure or rebuilt opening coverage differs')
             require(bool(p['opening_checkpoint_manifest_sha256']) == (first > source_first), 'part opening checkpoint binding differs')
         else:
@@ -170,7 +195,7 @@ def check_profiles(profiles):
         seams.append(left['through'])
         if right.get('schema') == 'native033-split-range-financial-v1' and right['fast_forward']['heights']:
             require(left.get('schema') == right['schema'] and left['source_range'] == right['source_range'] and right['progress_phase_base'] == left['progress_phase_base'] + sum(left['phases'].values()), 'rebuilt opening phase count differs from the preceding recorded part')
-    require(set(seams) >= ends - {500000} and set(seams) <= (ends | SPLIT_SEAMS) - {500000} and len(set(seams)) == len(seams), 'gap, duplicate, bounded component or missing complete profile')
+    require(set(seams) >= ends - {500000} and seams == sorted(set(seams)), 'gap, duplicate, bounded component or missing complete profile')
     return dict(distinct_prefix_heights=sum(p['heights'] for p in profiles), transactions=sum(p['transactions'] for p in profiles), all_nine_normal_checkpoint_seams=seams)
 
 
@@ -210,7 +235,8 @@ def verify(config, repo, progress=None, facts_path=None):
                 signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'),
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
                 stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(), stake_asset_tax_classification='unclassified',
-                launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}))
+                launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}),
+                parts=[dict(first=r['first'], through=r['through'], signed_source_commit=s['signed_source_commit'], launch_record=s['launch_record'], resumed_from_saved_state=s['resumed_from_saved_state'], earlier_attempts=s['earlier_attempts']) for r, s, _ in sealed])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

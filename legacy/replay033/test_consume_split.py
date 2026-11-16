@@ -107,6 +107,22 @@ class FiveSeams(unittest.TestCase):
         with self.assertRaises(ValueError): check_profiles(p[:1] + p[2:])
         with self.assertRaises(ValueError): check_profiles(p + p[-1:])
 
+    def test_more_parts_join_when_each_inner_opening_was_rebuilt_and_checked(self):
+        p = self.parts()
+        left, right = copy.deepcopy(p[0]), copy.deepcopy(p[0])
+        left.update(through=50000, heights=50000, phases=dict(begin_block=50000, end_block=50000, block=50000), source_closed_at_through=False, next_header_is_source_closure=False)
+        left['ending_commit'], left['ending_store_roots'] = dict(Version=50000, Hash='50000'), dict(Version=50000, StoreInfos=[dict(Name=name, Core=dict(CommitID=dict(Version=50000, Hash='50000'))) for name in NAMES])
+        right.update(first=50001, heights=50000, phases=dict(begin_block=50000, end_block=50000, block=50000), fast_forward=dict(heights=50000, typed_phases=150000, seconds=0.0), progress_phase_base=150000, opening_checkpoint_manifest_sha256='b' * 64)
+        right['opening_commit'], right['opening_store_roots'] = left['ending_commit'], left['ending_store_roots']
+        p[1]['fast_forward']['typed_phases'] = p[1]['progress_phase_base'] = 300000
+        six = [left, right] + p[1:]
+        self.assertEqual(check_profiles(six)['all_nine_normal_checkpoint_seams'], [50000, 100000, 200000, 300000, 400000])
+        for field, value in (('opening_checkpoint_manifest_sha256', ''), ('progress_phase_base', 7), ('opening_commit', dict(Version=50000, Hash='other'))):
+            q = copy.deepcopy(six)
+            q[1][field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError): check_profiles(q)
+
 
 if __name__ == '__main__':
     unittest.main()

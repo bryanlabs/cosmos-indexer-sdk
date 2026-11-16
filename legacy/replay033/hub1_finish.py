@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Seal finished Hub 1 parts and join them. One plan file names every part.
 
+  hub1_finish.py --plan PLAN plan --catalog C    find the parts in the roots the catalog names and write PLAN (new file)
   hub1_finish.py --plan PLAN prepare --first N   launch record and controls, safe while the part still records
   hub1_finish.py --plan PLAN seal --first N      seal one finished part (runs prepare first when needed)
   hub1_finish.py --plan PLAN join                join every sealed part with the accepted tail
@@ -27,10 +28,14 @@ HERE = Path(__file__).resolve().parent
 TOOL = HERE.parents[1]
 
 
-def background():
+def background(scratch):
     os.nice(19)
     subprocess.run(['ionice', '-c', '3', '-p', str(os.getpid())], check=True)
     os.umask(0o077)
+    # Nothing may land on the pod's small /tmp: every temporary file goes beside the records.
+    require(not str(scratch.resolve()).startswith('/tmp'), 'plan keeps its records under /tmp')
+    scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.environ.update(TMPDIR=str(scratch), GOTMPDIR=str(scratch), GOCACHE=str(Path.home() / '.cache/go-build'))
 
 
 def part_of(plan, first):
@@ -59,7 +64,7 @@ def prepare(plan, part):
         from record_after_launch import record
         record(part['first'], part['through'], Path(part['proof']), Path(part['launch_worktree']), Path(part['build_worktree']), part['trimpath'], part['entry'],
                Path(part['helper']), Path(part['built_from']), Path(part['launcher']), out, optional(part, 'opening_checkpoint'), optional(part, 'opening_manifest'),
-               optional(part, 'validator_history'), optional(part, 'test_worktree'))
+               optional(part, 'validator_history'), optional(part, 'test_worktree'), part.get('earlier_attempts'))
         print(json.dumps(dict(part=part['first'], launch_record=str(out / 'process.private.json'))), flush=True)
     started = json.loads((out / 'process.private.json').read_bytes())
     # Controls depend only on the source, the helper and the opening, so a plan may name ones already made for the same three.
@@ -113,6 +118,84 @@ def join(plan):
                           receipt=str(root / 'whole-join.private.json'), receipt_sha256=sha(root / 'whole-join.private.json'), financial_admission=False)), flush=True)
 
 
+def last_height(proof):
+    log = proof / 'native-consumer.private.log'
+    if not log.is_file():
+        return 0
+    with log.open('rb') as stream:
+        stream.seek(max(0, log.stat().st_size - 4096))
+        found = [int(word.split(b'=')[1]) for word in stream.read().split() if word.startswith(b'bounded_native_verified_height=')]
+    return found[-1] if found else 0
+
+
+def running():
+    """Recorders alive now, by the receipt path each will write."""
+    found = {}
+    for directory in Path('/proc').iterdir():
+        try:
+            argv = [a.decode() for a in (directory / 'cmdline').read_bytes().split(b'\0')[:-1]] if directory.name.isdigit() else []
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+        scripts = [a for a in argv if a.endswith(('/consume_split.py', '/consume_closed.py'))]
+        if scripts and '--receipt' in argv and 'python' in argv[0]:
+            found[argv[argv.index('--receipt') + 1]] = (scripts[0], {argv[i][2:].replace('-', '_'): argv[i + 1] for i in range(len(argv) - 1) if argv[i].startswith('--')})
+    return found
+
+
+def make_plan(catalog):
+    """Find every attempt in the named roots and choose one unbroken chain of parts from 1 to 500000.
+
+    A finished part with exit 0 wins over a running one; attempts that were
+    killed or failed are kept, untouched, and named on the part that replaced
+    them. Anything the catalog cannot identify is refused by name."""
+    live, attempts = running(), []
+    for root in catalog['roots']:
+        for proof in sorted(Path(root['path']).glob('profile-*/proof')):
+            receipt, exit_path = proof / 'complete-component.private.json', proof / 'exit.private.json'
+            exited = json.loads(exit_path.read_bytes())['exit'] if exit_path.exists() else None
+            item = dict(proof=str(proof), launcher=root.get('launcher') or str(proof.parent / root['launcher_in_part']), last_verified_height=last_height(proof), exit=exited)
+            if str(receipt) in live:
+                script, args = live[str(receipt)]
+                source = json.loads((Path(args['directory']) / 'capture.private.json').read_bytes())
+                item.update(state='recording', entry=Path(script).name, launch_worktree=str(Path(script).parents[2]), source=args['directory'], helper_file=args['native_helper'],
+                            first=int(args.get('first', source['first'])), through=int(args.get('through', source['through'])), validator_history=args.get('validator_history'),
+                            opening_checkpoint=args.get('opening_checkpoint'), opening_manifest=args.get('opening_manifest'))
+                item['helper_sha256'] = sha(Path(item['helper_file']))
+            elif exited == 0 and receipt.exists():
+                result = json.loads(receipt.read_bytes())
+                split = result['schema'] == 'native033-split-range-financial-v1'
+                opening = catalog['openings'].get(result.get('opening_checkpoint_manifest_sha256') or '', {})
+                require(split or result['schema'] == 'native033-complete-profile-financial-v1', 'unknown receipt kind in ' + str(proof))
+                require(not result.get('opening_checkpoint_manifest_sha256') or opening, 'catalog does not name the opening checkpoint of ' + str(proof))
+                item.update(state='finished', entry='consume_split.py' if split else 'consume_closed.py', first=result['first'], through=result['through'], helper_sha256=result['native_helper_sha256'],
+                            source=catalog['sources'][str(result['source_range'][0] if split else result['first'])], validator_history=catalog.get('validator_history'),
+                            opening_checkpoint=opening.get('opening_checkpoint'), opening_manifest=opening.get('opening_manifest'))
+            else:
+                item.update(state='failed' if exited else 'killed', first=int(proof.parent.name.split('-')[1]))
+            attempts.append(item)
+    usable = [a for a in attempts if a['state'] in ('finished', 'recording')]
+    parts, at = [], 1
+    while at <= 500000:
+        here = sorted((a for a in usable if a['first'] == at), key=lambda a: (a['state'] != 'finished', -a['through'], -a['last_verified_height']))
+        if not here:
+            break
+        chosen = here[0]
+        helper = catalog['helpers'].get(chosen['helper_sha256'])
+        require(helper is not None, 'catalog does not know the helper %s used by %s' % (chosen['helper_sha256'], chosen['proof']))
+        require(chosen['state'] == 'finished' or chosen['launch_worktree'] == helper['launch_worktree'], 'recorder runs from a worktree the catalog does not expect: ' + chosen['proof'])
+        part = dict(helper, **{k: chosen[k] for k in ('first', 'through', 'proof', 'source', 'entry', 'launcher', 'state') if k in chosen})
+        for name in ('validator_history', 'opening_checkpoint', 'opening_manifest'):
+            if chosen.get(name):
+                part[name] = chosen[name]
+        part['earlier_attempts'] = [dict(proof=a['proof'], state=a['state'], exit=a['exit'], first=a['first'], last_verified_height=a['last_verified_height'], contributed_recorded_output=False)
+                                    for a in attempts if a is not chosen and a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first'] and a['state'] != 'finished']
+        parts.append(part)
+        at = chosen['through'] + 1
+    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness') if k in catalog}
+    plan.update(parts=parts, covered_through=at - 1, complete=at == 500001, made_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    return plan
+
+
 def mini(plan, part, first, through, directory):
     """A short real slice recorded by the launch helper from the launch commit, checked before it starts."""
     launch, helper = Path(part['launch_worktree']), Path(part['helper'])
@@ -139,14 +222,24 @@ def mini(plan, part, first, through, directory):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--plan', type=Path, required=True)
-    parser.add_argument('step', choices=('prepare', 'seal', 'join', 'mini'))
+    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini'))
+    parser.add_argument('--catalog', type=Path, help='plan only: the roots to search and the known helpers, sources and openings')
     parser.add_argument('--first', type=int)
     parser.add_argument('--through', type=int)
     parser.add_argument('--part', type=int, help='mini only: the plan part whose source, helper and launch worktree to use')
     parser.add_argument('--directory', type=Path)
     a = parser.parse_args()
-    background()
+    if a.step == 'plan':
+        catalog = json.loads(a.catalog.read_bytes())
+        background(Path(catalog['record_root']) / 'tmp')
+        plan = make_plan(catalog)
+        with a.plan.open('x') as out:
+            json.dump(plan, out, indent=1)
+        print(json.dumps(dict(plan=str(a.plan), complete=plan['complete'], covered_through=plan['covered_through'],
+                              parts=[[p['first'], p['through'], p['state'], len(p['earlier_attempts'])] for p in plan['parts']])), flush=True)
+        sys.exit(0 if plan['complete'] else 3)
     plan = json.loads(a.plan.read_bytes())
+    background(Path(plan['record_root']) / 'tmp')
     clean_at(TOOL, subprocess.check_output(['git', '-C', str(TOOL), 'rev-parse', 'HEAD'], text=True).strip(), 'sealing tool tree is not clean')
     if a.step == 'prepare':
         prepare(plan, part_of(plan, a.first))

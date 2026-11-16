@@ -214,6 +214,8 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
                   exit_path=rel(exit_path),exit_sha256=sha(exit_path),native_helper_sha256=sha(helper),
                   launch_record='written_after_launch_from_rebuild' if reconstructed else 'written_by_supervisor_before_proof',
                   launch_record_path=rel(start_path),sealing_tool_commit=tool_commit,
+                  # Both recorders write their receipt only after one process has checked every height of the part, so no known receipt is a resumed one.
+                  recorded_in_one_run_from_its_opening=True,resumed_from_saved_state=False,earlier_attempts=started.get('earlier_attempts',[]),
                   stake_asset_facts_path=rel(proof/FACTS) if facts else '',stake_asset_facts_sha256=sha(proof/FACTS) if facts else '',stake_asset_fact_blocks=facts,
                   stake_asset_tax_classification='unclassified',
                   source_preserved_after_proof=True,actual_negative_controls_passed=True,historical_blocks_executed=0,

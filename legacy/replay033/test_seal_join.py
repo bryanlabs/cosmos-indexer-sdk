@@ -113,7 +113,7 @@ class TwoBuilds(unittest.TestCase):
 
     def test_reviewed_pair_accepted_only_with_passing_witness_on_same_opening(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(check_builds(self.parts(), self.witness(d)), [OLDER, NEWER])
+            self.assertEqual(check_builds(self.parts(), self.witness(d)), sorted([OLDER, NEWER]))
             with self.assertRaises(ValueError):
                 check_builds(self.parts(), None)
             for change in (dict(exit=1), dict(capture_sha256='other'), dict(native_helper_sha256='h-old'), dict(through=400050), dict(first=400002),
@@ -137,9 +137,25 @@ class TwoBuilds(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check_builds(parts, witness)
             parts = self.parts()
-            parts[0] = build('1' * 40, SPLIT, 1, 100000, self.new)
+            parts[0] = build('1' * 40, SPLIT, 1, 100000, dict(self.new, **{'legacy/replay033/consume_closed.py': 'other'}))
             with self.assertRaises(ValueError):
                 check_builds(parts, witness)
+            parts[0] = build('1' * 40, SPLIT, 1, 100000, self.new)
+            self.assertEqual(len(check_builds(parts, witness)), 3)
+
+
+class ManyParts(unittest.TestCase):
+    def test_later_commit_that_changes_only_sealing_tools_joins_and_a_recorder_change_is_named(self):
+        new = {'legacy/replay033/consume_split.py': 'aa', 'legacy/replay033/cmd/consume-native/main.go': 'bb', 'legacy/replay033/seal_closed.py': 'cc'}
+        tools = dict(new, **{'legacy/replay033/seal_closed.py': 'dd', 'legacy/replay033/hub1_finish.py': 'ee', 'legacy/replay033/test_seal_join.py': 'ff', 'legacy/replay033/cmd/consume-native/x_test.go': 'gg'})
+        parts = [build(NEWER, SPLIT, 1, 50000, new), build('2' * 40, SPLIT, 50001, 100000, tools)]
+        self.assertEqual(check_builds(parts, None), sorted([NEWER, '2' * 40]))
+        with self.assertRaises(ValueError):
+            check_builds(parts[:1] + [build('2' * 40, SPLIT, 50001, 100000, tools, 'another-helper')], None)
+        with self.assertRaisesRegex(ValueError, 'consume_split.py'):
+            check_builds(parts[:1] + [build('2' * 40, SPLIT, 50001, 100000, dict(tools, **{'legacy/replay033/consume_split.py': 'zz'}))], None)
+        with self.assertRaisesRegex(ValueError, 'main.go'):
+            check_builds(parts[:1] + [build('2' * 40, SPLIT, 50001, 100000, dict(tools, **{'legacy/replay033/cmd/consume-native/main.go': 'zz'}))], None)
 
 
 if __name__ == '__main__':

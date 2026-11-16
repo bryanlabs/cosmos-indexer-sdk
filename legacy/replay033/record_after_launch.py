@@ -63,7 +63,7 @@ def started(directory):
     return datetime.datetime.fromtimestamp(boot + ticks / os.sysconf('SC_CLK_TCK'), datetime.timezone.utc).isoformat()
 
 
-def record(first, through, proof, launch, build, trimpath, entry, helper, built_from, launcher, out, opening=None, manifest=None, history=None, tests=None):
+def record(first, through, proof, launch, build, trimpath, entry, helper, built_from, launcher, out, opening=None, manifest=None, history=None, tests=None, earlier=None):
     proof, launch, build, helper, built_from, launcher, out = [p.resolve() for p in (proof, launch, build, helper, built_from, launcher, out)]
     # Tests may run in another clean worktree of the same commit, so nothing but the compiler reads the tree live recorders run from.
     tests = (tests or build).resolve()
@@ -91,6 +91,7 @@ def record(first, through, proof, launch, build, trimpath, entry, helper, built_
     source = build / 'legacy/replay033'
     tmp = out / 'tmp'
     tmp.mkdir(mode=0o700)
+    require(not str(out).startswith('/tmp/'), 'records are never written under /tmp')
     env = dict(os.environ, TMPDIR=str(tmp), GOTMPDIR=str(tmp), GOMAXPROCS='2', GOMEMLIMIT='512MiB', GOFLAGS='-mod=readonly')
     arguments = ['go', 'build'] + (['-trimpath'] if trimpath else []) + ['-o', str(out / 'consume-native.rebuilt'), './cmd/consume-native']
     if trimpath:
@@ -132,7 +133,9 @@ def record(first, through, proof, launch, build, trimpath, entry, helper, built_
                  launch_worktree=str(launch), build_worktree=str(build), test_worktree=str(tests), build_arguments=arguments, helper_path=str(helper), helper_copy=str(copies['helper']), launched_utc_basis=basis,
                  helper_sha256=digest, rebuilt_helper_sha256=rebuilt, helper_build=info, launcher_names_commit_and_helper=names,
                  launcher=str(copies['launcher']), launcher_sha256=sha(launcher), built_from=str(copies['built_from']),
-                 live_processes=live, part_finished_when_recorded=finished, launched_utc=launched, proof=str(proof))
+                 live_processes=live, part_finished_when_recorded=finished,
+                 # Attempts at the same heights that were killed before finishing. They gave this part nothing: it recorded every height itself, in one run, from its opening.
+                 earlier_attempts=earlier or [], recorded_in_one_run_from_its_opening=True, resumed_from_saved_state=False, launched_utc=launched, proof=str(proof))
     if history is not None:
         shutil.copyfile(history, out / 'validator-history.private.jsonl')
         state.update(validator_history=str(out / 'validator-history.private.jsonl'), validator_history_sha256=sha(out / 'validator-history.private.jsonl'))
