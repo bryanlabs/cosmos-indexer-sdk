@@ -169,9 +169,29 @@ func run() error {
 		if errors.Is(e, p.ErrCommitUnknown) || errors.Is(e, p.ErrCommittedUnverified) {
 			return e
 		}
-		return errors.New("atomic load refused; new rows rolled back before commit, inspect retained private failure")
+		return loadRefused(*manifest, e)
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"committed": true, "profile": m.Profile, "raw_stage": m.Scope.RawStage, "financial_complete": !m.Scope.RawStage, "readback": p.OutcomeExact, "rows": result.Rows, "duration_ns": result.Duration})
+}
+
+// loadRefused keeps the real cause. Row contents can appear in a database
+// error, so the full text goes to a NEW private file beside the manifest and
+// only the error class and object names are printed.
+func loadRefused(manifest string, cause error) error {
+	text := "atomic load refused; new rows rolled back before commit"
+	if safe := p.SafeFailure(cause); safe != "" {
+		text += "; " + safe
+	}
+	path := fmt.Sprintf("%s.load-failure-%d.private.log", manifest, time.Now().UnixNano())
+	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if e != nil {
+		return errors.New(text + "; private failure file could not be written")
+	}
+	defer f.Close()
+	if _, e = fmt.Fprintln(f, p.PrivateFailure(cause)); e != nil || f.Sync() != nil {
+		return errors.New(text + "; private failure file could not be written")
+	}
+	return errors.New(text + "; full cause retained in " + path)
 }
 func main() {
 	if e := run(); e != nil {

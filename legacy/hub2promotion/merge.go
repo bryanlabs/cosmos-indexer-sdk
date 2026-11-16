@@ -206,7 +206,7 @@ func merge(ctx context.Context, loader, auditor *sql.DB, m Manifest, runtime Ide
 			}
 			res, e := tx.ExecContext(ctx, qualifiedInsert(m.Scope, t), string(data))
 			if e != nil {
-				return fmt.Errorf("projection insert refused: %s", t.name)
+				return fmt.Errorf("projection insert refused: %s: %w", t.name, e)
 			}
 			affected, e := res.RowsAffected()
 			if e != nil || affected != int64(len(batch)) {
