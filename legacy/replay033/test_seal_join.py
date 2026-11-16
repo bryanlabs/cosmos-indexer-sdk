@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from reconcile_whole import REBUILT, STAMP_ONLY, check_stretches
+from reconcile_whole import JAILED_WITHOUT_STAKE_MOVED, REBUILT, STAMP_ONLY, check_jailings, check_stretches
 from reconcile_whole import BEFORE_SAVE, BUILD_DIFFERENCES, NEWER, OLDER, PENALTY_HEIGHTS, SAVE_DIFFERENCES, WITH_SAVE, check_builds, join_facts
 from seal_closed import FACTS, bound_facts, stake_facts
 
@@ -67,10 +67,14 @@ def sealed_part(root, first, through, heights):
 
 
 class JoinedFacts(unittest.TestCase):
-    def test_all_six_known_penalty_blocks_are_carried_or_the_join_refuses(self):
+    def test_every_block_where_stake_was_taken_is_carried_or_the_join_refuses(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            parts = [sealed_part(root, 1, 100000, []), sealed_part(root, 100001, 200000, [134125]), sealed_part(root, 200001, 300000, [219358, 221354, 231614]),
+            (root / 'six').mkdir()
+            with self.assertRaises(ValueError):
+                join_facts([sealed_part(root / 'six', 100001, 200000, [134125]), sealed_part(root / 'six', 200001, 300000, [219358, 221354, 231614]),
+                            sealed_part(root / 'six', 300001, 400000, [359194]), sealed_part(root / 'six', 400001, 500000, [486010])])
+            parts = [sealed_part(root, 1, 100000, []), sealed_part(root, 100001, 200000, [134125]), sealed_part(root, 200001, 300000, [219358, 221354]),
                      sealed_part(root, 300001, 400000, [359194]), sealed_part(root, 400001, 500000, [486010])]
             entries, data = join_facts(parts)
             self.assertEqual(tuple(e['height'] for e in entries), PENALTY_HEIGHTS)
@@ -81,6 +85,72 @@ class JoinedFacts(unittest.TestCase):
             (root / '300001' / FACTS).write_bytes(line(359194, []))
             with self.assertRaises(ValueError):
                 join_facts(parts)
+
+
+def facts(after, jailed=0, slashed=False, root=None, name=''):
+    private = root / ('%s.private.json' % name)
+    private.write_bytes(b'{"private": {}}\n')
+    public = dict(schema='hub1-store-facts-v1', after_height=after, before_height=after - 1, private_sha256=hashlib.sha256(private.read_bytes()).hexdigest(),
+                  validators=dict(newly_jailed=jailed + (1 if slashed else 0)), validator_tokens_plus_unbonding_balances_unchanged=not slashed,
+                  validator_tokens_plus_unbonding_balances_went_down=slashed, distribution_slash_events=dict(added=1 if slashed else 0), pool_total_went_down=False)
+    path = root / ('%s.public.json' % name)
+    path.write_text(json.dumps(public))
+    return dict(public=public, public_path=str(path), public_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), private_path=str(private), private_sha256=public['private_sha256'])
+
+
+def jailing_proof(root, change=None):
+    from hub1_jailing_proof import CHECKS, SCHEMA, VERDICT, CAUSE
+    proof = dict(schema=SCHEMA, height=231614, verdict=VERDICT, cause=CAUSE, stake_moved=False, checks={k: True for k in CHECKS},
+                 block_run=dict(penalty_fact_heights=[]), next_block_run=dict(penalty_fact_heights=[]),
+                 comparisons={'block': facts(231614, jailed=1, root=root, name='block'), 'control-219358': facts(219358, slashed=True, root=root, name='c1'),
+                              'control-221354': facts(221354, slashed=True, root=root, name='c2')})
+    if change:
+        change(proof)
+    path = root / 'proof.json'
+    path.write_text(json.dumps(proof))
+    return [dict(height=231614, path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())]
+
+
+class JailedWithoutStakeMoved(unittest.TestCase):
+    def test_a_pinned_proof_is_carried_into_the_join(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = check_jailings(jailing_proof(Path(d)))
+            self.assertEqual([e['height'] for e in out], list(JAILED_WITHOUT_STAKE_MOVED))
+            self.assertEqual(out[0]['controls'], [219358, 221354])
+            self.assertEqual(out[0]['verdict'], 'jailed_with_no_stake_moved')
+
+    def test_the_join_refuses_without_the_proof_or_with_a_wrong_one(self):
+        def failed(p):
+            p['checks']['no_slash_event'] = False
+
+        def missing(p):
+            del p['checks']['controls_show_stake_taken']
+
+        def burned(p):
+            p['comparisons']['block']['public']['distribution_slash_events']['added'] = 1
+
+        def weak_control(p):
+            p['comparisons']['control-221354']['public']['distribution_slash_events']['added'] = 0
+
+        def recorded(p):
+            p['block_run']['penalty_fact_heights'] = [231614]
+        for change in (failed, missing, burned, weak_control, recorded):
+            with tempfile.TemporaryDirectory() as d, self.assertRaises(ValueError, msg=change.__name__):
+                check_jailings(jailing_proof(Path(d), change))
+        with self.assertRaises(ValueError):
+            check_jailings(None)
+        with self.assertRaises(ValueError):
+            check_jailings([])
+        with tempfile.TemporaryDirectory() as d:
+            entries = jailing_proof(Path(d))
+            entries[0]['sha256'] = '0' * 64
+            with self.assertRaises(ValueError):
+                check_jailings(entries)
+        with tempfile.TemporaryDirectory() as d:
+            entries = jailing_proof(Path(d))
+            (Path(d) / 'block.private.json').write_bytes(b'{"private": {"x": 1}}\n')
+            with self.assertRaises(ValueError):
+                check_jailings(entries)
 
 
 def build(commit, schema, first, through, pins, helper='h-new'):

@@ -121,6 +121,8 @@ def join(plan):
         config['both_builds_stretch'] = [dict(path=str(d), sha256=sha(Path(d) / 'complete-component.private.json')) for d in plan['both_builds_stretch']]
     if plan.get('weaker_proof_stretches'):
         config['weaker_proof_stretches'] = {first: [dict(path=str(d), sha256=sha(Path(d) / 'complete-component.private.json')) for d in pair] for first, pair in plan['weaker_proof_stretches'].items()}
+    if plan.get('jailed_without_stake_moved'):
+        config['jailed_without_stake_moved'] = [dict(height=e['height'], path=e['path'], sha256=e['sha256']) for e in plan['jailed_without_stake_moved']]
     if plan.get('cross_build_witness'):
         witness = Path(plan['cross_build_witness'])
         config['cross_build_witness'] = dict(path=str(witness), sha256=sha(witness / 'complete-component.private.json'))
@@ -279,7 +281,7 @@ def make_plan(catalog):
                                     for a in attempts if a is not chosen and a['proof'] != chosen.get('attempt_proof') and a['state'] != 'finished' and (a['first'] == chosen['first'] or a.get('saved_through', -1) + 1 == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
         parts.append(part)
         at = chosen['through'] + 1
-    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches', 'staging_parts') if k in catalog}
+    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches', 'staging_parts', 'jailed_without_stake_moved') if k in catalog}
     plan.update(parts=parts, covered_through=at - 1, complete=at == 500001, made_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     return plan
 

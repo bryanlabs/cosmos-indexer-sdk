@@ -13,9 +13,16 @@ from verify_movement_rehearsal import require
 from verify_terminal_fifteen import canonical_boundary
 
 TERMINAL_SHA = 'c32582a7eb3f42544b60501541cba915c6f4cd26acda5f15b99bb438bc9f5e9e'
-# The six Hub 1 blocks where BeginBlock took stake from delegators. The join
-# refuses unless the parts carry a penalty fact for exactly these heights.
-PENALTY_HEIGHTS = (134125, 219358, 221354, 231614, 359194, 486010)
+# Six Hub 1 blocks were found where a validator stopped signing and left the
+# set. Where stake was taken, the recorder writes a penalty fact, and the join
+# refuses unless the parts carry one for exactly these heights.
+PENALTY_HEIGHTS = (134125, 219358, 221354, 359194, 486010)
+# A validator left the set at 231614 with no stake taken: its operator
+# undelegated its own stake below the minimum self-delegation in a message and
+# was jailed for it. No penalty fact exists there, so the join instead needs a
+# pinned proof of that, made from recorded native state with two real penalty
+# blocks as controls (hub1_jailing_proof.py).
+JAILED_WITHOUT_STAKE_MOVED = (231614,)
 OLDER, NEWER = '199da294f4be111d89fc17501032dc27c42e2b28', '0f35e0d7d1ac6a39ed414c7a5374711b1c1e0e78'
 # Every file that differs between the two launch commits, as (older, newer)
 # SHA-256, None where the older commit has no such file. Nothing else may differ.
@@ -257,8 +264,32 @@ def join_facts(sealed):
             require(hashlib.sha256(line + b'\n').hexdigest() == entry['line_sha256'] and result['first'] <= entry['height'] <= result['through'], 'penalty fact line differs from its seal')
             entries.append(dict(entry, part=[result['first'], result['through']]))
             lines.append(line + b'\n')
-    require(tuple(e['height'] for e in entries) == PENALTY_HEIGHTS, 'recorded penalty blocks differ from the six known Hub 1 penalty heights')
+    require(tuple(e['height'] for e in entries) == PENALTY_HEIGHTS, 'recorded penalty blocks differ from the known Hub 1 blocks where stake was taken')
     return entries, b''.join(lines)
+
+
+def check_jailings(entries):
+    """Each block that jailed a validator without taking stake, with its pinned proof."""
+    from hub1_jailing_proof import CHECKS, FACT_SCHEMA, SCHEMA, VERDICT
+    require(isinstance(entries, list) and tuple(e.get('height') for e in entries) == JAILED_WITHOUT_STAKE_MOVED, 'jailings without stake moved differ from the known Hub 1 list')
+    out = []
+    for e in entries:
+        require(set(e) == {'height', 'path', 'sha256'}, 'unknown jailing proof input')
+        proof = pinned(Path(e['path']), e['sha256'])
+        require(proof['schema'] == SCHEMA and proof['height'] == e['height'] and proof['verdict'] == VERDICT and proof['stake_moved'] is False, 'jailing proof differs')
+        require(set(proof['checks']) == set(CHECKS) and all(v is True for v in proof['checks'].values()), 'jailing proof has a failed or missing check')
+        compared = proof['comparisons']
+        for c in compared.values():
+            require(c['public']['schema'] == FACT_SCHEMA and sha(Path(c['public_path'])) == c['public_sha256'] and sha(Path(c['private_path'])) == c['private_sha256'] == c['public']['private_sha256'], 'jailing proof comparison changed')
+        block = compared['block']['public']
+        require(block['after_height'] == e['height'] and block['validators']['newly_jailed'] >= 1 and block['validator_tokens_plus_unbonding_balances_unchanged'] is True
+                and block['distribution_slash_events']['added'] == 0 and block['pool_total_went_down'] is False, 'jailing proof block shows stake moved')
+        controls = [c['public'] for n, c in compared.items() if n.startswith('control')]
+        require(len(controls) >= 2 and all(c['validator_tokens_plus_unbonding_balances_went_down'] is True and c['distribution_slash_events']['added'] >= 1 and c['after_height'] in PENALTY_HEIGHTS for c in controls),
+                'jailing proof controls do not show a real penalty')
+        require(not proof['block_run']['penalty_fact_heights'] and not proof['next_block_run']['penalty_fact_heights'], 'jailing proof recordings carry a penalty fact')
+        out.append(dict(e, verdict=proof['verdict'], cause=proof['cause'], controls=sorted(c['after_height'] for c in controls)))
+    return out
 
 
 def named_roots(roots, height):
@@ -309,13 +340,14 @@ def check_profiles(profiles):
 
 
 def verify(config, repo, progress=None, facts_path=None):
-    require({'profiles', 'terminal_seal', 'canonical_boundary'} <= set(config) <= {'profiles', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches'}, 'unknown whole assembly input')
+    require({'profiles', 'terminal_seal', 'canonical_boundary'} <= set(config) <= {'profiles', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches', 'jailed_without_stake_moved'}, 'unknown whole assembly input')
     sealed = [signed_profile(Path(p['path']), p['sha256'], repo, progress, with_seal=True) for p in config['profiles']]
     profiles = [result for result, _, _ in sealed]
     builds = check_builds(sealed, config.get('cross_build_witness'), config.get('both_builds_stretch'))
     stretches = check_stretches(sealed, config.get('weaker_proof_stretches'))
     summary = check_profiles(profiles)
     fact_blocks, fact_bytes = join_facts(sealed)
+    jailings = check_jailings(config.get('jailed_without_stake_moved'))
     boundary = canonical_boundary(config['canonical_boundary'])
     require(boundary['canonical_migration_height'] == 500000 and boundary['terminal_export_is_next_chain_opening'] is False, 'canonical boundary cannot move to retained tail')
     proof = json.loads((Path(config['canonical_boundary']) / 'checkpoint-proof.json').read_bytes())
@@ -344,7 +376,8 @@ def verify(config, repo, progress=None, facts_path=None):
                 profile_seals=config['profiles'], accepted_terminal_seal_sha256=TERMINAL_SHA,
                 signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'), both_builds_stretch=config.get('both_builds_stretch'), first_heights_recorded_again_by_reproducible_helper=stretches,
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
-                stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(), stake_asset_tax_classification='unclassified',
+                stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(),
+                penalty_blocks_with_stake_moved=list(PENALTY_HEIGHTS), jailings_with_no_stake_moved=jailings, stake_asset_tax_classification='unclassified',
                 launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}),
                 parts=[dict(first=r['first'], through=r['through'], signed_source_commit=s['signed_source_commit'], launch_record=s['launch_record'], opening_kind=s['opening_kind'], resumed_from_interrupted_run=s['resumed_from_interrupted_run'], interrupted_run=s['interrupted_run'], savepoint_of_killed_run=s['savepoint_of_killed_run'], killed_run_exit=s['killed_run_exit'], python_source_proof=s['python_source_proof'], helper_proof=s['helper_proof'], earlier_attempts=s['earlier_attempts']) for r, s, _ in sealed])
 
