@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from reconcile_whole import REBUILT, STAMP_ONLY, check_stretches
 from reconcile_whole import BEFORE_SAVE, BUILD_DIFFERENCES, NEWER, OLDER, PENALTY_HEIGHTS, SAVE_DIFFERENCES, WITH_SAVE, check_builds, join_facts
 from seal_closed import FACTS, bound_facts, stake_facts
 
@@ -142,6 +143,53 @@ class TwoBuilds(unittest.TestCase):
                 check_builds(parts, witness)
             parts[0] = build('1' * 40, SPLIT, 1, 100000, self.new)
             self.assertEqual(len(check_builds(parts, witness)), 3)
+
+
+class FirstHeightsRecordedAgain(unittest.TestCase):
+    """A part whose helper was not rebuilt byte for byte needs its first 200 heights recorded again by both helpers, identically."""
+
+    def run_of(self, root, name, helper, first, through, lines, **change):
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / 'native-proof.private.json').write_text(json.dumps(dict(first=first, through=through)))
+        run = dict(dict(schema=SPLIT, first=first, through=through, transactions=3, phases=dict(a=7), fast_forward=dict(heights=4, seconds=len(name)), ending_commit='e', opening_commit='o',
+                        opening_store_roots=['r'], opening_checkpoint_manifest_sha256='m', opening_kind='interrupted_run_state', progress_phase_base=9, capture_sha256='c', source_range=[1, 100000],
+                        native_helper_sha256=helper, native_proof_sha256=hashlib.sha256((directory / 'native-proof.private.json').read_bytes()).hexdigest()), **change)
+        (directory / 'complete-component.private.json').write_text(json.dumps(run))
+        (directory / 'exit.private.json').write_text(json.dumps(dict(exit=0)))
+        (directory / 'native-consumer.private.log').write_text(''.join('bounded_native_verified_height=%d typed_phases=%d\n' % x for x in lines))
+        return run, dict(path=str(directory), sha256=hashlib.sha256((directory / 'complete-component.private.json').read_bytes()).hexdigest())
+
+    def joined(self, root, lines=((600, 20), (700, 31)), **change):
+        live = ((600, 20), (700, 31), (800, 40))
+        weak, _ = self.run_of(root, 'live/proof', 'h-plain', 501, 5000, live, ending_commit='later')
+        strong, _ = self.run_of(root, 'other/proof', 'h-save', 5001, 9000, ())
+        seal = lambda helper, proof, name: dict(native_helper_sha256=helper, helper_proof=proof, result_path=name + '/proof/complete-component.private.json', savepoint_of_killed_run=False)
+        sealed = [(weak, seal('h-plain', STAMP_ONLY, 'live'), root / 'seal-501.json'), (strong, seal('h-save', REBUILT, 'other'), root / 'seal-5001.json')]
+        pair = [self.run_of(root, 'again-a', 'h-plain', 501, 700, ((600, 20), (700, 31)))[1], self.run_of(root, 'again-b', 'h-save', 501, 700, lines, **change)[1]]
+        return sealed, pair
+
+    def test_equal_second_recordings_are_bound_and_any_difference_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            sealed, pair = self.joined(Path(d))
+            checked = check_stretches(sealed, {'501': pair})
+            self.assertEqual([(c['first'], c['through'], c['progress_lines_equal']) for c in checked], [(501, 700, 2)])
+            for wrong in (None, {}, {'501': pair[:1] * 2}, {'501': pair, '5001': pair}):
+                with self.assertRaises(ValueError):
+                    check_stretches(sealed, wrong)
+            self.assertEqual(check_stretches(sealed[1:], None), [])
+            with self.assertRaises(ValueError):
+                check_stretches(sealed[:1], {'501': pair})
+        for change in (dict(ending_commit='f'), dict(transactions=4), dict(phases=dict(a=8)), dict(opening_commit='p'), dict(opening_store_roots=['s']), dict(opening_checkpoint_manifest_sha256='n'),
+                       dict(progress_phase_base=8), dict(fast_forward=dict(heights=5, seconds=1)), dict(native_helper_sha256='h-plain'), dict(native_helper_sha256='h-third'), dict(savepoint=True), dict(schema='other')):
+            with tempfile.TemporaryDirectory() as d:
+                sealed, pair = self.joined(Path(d), **change)
+                with self.assertRaises(ValueError):
+                    check_stretches(sealed, {'501': pair})
+        with tempfile.TemporaryDirectory() as d:
+            sealed, pair = self.joined(Path(d), lines=((600, 20), (700, 32)))
+            with self.assertRaises(ValueError):
+                check_stretches(sealed, {'501': pair})
 
 
 class SavingBuild(unittest.TestCase):

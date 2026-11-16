@@ -145,6 +145,62 @@ def same_recording(pair, helpers):
     return dict(first=runs[0][1]['first'], through=runs[0][1]['through'], savepoints=sorted(set(runs[0][3] + runs[1][3]), key=int))
 
 
+STAMP_ONLY, REBUILT = 'toolchain_stamp_of_unmodified_commit_and_launcher_pinned_hash', 'rebuilt_byte_identical_from_commit'
+STRETCH = 200
+OPENING_FIELDS = ('opening_commit', 'opening_store_roots', 'opening_checkpoint_manifest_sha256', 'opening_kind', 'progress_phase_base', 'capture_sha256', 'source_range', 'first')
+
+
+def progress_lines(path, first, through):
+    """The helper's own per-hundred-heights lines for a stretch: verified height and running count of financial phases."""
+    lines = []
+    for line in path.read_bytes().split(b'\n'):
+        if line.startswith(b'bounded_native_verified_height='):
+            if first <= int(line.split()[0].split(b'=')[1]) <= through:
+                lines.append(line)
+    return lines
+
+
+def check_stretches(sealed, stretches):
+    """A part whose helper could not be rebuilt byte for byte is backed by a second recording of its first heights.
+
+    For each such part its first 200 heights were recorded again from the
+    part's own opening, once by the same helper and once by the helper that
+    does rebuild byte for byte. The two receipts must be equal in everything
+    but the helper's name, must open exactly where the sealed part opened, and
+    the progress lines of all three runs over the stretch must be the same."""
+    stretches = stretches or {}
+    needed = {str(r['first']) for r, s, _ in sealed if s['helper_proof'] == STAMP_ONLY}
+    require(set(stretches) == needed, 'second recordings are required for exactly the parts whose helper was not rebuilt byte for byte: ' + ', '.join(sorted(needed ^ set(stretches), key=int)))
+    rebuilt = {s['native_helper_sha256'] for _, s, _ in sealed if s['helper_proof'] == REBUILT}
+    require(not needed or rebuilt, 'no part was recorded by a helper rebuilt byte for byte, so there is nothing to compare with')
+    checked = []
+    for result, seal, path in sealed:
+        if str(result['first']) not in needed:
+            continue
+        pair = stretches[str(result['first'])]
+        require(len(pair) == 2, 'two second recordings per part are required')
+        through = min(result['through'], result['first'] + STRETCH - 1)
+        runs = []
+        for witness in pair:
+            directory = Path(witness['path'])
+            run = pinned(directory / 'complete-component.private.json', witness['sha256'])
+            native = pinned(directory / 'native-proof.private.json', run['native_proof_sha256'])
+            require(json.loads((directory / 'exit.private.json').read_bytes())['exit'] == 0 and run['schema'] == 'native033-split-range-financial-v1' and 'savepoint' not in run and run['through'] == through == native['through'], 'second recording did not finish or covers other heights: ' + str(directory))
+            require(all(run.get(k) == result.get(k) for k in OPENING_FIELDS) and dict(run['fast_forward'], seconds=0) == dict(result['fast_forward'], seconds=0), 'second recording did not open where the sealed part opened: ' + str(directory))
+            lines = progress_lines(directory / 'native-consumer.private.log', result['first'], through)
+            runs.append((run['native_helper_sha256'], dict(run, native_helper_sha256='', fast_forward=dict(run['fast_forward'], seconds=0)), native, lines))
+        helpers = {r[0] for r in runs}
+        require(len(helpers) == 2 and seal['native_helper_sha256'] in helpers and helpers & rebuilt, 'second recordings must come from the part\'s own helper and from the helper rebuilt byte for byte')
+        require(runs[0][1] == runs[1][1] and runs[0][2] == runs[1][2], 'the two helpers recorded the first heights of part %d differently' % result['first'])
+        folder = (path.parent / seal['result_path']).parent
+        live = progress_lines((folder.parent.parent if seal['savepoint_of_killed_run'] else folder) / 'native-consumer.private.log', result['first'], through)
+        require(live and live == runs[0][3] == runs[1][3], 'progress lines of part %d over its first heights differ from the second recordings' % result['first'])
+        checked.append(dict(first=result['first'], through=through, helpers=sorted(helpers), receipts_equal_except_helper_name=True, opening_equal_to_sealed_part=True,
+                            second_recordings=pair, progress_lines_equal=len(live), progress_lines_sha256=hashlib.sha256(b'\n'.join(live)).hexdigest(),
+                            ending_commit=runs[0][1]['ending_commit'], phases=sum(runs[0][1]['phases'].values()), transactions=runs[0][1]['transactions']))
+    return checked
+
+
 def check_builds(sealed, witness, pair=None):
     """All parts from one recorder, or from recorders whose every difference is accounted for."""
     by_commit = {}
@@ -253,10 +309,11 @@ def check_profiles(profiles):
 
 
 def verify(config, repo, progress=None, facts_path=None):
-    require({'profiles', 'terminal_seal', 'canonical_boundary'} <= set(config) <= {'profiles', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch'}, 'unknown whole assembly input')
+    require({'profiles', 'terminal_seal', 'canonical_boundary'} <= set(config) <= {'profiles', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches'}, 'unknown whole assembly input')
     sealed = [signed_profile(Path(p['path']), p['sha256'], repo, progress, with_seal=True) for p in config['profiles']]
     profiles = [result for result, _, _ in sealed]
     builds = check_builds(sealed, config.get('cross_build_witness'), config.get('both_builds_stretch'))
+    stretches = check_stretches(sealed, config.get('weaker_proof_stretches'))
     summary = check_profiles(profiles)
     fact_blocks, fact_bytes = join_facts(sealed)
     boundary = canonical_boundary(config['canonical_boundary'])
@@ -285,7 +342,7 @@ def verify(config, repo, progress=None, facts_path=None):
                 all_historical_sources_and_coinflows_reconciled=True, financial_admission=False, books_tax_acceptance=False,
                 production_import_or_public_promotion_authorized=False, input_config_sha256=hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),
                 profile_seals=config['profiles'], accepted_terminal_seal_sha256=TERMINAL_SHA,
-                signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'), both_builds_stretch=config.get('both_builds_stretch'),
+                signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'), both_builds_stretch=config.get('both_builds_stretch'), first_heights_recorded_again_by_reproducible_helper=stretches,
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
                 stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(), stake_asset_tax_classification='unclassified',
                 launch_records=sorted({seal['launch_record'] for _, seal, _ in sealed}),

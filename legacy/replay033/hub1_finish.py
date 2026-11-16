@@ -119,6 +119,8 @@ def join(plan):
     config = dict(profiles=[dict(path=str(p), sha256=sha(p)) for p in seals], terminal_seal=plan['terminal_seal'], canonical_boundary=plan['canonical_boundary'])
     if plan.get('both_builds_stretch'):
         config['both_builds_stretch'] = [dict(path=str(d), sha256=sha(Path(d) / 'complete-component.private.json')) for d in plan['both_builds_stretch']]
+    if plan.get('weaker_proof_stretches'):
+        config['weaker_proof_stretches'] = {first: [dict(path=str(d), sha256=sha(Path(d) / 'complete-component.private.json')) for d in pair] for first, pair in plan['weaker_proof_stretches'].items()}
     if plan.get('cross_build_witness'):
         witness = Path(plan['cross_build_witness'])
         config['cross_build_witness'] = dict(path=str(witness), sha256=sha(witness / 'complete-component.private.json'))
@@ -242,7 +244,7 @@ def make_plan(catalog):
                                     for a in attempts if a is not chosen and a['proof'] != chosen.get('attempt_proof') and a['state'] != 'finished' and (a['first'] == chosen['first'] or (a['first'] <= chosen['through'] and a.get('through', a['last_verified_height']) >= chosen['first']))]
         parts.append(part)
         at = chosen['through'] + 1
-    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch') if k in catalog}
+    plan = {k: catalog[k] for k in ('record_root', 'seal_prefix', 'terminal_seal', 'canonical_boundary', 'cross_build_witness', 'both_builds_stretch', 'weaker_proof_stretches') if k in catalog}
     plan.update(parts=parts, covered_through=at - 1, complete=at == 500001, made_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     return plan
 
@@ -310,7 +312,7 @@ def mini(plan, part, first, through, directory):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--plan', type=Path, help='a plan written earlier; without it the plan is made afresh from --catalog')
-    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini', 'reopen', 'watch'))
+    parser.add_argument('step', choices=('plan', 'prepare', 'seal', 'join', 'mini', 'reopen'))
     parser.add_argument('--catalog', type=Path, help='plan only: the roots to search and the known helpers, sources and openings')
     parser.add_argument('--first', type=int)
     parser.add_argument('--through', type=int)
@@ -333,8 +335,6 @@ if __name__ == '__main__':
         sys.exit(reopen(catalog, a.first, a.through))
     plan = json.loads(a.plan.read_bytes()) if a.plan else make_plan(json.loads(a.catalog.read_bytes()))
     background(Path(plan['record_root']) / 'tmp')
-    if a.step == 'watch':
-        sys.exit('the watcher is started as hub1_seal_watch.py')
     clean_at(TOOL, subprocess.check_output(['git', '-C', str(TOOL), 'rev-parse', 'HEAD'], text=True).strip(), 'sealing tool tree is not clean')
     if a.step == 'prepare':
         prepare(plan, part_of(plan, a.first), not a.record_only)
