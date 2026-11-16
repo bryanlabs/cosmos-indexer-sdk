@@ -124,24 +124,48 @@ func (p hub1Parts) pins() error {
 	return nil
 }
 
+// dirs lists each source once. Consecutive parts may share one source; each
+// then takes only its own heights from it.
 func (p hub1Parts) dirs() []string {
 	var dirs []string
-	for _, part := range p.Parts {
-		dirs = append(dirs, part.Source)
+	for i, part := range p.Parts {
+		if i == 0 || part.Source != p.Parts[i-1].Source {
+			dirs = append(dirs, part.Source)
+		}
 	}
 	return dirs
 }
 
-// bound refuses a source whose own capture receipt covers another range than
-// the part it was listed for.
-func (p hub1Parts) bound(sources []hub1Source) error {
-	if len(sources) != len(p.Parts) {
-		return errors.New("not every listed part was read")
+func (p hub1Parts) slices() []*hub1Slice {
+	var slices []*hub1Slice
+	for _, part := range p.Parts {
+		slices = append(slices, &hub1Slice{first: part.First, last: part.Last, captures: sha256.New()})
 	}
+	return slices
+}
+
+// bound refuses unless the parts that name a source cover that source's own
+// sealed range exactly once: the first begins where its capture receipt
+// begins, the last ends where it ends, and no source is named again later.
+func (p hub1Parts) bound(sources []hub1Source) error {
+	at := 0
+	seen := map[string]bool{}
 	for i, s := range sources {
-		if s.proof.From != p.Parts[i].First || s.proof.Through != p.Parts[i].Last {
-			return fmt.Errorf("part %d: the sealed source covers heights %d to %d, the list says %d to %d", i+1, s.proof.From, s.proof.Through, p.Parts[i].First, p.Parts[i].Last)
+		if at == len(p.Parts) || p.Parts[at].Source != s.dir || seen[s.dir] {
+			return fmt.Errorf("source %d is not the source the parts list names next, or it is named twice", i+1)
 		}
+		seen[s.dir] = true
+		first := p.Parts[at].First
+		for at+1 < len(p.Parts) && p.Parts[at+1].Source == s.dir {
+			at++
+		}
+		if first != s.proof.From || p.Parts[at].Last != s.proof.Through {
+			return fmt.Errorf("source %d is sealed for heights %d to %d, the parts that name it cover %d to %d", i+1, s.proof.From, s.proof.Through, first, p.Parts[at].Last)
+		}
+		at++
+	}
+	if at != len(p.Parts) {
+		return errors.New("not every listed part was read")
 	}
 	return nil
 }
@@ -486,19 +510,25 @@ func buildHub1Receipt(p hub1Parts, exportRecords, exportProof, target string, ma
 	if r.UnboundRows != 0 {
 		return fail("%d stored rows belong to no listed part", r.UnboundRows)
 	}
-	done, err := hub1Options{dirs: p.dirs(), exportRecords: exportRecords, exportProof: exportProof, target: target, maxBody: maxBody, manifest: manifest, compare: d.conn, tail: p.Tail, bound: p.bound}.run()
+	slices := p.slices()
+	done, err := hub1Options{dirs: p.dirs(), exportRecords: exportRecords, exportProof: exportProof, target: target, maxBody: maxBody, manifest: manifest, compare: d.conn, tail: p.Tail, bound: p.bound, slices: slices}.run()
 	if err != nil {
 		return fail("stored rows are not the rows the sealed parts give")
 	}
-	for i, s := range done.sources {
-		seal, err := os.ReadFile(p.Parts[i].Seal.Path)
+	at := 0
+	for i, part := range p.Parts {
+		for done.sources[at].dir != part.Source {
+			at++
+		}
+		s, cut := done.sources[at], slices[i]
+		seal, err := os.ReadFile(part.Seal.Path)
 		if err != nil {
 			return fail("part %d: seal unreadable", i+1)
 		}
 		c := &r.Components[i]
-		c.SealNamesSource, c.RecordsSHA, c.StatusSHA, c.CacheListSHA, c.Rederived = bytes.Contains(seal, []byte(s.proof.SHA256)), s.proof.SHA256, s.read.CaptureReceiptSHA256, s.read.BlockCaptureListSHA256, true
-		if c.Tables["blocks"].Rows != s.read.Heights || c.Tables["tx_inclusions"].Rows != s.read.Transactions {
-			return fail("part %d: stored block or transaction count differs from its sealed source", i+1)
+		c.SealNamesSource, c.RecordsSHA, c.StatusSHA, c.CacheListSHA, c.Rederived = bytes.Contains(seal, []byte(s.proof.SHA256)), s.proof.SHA256, s.read.CaptureReceiptSHA256, hex.EncodeToString(cut.captures.Sum(nil)), true
+		if cut.heights != part.Last-part.First+1 || c.Tables["blocks"].Rows != cut.heights || c.Tables["tx_inclusions"].Rows != cut.transactions {
+			return fail("part %d: stored block or transaction count differs from what its heights of the sealed source give", i+1)
 		}
 	}
 	if x := r.Payout; x != nil {
