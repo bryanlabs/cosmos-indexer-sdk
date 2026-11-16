@@ -240,7 +240,13 @@ func main() {
 	}
 	sd := []interface{}{}
 	jailedUntil, counterReset, counterUp, counterDown, tomb, start := 0, 0, 0, 0, 0, 0
-	for k, x := range a.Signing {
+	signing := []string{}
+	for k := range a.Signing {
+		signing = append(signing, k)
+	}
+	sort.Strings(signing)
+	for _, k := range signing {
+		x := a.Signing[k]
 		y, ok := b.Signing[k]
 		if !ok {
 			continue
