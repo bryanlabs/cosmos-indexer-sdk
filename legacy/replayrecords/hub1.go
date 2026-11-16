@@ -99,85 +99,97 @@ func ScanHub1(r io.Reader, p Proof, visit func(Height) error) (Hub1Counts, error
 	current := Height{Number: p.From}
 	begin, end := 0, 0
 	closed := false
-	var line []byte
-	for {
-		line = line[:0]
-		for {
-			part, e := br.ReadSlice('\n')
-			if len(line)+len(part) > 1<<31 {
-				return counts, &Hub1Error{Line: counts.Records + 1, Height: current.Number, Reason: "line exceeds 2 GiB"}
-			}
-			line = append(line, part...)
-			if e == bufio.ErrBufferFull {
-				continue
-			}
-			if e != nil && e != io.EOF {
-				return counts, invalid
-			}
-			break
-		}
-		if len(line) == 0 {
-			break
-		}
-		counts.Records++
-		counts.RawBytes += int64(len(line))
-		refuse := func(x hub1Record, reason string) (Hub1Counts, error) {
-			return counts, &Hub1Error{Line: counts.Records, Height: x.Height, Kind: x.Kind, Label: hub1Label(x.Label), Reason: reason}
-		}
-		var x hub1Record
-		if line[len(line)-1] != '\n' {
-			return refuse(x, "unterminated line")
-		}
-		dec := json.NewDecoder(bytes.NewReader(line))
-		dec.DisallowUnknownFields()
-		if dec.Decode(&x) != nil {
-			return refuse(x, "not one record of the known shape")
-		}
-		if dec.More() {
-			return refuse(x, "more than one value on a line")
-		}
-		if closed {
-			return refuse(x, "record after the stream closed")
-		}
+	var x hub1Record
+	refuse := func(reason string) (Hub1Counts, error) {
+		return counts, &Hub1Error{Line: counts.Records, Height: x.Height, Kind: x.Kind, Label: hub1Label(x.Label), Reason: reason}
+	}
+	// step applies the stream rules to one decoded record, in stream order.
+	step := func() (string, error) {
 		counts.Kinds[x.Kind]++
 		switch {
 		case hub1Referenced[x.Kind]:
+			status := (!p.Export && (x.Status == "committed" || x.Status == "aborted")) || (p.Export && x.Status == "exported")
 			inside := x.Height == current.Number && x.Height <= p.Through
-			if !inside || (!p.Export && x.Status != "committed" && x.Status != "aborted") || (p.Export && x.Status != "exported") {
-				return refuse(x, "native evidence outside its height or status")
+			// The closing store checkpoints follow the last height.
+			final := !p.Export && x.Kind == "native_state_checkpoint" && strings.HasPrefix(x.Label, "segment_final/") && x.Height == p.Through &&
+				current.Number == p.Through+1 && len(current.Records) == 0 && x.Phase == "block" && x.Tx == -1 && x.Message == -1
+			if strings.HasPrefix(x.Label, "segment_final/") {
+				inside = false
 			}
-			continue
+			if !status || (!inside && !final) {
+				return "native evidence outside its height or status", nil
+			}
+			return "", nil
 		case hub1Explaining[x.Kind] != "":
 			if p.Export || x.Height != current.Number || x.Phase != "message" || x.Tx < 0 || x.Message < 0 || x.Unit != hub1Explaining[x.Kind] || (x.Status != "committed" && x.Status != "aborted") || x.Validator == "" || x.Delegator == "" {
-				return refuse(x, "explaining evidence outside a message or with another unit")
+				return "explaining evidence outside a message or with another unit", nil
 			}
 		case x.Kind == "observation_completed":
 			if p.Export || x.Height != p.Through || current.Number != p.Through+1 || len(current.Records) != 0 || x.Phase != "segment" || x.Status != "committed" || x.Code != 0 || x.Tx != -1 || x.Message != -1 {
-				return refuse(x, "stream closed away from its last height")
+				return "stream closed away from its last height", nil
 			}
 			closed = true
-			continue
+			return "", nil
 		case x.Kind == "movement" || x.Kind == "principal" || x.Kind == "accounting" || x.Kind == "height_completed" || x.Kind == "export_completed":
 			if x.Kind == "movement" && x.Unit != "native_bank_tokens" || x.Kind == "principal" && x.Unit != "native_bond_tokens" {
-				return refuse(x, "amount is in a unit this converter has no rule for")
+				return "amount is in a unit this converter has no rule for", nil
 			}
 			if !admit(x.Record, p, current.Number, &begin, &end) {
-				return refuse(x, "record breaks the shared replay record rules")
+				return "record breaks the shared replay record rules", nil
 			}
 		default:
-			return refuse(x, "record kind is not admitted")
+			return "record kind is not admitted", nil
 		}
 		current.Records = append(current.Records, x.Record)
 		if x.Kind == "height_completed" || x.Kind == "export_completed" {
 			counts.Heights++
 			if visit != nil {
 				if err := visit(current); err != nil {
-					return counts, err
+					return "", err
 				}
 			}
 			current = Height{Number: current.Number + 1}
 			begin, end = 0, 0
 			closed = p.Export
+		}
+		return "", nil
+	}
+	// One goroutine reads the lines, several decode them, and this one
+	// applies the rules to the decoded records in stream order.
+	stop := make(chan struct{})
+	defer close(stop)
+	work := make(chan *hub1Batch, hub1Decoders)
+	ordered := make(chan *hub1Batch, 2*hub1Decoders)
+	for i := 0; i < hub1Decoders; i++ {
+		go func() {
+			for b := range work {
+				b.decode()
+			}
+		}()
+	}
+	go hub1Cut(br, work, ordered, stop)
+	for b := range ordered {
+		<-b.done
+		for i := range b.records {
+			x = b.records[i]
+			counts.Records++
+			counts.RawBytes += b.sizes[i]
+			if b.reasons[i] != "" {
+				return refuse(b.reasons[i])
+			}
+			if closed {
+				return refuse("record after the stream closed")
+			}
+			reason, err := step()
+			if err != nil {
+				return counts, err
+			}
+			if reason != "" {
+				return refuse(reason)
+			}
+		}
+		if b.err != nil {
+			return counts, b.err
 		}
 	}
 	if !closed || len(current.Records) != 0 || current.Number != p.Through+1 {
@@ -187,4 +199,89 @@ func ScanHub1(r io.Reader, p Proof, visit func(Height) error) (Hub1Counts, error
 		return counts, &Hub1Error{Line: counts.Records, Height: p.Through, Reason: "stream does not match its pinned digest, record count and size"}
 	}
 	return counts, nil
+}
+
+const hub1Decoders = 12
+
+// hub1Batch is a run of consecutive lines and what decoding made of them.
+type hub1Batch struct {
+	lines   [][]byte
+	records []hub1Record
+	sizes   []int64
+	reasons []string
+	// err is a read failure after the last line of the batch.
+	err  error
+	done chan struct{}
+}
+
+func (b *hub1Batch) decode() {
+	b.records, b.sizes, b.reasons = make([]hub1Record, len(b.lines)), make([]int64, len(b.lines)), make([]string, len(b.lines))
+	for i, line := range b.lines {
+		b.sizes[i] = int64(len(line))
+		if line[len(line)-1] != '\n' {
+			b.reasons[i] = "unterminated line"
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(line))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&b.records[i]) != nil {
+			b.reasons[i] = "not one record of the known shape"
+		} else if dec.More() {
+			b.reasons[i] = "more than one value on a line"
+		}
+	}
+	b.lines = nil
+	close(b.done)
+}
+
+// hub1Cut cuts the stream into batches of whole lines, in order.
+func hub1Cut(br *bufio.Reader, work, ordered chan<- *hub1Batch, stop <-chan struct{}) {
+	defer close(work)
+	defer close(ordered)
+	send := func(b *hub1Batch) bool {
+		select {
+		case ordered <- b:
+		case <-stop:
+			return false
+		}
+		select {
+		case work <- b:
+		case <-stop:
+			return false
+		}
+		return true
+	}
+	for {
+		b := &hub1Batch{done: make(chan struct{})}
+		size := 0
+		for len(b.lines) < 4096 && size < 16<<20 && b.err == nil {
+			var line []byte
+			for {
+				part, e := br.ReadSlice('\n')
+				line = append(line, part...)
+				if e == bufio.ErrBufferFull && len(line) < 1<<31 {
+					continue
+				}
+				if e != nil && e != io.EOF {
+					b.err = invalid
+				}
+				break
+			}
+			if len(line) == 0 {
+				if b.err == nil {
+					b.err = io.EOF
+				}
+				break
+			}
+			b.lines = append(b.lines, line)
+			size += len(line)
+		}
+		last := b.err != nil
+		if b.err == io.EOF {
+			b.err = nil
+		}
+		if !send(b) || last {
+			return
+		}
+	}
 }

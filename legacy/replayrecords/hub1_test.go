@@ -22,6 +22,7 @@ const hub1Lines = `{"before":[{"key":"AA==","value":"AQ=="}],"unit":"native_stor
 {"kind":"accounting","code":0,"height":7,"tx":0,"message":-1,"phase":"transaction","label":"","status":"committed","address":"","denom":"","amount":""}
 {"kind":"accounting","code":0,"height":7,"tx":-1,"message":-1,"phase":"end_block","label":"","status":"committed","address":"","denom":"","amount":""}
 {"kind":"height_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"block","label":"","status":"committed","address":"","denom":"","amount":""}
+{"before":[{"key":"AA==","value":"Ag=="}],"unit":"native_store_bytes","kind":"native_state_checkpoint","code":0,"height":7,"tx":-1,"message":-1,"phase":"block","label":"segment_final/store:main:main","status":"committed","address":"","denom":"","amount":""}
 {"kind":"observation_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"segment","label":"","status":"committed","address":"","denom":"","amount":""}
 `
 
@@ -47,9 +48,9 @@ func TestHub1StreamKeepsFinancialRecordsAndCountsNativeEvidence(t *testing.T) {
 	}
 	require.Equal(t, []string{"accounting", "movement", "accounting", "share_request", "principal", "accounting", "accounting", "accounting", "height_completed"}, kinds)
 	require.Equal(t, "9", heights[0].Records[4].Amount)
-	require.Equal(t, int64(12), counts.Records)
+	require.Equal(t, int64(13), counts.Records)
 	require.Equal(t, int64(1), counts.Kinds["native_write"])
-	require.Equal(t, int64(1), counts.Kinds["native_state_checkpoint"])
+	require.Equal(t, int64(2), counts.Kinds["native_state_checkpoint"])
 	require.Equal(t, int64(1), counts.Heights)
 }
 
@@ -59,11 +60,12 @@ func TestHub1StreamRefusesByName(t *testing.T) {
 		return strings.Replace(hub1Lines, old, replacement, 1)
 	}
 	for name, tc := range map[string]struct{ body, kind, reason string }{
-		"unknown kind":   {change(`"kind":"share_request"`, `"kind":"slash_payout"`), "slash_payout", "not admitted"},
-		"unknown unit":   {change(`"unit":"native_bank_tokens"`, `"unit":"native_pool_tokens"`), "movement", "unit"},
-		"unknown field":  {change(`"kind":"principal"`, `"surprise":1,"kind":"principal"`), "principal", "known shape"},
-		"no completion":  {change(`{"kind":"observation_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"segment","label":"","status":"committed","address":"","denom":"","amount":""}`+"\n", ""), "", "completion"},
-		"missing height": {change(`{"kind":"height_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"block","label":"","status":"committed","address":"","denom":"","amount":""}`+"\n", ""), "observation_completed", "last height"},
+		"closing checkpoint mid stream": {change(`"label":"segment_baseline/store:main:main"`, `"label":"segment_final/store:main:main"`), "native_state_checkpoint", "native evidence"},
+		"unknown kind":                  {change(`"kind":"share_request"`, `"kind":"slash_payout"`), "slash_payout", "not admitted"},
+		"unknown unit":                  {change(`"unit":"native_bank_tokens"`, `"unit":"native_pool_tokens"`), "movement", "unit"},
+		"unknown field":                 {change(`"kind":"principal"`, `"surprise":1,"kind":"principal"`), "principal", "known shape"},
+		"no completion":                 {change(`{"kind":"observation_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"segment","label":"","status":"committed","address":"","denom":"","amount":""}`+"\n", ""), "", "completion"},
+		"missing height":                {change(`{"kind":"height_completed","code":0,"height":7,"tx":-1,"message":-1,"phase":"block","label":"","status":"committed","address":"","denom":"","amount":""}`+"\n", ""), "native_state_checkpoint", "native evidence"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			heights, _, err := hub1Stream(tc.body, hub1Proof(tc.body))

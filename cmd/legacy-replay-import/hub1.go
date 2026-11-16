@@ -126,11 +126,15 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 		}
 		admittedExport = &ep
 	}
-	// Every stream is checked whole against its pin before anything is built.
+	// Before anything is written every stream is checked whole against its
+	// pin. A run that writes nothing checks each pin at the end of its pass.
 	var wg sync.WaitGroup
 	checked := make([]error, len(sources))
 	counted := make([]replayrecords.Hub1Counts, len(sources))
 	for i, s := range sources {
+		if !write {
+			break
+		}
 		wg.Add(1)
 		go func(i int, s hub1Source) {
 			defer wg.Done()
@@ -144,16 +148,21 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 		}(i, s)
 	}
 	wg.Wait()
-	for i, err := range checked {
-		if err != nil {
-			return fail(fmt.Errorf("source %d: %w", i+1, err))
-		}
+	admitted := func(i int) {
 		kinds := make([]string, 0, len(counted[i].Kinds))
 		for kind, n := range counted[i].Kinds {
 			kinds = append(kinds, fmt.Sprintf("%s=%d", kind, n))
 		}
 		sort.Strings(kinds)
 		fmt.Printf("hub1 source %d heights %d to %d admitted: records=%d %s\n", i+1, sources[i].proof.From, sources[i].proof.Through, counted[i].Records, strings.Join(kinds, " "))
+	}
+	for i, err := range checked {
+		if err != nil {
+			return fail(fmt.Errorf("source %d: %w", i+1, err))
+		}
+		if write {
+			admitted(i)
+		}
 	}
 	ctx := context.Background()
 	var destination *rehearsalDestination
@@ -245,10 +254,13 @@ func runHub1(dirs []string, exportRecords, exportProof, target string, write boo
 		if err != nil {
 			return fail(err)
 		}
-		_, err = replayrecords.ScanHub1(r, s.proof, visit)
+		counted[i], err = replayrecords.ScanHub1(r, s.proof, visit)
 		r.Close()
 		if err != nil {
 			return fail(fmt.Errorf("source %d: %w", i+1, err))
+		}
+		if !write {
+			admitted(i)
 		}
 	}
 	names := make([]string, 0, len(categories))
