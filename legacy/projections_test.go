@@ -426,9 +426,23 @@ func TestAminoStakingAmountByEra(t *testing.T) {
 		require.True(t, tx.SignersComplete)
 		require.Len(t, tx.Signers, 1)
 		require.Equal(t, a, []byte(tx.Signers[0]))
+		// The identity is exact and carries no amount.
+		switch identity := ShareValuedIdentity(decoded).(type) {
+		case *staking.MsgUndelegate:
+			require.Equal(t, bech(t, "cosmos", a), identity.DelegatorAddress)
+			require.Equal(t, bech(t, "cosmosvaloper", b), identity.ValidatorAddress)
+			require.True(t, identity.Amount.Amount.IsNil())
+		case *staking.MsgBeginRedelegate:
+			require.Equal(t, bech(t, "cosmosvaloper", b), identity.ValidatorSrcAddress)
+			require.Equal(t, bech(t, "cosmosvaloper", c), identity.ValidatorDstAddress)
+			require.True(t, identity.Amount.Amount.IsNil())
+		default:
+			t.Fatal("a share-valued message has an identity")
+		}
 	}
 	tx, decoded := one(t, "cosmoshub-1", fixtureUndelegateShares{a, b, "not a number"})
 	require.Nil(t, decoded.Derived)
+	require.Nil(t, ShareValuedIdentity(decoded))
 	require.NotEqual(t, shareValuedIssue, decoded.Issue)
 	require.False(t, tx.SignersComplete)
 	tx, decoded = one(t, "cosmoshub-1", fixtureRedelegateShares{a, b, c[:19], "41"})

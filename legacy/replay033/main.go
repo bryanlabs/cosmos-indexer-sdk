@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/legacy/replay033/observeapp"
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	gaia "github.com/cosmos/cosmos-sdk/cmd/gaia/app"
 	"github.com/cosmos/cosmos-sdk/store"
@@ -48,7 +49,7 @@ func plain(v interface{}) string {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: replay033 scan|run [flags]")
+		fmt.Fprintln(os.Stderr, "usage: replay033 scan|run|export-zero [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -57,6 +58,8 @@ func main() {
 		err = scan(os.Args[2:])
 	case "run":
 		err = run(os.Args[2:])
+	case "export-zero":
+		err = exportZero(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown mode")
 	}
@@ -70,20 +73,22 @@ func main() {
 }
 
 type runState struct {
-	Release      string  `json:"release"`
-	Chain        string  `json:"chain"`
-	Started      string  `json:"started"`
-	Updated      string  `json:"updated"`
-	From         int64   `json:"first_height_this_run"`
-	Height       int64   `json:"last_height_committed"`
-	HashVerified int64   `json:"state_hash_verified_through"`
-	Target       int64   `json:"target"`
-	Transactions int64   `json:"transactions_this_run"`
-	Rate         float64 `json:"blocks_per_second_last_window"`
-	RateRun      float64 `json:"blocks_per_second_this_run"`
-	ResultDiffs  int64   `json:"heights_where_results_differ_from_cache"`
-	Evidence     int64   `json:"evidence_items_this_run"`
-	Stop         string  `json:"stop_reason,omitempty"`
+	Release          string  `json:"release"`
+	Chain            string  `json:"chain"`
+	Started          string  `json:"started"`
+	Updated          string  `json:"updated"`
+	From             int64   `json:"first_height_this_run"`
+	Height           int64   `json:"last_height_committed"`
+	HashVerified     int64   `json:"state_hash_verified_through"`
+	Target           int64   `json:"target"`
+	Transactions     int64   `json:"transactions_this_run"`
+	Rate             float64 `json:"blocks_per_second_last_window"`
+	RateRun          float64 `json:"blocks_per_second_this_run"`
+	ResultDiffs      int64   `json:"heights_where_results_differ_from_cache"`
+	Evidence         int64   `json:"evidence_items_this_run"`
+	Stop             string  `json:"stop_reason,omitempty"`
+	TerminalVerified int64   `json:"closed_reference_verified_through,omitempty"`
+	ProofMode        string  `json:"terminal_proof_mode,omitempty"`
 }
 
 // tailState carries the hash of the last height's results across a restart,
@@ -101,6 +106,25 @@ func writeJSON(path string, v interface{}) {
 	}
 }
 
+// The original native constructor remains the default execution path.
+type replayApp interface {
+	InitChain(abci.RequestInitChain) abci.ResponseInitChain
+	BeginBlock(abci.RequestBeginBlock) abci.ResponseBeginBlock
+	DeliverTx([]byte) abci.ResponseDeliverTx
+	EndBlock(abci.RequestEndBlock) abci.ResponseEndBlock
+	Commit() abci.ResponseCommit
+	LastBlockHeight() int64
+	LastCommitID() sdk.CommitID
+	Query(abci.RequestQuery) abci.ResponseQuery
+}
+
+func createPrivateEvidence(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create exclusive private evidence file")
+	}
+	return f, nil
+}
 func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cache := fs.String("cache", "/cache", "cache root")
@@ -114,7 +138,46 @@ func run(args []string) error {
 	blockCache := fs.Int("db-cache-mb", 8, "database block cache")
 	writeBuffer := fs.Int("db-buffer-mb", 4, "database write buffer")
 	profile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
+	auditPath := fs.String("native-audit", "", "optional exclusive full native response and all-store evidence")
+	historyPath := fs.String("native-history", "", "optional exclusive compact complete native results/header/all9roots history")
+	coinRecords := fs.String("coin-records", "", "optional exclusive private native033 movement evidence")
+	lossless := fs.Bool("lossless-recording", false, "exact incremental all-key native recording, requires coin-records")
+	compressEvidence := fs.Bool("compress-evidence", false, "lossless gzip framing for coin records and native history")
+	verifyTarget := fs.Bool("verify-target-next-header", false, "verify target using next cached header without executing it")
+	terminalHome := fs.String("closed-terminal-reference", "", "exact pinned closed Hub1 height500015 source, byte-copied before read-only inspection")
+	terminalProof := fs.String("terminal-proof", "", "exclusive private complete terminal witness outside both homes")
+	terminalCopy := fs.String("terminal-reference-copy", "", "explicit exclusive retained private reference-copy directory")
 	fs.Parse(args)
+	terminalMode := *terminalHome != ""
+	if err := validateTerminalRun(*chain, *to, *compare, *verifyTarget, *terminalHome, *genesis, *terminalProof); err != nil {
+		return err
+	}
+	if !terminalMode && *terminalCopy != "" {
+		return fmt.Errorf("terminal copy requires pinned closed reference")
+	}
+	var terminal *closedTerminalReference
+	if terminalMode {
+		var err error
+		if err = validateTerminalPaths(*terminalHome, *home, *terminalCopy, *terminalProof, *auditPath, *historyPath, *coinRecords, *profile); err != nil {
+			return err
+		}
+		terminal, err = loadClosedTerminalReference(*terminalHome, *cache, *genesis, *terminalCopy)
+		if err != nil {
+			return err
+		}
+	}
+	if *historyPath != "" && ((!*verifyTarget && !terminalMode) || !*compare) {
+		return fmt.Errorf("native history requires all result comparisons and target next-header proof")
+	}
+	if *compressEvidence && *coinRecords == "" && *historyPath == "" {
+		return fmt.Errorf("compression requires private evidence")
+	}
+	if *lossless && *coinRecords == "" {
+		return fmt.Errorf("lossless recording requires private coin records")
+	}
+	if *coinRecords != "" && (*chain != "cosmoshub-1" || !*compare || (!*verifyTarget && !terminalMode)) {
+		return fmt.Errorf("Hub1 recording requires exact chain, all result comparisons and target next-header proof")
+	}
 	if *profile != "" {
 		f, err := os.Create(*profile)
 		if err != nil {
@@ -131,6 +194,11 @@ func run(args []string) error {
 	}
 	if err := os.MkdirAll(*home, 0o700); err != nil {
 		return err
+	}
+	if *coinRecords != "" {
+		if err := createRecordingAttempt(*home); err != nil {
+			return err
+		}
 	}
 	db, err := dbm.NewGoLevelDBWithOpts("application", *home, &opt.Options{
 		BlockCacheCapacity:     *blockCache << 20,
@@ -155,7 +223,45 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("pruning is recent, syncable or nothing")
 	}
-	app := gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+	var app replayApp
+	var observed *observeapp.GaiaApp
+	var movementFile *evidenceWriter
+	if *coinRecords != "" {
+		records, err := createRecordEvidence(*coinRecords, *compressEvidence)
+		if err != nil {
+			return err
+		}
+		defer records.Close()
+		movementFile = records
+		observed = observeapp.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+		observed.SetLosslessRecording(*lossless)
+		observed.SetRecorder(records)
+		app = observed
+	} else {
+		app = gaia.NewGaiaApp(log.NewNopLogger(), db, nil, true, baseapp.SetPruning(keep))
+	}
+	var auditFile *os.File
+	if *auditPath != "" {
+		if !outsideCheckpoint(*home, *auditPath) {
+			return fmt.Errorf("native audit must be outside replay home")
+		}
+		auditFile, err = createPrivateEvidence(*auditPath)
+		if err != nil {
+			return err
+		}
+		defer auditFile.Close()
+	}
+	var historyFile *evidenceWriter
+	if *historyPath != "" {
+		if !outsideCheckpoint(*home, *historyPath) {
+			return fmt.Errorf("native history must be outside replay home")
+		}
+		historyFile, err = createRecordEvidence(*historyPath, *compressEvidence)
+		if err != nil {
+			return err
+		}
+		defer historyFile.Close()
+	}
 	vals, err := openValidators(filepath.Join(*home, "validator-updates.jsonl"))
 	if err != nil {
 		return err
@@ -171,6 +277,9 @@ func run(args []string) error {
 	defer diffs.Close()
 
 	height := app.LastBlockHeight()
+	if terminalMode && (height != 500000 || !outsideCheckpoint(*home, *terminalProof)) {
+		return fmt.Errorf("closed terminal recording requires exact private height500000 start and external proof")
+	}
 	var lastHash, lastResults []byte
 	appHash := []byte{}
 	if height == 0 {
@@ -219,8 +328,19 @@ func run(args []string) error {
 		}
 		fmt.Printf("resumed after height %d\n", height)
 	}
+	if err := auditHistoryAnchor(historyFile, db, app, *chain, *genesis); err != nil {
+		return err
+	}
+	if auditFile != nil {
+		if err := auditNativeCheckpoint(*auditPath+".source-checkpoint.json", *chain, app); err != nil {
+			return err
+		}
+	}
 	state.From, state.Height, state.HashVerified = height+1, height, height-1
 	if *to == height {
+		if *verifyTarget {
+			return fmt.Errorf("target already exists; use independent offline checkpoint proof")
+		}
 		fmt.Printf("already at the target height %d\n", height)
 		return nil
 	}
@@ -337,13 +457,35 @@ func run(args []string) error {
 				failure = fmt.Errorf("the application changed consensus parameters, which this tool does not track")
 				return
 			}
+			if observed != nil {
+				if failure = observed.RecorderError(); failure != nil {
+					return
+				}
+			}
+			if observed != nil || historyFile != nil || terminalMode {
+				if failure = requireRecordedResults(c.results, begin, deliver, end); failure != nil {
+					return
+				}
+			}
 			if failure = vals.record(h, end.ValidatorUpdates); failure != nil {
 				return
 			}
 			appHash = app.Commit().Data
+			if observed != nil {
+				failure = observed.RecorderError()
+				if failure == nil && movementFile.Sync() != nil {
+					failure = fmt.Errorf("cannot sync committed private evidence")
+				}
+			}
 		}()
 		if failure != nil {
 			return fail(h, "%v", failure)
+		}
+		if err := auditNative(auditFile, app, c, begin, deliver, end); err != nil {
+			return fail(h, "%v", err)
+		}
+		if err := auditNativeHistory(historyFile, db, app, c, begin, deliver, end); err != nil {
+			return fail(h, "%v", err)
 		}
 		if err := vals.advance(h); err != nil {
 			return fail(h, "%v", err)
@@ -360,6 +502,78 @@ func run(args []string) error {
 		if time.Since(window) >= 30*time.Second {
 			report("")
 		}
+	}
+	if *verifyTarget || terminalMode {
+		var next cached
+		if terminalMode {
+			if state.ResultDiffs != 0 {
+				return fail(height, "terminal has unmatched native results")
+			}
+			if _, err := terminalLoadedRoot(db); err != nil {
+				return fail(height, "%v", err)
+			}
+			if err := verifyClosedTerminal(terminal, app, height, lastHash, lastResults, filepath.Join(*home, "validator-updates.jsonl")); err != nil {
+				return fail(height, "%v", err)
+			}
+		} else {
+			next = load(*cache, *chain, height+1, false)
+			if err := verifyFinalHeader(next, height, appHash, lastHash, lastResults, vals.current, vals.next); err != nil {
+				return fail(height+1, "%v", err)
+			}
+			state.HashVerified = height
+		}
+		if observed != nil {
+			var err error
+			if terminalMode {
+				err = observed.SealClosedTerminalRecorder()
+			} else {
+				err = observed.SealRecorder()
+			}
+			if err != nil {
+				return fail(height, "%v", err)
+			}
+			if movementFile.Sync() != nil {
+				return fail(height, "cannot sync sealed private evidence")
+			}
+		}
+		if movementFile != nil {
+			if err := movementFile.Close(); err != nil {
+				return fail(height, "cannot close private movement evidence")
+			}
+		}
+		if historyFile != nil {
+			if state.ResultDiffs != 0 {
+				return fail(height, "native history has unmatched results")
+			}
+			var err error
+			if terminalMode {
+				err = completeClosedTerminal(historyFile, terminal, state.From)
+			} else {
+				err = completeNativeHistory(historyFile, app, state.From, next)
+			}
+			if err != nil {
+				return fail(height, "native history completion failed")
+			}
+			if err := historyFile.Close(); err != nil {
+				return fail(height, "cannot close private native history")
+			}
+		}
+		if terminalMode {
+			proof, err := createRecordEvidence(*terminalProof, false)
+			if err != nil {
+				return fail(height, "terminal proof exclusive output refused")
+			}
+			err = completeClosedTerminal(proof, terminal, state.From)
+			closeErr := proof.Close()
+			if err != nil || closeErr != nil {
+				return fail(height, "terminal proof could not persist")
+			}
+			state.TerminalVerified, state.ProofMode = height, "closed_pinned_native_reference"
+			report("reached target; complete native state and results equal pinned closed terminal reference; no next-header proof")
+			return nil
+		}
+		report("reached target; verified by unexecuted next header")
+		return nil
 	}
 	report(fmt.Sprintf("reached the target; the state after height %d is checked by the next header only", height))
 	return nil
