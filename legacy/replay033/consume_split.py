@@ -145,7 +145,7 @@ def opening_manifest(directory, manifest):
     return sha(manifest)
 
 
-def verify(root, binary, receipt, first, through, opening=None, manifest=None, resume=False, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256=''):
+def verify(root, binary, receipt, first, through, opening=None, manifest=None, resume=False, savepoint_every=0, validator_history=None, validator_history_sha256='', evidence_cache=None, evidence_capture_sha256=''):
     b = validate_source(root)
     prefix, closed = first > b['first'], through == b['through']
     require(b['first'] <= first <= through <= b['through'], 'part lies outside the complete source range')
@@ -177,15 +177,49 @@ def verify(root, binary, receipt, first, through, opening=None, manifest=None, r
         def send(q):
             p.stdin.write((json.dumps(q, separators=(',', ':')) + '\n').encode())
         c = ClosedConsumer(send, history, through, first)
+
+        def part(directory, height, next_header, source_closed, extra=()):
+            asset_blocks, asset_rows, asset_hash = validate_native_assets(directory)
+            ending = history.cache[height]
+            return dict(schema=SCHEMA, first=first, through=height, source_range=[b['first'], b['through']],
+                        heights=height - first + 1, transactions=c.transactions, phases=dict(c.counts), journal_counts=dict(c.journal.counts),
+                        opening_commit=history.anchor['commit'], opening_store_roots=history.anchor['native_commit_info'],
+                        ending_commit=ending['commit'], ending_store_roots=ending['native_commit_info'],
+                        ending_block_hash=ending['block_hash'], next_header=next_header, next_header_is_source_closure=source_closed,
+                        source_closed_at_through=source_closed, fast_forward=forward, progress_phase_base=forward['typed_phases'],
+                        opening_checkpoint_manifest_sha256=manifest_sha, opening_kind=('interrupted_run_state' if resume else 'saved_checkpoint') if prefix else 'source_range_start',
+                        financial_admission=False, global_books_tax_acceptance=False,
+                        native_stake_asset_blocks=asset_blocks, native_stake_asset_fact_rows=asset_rows,
+                        native_stake_asset_facts_sha256=asset_hash, stake_asset_tax_classification='unclassified',
+                        capture_sha256=sha(root / 'capture.private.json'), native_proof_sha256=sha(directory / 'native-proof.private.json'), native_helper_sha256=sha(binary), **dict(extra))
+
+        def savepoint(height):
+            # The helper copies its committed state and writes its own receipt
+            # for the heights proved so far. This side then binds the same
+            # counts. A later run can open from that copy after a kill.
+            send(dict(kind='savepoint', height=height))
+            p.stdin.flush()
+            directory = receipt.parent / 'savepoints' / str(height)
+            deadline = time.monotonic() + 3600
+            while not directory.is_dir():
+                require(p.poll() is None and time.monotonic() < deadline, 'native helper did not complete the savepoint')
+                time.sleep(0.2)
+            require(c.journal.heights == height - first + 1, 'savepoint financial/journal height count differs')
+            record = part(directory, height, history[height + 1]['header'], False, dict(savepoint=True, saved_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
+            with (directory / 'part.private.json').open('x') as stream:
+                json.dump(record, stream, indent=2, sort_keys=True)
         send(dict(kind='anchor', anchor=history.anchor, through=through))
         try:
             for record in baseline:
                 c.accept(record)
             baseline = None
             for raw in lines:
+                before = c.heights
                 c.accept(parse(raw))
                 if not closed and c.heights == through:
                     break
+                if savepoint_every and c.heights != before and c.heights % savepoint_every == 0 and c.heights < through:
+                    savepoint(c.heights)
             require(c.heights == through and c.journal.heights == through - first + 1, 'part financial/journal height count differs')
             if closed:
                 require(c.closed and history.completion is not None, 'complete source financial/journal/next-header closure missing')
@@ -203,19 +237,7 @@ def verify(root, binary, receipt, first, through, opening=None, manifest=None, r
                 pass
             p.wait(timeout=30)
             raise
-    asset_blocks, asset_rows, asset_hash = validate_native_assets(receipt.parent)
-    ending = history.cache[through]
-    result = dict(schema=SCHEMA, first=first, through=c.heights, source_range=[b['first'], b['through']],
-                  heights=c.journal.heights, transactions=c.transactions, phases=dict(c.counts), journal_counts=dict(c.journal.counts),
-                  opening_commit=history.anchor['commit'], opening_store_roots=history.anchor['native_commit_info'],
-                  ending_commit=ending['commit'], ending_store_roots=ending['native_commit_info'],
-                  ending_block_hash=ending['block_hash'], next_header=next_header, next_header_is_source_closure=closed,
-                  source_closed_at_through=closed, fast_forward=forward, progress_phase_base=forward['typed_phases'],
-                  opening_checkpoint_manifest_sha256=manifest_sha, opening_kind=('interrupted_run_state' if resume else 'saved_checkpoint') if prefix else 'source_range_start',
-                  financial_admission=False, global_books_tax_acceptance=False,
-                  native_stake_asset_blocks=asset_blocks, native_stake_asset_fact_rows=asset_rows,
-                  native_stake_asset_facts_sha256=asset_hash, stake_asset_tax_classification='unclassified',
-                  capture_sha256=sha(root / 'capture.private.json'), native_proof_sha256=sha(receipt.parent / 'native-proof.private.json'), native_helper_sha256=sha(binary))
+    result = part(receipt.parent, c.heights, next_header, closed)
     with receipt.open('x') as stream:
         json.dump(result, stream, indent=2, sort_keys=True)
     return result
@@ -231,12 +253,13 @@ if __name__ == '__main__':
     parser.add_argument('--opening-checkpoint', type=Path)
     parser.add_argument('--opening-manifest', type=Path)
     parser.add_argument('--resume-opening', action='store_true')
+    parser.add_argument('--savepoint-every', type=int, default=0)
     parser.add_argument('--validator-history', type=Path)
     parser.add_argument('--validator-history-sha256', default='')
     parser.add_argument('--evidence-cache', type=Path)
     parser.add_argument('--evidence-capture-sha256', default='')
     a = parser.parse_args()
     os.umask(0o077)
-    r = verify(a.directory, a.native_helper, a.receipt, a.first, a.through, a.opening_checkpoint, a.opening_manifest, a.resume_opening,
+    r = verify(a.directory, a.native_helper, a.receipt, a.first, a.through, a.opening_checkpoint, a.opening_manifest, a.resume_opening, a.savepoint_every,
                a.validator_history, a.validator_history_sha256, a.evidence_cache, a.evidence_capture_sha256)
     print(json.dumps({k: r[k] for k in ('first', 'through', 'heights', 'transactions', 'fast_forward', 'financial_admission')}))

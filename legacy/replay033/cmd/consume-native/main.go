@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io/ioutil"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -686,17 +687,20 @@ func run() {
 	need(*phaseBase >= 0 && (*phaseBase == 0 || *checkpoint != ""), "progress phase base requires a normal checkpoint opening")
 	need(*cache != "" && *receipt != "", "private paths required")
 	phase, committed := newNative(), newNative()
+	var workingDB dbm.DB
 	if *checkpoint != "" {
 		copyCheckpoint(*checkpoint, *working)
 		db, e := dbm.NewGoLevelDBWithOpts("application", *working, &opt.Options{BlockCacheCapacity: 8 << 20, WriteBuffer: 4 << 20, OpenFilesCacheCapacity: 2000, Filter: filter.NewBloomFilter(10)})
 		must(e)
 		defer db.Close()
+		workingDB = db
 		committed = nativeDB(db)
 	} else if *working != "" {
 		must(os.Mkdir(*working, 0700))
 		db, e := dbm.NewGoLevelDBWithOpts("application", *working, &opt.Options{BlockCacheCapacity: 8 << 20, WriteBuffer: 4 << 20, OpenFilesCacheCapacity: 2000, Filter: filter.NewBloomFilter(10)})
 		must(e)
 		defer db.Close()
+		workingDB = db
 		committed = nativeDB(db)
 		need(committed.cms.LastCommitID().Version == 0 && len(committed.cms.LastCommitID().Hash) == 0, "genuine genesis requires an empty working store")
 	}
@@ -704,6 +708,9 @@ func run() {
 	var height, first, through, phases, transactions int64
 	var reductions *os.File
 	var assetFactRows, assetBlocks int64
+	proof := func(assetDigest string) map[string]interface{} {
+		return map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "progress_phase_base": *phaseBase, "resume_opening": *resumeOpening, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}
+	}
 	verifiedHeaders := map[int64][]byte{}
 	defer func() {
 		if reductions != nil {
@@ -797,6 +804,12 @@ func run() {
 				fmt.Printf("bounded_native_verified_height=%d typed_phases=%d\n", height, *phaseBase+phases)
 			}
 			transactions += int64(len(r.History.Transactions))
+		case "savepoint":
+			// A receipt and a complete copy of the committed state for the
+			// heights proved so far, so a later run can open from it after a
+			// kill. It changes no progress line and no final receipt.
+			need(anchor && r.Height == height && height < through && workingDB != nil, "savepoint outside a committed working height")
+			savepoint(workingDB, *working, filepath.Dir(*receipt), height, reductions, proof)
 		case "bounded_end":
 			need(anchor && height == through && r.Height == height, "incomplete bounded native proof")
 			done = true
@@ -829,8 +842,57 @@ func run() {
 	f, e := os.OpenFile(*receipt, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	must(e)
 	defer f.Close()
-	must(json.NewEncoder(f).Encode(map[string]interface{}{"native_stake_asset_fact_rows": assetFactRows, "native_stake_asset_blocks": assetBlocks, "native_stake_asset_facts_sha256": assetDigest, "supplemental_validator_history_sha256": *validatorHistoryPin, "supplemental_evidence_capture_sha256": *evidenceCapturePin, "schema": "native033-independent-bounded-financial-v1", "first": first, "through": height, "native_iavl_heights": height - first + 1, "normal_opening_height": first - 1, "typed_financial_phases": phases, "progress_phase_base": *phaseBase, "resume_opening": *resumeOpening, "transactions": transactions, "source_whole_complete": false, "financial_admission": false, "global_books_tax_acceptance": false}))
+	must(json.NewEncoder(f).Encode(proof(assetDigest)))
 	must(f.Sync())
+}
+func savepoint(db dbm.DB, working, base string, height int64, reductions *os.File, proof func(string) map[string]interface{}) {
+	root := filepath.Join(base, "savepoints")
+	if e := os.Mkdir(root, 0700); e != nil {
+		need(os.IsExist(e), "savepoint folder unavailable")
+	}
+	final := filepath.Join(root, fmt.Sprint(height))
+	partial := final + ".partial"
+	home := filepath.Join(partial, "native-home")
+	must(os.Mkdir(partial, 0700))
+	must(os.Mkdir(home, 0700))
+	members, e := ioutil.ReadDir(working)
+	must(e)
+	for _, member := range members {
+		if member.Mode().IsRegular() {
+			raw, e := ioutil.ReadFile(filepath.Join(working, member.Name()))
+			must(e)
+			must(ioutil.WriteFile(filepath.Join(home, member.Name()), raw, 0600))
+		}
+	}
+	out, e := dbm.NewGoLevelDB("application", home)
+	must(e)
+	it := db.Iterator(nil, nil)
+	batch, pending := out.NewBatch(), 0
+	for ; it.Valid(); it.Next() {
+		batch.Set(append([]byte(nil), it.Key()...), append([]byte(nil), it.Value()...))
+		if pending++; pending == 4096 {
+			batch.Write()
+			batch, pending = out.NewBatch(), 0
+		}
+	}
+	it.Close()
+	batch.WriteSync()
+	out.Close()
+	digest := ""
+	if reductions != nil {
+		must(reductions.Sync())
+		raw, e := ioutil.ReadFile(reductions.Name())
+		must(e)
+		sum := sha256.Sum256(raw)
+		digest = hex.EncodeToString(sum[:])
+		must(ioutil.WriteFile(filepath.Join(partial, "native-stake-reductions.private.jsonl"), raw, 0600))
+	}
+	f, e := os.OpenFile(filepath.Join(partial, "native-proof.private.json"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	must(e)
+	must(json.NewEncoder(f).Encode(proof(digest)))
+	must(f.Sync())
+	must(f.Close())
+	must(os.Rename(partial, final))
 }
 func main() {
 	defer func() {
