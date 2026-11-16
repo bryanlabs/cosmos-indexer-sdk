@@ -280,19 +280,29 @@ func hashStored(ctx context.Context, conn *sql.Conn, m Manifest, r *StagingRecei
 // buildReceipt recomputes the whole receipt from the database and the sealed
 // files. It writes nothing to the database: the session is read-only.
 func buildReceipt(m Manifest, rederive bool) (StagingReceipt, error) {
+	r, export, e := receiptHeader(m, rederive)
+	if e != nil {
+		return r, e
+	}
+	return fillReceipt(m, r, export, rederive)
+}
+
+// receiptHeader names every part and its pinned seal and source digests. It
+// reads no database.
+func receiptHeader(m Manifest, rederive bool) (StagingReceipt, *replayrecords.Height, error) {
 	r := StagingReceipt{Schema: receiptSchema, Chain: chainID, First: 1, Last: m.Last, CanonicalThrough: m.Last, CanonicalHeight: canonicalHeight, CompleteChain: m.Last == canonicalHeight && m.Tail != nil, ManifestSHA: fileSHA(manifestPath), SourceCommit: m.SourceCommit, RowFormat: rowFormat,
 		ProjectionNote: "equal to the sha256 of the loader export's ndjson file of the same table; genesis_files there keeps loaded_at"}
 	if pins(m) != nil {
-		return r, why("manifest layout or a pinned file changed")
+		return r, nil, why("manifest layout or a pinned file changed")
 	}
 	for _, c := range m.Components {
 		seal, e := sealOf(m, c)
 		if e != nil {
-			return r, why("component %d has no pinned seal", c.Last)
+			return r, nil, why("component %d has no pinned seal", c.Last)
 		}
 		raw, e := os.ReadFile(seal)
 		if e != nil {
-			return r, refused
+			return r, nil, refused
 		}
 		r.Components = append(r.Components, receiptComponent{First: c.First, Last: c.Last, SealPath: seal, SealSHA: m.Pins[seal], SealNamesSource: strings.Contains(string(raw), c.RecordsSHA), RecordsSHA: c.RecordsSHA, StatusSHA: m.Pins[c.Status], CacheManifestSHA: m.Pins[c.CacheManifest], Rederived: rederive})
 	}
@@ -300,7 +310,7 @@ func buildReceipt(m Manifest, rederive bool) (StagingReceipt, error) {
 	if x := m.CanonicalExport; x != nil {
 		var e error
 		if export, e = loadExport(x); e != nil {
-			return r, why("canonical export records")
+			return r, nil, why("canonical export records")
 		}
 		r.Payout = &receiptPayout{Height: canonicalHeight, ExportSHA: x.Proof.SHA256, ExportPath: x.Records, Rederived: rederive}
 	}
@@ -308,31 +318,46 @@ func buildReceipt(m Manifest, rederive bool) (StagingReceipt, error) {
 		r.Last = t.Last
 		r.Tail = &receiptTail{First: t.First, Last: t.Last, SealPath: t.Seal, SealSHA: m.Pins[t.Seal], CacheManifestSHA: m.Pins[t.CacheManifest], Rederived: rederive}
 	}
-	ctx := context.Background()
+	return r, export, nil
+}
+
+// openReadOnly opens the staging database for a pass that cannot write, runs
+// the whole-database checks and confirms the stored genesis is the pinned one.
+func openReadOnly(ctx context.Context, m Manifest) (*rehearsalDestination, *genesis.File, error) {
 	d, e := openStagingDestination(ctx, dsn(importerRole), database, true)
 	if e != nil {
-		return r, why("destination identity, confinement or lock")
+		return nil, nil, why("destination identity, confinement or lock")
 	}
-	defer d.close()
+	fail := func(e error) (*rehearsalDestination, *genesis.File, error) { d.close(); return nil, nil, e }
 	if _, e = d.conn.ExecContext(ctx, `SET default_transaction_read_only=on`); e != nil {
-		return r, refused
+		return fail(refused)
 	}
 	if _, e = verifyStaged(ctx, d.conn, m); e != nil {
-		return r, e
+		return fail(e)
 	}
 	gf, e := os.Open(m.Genesis)
 	if e != nil {
-		return r, refused
+		return fail(refused)
 	}
 	opening, e := genesis.Read(gf)
 	gf.Close()
 	if e != nil || opening.SHA256 != m.Pins[m.Genesis] {
-		return r, why("genuine genesis")
+		return fail(why("genuine genesis"))
 	}
 	var stored string
 	if d.conn.QueryRowContext(ctx, `SELECT sha256 FROM legacy.genesis_files WHERE chain_id=$1`, chainID).Scan(&stored) != nil || stored != opening.SHA256 {
-		return r, why("stored genesis is not the pinned genesis")
+		return fail(why("stored genesis is not the pinned genesis"))
 	}
+	return d, opening, nil
+}
+
+func fillReceipt(m Manifest, r StagingReceipt, export *replayrecords.Height, rederive bool) (StagingReceipt, error) {
+	ctx := context.Background()
+	d, opening, e := openReadOnly(ctx, m)
+	if e != nil {
+		return r, e
+	}
+	defer d.close()
 	r.Genesis.SHA256 = opening.SHA256
 	if e = hashStored(ctx, d.conn, m, &r); e != nil {
 		return r, e
@@ -382,14 +407,20 @@ func buildReceipt(m Manifest, rederive bool) (StagingReceipt, error) {
 	return r, nil
 }
 
-func writeReceipt(m Manifest, out string) error {
+func writeReceipt(m Manifest, out, entries string) error {
 	if !filepath.IsAbs(out) {
 		return refused
 	}
 	if _, e := os.Lstat(out); e == nil {
 		return why("receipt path exists; a receipt is never overwritten")
 	}
-	r, e := buildReceipt(m, true)
+	var r StagingReceipt
+	var e error
+	if entries != "" {
+		r, e = assembleReceipt(m, entries)
+	} else {
+		r, e = buildReceipt(m, true)
+	}
 	if e != nil {
 		return e
 	}

@@ -407,7 +407,7 @@ func snapshot(out string) error {
 var manifestPath string
 
 func main() {
-	mode := flag.String("mode", "", "prepare/import/add/extend-manifest/fingerprint/receipt/verify-receipt/snapshot/refuse-retry")
+	mode := flag.String("mode", "", "prepare/import/add/extend-manifest/fingerprint/part-entry/receipt/verify-receipt/snapshot/refuse-retry")
 	mp := flag.String("manifest", "", "sealed pinned private manifest")
 	out := flag.String("out", "", "new retained receipt path")
 	name := flag.String("database", database, "private staging database, legacy_replay_rehearsal_hub2_SUFFIX")
@@ -419,6 +419,7 @@ func main() {
 	tailSeal := flag.String("tail-seal", "", "extend-manifest at the canonical end: the tail's own acceptance receipt, when one exists")
 	receiptPath := flag.String("receipt", "", "verify-receipt: the staging receipt to recompute")
 	hashesOnly := flag.Bool("hashes-only", false, "verify-receipt: compare stored row hashes and pins only, skip reading the sealed files again")
+	entries := flag.String("entries", "", "part-entry: directory of part entries; receipt: build from these entries and one database pass")
 	through := flag.Int64("through", 0, "fingerprint: only heights up to this one, 0 for all")
 	flag.Parse()
 	if guardTarget(*name, *p) != nil || (*tailCache == "") != (*tailManifest == "") {
@@ -449,12 +450,14 @@ func main() {
 		} else {
 			e = extendManifest(m, filepath.Clean(*component), *tailCache, *tailManifest, *tailSeal, *out)
 		}
-	case "receipt", "verify-receipt":
+	case "receipt", "verify-receipt", "part-entry":
 		var m Manifest
 		if readJSON(*mp, &m) != nil {
 			e = refused
+		} else if *mode == "part-entry" {
+			e = writeEntries(m, *entries)
 		} else if *mode == "receipt" {
-			e = writeReceipt(m, *out)
+			e = writeReceipt(m, *out, *entries)
 		} else {
 			e = verifyReceipt(m, *receiptPath, *hashesOnly)
 		}

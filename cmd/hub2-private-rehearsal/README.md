@@ -32,6 +32,7 @@ Any prefix is valid: 7 components (1,400,000), 10 (2,000,000), all 15.
 | `import` | the same, but refuses a database that already holds rows |
 | `fingerprint` | hashes all 14 legacy tables in key order, optionally `-through` a height |
 | `receipt` | reads every part again from its sealed files, then writes the staging receipt |
+| `part-entry` | for each listed part with no entry yet: reads it again from its sealed files, hashes its stored rows, writes its entry |
 | `verify-receipt` | recomputes the receipt and refuses on any difference |
 | `snapshot`, `refuse-retry` | the 1.4M rehearsal's retry proof, unchanged |
 
@@ -100,6 +101,28 @@ clock time or database name, so it is reproducible byte for byte.
 `verify-receipt` does the same work and compares; `-hashes-only` skips
 reading the sealed files again. Payout rows are phase 4 with transaction
 index 0 and message index 0; the receipt states it and refuses otherwise.
+
+### Built part by part
+
+Reading every part again at the end holds the staging database for hours, so
+the receipt is normally built as parts arrive:
+
+```sh
+hub2-private-rehearsal -mode part-entry -database NAME -port PORT \
+  -manifest MANIFEST.json -entries /abs/ENTRIES_DIR
+hub2-private-rehearsal -mode receipt -entries /abs/ENTRIES_DIR -database NAME \
+  -port PORT -manifest MANIFEST.json -out /abs/NEW.receipt.json
+```
+
+`part-entry` runs after each `add`. For every listed part without an entry
+file it reads that part again from its sealed files, requires it to equal the
+stored rows, hashes those rows and writes `component-LAST.entry.json` (also
+`genesis.entry.json` once, the restart payout inside the last component's
+entry, and `tail.entry.json`). Entries are mode 0600 and never overwritten.
+`receipt -entries` then hashes the database once and requires every part's
+rows, seal and source digests to equal its entry. The result is the same
+bytes as a receipt built in one run. `verify-receipt` never reads entries: it
+recomputes everything from the database and the sealed files.
 
 ## Why one at a time equals one run
 
