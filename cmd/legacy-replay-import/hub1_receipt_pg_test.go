@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/DefiantLabs/cosmos-indexer/legacy/genesis"
+	"github.com/DefiantLabs/cosmos-indexer/legacy/hub2promotion"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/schema/pgtest"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
@@ -91,6 +93,18 @@ func TestHub1PGStagingReceiptBindsStoredRowsToTheSealedPart(t *testing.T) {
 	require.Equal(t, got.Projection["block_events"], c.Tables["block_events"])
 	require.Nil(t, got.Payout)
 	require.Nil(t, got.Tail)
+
+	// The loader's own export of this database must give, table for table,
+	// the row count and sha256 the receipt states. This is the link the
+	// finalizer relies on, checked here with both tools on one database.
+	source, err := db.Owner.DB()
+	require.NoError(t, err)
+	index, _, err := hub2promotion.ExportStaging(context.Background(), source, filepath.Join(dir, "loader-export"), "cosmoshub-1")
+	require.NoError(t, err)
+	require.Len(t, index.Tables, len(got.Projection))
+	for _, table := range index.Tables {
+		require.Equal(t, hub1TableHash{Rows: table.Rows, SHA256: table.File.SHA256}, got.Projection[table.Table], table.Table)
+	}
 
 	require.Error(t, hub1Invoke("--hub1-parts", parts, "--rehearsal-db", name, "--hub1-receipt", out), "a receipt is never overwritten")
 	require.NoError(t, hub1Invoke("--hub1-parts", parts, "--rehearsal-db", name, "--hub1-verify-receipt", out))
