@@ -18,6 +18,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/cometbft/cometbft/crypto/tmhash"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
 // Component is the name the spendable balance check has in
@@ -42,8 +45,31 @@ var liquidRule = map[string][2]int{
 	"redelegate":         {0, 0},
 	"gov_deposit":        {-1, 0},
 	"gov_deposit_refund": {0, 1},
+	"gov_deposit_burn":   {0, 0},
+	"expense":            {-1, 0},
 	"unbonding_complete": {0, 1},
 }
+
+// On the first two chains governance held deposits in an ordinary account
+// and sent burned deposits to a second one. Both are accounts of the genesis
+// files, so a deposit, its refund and its burn move them too. The value is
+// what the row does to the deposit account and to the burn account.
+var depositRule = map[string][2]int{
+	"gov_deposit":        {1, 0},
+	"gov_deposit_refund": {-1, 0},
+	"gov_deposit_burn":   {-1, 1},
+}
+
+func depositAccounts(chain string) (held, burned string, ok bool) {
+	if chain != "cosmoshub-1" && chain != "cosmoshub-2" {
+		return "", "", false
+	}
+	return sdk.AccAddress(tmhash.SumTruncated([]byte("govDepositedCoins"))).String(), sdk.AccAddress(tmhash.SumTruncated([]byte("govBurnedDepositCoins"))).String(), true
+}
+
+// PayoutSource is the amount source of a row the state export of a chain
+// paid into a balance with no transaction.
+const PayoutSource = "export_payout"
 
 // Result is the outcome of a close. Lines hold addresses and are for
 // recording only; everything else is a count or a total.
@@ -57,6 +83,8 @@ type Result struct {
 	HeightsStored int64
 	Complete      bool
 	Rows, Fees    int64
+	// Payouts counts the stored rows the state export paid into balances.
+	Payouts int64
 	// OtherDenomRows counts stored rows and fees in a denomination other
 	// than uatom. They are outside this check.
 	OtherDenomRows int64
@@ -161,9 +189,8 @@ func (b book) move(address string, sign int, amount *big.Int, kind string) {
 }
 
 // Close runs the check for one chain against the genesis file of the chain
-// after it. It supports a chain whose state export paid nothing into
-// balances; one whose export paid out pending rewards needs those payout
-// rows stored first.
+// after it. A chain whose state export paid pending rewards into balances
+// is closed only once those payout rows are stored at its export height.
 func Close(ctx context.Context, db *sql.DB, chain string) (*Result, error) {
 	return CloseWith(ctx, db, chain, nil)
 }
@@ -195,10 +222,19 @@ func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisCha
 	if !through.Valid {
 		return nil, fmt.Errorf("the chain has no export height")
 	}
-	if paid {
+	out.Through = through.Int64
+	var payouts, misplaced int64
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE height = $2), count(*) FILTER (WHERE height <> $2)
+FROM legacy.taxable_events WHERE chain_id = $1 AND amount_source = $3`, chain, out.Through, PayoutSource).Scan(&payouts, &misplaced); err != nil {
+		return nil, err
+	}
+	if paid && payouts == 0 {
 		return nil, fmt.Errorf("the export of this chain paid pending rewards into balances, so its close needs those payout rows first")
 	}
-	out.Through = through.Int64
+	if misplaced != 0 || (!paid && payouts != 0) {
+		return nil, fmt.Errorf("export payout rows are stored where this chain's export paid nothing")
+	}
+	out.Payouts = payouts
 	if err := db.QueryRowContext(ctx, `SELECT chain_id FROM legacy.eras WHERE era = $1`, era+1).Scan(&out.Next); err != nil {
 		return nil, fmt.Errorf("the chain after this one is not known")
 	}
@@ -260,6 +296,7 @@ func CloseWith(ctx context.Context, db *sql.DB, chain string, change *GenesisCha
 		}
 	}
 
+	held, burned, tracked := depositAccounts(chain)
 	rows, err := db.QueryContext(ctx, `SELECT category, amount, denom, from_addr, to_addr, detail FROM legacy.taxable_events
 WHERE chain_id = $1 AND height <= $2`, chain, out.Through)
 	if err != nil {
@@ -292,22 +329,27 @@ WHERE chain_id = $1 AND height <= $2`, chain, out.Through)
 			return nil, fmt.Errorf("a stored amount is not a whole number")
 		}
 		out.Rows++
-		// A reward names the delegator who earned it. The coins went to the
-		// address the row records as paid, when it records one.
-		if category == "reward" && detail != "" {
+		// A reward names the delegator who earned it and a commission the
+		// validator's own account. The coins went to the address the row
+		// records as paid, when it records one.
+		if (category == "reward" || category == "commission") && detail != "" {
 			var paid struct {
 				To string `json:"paid_to"`
 			}
 			if json.Unmarshal([]byte(detail), &paid) != nil || paid.To == "" {
 				rows.Close()
-				return nil, fmt.Errorf("a reward row carries a detail that names no paid address")
+				return nil, fmt.Errorf("a %s row carries a detail that names no paid address", category)
 			}
-			accounts.at(to).touched["reward paid to another address"] = true
-			accounts.move(paid.To, 1, value, "reward of another address")
+			accounts.at(to).touched[category+" paid to another address"] = true
+			accounts.move(paid.To, 1, value, category+" of another address")
 			continue
 		}
 		accounts.move(from, rule[0], value, category)
 		accounts.move(to, rule[1], value, category)
+		if deposit, moves := depositRule[category]; moves && tracked {
+			accounts.move(held, deposit[0], value, category)
+			accounts.move(burned, deposit[1], value, category)
+		}
 	}
 	if err := finish(rows); err != nil {
 		return nil, err

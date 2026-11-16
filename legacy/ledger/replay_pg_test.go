@@ -11,6 +11,11 @@ import (
 )
 
 func TestReplayPGSourcesRoundtripConfinedAndImmutable(t *testing.T) {
+	for _, chain := range []string{"cosmoshub-1", "cosmoshub-2"} {
+		t.Run(chain, func(t *testing.T) { replaySourcesRoundtrip(t, chain) })
+	}
+}
+func replaySourcesRoundtrip(t *testing.T, chain string) {
 	db := pgtest.OpenRetained(t)
 	findings, e := schema.Confined(db.Importer)
 	require.NoError(t, e)
@@ -18,7 +23,7 @@ func TestReplayPGSourcesRoundtripConfinedAndImmutable(t *testing.T) {
 	before := pgtest.Snapshot(t, db.Owner, "public")
 	conn := importer(t, db)
 	ctx := context.Background()
-	b := sample("cosmoshub-2", 9)
+	b := sample(chain, 9)
 	b.Rows[1].Source = "state"
 	b.Rows[2].Source = "state"
 	b.Rows = append(b.Rows, ledger.Row{Phase: ledger.PhaseExport, SubIndex: 0, Category: "commission", Amount: "13", Denom: "uatom", To: "owner", Validator: "validator", Trigger: "zero_height_export", Detail: `{"paid_to":"destination"}`, Source: "export_payout"})

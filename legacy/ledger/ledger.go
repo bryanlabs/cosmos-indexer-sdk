@@ -87,7 +87,7 @@ var (
 	upperHash   = regexp.MustCompile(`^[0-9A-F]{64}$`)
 	wholeNumber = regexp.MustCompile(`^[0-9]{1,78}$`)
 	// importerSources are the sources this writer can own. State and export
-	// sources are admitted and compared only for Hub2 replay. Later Hub3 state
+	// sources are admitted and compared only for Hub1 and Hub2 replay. Later Hub3 state
 	// rows and window allocations remain outside this writer's ownership.
 	importerSources = map[string]bool{"message": true, "event": true, "tag": true, "state": true, "export_payout": true}
 )
@@ -150,8 +150,8 @@ func (b *Block) prepare() error {
 		default:
 			return fmt.Errorf("legacy tax row phase is not one the importer writes")
 		}
-		if (row.Source == "state" || row.Source == "export_payout" || row.Phase == PhaseExport) && b.Chain != "cosmoshub-2" {
-			return fmt.Errorf("replay sources and export phase require Hub2")
+		if (row.Source == "state" || row.Source == "export_payout" || row.Phase == PhaseExport) && b.Chain != "cosmoshub-1" && b.Chain != "cosmoshub-2" {
+			return fmt.Errorf("replay sources and export phase require Hub1 or Hub2")
 		}
 		if (row.Phase == PhaseExport) != (row.Source == "export_payout") {
 			return fmt.Errorf("export payout source requires export phase exclusively")
@@ -280,7 +280,7 @@ WHERE chain_id = $1 AND height = ANY($2::bigint[]) ORDER BY height, tx_index`, c
 	}
 	rows, err = db.QueryContext(ctx, `SELECT height, phase, tx_index, msg_index, sub_index, category, amount, denom, asset, from_addr, to_addr,
 validator_address, reward_trigger, detail, tx_hash, amount_source FROM legacy.taxable_events
-WHERE chain_id = $1 AND height = ANY($2::bigint[]) AND (amount_source IN ('message', 'event', 'tag') OR (chain_id = 'cosmoshub-2' AND amount_source IN ('state', 'export_payout')))
+WHERE chain_id = $1 AND height = ANY($2::bigint[]) AND (amount_source IN ('message', 'event', 'tag') OR (chain_id IN ('cosmoshub-1', 'cosmoshub-2') AND amount_source IN ('state', 'export_payout')))
 ORDER BY height, phase, tx_index, msg_index, sub_index`, chain, heights)
 	if err != nil {
 		return nil, err

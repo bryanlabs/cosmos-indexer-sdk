@@ -327,3 +327,39 @@ func ActionName(chain, aminoName string) string {
 	}
 	return actionNames[aminoName]
 }
+
+// ShareValuedIdentity returns who a Hub 1 undelegation or redelegation was
+// signed by and which validators it names, with no amount: the message
+// carried shares, and only recorded state says what they were worth. It
+// returns nil for any other message.
+func ShareValuedIdentity(m Message) sdk.Msg {
+	if m.Derived != nil || m.Issue != shareValuedIssue {
+		return nil
+	}
+	address := func(num uint64, prefix string) string {
+		for _, f := range m.Fields {
+			if f.Number == num && len(f.Value) == 20 {
+				encoded, err := sdk.Bech32ifyAddressBytes(prefix, f.Value)
+				if err == nil {
+					return encoded
+				}
+			}
+		}
+		return ""
+	}
+	delegator, source := address(1, "cosmos"), address(2, "cosmosvaloper")
+	if delegator == "" || source == "" {
+		return nil
+	}
+	switch m.AminoName {
+	case "cosmos-sdk/MsgUndelegate":
+		return &staking.MsgUndelegate{DelegatorAddress: delegator, ValidatorAddress: source}
+	case "cosmos-sdk/MsgBeginRedelegate":
+		destination := address(3, "cosmosvaloper")
+		if destination == "" {
+			return nil
+		}
+		return &staking.MsgBeginRedelegate{DelegatorAddress: delegator, ValidatorSrcAddress: source, ValidatorDstAddress: destination}
+	}
+	return nil
+}

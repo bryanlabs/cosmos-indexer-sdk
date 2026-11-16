@@ -147,7 +147,85 @@ VALUES ('cosmoshub-3', 2, 3, 0, 0, 9, 'swap', '5', 'uatom', now(), 'state')`)
 	_, err = books.Close(ctx, conn, "cosmoshub-3")
 	require.ErrorContains(t, err, "no rule for")
 
-	// A chain whose export paid rewards cannot be closed this way.
+	// A chain whose export paid rewards is not closed without its payout rows.
 	_, err = books.Close(ctx, conn, "cosmoshub-2")
 	require.ErrorContains(t, err, "paid pending rewards")
+}
+
+// The first chain paid every pending reward and commission into balances
+// when it was exported, with no transaction, and held governance deposits in
+// ordinary accounts. Its close refuses until the payout rows are stored, and
+// then every account closes, the two deposit accounts included.
+func TestCloseOfAChainWhoseExportPaidRewards(t *testing.T) {
+	db := pgtest.Open(t)
+	ctx := context.Background()
+	conn, err := db.Importer.DB()
+	require.NoError(t, err)
+	exec := func(statement string, args ...any) {
+		t.Helper()
+		require.NoError(t, db.Owner.Exec(statement, args...).Error)
+	}
+	held, burned := books.DepositAccounts(t, "cosmoshub-1")
+	exec(`UPDATE legacy.eras SET export_height = 2 WHERE chain_id = 'cosmoshub-1'`)
+	for _, chain := range []string{"cosmoshub-1", "cosmoshub-2"} {
+		exec(`INSERT INTO legacy.genesis_files (chain_id, sha256, genesis_time, accounts, delegations, unbonding_entries, validators, withdraw_addresses, genesis_txs)
+VALUES (?, ?, now(), 0, 0, 0, 0, 0, 0)`, chain, strings.Repeat("0a", 32))
+	}
+	account := func(chain, address string, liquid int) {
+		t.Helper()
+		var position int
+		require.NoError(t, db.Owner.Raw(`SELECT count(*) FROM legacy.genesis_accounts WHERE chain_id = ?`, chain).Scan(&position).Error)
+		exec(`INSERT INTO legacy.genesis_accounts (chain_id, address, file_position, account_number, sequence, kind, file_coins, liquid, delegated, unbonding)
+VALUES (?, ?, ?, ?, 0, 'base', ?, ?, 0, 0)`, chain, address, position, position, liquid, liquid)
+	}
+	account("cosmoshub-1", "alice", 1000)
+	account("cosmoshub-1", "bob", 500)
+	account("cosmoshub-2", "alice", 1000-2-100-64-50+20+11)
+	account("cosmoshub-2", "bob", 500+13+5)
+	account("cosmoshub-2", "carol", 4)
+	account("cosmoshub-2", held, 64+50-20-50)
+	account("cosmoshub-2", burned, 50)
+
+	hash := strings.Repeat("0A", 32)
+	row := func(phase, sub int, category, amount, from, to, detail, source string) ledger.Row {
+		r := ledger.Row{Phase: phase, SubIndex: sub, Category: category, Amount: amount, Denom: "uatom", From: from, To: to, Detail: detail, Source: source}
+		if phase == ledger.PhaseTx {
+			r.TxHash = hash
+		}
+		return r
+	}
+	when := time.Date(2019, 3, 13, 23, 0, 0, 0, time.UTC)
+	fee := ledger.Inclusion{Hash: hash, CodeEvidence: "explicit", Fee: "2uatom", FeePayer: "alice", FeeCharged: true, FeeEvidence: "the transaction succeeded", Signers: []string{"alice"}, Raw: []byte{1}}
+	first := ledger.Block{Chain: "cosmoshub-1", Height: 1, Time: when, Hash: strings.Repeat("AB", 32), Proposer: "AA", Inclusions: []ledger.Inclusion{fee},
+		Rows: []ledger.Row{
+			row(ledger.PhaseTx, 0, "delegate", "100", "alice", "", "", "state"),
+			row(ledger.PhaseTx, 1, "gov_deposit", "64", "alice", "", "", "state"),
+			row(ledger.PhaseTx, 2, "gov_deposit", "50", "alice", "", "", "state"),
+			row(ledger.PhaseTx, 3, "commission", "13", "", "alice", `{"paid_to":"bob"}`, "state"),
+			row(ledger.PhaseEnd, 0, "gov_deposit_refund", "20", "", "alice", "", "state"),
+			row(ledger.PhaseEnd, 1, "gov_deposit_burn", "50", "alice", "", "", "state"),
+		}}
+	last := ledger.Block{Chain: "cosmoshub-1", Height: 2, Time: when.Add(time.Second), Hash: strings.Repeat("CD", 32), Proposer: "AA"}
+	_, err = ledger.Write(ctx, conn, []ledger.Block{first, last})
+	require.NoError(t, err)
+	_, err = books.Close(ctx, conn, "cosmoshub-1")
+	require.ErrorContains(t, err, "paid pending rewards")
+
+	exec(`INSERT INTO legacy.taxable_events (chain_id, height, phase, tx_index, msg_index, sub_index, category, amount, denom, to_addr, detail, "timestamp", amount_source) VALUES
+('cosmoshub-1', 2, 4, 0, 0, 0, 'reward', '11', 'uatom', 'alice', '', now(), 'export_payout'),
+('cosmoshub-1', 2, 4, 0, 0, 1, 'reward', '4', 'uatom', 'alice', '{"paid_to":"carol"}', now(), 'export_payout'),
+('cosmoshub-1', 2, 4, 0, 0, 2, 'commission', '5', 'uatom', 'bob', '', now(), 'export_payout')`)
+	result, err := books.Close(ctx, conn, "cosmoshub-1")
+	require.NoError(t, err)
+	require.True(t, result.Complete)
+	require.Equal(t, int64(3), result.Payouts)
+	require.Equal(t, 5, result.Addresses)
+	require.Equal(t, 5, result.Closed)
+	require.Zero(t, result.Open)
+	require.Equal(t, 1, result.Touched["commission paid to another address"])
+
+	// A payout stored anywhere but the export height stops the check.
+	exec(`UPDATE legacy.taxable_events SET height = 1, phase = 3 WHERE chain_id = 'cosmoshub-1' AND amount_source = 'export_payout' AND sub_index = 2 AND height = 2`)
+	_, err = books.Close(ctx, conn, "cosmoshub-1")
+	require.ErrorContains(t, err, "export payout rows")
 }

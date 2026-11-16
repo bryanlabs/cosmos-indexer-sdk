@@ -42,6 +42,9 @@ type Proof struct {
 	Export                     bool                 `json:"zero_height_export,omitempty"`
 	ResultDifferencesSHA256    string               `json:"result_differences_sha256,omitempty"`
 	ResultDifferencesAdmission *DifferenceAdmission `json:"result_differences_admission,omitempty"`
+	// Records and RawBytes pin a Hub 1 closed stream beside its digest.
+	Records  int64 `json:"records,omitempty"`
+	RawBytes int64 `json:"raw_bytes,omitempty"`
 }
 type Height struct {
 	Number  int64
@@ -76,10 +79,7 @@ func Read(r io.Reader, p Proof) ([]Height, error) {
 	return out, nil
 }
 func scan(r io.Reader, p Proof, visit func(Height) error) error {
-	if p.Chain != "cosmoshub-2" || p.Release != Release034 || p.From < 1 || p.Through < p.From || p.VerifiedThrough < p.Through || len(p.SHA256) != 64 || (p.Export && p.From != p.Through) {
-		return invalid
-	}
-	if _, e := hex.DecodeString(p.SHA256); e != nil {
+	if p.Chain != "cosmoshub-2" || p.Release != Release034 || p.Records != 0 || p.RawBytes != 0 || !p.bounded() {
 		return invalid
 	}
 	hash := sha256.New()
@@ -119,69 +119,8 @@ func scan(r io.Reader, p Proof, visit func(Height) error) error {
 		if dec.Decode(&extra) != io.EOF {
 			return invalid
 		}
-		if x.Height != current.Number || x.Height > p.Through || (x.Status != "committed" && x.Status != "aborted" && !(p.Export && x.Status == "exported")) {
+		if !admit(x, p, current.Number, &begin, &end) {
 			return invalid
-		}
-		if p.Export && (x.Phase != "zero_height_export" || x.Status != "exported" || x.Tx != -1 || x.Message != -1) {
-			return invalid
-		}
-		switch x.Kind {
-		case "movement", "principal":
-			amount, ok := new(big.Int).SetString(x.Amount, 10)
-			zeroAnteFee := !p.Export && x.Kind == "movement" && x.Phase == "ante" && x.Label == "ante_fee" && x.Amount == "0"
-			if !ok || (amount.Sign() == 0 && x.Kind != "principal" && !zeroAnteFee) || amount.String() != x.Amount || x.Address == "" || (x.Denom == "" && !zeroAnteFee) || x.Code != 0 {
-				return invalid
-			}
-			if x.Kind == "principal" && (p.Export || x.Phase != "message" || amount.Sign() < 0 || x.Validator == "" || x.Delegator == "") {
-				return invalid
-			}
-			if !p.Export && x.Phase != "ante" && x.Phase != "message" && x.Phase != "begin_block" && x.Phase != "end_block" {
-				return invalid
-			}
-		case "accounting":
-			if x.Address != "" || x.Amount != "" || x.Denom != "" {
-				return invalid
-			}
-			if x.Phase == "begin_block" && x.Status == "committed" {
-				begin++
-			}
-			if x.Phase == "end_block" && x.Status == "committed" {
-				end++
-			}
-			if p.Export {
-				begin++
-				break
-			}
-			if x.Phase != "begin_block" && x.Phase != "end_block" && x.Phase != "message" && x.Phase != "ante" && x.Phase != "transaction" {
-				return invalid
-			}
-		case "height_completed":
-			if p.Export || x.Status != "committed" || x.Phase != "block" || x.Tx != -1 || x.Message != -1 || x.Code != 0 || begin != 1 || end != 1 {
-				return invalid
-			}
-		case "export_completed":
-			if !p.Export || x.Code != 0 || begin < 1 {
-				return invalid
-			}
-		default:
-			return invalid
-		}
-		// Position checks apply even to aborted evidence.
-		if !p.Export {
-			switch x.Phase {
-			case "ante", "transaction":
-				if x.Tx < 0 || x.Message != -1 {
-					return invalid
-				}
-			case "message":
-				if x.Tx < 0 || x.Message < 0 {
-					return invalid
-				}
-			default:
-				if x.Tx != -1 || x.Message != -1 {
-					return invalid
-				}
-			}
 		}
 		current.Records = append(current.Records, x)
 		if x.Kind == "height_completed" || x.Kind == "export_completed" {
@@ -198,4 +137,81 @@ func scan(r io.Reader, p Proof, visit func(Height) error) error {
 		return invalid
 	}
 	return nil
+}
+
+func (p Proof) bounded() bool {
+	if p.From < 1 || p.Through < p.From || p.VerifiedThrough < p.Through || len(p.SHA256) != 64 || (p.Export && p.From != p.Through) {
+		return false
+	}
+	_, e := hex.DecodeString(p.SHA256)
+	return e == nil
+}
+
+// admit applies the checks every shared record kind must pass on either chain.
+func admit(x Record, p Proof, number int64, begin, end *int) bool {
+	if x.Height != number || x.Height > p.Through || (x.Status != "committed" && x.Status != "aborted" && !(p.Export && x.Status == "exported")) {
+		return false
+	}
+	if p.Export && (x.Phase != "zero_height_export" || x.Status != "exported" || x.Tx != -1 || x.Message != -1) {
+		return false
+	}
+	switch x.Kind {
+	case "movement", "principal":
+		amount, ok := new(big.Int).SetString(x.Amount, 10)
+		zeroAnteFee := !p.Export && x.Kind == "movement" && x.Phase == "ante" && x.Label == "ante_fee" && x.Amount == "0"
+		if !ok || (amount.Sign() == 0 && x.Kind != "principal" && !zeroAnteFee) || amount.String() != x.Amount || x.Address == "" || (x.Denom == "" && !zeroAnteFee) || (x.Code != 0 && !(p.Chain == "cosmoshub-1" && x.Status == "aborted")) {
+			return false
+		}
+		if x.Kind == "principal" && (p.Export || x.Phase != "message" || amount.Sign() < 0 || x.Validator == "" || x.Delegator == "") {
+			return false
+		}
+		if !p.Export && x.Phase != "ante" && x.Phase != "message" && x.Phase != "begin_block" && x.Phase != "end_block" {
+			return false
+		}
+	case "accounting":
+		if x.Address != "" || x.Amount != "" || x.Denom != "" {
+			return false
+		}
+		if x.Phase == "begin_block" && x.Status == "committed" {
+			*begin++
+		}
+		if x.Phase == "end_block" && x.Status == "committed" {
+			*end++
+		}
+		if p.Export {
+			*begin++
+			break
+		}
+		if x.Phase != "begin_block" && x.Phase != "end_block" && x.Phase != "message" && x.Phase != "ante" && x.Phase != "transaction" {
+			return false
+		}
+	case "height_completed":
+		if p.Export || x.Status != "committed" || x.Phase != "block" || x.Tx != -1 || x.Message != -1 || x.Code != 0 || *begin != 1 || *end != 1 {
+			return false
+		}
+	case "export_completed":
+		if !p.Export || x.Code != 0 || *begin < 1 {
+			return false
+		}
+	default:
+		return false
+	}
+	// Position checks apply even to aborted evidence.
+	if !p.Export {
+		switch x.Phase {
+		case "ante", "transaction":
+			if x.Tx < 0 || x.Message != -1 {
+				return false
+			}
+		case "message":
+			if x.Tx < 0 || x.Message < 0 {
+				return false
+			}
+		default:
+			if x.Tx != -1 || x.Message != -1 {
+				return false
+			}
+		}
+	}
+	return true
 }

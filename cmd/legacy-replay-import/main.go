@@ -1,4 +1,4 @@
-// Command legacy-replay-import is offline Hub2 rehearsal only. It never
+// Command legacy-replay-import is offline Hub1 and Hub2 rehearsal only. It never
 // migrates a database, contacts a chain, or writes the serving schema.
 package main
 
@@ -115,7 +115,14 @@ func run() error {
 	target := flag.String("rehearsal-db", "", "new empty database named legacy_replay_rehearsal_SUFFIX")
 	write := flag.Bool("write", false, "write rehearsal instead of validating only")
 	maxBody := flag.Int64("max-body", 64<<20, "largest decompressed capture")
+	hub1 := flag.String("hub1-sources", "", "comma separated closed Hub 1 recording source directories, in height order")
 	flag.Parse()
+	if *hub1 != "" {
+		if *root != "" || *records != "" || *proof != "" || *status != "" || *differences != "" || *maxBody < 1 {
+			return refused
+		}
+		return runHub1(strings.Split(*hub1, ","), *exportRecords, *exportProof, *target, *write, *maxBody)
+	}
 	if *root == "" || *records == "" || *proof == "" || *status == "" || *maxBody < 1 {
 		return refused
 	}
