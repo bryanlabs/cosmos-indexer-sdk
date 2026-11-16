@@ -58,7 +58,7 @@ func syntheticCapture(t *testing.T, dir, chain string) Pin {
 	require.NoError(t, e)
 	capture := DestinationCapture{Schema: DestinationCaptureSchema, Chain: chain, Scope: scope,
 		Destination: Identity{Database: "cosmostax", OID: 1, SystemHash: digest([]byte("system")), DeploymentUID: "synthetic-deployment", PodUID: "synthetic-pod", PVCUID: "synthetic-pvc", Endpoint: "synthetic-endpoint", CatalogSHA: digest([]byte("catalog")), ScopeSHA: digest([]byte("scope"))},
-		Protected:   protected, Hub3GenesisSHA: acceptedHub3GenesisSHA, Hub4GenesisSHA: digest([]byte("hub4")), CapturedUTC: time.Now().UTC().Format(time.RFC3339)}
+		TargetEmpty: true, Protected: protected, Hub3GenesisSHA: acceptedHub3GenesisSHA, Hub4GenesisSHA: digest([]byte("hub4")), CapturedUTC: time.Now().UTC().Format(time.RFC3339)}
 	pin, e := writeNew(filepath.Join(dir, "destination-capture.json"), capture)
 	require.NoError(t, e)
 	return pin
@@ -107,9 +107,19 @@ func TestWholeChainHub1RealBoundariesReachLoaderValidate(t *testing.T) {
 	for _, row := range w.taxRows[1:] {
 		row["height"] = 500000
 	}
+	// A dry run of the load runbook needs these same inputs outside the test.
+	if keep := os.Getenv("WHOLE_CHAIN_KEEP_DIR"); keep != "" {
+		w.dir, e = os.MkdirTemp(keep, "hub1-real-boundaries-")
+		require.NoError(t, e)
+	}
 	w.build()
 	loader := buildCommand(t, "legacy-approved-load")
 	w.spec.LoaderBinary = loader
+	if os.Getenv("WHOLE_CHAIN_KEEP_DIR") != "" {
+		_, e = writeNew(filepath.Join(w.dir, "finalize-spec.json"), w.spec)
+		require.NoError(t, e)
+		t.Logf("inputs kept in %s", w.dir)
+	}
 
 	started := time.Now()
 	dir := filepath.Join(w.dir, "final")

@@ -1,6 +1,6 @@
 // Command legacy-whole-chain joins a chain's independently sealed parts into
 // one accepted history and hands it to legacy-approved-load. It never writes
-// to a database: export and capture read, the rest work on pinned files.
+// to a database: export reads, the rest work on pinned files.
 package main
 
 import (
@@ -59,8 +59,8 @@ func open(dsn string, staging bool) (*sql.DB, error) {
 		if ip == nil || !ip.IsLoopback() || c.Port == 15432 || !strings.HasPrefix(c.Database, "legacy_replay_rehearsal_") {
 			return nil, errors.New("staging export needs a private loopback rehearsal database, never production")
 		}
-	} else if c.Database != "cosmostax" {
-		return nil, errors.New("destination capture must name cosmostax")
+	} else {
+		return nil, errors.New("only the staging export connects to a database")
 	}
 	c.ConnectTimeout = 5 * time.Second
 	db := stdlib.OpenDB(*c)
@@ -69,17 +69,16 @@ func open(dsn string, staging bool) (*sql.DB, error) {
 }
 func show(v any) error { return json.NewEncoder(os.Stdout).Encode(v) }
 func run() error {
-	op := flag.String("operation", "", "export, components, finalize, capture, manifest")
-	chain := flag.String("chain", "", "cosmoshub-1 or cosmoshub-2 (export, capture)")
-	config := flag.String("connections", "", "private 0600 connection file, never printed (export, capture)")
+	op := flag.String("operation", "", "export, components, finalize, manifest")
+	chain := flag.String("chain", "", "cosmoshub-1 or cosmoshub-2 (export)")
+	config := flag.String("connections", "", "private 0600 connection file, never printed (export)")
 	spec := flag.String("spec", "", "ordered input list of paths and hashes (components, finalize)")
 	dir := flag.String("output-dir", "", "NEW absolute directory (export, finalize)")
-	output := flag.String("output", "", "NEW absolute file (capture, manifest)")
-	runtimeFile := flag.String("runtime", "", "destination Kubernetes identity JSON, 0600 (capture)")
+	output := flag.String("output", "", "NEW absolute file (manifest)")
 	report := flag.String("report", "", "finalization report (manifest)")
 	reportSHA := flag.String("report-sha256", "", "finalization report hash (manifest)")
-	destination := flag.String("destination", "", "destination capture (manifest)")
-	destinationSHA := flag.String("destination-sha256", "", "destination capture hash (manifest)")
+	destination := flag.String("destination", "", "first baseline written by legacy-approved-load -operation baseline (manifest)")
+	destinationSHA := flag.String("destination-sha256", "", "first baseline hash (manifest)")
 	approval := flag.String("approval-source", "", "where the standing approval was given (manifest)")
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -133,29 +132,6 @@ func run() error {
 			return e
 		}
 		return show(map[string]any{"full_chain_books_tax_acceptance": r.Accepted, "chain": r.Chain, "first": r.First, "last": r.Last, "parts": len(r.Components), "restart_payout_rows": r.CanonicalRows, "accounts_compared": r.Balance.AccountsChecked, "differences": 0, "report": pin})
-	case "capture":
-		var c connections
-		if e := readJSON(*config, true, &c); e != nil {
-			return e
-		}
-		var runtime p.Identity
-		if e := readJSON(*runtimeFile, true, &runtime); e != nil {
-			return e
-		}
-		db, e := open(c.Auditor, false)
-		if e != nil {
-			return e
-		}
-		defer db.Close()
-		captured, e := p.CaptureDestination(ctx, db, *chain, runtime)
-		if e != nil {
-			return errors.New("read-only destination capture refused: " + e.Error())
-		}
-		pin, e := p.WriteNew(*output, captured)
-		if e != nil {
-			return errors.New("capture output must be a NEW file")
-		}
-		return show(map[string]any{"captured": true, "chain": captured.Chain, "destination_capture": pin, "production_rows_written": 0})
 	case "manifest":
 		m, pin, e := p.AssembleManifest(p.AssembleSpec{Report: p.Pin{Path: *report, SHA256: *reportSHA}, Destination: p.Pin{Path: *destination, SHA256: *destinationSHA}, ApprovalSource: *approval}, *output)
 		if e != nil {

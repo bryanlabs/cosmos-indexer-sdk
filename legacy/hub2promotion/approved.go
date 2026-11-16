@@ -2,9 +2,7 @@ package hub2promotion
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -191,37 +189,7 @@ func InstallApprovedScope(ctx context.Context, owner *sql.DB, m Manifest, runtim
 	if runtime.DeploymentUID != m.Destination.DeploymentUID || runtime.PodUID != m.Destination.PodUID || runtime.PVCUID != m.Destination.PVCUID || runtime.Endpoint != m.Destination.Endpoint {
 		return errors.New("scope installation runtime mismatch")
 	}
-	tx, e := owner.BeginTx(ctx, nil)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
-	if _, e = tx.ExecContext(ctx, `SET LOCAL search_path=pg_catalog,pg_temp; SET LOCAL lock_timeout='250ms'; SET LOCAL statement_timeout='10s'`); e != nil {
-		return e
-	}
-	var name, system string
-	var oid uint32
-	if e = tx.QueryRowContext(ctx, `SELECT current_database(),oid FROM pg_catalog.pg_database WHERE datname=current_database()`).Scan(&name, &oid); e != nil {
-		return e
-	}
-	if e = tx.QueryRowContext(ctx, `SELECT system_identifier::pg_catalog.text FROM pg_catalog.pg_control_system()`).Scan(&system); e != nil {
-		return e
-	}
-	h := sha256.Sum256([]byte(system))
-	if name != m.Destination.Database || oid != m.Destination.OID || hex.EncodeToString(h[:]) != m.Destination.SystemHash {
-		return errors.New("scope installation server identity mismatch")
-	}
-	text, e := m.Scope.SQL()
-	if e != nil {
-		return e
-	}
-	if _, e = tx.ExecContext(ctx, text); e != nil {
-		return e
-	}
-	if e = CheckScope(ctx, tx, m.Scope); e != nil {
-		return e
-	}
-	return tx.Commit()
+	return installPinned(ctx, owner, m.Scope, m.Destination)
 }
 
 // CaptureProtected is read-only and must run again immediately before load.

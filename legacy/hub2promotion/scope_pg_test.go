@@ -2,6 +2,9 @@ package hub2promotion
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -191,4 +194,66 @@ func TestScopeAdmitsOnlyTheTwoReportTrustFunctions(t *testing.T) {
 			require.ErrorContains(t, e, tc.refusal)
 		})
 	}
+}
+
+// The steps that run before a manifest exists: observe the server, install
+// the fixed scope on exactly that server, record the first baseline
+// read-only. Each refuses when its pin, server or target state is wrong.
+func TestFirstBaselineOrderBeforeAnyManifest(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	runtime := Identity{DeploymentUID: "deployment", PodUID: "pod", PVCUID: "pvc", Endpoint: "endpoint"}
+	dir := t.TempDir()
+	suffix := randomID()
+	var name string
+	require.NoError(t, f.owner.QueryRow("SELECT current_database()").Scan(&name))
+	observe := func(name string, change func(*ServerObservation)) Pin {
+		tx, e := f.owner.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		require.NoError(t, e)
+		defer tx.Rollback()
+		id, e := serverIdentity(ctx, tx, runtime)
+		require.NoError(t, e)
+		// The package fixture database has a random name; only the name differs
+		// from what ObserveServer returns on cosmostax.
+		o := ServerObservation{Schema: ServerObservationSchema, Server: id}
+		if change != nil {
+			change(&o)
+		}
+		pin, e := writeNew(filepath.Join(dir, name), o)
+		require.NoError(t, e)
+		return pin
+	}
+	_, e := ObserveServer(ctx, f.owner, runtime)
+	require.ErrorContains(t, e, "must name cosmostax")
+	_, e = ObserveServer(ctx, f.owner, Identity{PodUID: "pod"})
+	require.ErrorContains(t, e, "runtime identity incomplete")
+
+	// readObservation only admits cosmostax, so the refusals that need a live
+	// install are exercised through installPinned and the pinned-file checks.
+	named := observe("named.json", func(o *ServerObservation) { o.Server.Database = "cosmostax" })
+	id, e := readObservation(named, runtime)
+	require.NoError(t, e)
+	_, e = readObservation(Pin{named.Path, strings.Repeat("0", 64)}, runtime)
+	require.ErrorContains(t, e, "missing, changed or malformed")
+	_, e = readObservation(named, Identity{DeploymentUID: "deployment", PodUID: "another pod", PVCUID: "pvc", Endpoint: "endpoint"})
+	require.ErrorContains(t, e, "differs from the observed server")
+	_, e = readObservation(observe("other.json", nil), runtime)
+	require.ErrorContains(t, e, "incomplete")
+	require.ErrorContains(t, InstallScopeForChain(ctx, f.owner, "cosmoshub-3", named, runtime), "unapproved chain")
+	// The pinned observation names cosmostax, this server is the fixture: refuse and install nothing.
+	require.ErrorContains(t, InstallScopeForChain(ctx, f.owner, "cosmoshub-1", named, runtime), "server identity mismatch")
+	wrong := id
+	wrong.Database, wrong.OID = name, id.OID+1
+	s := Scope{Schema: "h2p_" + suffix + "_b", Loader: "h2p_" + suffix + "_bl", ViewOwner: "h2p_" + suffix + "_bv", LockOwner: "h2p_" + suffix + "_bk", ChainID: "cosmoshub-1"}
+	require.ErrorContains(t, installPinned(ctx, f.owner, s, wrong), "server identity mismatch")
+	var n int
+	require.NoError(t, f.owner.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspname=$1`, s.Schema).Scan(&n))
+	require.Zero(t, n, "a refused install leaves nothing behind")
+	right := id
+	right.Database = name
+	require.NoError(t, installPinned(ctx, f.owner, s, right))
+	require.Error(t, installPinned(ctx, f.owner, s, right), "an installed scope is never replaced")
+	// Before any scope is installed for the approved names, the baseline has nothing to record.
+	_, e = RecordFirstBaseline(ctx, f.owner, "cosmoshub-1", named, runtime)
+	require.Error(t, e)
 }

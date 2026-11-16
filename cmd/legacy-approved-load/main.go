@@ -64,15 +64,21 @@ func connect(dsn string) (*sql.DB, error) {
 	return db, nil
 }
 func run() error {
-	op := flag.String("operation", "validate", "validate, scope-sql, install-scope, preflight, load, audit")
+	op := flag.String("operation", "validate", "observe-server, install-scope, baseline (before a manifest exists); validate, scope-sql, preflight, load, audit (pinned manifest)")
 	manifest := flag.String("manifest", "", "absolute manifest path")
 	hash := flag.String("sha256", "", "independently pinned manifest hash")
 	config := flag.String("connections", "", "private 0600 connection file, never printed")
 	runtimeFile := flag.String("runtime", "", "fresh actual Kubernetes destination identity JSON, 0600")
-	output := flag.String("output", "", "NEW retained output file for scope-sql or preflight")
+	output := flag.String("output", "", "NEW retained output file for observe-server, baseline, scope-sql or preflight")
+	chain := flag.String("chain", "", "cosmoshub-1 or cosmoshub-2, for install-scope and baseline before a manifest exists")
+	server := flag.String("server", "", "server observation written by observe-server (install-scope, baseline)")
+	serverSHA := flag.String("server-sha256", "", "independently pinned server observation hash")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		return errors.New("unexpected arguments")
+	}
+	if *op == "observe-server" || *op == "baseline" || (*op == "install-scope" && *manifest == "") {
+		return beforeManifest(*op, *chain, p.Pin{Path: *server, SHA256: *serverSHA}, *config, *runtimeFile, *output)
 	}
 	m, e := p.ReadManifestPinned(*manifest, *hash)
 	if e != nil {
@@ -172,6 +178,74 @@ func run() error {
 		return loadRefused(*manifest, e)
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"committed": true, "profile": m.Profile, "raw_stage": m.Scope.RawStage, "financial_complete": !m.Scope.RawStage, "readback": p.OutcomeExact, "rows": result.Rows, "duration_ns": result.Duration})
+}
+
+// beforeManifest runs the three steps that must happen before a complete
+// manifest can exist, because the manifest binds digests of the installed
+// loader scope. None of them reads or writes row data for the chain being
+// loaded: two are read-only, and the install creates only the fixed, reviewed
+// loader objects on the pinned server.
+func beforeManifest(op, chain string, server p.Pin, config, runtimeFile, output string) error {
+	var c connections
+	if e := privateJSON(config, &c); e != nil {
+		return e
+	}
+	var runtime p.Identity
+	if e := privateJSON(runtimeFile, &runtime); e != nil {
+		return e
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+	why := func(text string, e error) error {
+		if safe := p.SafeFailure(e); safe != "" {
+			return errors.New(text + ": " + safe)
+		}
+		return errors.New(text + ": " + e.Error())
+	}
+	retain := func(v any) (p.Pin, error) {
+		pin, e := p.WriteNew(output, v)
+		if e != nil {
+			return pin, errors.New("output must be a NEW file; nothing is overwritten")
+		}
+		return pin, nil
+	}
+	if op == "install-scope" {
+		owner, e := connect(c.Owner)
+		if e != nil {
+			return e
+		}
+		defer owner.Close()
+		if e = p.InstallScopeForChain(ctx, owner, chain, server, runtime); e != nil {
+			return why("atomic scope installation refused; nothing installed", e)
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"scope_installed": true, "chain": chain, "production_rows_written": 0})
+	}
+	auditor, e := connect(c.Auditor)
+	if e != nil {
+		return e
+	}
+	defer auditor.Close()
+	if op == "observe-server" {
+		observed, e := p.ObserveServer(ctx, auditor, runtime)
+		if e != nil {
+			return why("read-only server observation refused", e)
+		}
+		pin, e := retain(observed)
+		if e != nil {
+			return e
+		}
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"server_observed": true, "database": observed.Server.Database, "oid": observed.Server.OID, "system_hash": observed.Server.SystemHash, "server_observation": pin, "production_rows_written": 0})
+	}
+	started := time.Now()
+	baseline, e := p.RecordFirstBaseline(ctx, auditor, chain, server, runtime)
+	if e != nil {
+		return why("read-only first baseline refused; nothing recorded", e)
+	}
+	pin, e := retain(baseline)
+	if e != nil {
+		return e
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"first_baseline_recorded": true, "chain": chain, "target_empty": baseline.TargetEmpty, "baseline": pin, "seconds": int(time.Since(started).Seconds()), "production_rows_written": 0})
 }
 
 // loadRefused keeps the real cause. Row contents can appear in a database

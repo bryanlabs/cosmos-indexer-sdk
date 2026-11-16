@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -38,14 +37,16 @@ func ExportStaging(ctx context.Context, source *sql.DB, dir, chain string) (Proj
 	return index, pin, e
 }
 
-// DestinationCapture is a read-only observation of the database a chain will
-// be loaded into: which database it is, a fingerprint of every other chain's
+// DestinationCapture is the first baseline (see RecordFirstBaseline): a
+// read-only observation of the database a chain will be loaded into: which database it is, a fingerprint of every other chain's
 // rows already there, and the later chains' genesis hashes it holds.
 type DestinationCapture struct {
 	Schema         string   `json:"schema"`
 	Chain          string   `json:"chain"`
 	Scope          Scope    `json:"scope"`
 	Destination    Identity `json:"destination"`
+	Server         Pin      `json:"server_observation"`
+	TargetEmpty    bool     `json:"target_empty"`
 	Protected      Snapshot `json:"protected"`
 	Hub3GenesisSHA string   `json:"hub3_genesis_sha"`
 	Hub4GenesisSHA string   `json:"hub4_genesis_sha"`
@@ -53,39 +54,6 @@ type DestinationCapture struct {
 }
 
 const DestinationCaptureSchema = "legacy-destination-capture-v1"
-
-// CaptureDestination writes nothing. The loader's own preflight can only
-// compare against a manifest that already exists, so the first manifest needs
-// this observation. It must be taken after the loader scope is installed and
-// is checked again by preflight and by the load itself.
-func CaptureDestination(ctx context.Context, auditor *sql.DB, chain string, runtime Identity) (DestinationCapture, error) {
-	scope, e := ApprovedScope(chain)
-	out := DestinationCapture{Schema: DestinationCaptureSchema, Chain: chain, Scope: scope}
-	if e != nil {
-		return out, e
-	}
-	tx, e := beginAuditBudget(ctx, auditor, true)
-	if e != nil {
-		return out, e
-	}
-	defer tx.Rollback()
-	if out.Destination, e = ProbeIdentity(ctx, tx, scope, runtime); e != nil {
-		return out, errors.New("destination identity or installed loader scope unreadable")
-	}
-	if e = validateIdentity(out.Destination); e != nil {
-		return out, e
-	}
-	if out.Protected, e = snapshotChain(ctx, tx, scope.chain(), true, true); e != nil {
-		return out, errors.New("existing history fingerprint unreadable")
-	}
-	for chain, into := range map[string]*string{"cosmoshub-3": &out.Hub3GenesisSHA, "cosmoshub-4": &out.Hub4GenesisSHA} {
-		if e = tx.QueryRowContext(ctx, `SELECT sha256 FROM legacy.genesis_files WHERE chain_id=$1`, chain).Scan(into); e != nil {
-			return out, errors.New("destination holds no genesis for " + chain)
-		}
-	}
-	out.CapturedUTC = time.Now().UTC().Format(time.RFC3339)
-	return out, nil
-}
 
 // AssembleSpec names the finalizer's report and the destination observation.
 type AssembleSpec struct {
@@ -116,6 +84,9 @@ func AssembleManifest(spec AssembleSpec, path string) (Manifest, Pin, error) {
 	}
 	if d.Schema != DestinationCaptureSchema || d.Chain != r.Chain || d.Scope.chain() != r.Chain {
 		return Manifest{}, Pin{}, refuse("destination capture", "taken for a different chain")
+	}
+	if !d.TargetEmpty {
+		return Manifest{}, Pin{}, refuse("destination capture", "the destination already held rows for this chain")
 	}
 	if scope, _ := ApprovedScope(r.Chain); d.Scope != scope {
 		return Manifest{}, Pin{}, refuse("destination capture", "loader object names differ from the reviewed install")
