@@ -20,12 +20,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/DefiantLabs/cosmos-indexer/core"
-	"github.com/DefiantLabs/cosmos-indexer/legacy/capture"
-	"github.com/DefiantLabs/cosmos-indexer/legacy/genesis"
-	"github.com/DefiantLabs/cosmos-indexer/legacy/ledger"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/replayrecords"
 	"github.com/DefiantLabs/cosmos-indexer/legacy/schema"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -35,8 +30,16 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-const database = "legacy_replay_rehearsal_hub2_sealed_1400000_20261114"
-const port = 25461
+// The defaults name the retained 1.4M rehearsal. -database and -port select a
+// different private loopback staging database; see guardTarget.
+var database = "legacy_replay_rehearsal_hub2_sealed_1400000_20261114"
+var port = 25461
+
+// canonicalHeight is fixed in the binary. Only the private wiring test of the
+// restart payout path lowers it, in its own throwaway database.
+var canonicalHeight int64 = 2902000
+
+const tailLast int64 = 2902002
 const importerRole = "hub2_sealed_importer_20261114"
 
 var refused = errors.New("private sealed rehearsal refused; evidence retained")
@@ -57,6 +60,21 @@ type Manifest struct {
 	Components   []Component
 	SourceCommit string
 	BinarySHA    string
+	// CanonicalExport is the restart payout at 2,902,000. It is required
+	// exactly when the manifest reaches that height and is refused before it.
+	CanonicalExport *CanonicalExport `json:",omitempty"`
+	// Tail is the two historical heights after the export. They are stored
+	// as headers and transactions only, never as tax rows.
+	Tail *Tail `json:",omitempty"`
+}
+type CanonicalExport struct {
+	Records string
+	Proof   replayrecords.Proof
+	Rows    int64
+}
+type Tail struct {
+	First, Last          int64
+	Cache, CacheManifest string
 }
 
 func fileSHA(p string) string {
@@ -101,7 +119,7 @@ func dsn(role string) string {
 }
 func guardDSN(s, name string) error {
 	c, e := pgconn.ParseConfig(s)
-	if e != nil || name != database || c.Database != database || c.Port != port || c.User != importerRole || !net.ParseIP(c.Host).IsLoopback() || len(c.Fallbacks) != 0 {
+	if e != nil || name != database || c.Database != database || int(c.Port) != port || c.User != importerRole || !net.ParseIP(c.Host).IsLoopback() || len(c.Fallbacks) != 0 {
 		return refused
 	}
 	return nil
@@ -110,17 +128,33 @@ func owner() (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn("postgres")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 }
 func validateLayout(m Manifest) error {
-	if m.Version != 1 || m.First != 1 || m.Last != 1400000 || len(m.Components) != 7 || m.SourceCommit != "c3444f7f1d48bb48fe596b80c79bb049a10e04b0" {
+	if (m.Version != 1 && m.Version != 2) || m.First != 1 || len(m.Components) == 0 || m.SourceCommit != "c3444f7f1d48bb48fe596b80c79bb049a10e04b0" {
 		return refused
 	}
 	next := int64(1)
 	for i, c := range m.Components {
-		if c.First != next || c.Last != c.First+199999 || c.Prefix != (i == 0) || c.Proof.Chain != "cosmoshub-2" || c.Proof.Release != replayrecords.Release034 || c.Proof.From != c.First || c.Proof.Through != c.Last || c.Proof.VerifiedThrough < c.Last || c.Proof.Export || c.RecordsSHA != c.Proof.SHA256 || c.HistoricalRows <= 0 || c.Transactions <= 0 {
+		// Every component is 200,000 heights except the last of the chain,
+		// which ends at the canonical export height.
+		last := c.First + 199999
+		if last > canonicalHeight {
+			last = canonicalHeight
+		}
+		if c.First != next || c.Last != last || c.Prefix != (i == 0) || c.Proof.Chain != "cosmoshub-2" || c.Proof.Release != replayrecords.Release034 || c.Proof.From != c.First || c.Proof.Through != c.Last || c.Proof.VerifiedThrough < c.Last || c.Proof.Export || c.RecordsSHA != c.Proof.SHA256 || c.HistoricalRows <= 0 || c.Transactions <= 0 {
 			return refused
 		}
 		next = c.Last + 1
 	}
-	if next != m.Last+1 {
+	if next != m.Last+1 || m.Last > canonicalHeight {
+		return refused
+	}
+	x := m.CanonicalExport
+	if (x != nil) != (m.Last == canonicalHeight) {
+		return refused
+	}
+	if x != nil && (m.Version != 2 || x.Records == "" || x.Rows <= 0 || !x.Proof.Export || x.Proof.Chain != "cosmoshub-2" || x.Proof.Release != replayrecords.Release034 || x.Proof.From != canonicalHeight || x.Proof.Through != canonicalHeight || x.Proof.VerifiedThrough < canonicalHeight || len(x.Proof.SHA256) != 64) {
+		return refused
+	}
+	if t := m.Tail; t != nil && (m.Version != 2 || m.Last != canonicalHeight || t.First != canonicalHeight+1 || t.Last != tailLast || t.Cache == "" || t.CacheManifest == "") {
 		return refused
 	}
 	return nil
@@ -145,6 +179,12 @@ func pins(m Manifest) error {
 		if c.Prefix && (m.Pins[c.Records] != "49e31ce5aaacb5e56cc5d3c501345e69ee61642a4a8b3253820b0cfbf0301867" || m.Pins[c.Status] != "3d1a5550f0334b1c7b4e9bae07b1d1becb4c77806a88215bc97b34c96e7a963c" || m.Pins[c.Differences] != "6bd71d017dbb2e84ee3845041377c094f55c63389784b22af574f9ed29bf5bb9") {
 			return refused
 		}
+	}
+	if x := m.CanonicalExport; x != nil && m.Pins[x.Records] != x.Proof.SHA256 {
+		return refused
+	}
+	if t := m.Tail; t != nil && len(m.Pins[t.CacheManifest]) != 64 {
+		return refused
 	}
 	for p, h := range m.Pins {
 		if len(h) != 64 || fileSHA(p) != h {
@@ -361,163 +401,26 @@ func snapshot(out string) error {
 	}
 	return save(out, result)
 }
-func runImport(m Manifest, out string) error {
-	executable, e := os.Executable()
-	if e != nil || fileSHA(executable) != m.BinarySHA || pins(m) != nil {
-		return refused
-	}
-	ctx := context.Background()
-	for _, c := range m.Components {
-		if _, _, e := admission(c); e != nil {
-			return refused
-		}
-	}
-	d, e := openRehearsalDestination(ctx, dsn(importerRole), database)
-	if e != nil {
-		return refused
-	}
-	defer d.close()
-	guard, e := gorm.Open(postgres.New(postgres.Config{Conn: d.conn}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
-	if e != nil {
-		return refused
-	}
-	gf, e := os.Open(m.Genesis)
-	if e != nil {
-		return refused
-	}
-	opening, e := genesis.Read(gf)
-	gf.Close()
-	if e != nil || opening.Chain != "cosmoshub-2" || opening.SHA256 != m.Pins[m.Genesis] {
-		return refused
-	}
-	gr, e := genesis.Load(guard, opening)
-	if e != nil || gr.AlreadyLoaded || !reflect.DeepEqual(gr.File, gr.Stored) {
-		return refused
-	}
-	parent := ""
-	var allHeights, allRows, allTx, allEvents int64
-	started := time.Now()
-	results := []map[string]any{}
-	for _, c := range m.Components {
-		began := time.Now()
-		p, gas, e := admission(c)
-		if e != nil {
-			return refused
-		}
-		expected, e := cachePins(c)
-		if e != nil {
-			return refused
-		}
-		f, e := os.Open(c.Records)
-		if e != nil {
-			return refused
-		}
-		var reader io.ReadSeeker = f
-		if c.Prefix {
-			reader = io.NewSectionReader(f, 0, c.RecordBytes)
-		}
-		batch := []ledger.Block{}
-		var heights, rows, txs, events int64
-		flush := func() error {
-			if len(batch) == 0 {
-				return nil
-			}
-			n, e := ledger.Write(ctx, d.conn, batch)
-			if e != nil || n != len(batch) {
-				return refused
-			}
-			n, e = ledger.Write(ctx, d.conn, batch)
-			if e != nil || n != 0 {
-				return refused
-			}
-			batch = nil
-			return nil
-		}
-		receipt, _ := json.Marshal(map[string]any{"sealed_manifest_sha256": fileSHA(manifestPath), "component_first": c.First, "component_last": c.Last, "records_sha256": c.RecordsSHA, "source_commit": m.SourceCommit, "native_zeroheight_exports": "validation_only_excluded_from_historical_rows", "genuine_opening_sha256": opening.SHA256})
-		e = replayrecords.Stream(reader, p, func(r replayrecords.Height) error {
-			if checkHeight(c, r.Number, expected) != nil {
-				return refused
-			}
-			if gas != nil && gas.CheckCachedFiles(c.Cache, r.Number) != nil {
-				return refused
-			}
-			h, e := capture.LoadHeight(c.Cache, "cosmoshub-2", r.Number, 64<<20)
-			if e != nil || parent != "" && h.Previous != parent {
-				return refused
-			}
-			if gas != nil {
-				if h.Results.Legacy == nil {
-					return refused
-				}
-				raw := make([][]byte, len(h.Block.Block.Txs))
-				for i, t := range h.Block.Block.Txs {
-					raw[i] = t
-				}
-				if gas.CheckCachedInputs(r.Number, raw, h.Results.Legacy.RawJSON) != nil {
-					return refused
-				}
-			}
-			items, e := core.DecodeLegacyBlock(h.Block, h.Results)
-			if e != nil {
-				return refused
-			}
-			b, e := core.LegacyReplayBlock(h, items, r)
-			if e != nil {
-				return refused
-			}
-			for _, row := range b.Rows {
-				if row.Phase == ledger.PhaseExport || row.Source == "export_payout" || row.Trigger == "zero_height_export" {
-					return refused
-				}
-			}
-			b.Events = append(b.Events, ledger.Event{Phase: ledger.PhaseBegin, Index: 2, Type: "pinned_replay_receipt", Attributes: [][2]string{{"json", string(receipt)}}})
-			if checkHeight(c, r.Number, expected) != nil {
-				return refused
-			}
-			parent = h.Hash
-			heights++
-			rows += int64(len(b.Rows))
-			txs += int64(len(b.Inclusions))
-			events += int64(len(b.Events))
-			batch = append(batch, b)
-			if len(batch) == 500 {
-				if flush() != nil {
-					return refused
-				}
-				fmt.Printf("progress height=%d elapsed_seconds=%.3f historical_rows=%d transactions=%d\n", r.Number, time.Since(started).Seconds(), allRows+rows, allTx+txs)
-			}
-			return nil
-		})
-		f.Close()
-		if e != nil || flush() != nil || heights != 200000 || rows != c.HistoricalRows || txs != c.Transactions {
-			return refused
-		}
-		allHeights += heights
-		allRows += rows
-		allTx += txs
-		allEvents += events
-		results = append(results, map[string]any{"first": c.First, "last": c.Last, "heights": heights, "historical_rows": rows, "transactions": txs, "events": events, "seconds": time.Since(began).Seconds(), "every_batch_exact_readback": true})
-		if save(filepath.Join(out, fmt.Sprintf("component-%d.json", c.Last)), results[len(results)-1]) != nil {
-			return refused
-		}
-	}
-	if pins(m) != nil {
-		return refused
-	}
-	var zero int64
-	if d.conn.QueryRowContext(ctx, "SELECT count(*) FROM legacy.taxable_events WHERE height=0 OR phase=4 OR amount_source='export_payout' OR reward_trigger='zero_height_export'").Scan(&zero) != nil || zero != 0 {
-		return refused
-	}
-	return save(filepath.Join(out, "import-result.json"), map[string]any{"heights": allHeights, "historical_rows": allRows, "transactions": allTx, "events": allEvents, "seconds": time.Since(started).Seconds(), "components": results, "genesis_exact_readback": gr, "production_access": false, "whole_chain_books_tax_accepted": false, "zeroheight_historical_rows": zero})
-}
 
 var manifestPath string
 
 func main() {
-	mode := flag.String("mode", "", "prepare/import/snapshot/refuse-retry")
+	mode := flag.String("mode", "", "prepare/import/add/extend-manifest/fingerprint/snapshot/refuse-retry")
 	mp := flag.String("manifest", "", "sealed pinned private manifest")
 	out := flag.String("out", "", "new retained receipt path")
+	name := flag.String("database", database, "private staging database, legacy_replay_rehearsal_hub2_SUFFIX")
+	p := flag.Int("port", port, "loopback port of the private staging server, never the serving forward")
+	parallel := flag.Int("parallel", 1, "components imported at once, 1 to 4")
+	component := flag.String("component", "", "extend-manifest: sealed component directory holding final-component-acceptance.json")
+	tailCache := flag.String("tail-cache", "", "extend-manifest at the canonical end: capture root of heights 2902001 and 2902002")
+	tailManifest := flag.String("tail-cache-manifest", "", "extend-manifest at the canonical end: SHA256 list of the tail captures")
+	through := flag.Int64("through", 0, "fingerprint: only heights up to this one, 0 for all")
 	flag.Parse()
+	if guardTarget(*name, *p) != nil || (*tailCache == "") != (*tailManifest == "") {
+		fmt.Fprintln(os.Stderr, refused)
+		os.Exit(1)
+	}
+	database, port = *name, *p
 	manifestPath = *mp
 	var e error
 	switch *mode {
@@ -525,12 +428,21 @@ func main() {
 		e = prepare(*out)
 	case "snapshot":
 		e = snapshot(*out)
-	case "import":
+	case "fingerprint":
+		e = fingerprint(*out, *through)
+	case "import", "add":
 		var m Manifest
 		if readJSON(*mp, &m) != nil {
 			e = refused
 		} else {
-			e = runImport(m, *out)
+			e = runAdd(m, *out, *mode == "add", *parallel)
+		}
+	case "extend-manifest":
+		var m Manifest
+		if readJSON(*mp, &m) != nil || *component == "" || !filepath.IsAbs(*component) {
+			e = refused
+		} else {
+			e = extendManifest(m, filepath.Clean(*component), *tailCache, *tailManifest, *out)
 		}
 	case "refuse-retry":
 		var d *rehearsalDestination

@@ -20,7 +20,14 @@ type rehearsalDestination struct {
 	failed bool
 }
 
-func openRehearsalDestination(ctx context.Context, dsn, target string) (_ *rehearsalDestination, err error) {
+func openRehearsalDestination(ctx context.Context, dsn, target string) (*rehearsalDestination, error) {
+	return openStagingDestination(ctx, dsn, target, false)
+}
+
+// openStagingDestination with incremental set admits a populated staging
+// database. What it already holds is then checked component by component by
+// the caller, under the same session lock.
+func openStagingDestination(ctx context.Context, dsn, target string, incremental bool) (_ *rehearsalDestination, err error) {
 	if guardDSN(dsn, target) != nil {
 		return nil, refused
 	}
@@ -55,6 +62,9 @@ func openRehearsalDestination(ctx context.Context, dsn, target string) (_ *rehea
 	var locked bool
 	if d.conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(340310)").Scan(&locked) != nil || !locked {
 		return nil, refused
+	}
+	if incremental {
+		return d, nil
 	}
 	// A rehearsal never resumes a populated destination. These checks happen
 	// under the session lock that remains held throughout every ledger write.
