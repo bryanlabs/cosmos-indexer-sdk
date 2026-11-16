@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 sys.dont_write_bytecode = True
 from consume_bounded import sha
 from seal_closed import build_info, clean_at, seal
@@ -68,12 +69,16 @@ def prepare(plan, part):
         print(json.dumps(dict(part=part['first'], launch_record=str(out / 'process.private.json'))), flush=True)
     started = json.loads((out / 'process.private.json').read_bytes())
     # Controls depend only on the source, the helper and the opening, so a plan may name ones already made for the same three.
-    controls = Path(part['controls']) if part.get('controls') else out / 'controls' / 'actual-negative-controls.private.json'
+    # A controls run that was stopped part way is left as it is and a new folder is used; nothing is deleted.
+    folders = [out / 'controls'] + [out / ('controls-%d' % n) for n in range(2, 20)]
+    done = [f for f in folders if (f / 'actual-negative-controls.private.json').exists()]
+    fresh = next(f for f in folders if not f.exists()) if not done else done[0]
+    controls = Path(part['controls']) if part.get('controls') else fresh / 'actual-negative-controls.private.json'
     if not controls.exists():
         require(not part.get('controls'), 'named controls do not exist yet')
         from actual_full_controls import run
         prefix = 'opening_checkpoint' in started
-        r = run(Path(part['source']), out / 'controls', Path(started['helper_copy']), part['first'],
+        r = run(Path(part['source']), fresh, Path(started['helper_copy']), part['first'],
                 Path(started['opening_checkpoint']) if prefix else None, Path(started['opening_manifest']) if prefix else None, started['resumed_from_interrupted_run'])
         print(json.dumps(dict(part=part['first'], controls_refused=len(r['controls']))), flush=True)
     return started, controls
@@ -89,7 +94,14 @@ def seal_part(plan, part):
     preservation = out / 'source-preservation.private.json'
     if not preservation.exists():
         from verify_source_preservation import verify
-        verify(Path(part['source']), preservation)
+        # The readback goes through a long kubectl exec stream, which drops under load. A dropped stream proves nothing either way, so read again.
+        for attempt in range(5):
+            try:
+                verify(Path(part['source']), preservation)
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                require(attempt < 4 and not preservation.exists(), 'preserved source could not be read back in five attempts')
+                time.sleep(60)
     result = seal(Path(part['source']), proof, Path(started['helper_copy']), controls, preservation, TOOL, seal_path(plan, part), out / 'process.private.json')
     print(json.dumps(dict(sealed_part=[part['first'], part['through']], seal=str(seal_path(plan, part)), seal_sha256=sha(seal_path(plan, part)),
                           pinned_files=len(result['artifact_pins']), penalty_blocks=[e['height'] for e in result['stake_asset_fact_blocks']],

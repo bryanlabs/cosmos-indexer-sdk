@@ -238,7 +238,7 @@ def seal(root, proof, helper, controls_path, preservation_path, repo, output, st
     result = dict(schema='native033-complete-profile-seal-v1',signed_source_commit=commit,signed_code_pins=code,artifact_pins=pins,
                   result_path=rel(result_path),result_sha256=sha(result_path),native_proof_path=rel(native_path),native_proof_sha256=sha(native_path),
                   exit_path=rel(exit_path),exit_sha256=sha(exit_path),native_helper_sha256=sha(helper),
-                  launch_record='written_after_launch_from_rebuild' if reconstructed else 'written_by_supervisor_before_proof',
+                  launch_record='written_after_launch' if reconstructed else 'written_by_supervisor_before_proof',
                   launch_record_path=rel(start_path),sealing_tool_commit=tool_commit,
                   # Every part checks all of its own heights in one run. A resumed part differs only in where its opening state came from.
                   opening_kind=kind,resumed_from_interrupted_run=kind=='interrupted_run_state',interrupted_run=started.get('interrupted_run',''),earlier_attempts=started.get('earlier_attempts',[]),
