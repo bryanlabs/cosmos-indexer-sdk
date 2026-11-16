@@ -177,7 +177,7 @@ def record(first, through, proof, launch, build, trimpath, entry, helper, built_
     if history is not None:
         shutil.copyfile(history, out / 'validator-history.private.jsonl')
         state.update(validator_history=str(out / 'validator-history.private.jsonl'), validator_history_sha256=sha(out / 'validator-history.private.jsonl'))
-        require(state['validator_history_sha256'] == sha(history), 'validator history changed while it was copied')
+        require(state['validator_history_sha256'] == sha(history) and state['validator_history_sha256'] in text, 'validator history differs from the one the launcher pinned')
     if opening is not None:
         from consume_split import opening_manifest
         shutil.copytree(opening, out / 'opening-checkpoint')
