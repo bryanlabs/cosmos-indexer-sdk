@@ -150,3 +150,45 @@ func TestPG4DestinationBuildAndSourceIdentityNegatives(t *testing.T) {
 		})
 	}
 }
+
+// Production holds the report summary's change logger and its schema-change
+// guard in public with default PUBLIC execute. Exactly those two, as
+// production defines them, may sit beside the loader. A third function, or
+// either name with any other shape, still refuses.
+func TestScopeAdmitsOnlyTheTwoReportTrustFunctions(t *testing.T) {
+	logger := "CREATE FUNCTION public.statement_log_change() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'BEGIN RETURN NULL; END'"
+	guard := "CREATE FUNCTION public.statement_guard_ddl() RETURNS event_trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 'BEGIN RETURN; END'"
+	owned := "; ALTER FUNCTION public.statement_log_change() OWNER TO postgres; ALTER FUNCTION public.statement_guard_ddl() OWNER TO postgres"
+	cases := []struct{ name, sql, refusal string }{
+		{"exactly the two production functions", logger + "; " + guard + owned, ""},
+		{"unlisted third function", logger + "; " + guard + owned + "; CREATE FUNCTION public.statement_log_other() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NULL; END'; ALTER FUNCTION public.statement_log_other() OWNER TO postgres", "alternate callable function"},
+		{"unlisted third definer function", logger + "; " + guard + owned + "; CREATE FUNCTION public.statement_guard_other() RETURNS event_trigger LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN RETURN; END'; ALTER FUNCTION public.statement_guard_other() OWNER TO postgres", "alternate callable function"},
+		{"listed name with another owner", logger + "; " + guard, "alternate callable function"},
+		{"listed name that can be called", "CREATE FUNCTION public.statement_log_change() RETURNS integer LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN RETURN 1; END'; ALTER FUNCTION public.statement_log_change() OWNER TO postgres", "alternate callable function"},
+		{"listed name with an argument", "CREATE FUNCTION public.statement_guard_ddl(integer) RETURNS integer LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'; ALTER FUNCTION public.statement_guard_ddl(integer) OWNER TO postgres", "alternate callable function"},
+		{"listed name in another language", "CREATE FUNCTION public.statement_log_change() RETURNS integer LANGUAGE sql AS 'SELECT 1'; ALTER FUNCTION public.statement_log_change() OWNER TO postgres", "alternate callable function"},
+		{"listed name in another schema", "CREATE SCHEMA other_reports; CREATE FUNCTION other_reports.statement_log_change() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS 'BEGIN RETURN NULL; END'; ALTER FUNCTION other_reports.statement_log_change() OWNER TO postgres; GRANT USAGE ON SCHEMA other_reports TO PUBLIC", "alternate callable function"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			// The production owner. The role is cluster wide, so a peer test may hold it already.
+			mustExec(t, f.owner, "DO $$BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='postgres') THEN BEGIN CREATE ROLE postgres NOLOGIN; EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END; END IF; END$$")
+			require.NoError(t, CheckScope(context.Background(), f.owner, f.m.Scope))
+			mustExec(t, f.owner, tc.sql)
+			e := CheckScope(context.Background(), f.owner, f.m.Scope)
+			if tc.refusal == "" {
+				require.NoError(t, e)
+				// A fresh install beside them passes too, and the loader still cannot call either.
+				again := Scope{Schema: f.m.Scope.Schema + "b", Loader: f.m.Scope.Loader + "b", ViewOwner: f.m.Scope.ViewOwner + "b", LockOwner: f.m.Scope.LockOwner + "b", ChainID: f.m.Scope.ChainID}
+				require.NoError(t, InstallScope(context.Background(), f.owner, again))
+				_, e = f.loader.Exec("SELECT public.statement_log_change()")
+				require.ErrorContains(t, e, "trigger functions can only be called as triggers")
+				_, e = f.loader.Exec("SELECT public.statement_guard_ddl()")
+				require.Error(t, e)
+				return
+			}
+			require.ErrorContains(t, e, tc.refusal)
+		})
+	}
+}

@@ -241,7 +241,7 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid=p.pronamespace
  WHERE ns.nspname NOT IN ('pg_catalog','information_schema') AND pg_catalog.has_function_privilege($1,p.oid,'EXECUTE')
  AND NOT (ns.nspname=$2 AND p.proname='lock_legacy' AND p.pronargs=0)
- AND NOT (ns.nspname='legacy' AND p.proname='refuse_change' AND NOT p.prosecdef AND p.prorettype='pg_catalog.trigger'::pg_catalog.regtype)`, s.Loader, s.Schema).Scan(&n); e != nil {
+ AND NOT (ns.nspname='legacy' AND p.proname='refuse_change' AND NOT p.prosecdef AND p.prorettype='pg_catalog.trigger'::pg_catalog.regtype)`+reportTrustFunctions, s.Loader, s.Schema).Scan(&n); e != nil {
 		return e
 	}
 	if n != 0 {
@@ -313,7 +313,7 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 	if n != 0 {
 		return errors.New("lock helper ACL drift")
 	}
-	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid=p.pronamespace WHERE p.prosecdef AND pg_catalog.has_function_privilege($1,p.oid,'EXECUTE') AND NOT (ns.nspname=$2 AND p.proname='lock_legacy' AND p.pronargs=0)`, s.Loader, s.Schema).Scan(&n); e != nil {
+	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace ns ON ns.oid=p.pronamespace WHERE p.prosecdef AND pg_catalog.has_function_privilege($1,p.oid,'EXECUTE') AND NOT (ns.nspname=$2 AND p.proname='lock_legacy' AND p.pronargs=0)`+reportTrustFunctions, s.Loader, s.Schema).Scan(&n); e != nil {
 		return e
 	}
 	if n != 0 {
@@ -327,6 +327,33 @@ func CheckScope(ctx context.Context, q querier, s Scope) error {
 		return errors.New("default PUBLIC helper ACL")
 	}
 	return nil
+}
+
+// reportTrustFunctions admits exactly two functions that production already
+// holds outside the loader's scope: the tax report summary's change logger and
+// its schema-change guard. Each is named by schema, name, zero arguments,
+// return type, language and owner. A function declared to return trigger or
+// event_trigger cannot be called directly in PL/pgSQL, so the default PUBLIC
+// execute on them gives the loader nothing to call, and PostgreSQL fires
+// triggers whatever the caller's execute privilege is. Revoking that execute
+// instead would change the function rows the published reports are trusted
+// against. Anything else, including a same-named function with another
+// owner, language, return type or argument list, still refuses.
+const reportTrustFunctions = ` AND NOT (ns.nspname='public' AND p.prokind='f' AND p.pronargs=0 AND NOT p.proretset
+ AND p.prolang=(SELECT l.oid FROM pg_catalog.pg_language l WHERE l.lanname='plpgsql')
+ AND p.proowner=(SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname='postgres')
+ AND ((p.proname='statement_log_change' AND p.prorettype='pg_catalog.trigger'::pg_catalog.regtype)
+  OR (p.proname='statement_guard_ddl' AND p.prorettype='pg_catalog.event_trigger'::pg_catalog.regtype)))`
+
+// ApprovedScope is the one set of loader object names per chain. The scope
+// digest binds the rendered SQL text, so the reviewed install, the
+// destination capture and the manifest must all use these names.
+func ApprovedScope(chain string) (Scope, error) {
+	n := map[string]string{"cosmoshub-1": "h2p_hub1", "cosmoshub-2": "h2p_hub2"}[chain]
+	if n == "" {
+		return Scope{}, errors.New("unapproved chain")
+	}
+	return Scope{Schema: n, Loader: n + "_loader", ViewOwner: n + "_view_owner", LockOwner: n + "_lock_owner", ChainID: chain}, nil
 }
 
 // CatalogDigest binds physical relation identities, every column/constraint,
