@@ -13,7 +13,7 @@ import time
 from capture_closed import capture
 from actual_full_controls import run as controls
 from verify_source_preservation import verify as preserve
-from seal_closed import CODE, seal
+from seal_closed import code_list, seal
 from verify_movement_rehearsal import require
 
 
@@ -26,7 +26,7 @@ def run(first, directory, repo):
     subprocess.run(['git','-C',str(repo),'verify-commit',commit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
     directory.mkdir(mode=0o700)
     start=time.monotonic()
-    state=dict(supervisor_pid=os.getpid(),first=first,storage_reservation_bytes=int(os.environ.get('HUB1_STORAGE_RESERVATION_BYTES','0')),signed_source_commit=commit,python_source_pins={name:hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in CODE if name.endswith('.py')},started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    state=dict(supervisor_pid=os.getpid(),first=first,storage_reservation_bytes=int(os.environ.get('HUB1_STORAGE_RESERVATION_BYTES','0')),signed_source_commit=commit,python_source_pins={name:hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in code_list(repo,commit) if name.endswith('.py')},started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat())
     (directory/'process.private.json').write_text(json.dumps(state))
     code=1
     try:

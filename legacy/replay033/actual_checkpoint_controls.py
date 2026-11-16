@@ -6,37 +6,54 @@ import json
 import os
 from pathlib import Path
 import subprocess
-from consume_bounded import Consumer, HistoryWindow, selected_lines, sha
+from consume_bounded import HistoryWindow, selected_lines, sha
 from verify_movement_rehearsal import require
 
 class FixtureDone(Exception):
     pass
 
-def fixture(root, output):
+def fixture(root, output, first=None, opening=None, manifest=None):
     binding = json.loads((root / 'capture.private.json').read_bytes())
-    require(binding['first'] in (200001, 400001), 'actual checkpoint profile required')
-    if binding['schema'] == 'native033-closed-source-capture-v1':
-        from consume_closed import ClosedHistory, closed_lines
-        history = ClosedHistory(root, binding)
-        records = closed_lines(root, binding, 'movements')
+    first = binding['first'] if first is None else first
+    baseline = []
+    if first != binding['first']:
+        # A later part: rebuild the state at its saved checkpoint height from
+        # the recorded writes, exactly as the recording of that part did.
+        from consume_closed import ClosedConsumer as Consumer
+        from consume_split import SPLITS, SplitHistory, closed_raw_lines, fast_forward, opening_manifest, parse
+        require(binding['schema'] == 'native033-closed-source-capture-v1' and first - 1 in SPLITS[binding['first']] and opening is not None and manifest is not None, 'actual saved-checkpoint part required')
+        opening_manifest(opening, manifest)
+        history = SplitHistory(root, binding, first)
+        lines = closed_raw_lines(root, binding, 'movements')
+        baseline, _ = fast_forward(lines, binding['first'], first - 1)
+        records = (parse(raw) for raw in lines)
     else:
-        history = HistoryWindow(root, binding)
-        records = selected_lines(root, binding, 'movements')
+        from consume_bounded import Consumer
+        require(first in (200001, 400001) and opening is None and manifest is None, 'actual checkpoint profile required')
+        if binding['schema'] == 'native033-closed-source-capture-v1':
+            from consume_closed import ClosedHistory, closed_lines
+            history = ClosedHistory(root, binding)
+            records = closed_lines(root, binding, 'movements')
+        else:
+            history = HistoryWindow(root, binding)
+            records = selected_lines(root, binding, 'movements')
     with gzip.open(output, 'xb') as stream:
         def send(q):
             stream.write((json.dumps(q, separators=(',', ':')) + '\n').encode())
             if q['kind'] == 'commit':
                 raise FixtureDone()
         send(dict(kind='anchor', anchor=history.anchor, through=binding['through']))
-        consumer = Consumer(send, history, binding['through'], binding['first'])
+        consumer = Consumer(send, history, binding['through'], first)
         try:
+            for r in baseline:
+                consumer.accept(r)
             for r in records:
                 consumer.accept(r)
         except FixtureDone:
-            return binding['first']
+            return first
     raise ValueError('complete actual checkpoint first height absent')
 
-def control(root, source, directory, binary, name):
+def control(root, source, directory, binary, name, checkpoint=None):
     cases = dict(opening_root='normal native application commitment differs',
                  opening_store='complete raw store does not reproduce native IAVL commitment',
                  opening_baseline='normal opening complete raw baseline differs from native checkpoint',
@@ -47,7 +64,7 @@ def control(root, source, directory, binary, name):
     changed = False
     logfile = directory / (name + '.refused.private.log')
     receipt = directory / (name + '.must-not-exist.json')
-    command = [str(binary), '--cache', str(root / 'cache'), '--checkpoint-home', str(root / 'opening-checkpoint'), '--working-home', str(directory / (name + '-home')), '--receipt', str(receipt)]
+    command = [str(binary), '--cache', str(root / 'cache'), '--checkpoint-home', str(checkpoint or root / 'opening-checkpoint'), '--working-home', str(directory / (name + '-home')), '--receipt', str(receipt)]
     with logfile.open('xb') as log:
         p = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, env=dict(os.environ, GOMAXPROCS='2', GOMEMLIMIT='512MiB'))
         try:
@@ -87,7 +104,7 @@ def control(root, source, directory, binary, name):
                 p.stdin.close()
             except BrokenPipeError:
                 pass
-        code = p.wait(timeout=180)
+        code = p.wait(timeout=1800)
     require(changed and code != 0 and cases[name] in logfile.read_text() and not receipt.exists(), 'specific actual checkpoint refusal missing: ' + name)
     return dict(control=name, exit=code, expected_refusal=True, log_sha256=sha(logfile))
 

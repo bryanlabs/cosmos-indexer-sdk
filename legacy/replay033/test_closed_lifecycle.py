@@ -2,11 +2,12 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 from source_reader import Reader, UID, POD, IMAGE, validate_reader, completed_manifest
-from seal_closed import CODE, validate_start
+from seal_closed import CODE, code_list, validate_start
 from consume_closed import ClosedConsumer
 
 class RetainedReader(unittest.TestCase):
@@ -45,17 +46,29 @@ class RunStart(unittest.TestCase):
     def test_later_head_or_changed_python_cannot_name_executed_source(self):
         with tempfile.TemporaryDirectory() as d:
             repo=Path(d); pins={}; data=b'pass\n'
-            for name in CODE:
-                if name.endswith('.py'):
-                    p=repo/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data);pins[name]=hashlib.sha256(data).hexdigest()
-            record=repo/'start.json';record.write_text(json.dumps(dict(signed_source_commit='original',python_source_pins=pins)))
-            def git(args,**kwargs):return 'original\n' if args[-1]=='HEAD' else data
-            with patch('seal_closed.subprocess.check_output',side_effect=git):
-                self.assertEqual(validate_start(repo,record),'original')
-                (repo/next(iter(pins))).write_text('changed')
-                with self.assertRaises(ValueError):validate_start(repo,record)
-            with patch('seal_closed.subprocess.check_output',return_value='later-signed-head\n'):
-                with self.assertRaises(ValueError):validate_start(repo,record)
+            def git(*args):return subprocess.check_output(['git','-C',d,'-c','user.name=t','-c','user.email=t@t','-c','commit.gpgsign=false']+list(args),text=True,stderr=subprocess.DEVNULL)
+            git('init','-q')
+            for name in CODE+['legacy/replay033/cmd/consume-native/extra_rule.go','legacy/replay033/extra_tool.py']:
+                p=repo/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data)
+                if name.endswith('.py'):pins[name]=hashlib.sha256(data).hexdigest()
+            git('add','-A');git('commit','-q','-m','launch')
+            commit=git('rev-parse','HEAD').strip()
+            # Every helper file and every tool of the launch commit is covered, not a hand-kept list.
+            self.assertIn('legacy/replay033/cmd/consume-native/extra_rule.go',code_list(repo,commit))
+            self.assertIn('legacy/replay033/cmd/consume-native/slash_native.go',code_list(repo,commit))
+            record=repo/'start.json';record.write_text(json.dumps(dict(signed_source_commit=commit,python_source_pins=pins)))
+            self.assertEqual(validate_start(repo,record),commit)
+            short=dict(pins);short.pop('legacy/replay033/extra_tool.py')
+            partial=repo/'partial.json';partial.write_text(json.dumps(dict(signed_source_commit=commit,python_source_pins=short)))
+            with self.assertRaises(ValueError):validate_start(repo,partial)
+            (repo/next(iter(pins))).write_text('changed')
+            with self.assertRaises(ValueError):validate_start(repo,record)
+            git('checkout','-q','--','.')
+            self.assertEqual(validate_start(repo,record),commit)
+            git('commit','-q','--allow-empty','-m','later')
+            with self.assertRaises(ValueError):validate_start(repo,record)
+            git('rm','-q','legacy/replay033/cmd/consume-native/slash_native.go');git('commit','-q','-m','no penalty source')
+            with self.assertRaises(ValueError):code_list(repo,git('rev-parse','HEAD').strip())
 
     def test_final_marker_unknown_field_refused_before_special_case(self):
         c=ClosedConsumer(lambda q:None,{},200000)
