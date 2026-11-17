@@ -736,7 +736,19 @@ type exportRecord struct {
 	Address   string `json:"address"`
 	Denom     string `json:"denom"`
 	Amount    string `json:"amount"`
+	// The native observer (Hub 1) also records store evidence and a
+	// classification on each movement. Hub 2's export carries none of these.
+	Unit            string `json:"unit"`
+	Before          string `json:"before"`
+	After           string `json:"after"`
+	Classification  string `json:"classification"`
+	EvidenceQuality string `json:"evidence_quality"`
 }
+
+// exportEvidenceUnits are the native evidence kinds an observed export
+// carries beside its payouts, with the one unit each is written in. They
+// move no tokens; the importer reads them as evidence the same way.
+var exportEvidenceUnits = map[string]string{"native_state": "native_store_bytes", "native_state_checkpoint": "native_store_bytes", "native_state_hash": "native_store_sha256", "native_execution": "native_execution_evidence"}
 
 // readPayoutRecords reads the native record of what the migration-height
 // export actually paid out. Each paid reward and commission appears once.
@@ -768,8 +780,20 @@ func readPayoutRecords(records, proof Pin, b finalBounds) (map[string]int64, int
 		d := json.NewDecoder(strings.NewReader(sc.Text()))
 		d.DisallowUnknownFields()
 		var r exportRecord
-		if d.Decode(&r) != nil || r.Height != b.canonical || r.Phase != "zero_height_export" || r.Status != "exported" || r.Tx != -1 || r.Message != -1 || r.Code != 0 {
+		// A native_execution record keeps the result code the chain returned
+		// (a refused withdrawal pays nothing and has no movement); every other
+		// record must be a success.
+		if d.Decode(&r) != nil || r.Height != b.canonical || r.Phase != "zero_height_export" || r.Status != "exported" || r.Tx != -1 || r.Message != -1 || (r.Code != 0 && r.Kind != "native_execution") {
 			return nil, 0, refuse("restart payout records", "a record is not from the migration-height export")
+		}
+		if unit, evidence := exportEvidenceUnits[r.Kind]; evidence {
+			if r.Unit != unit {
+				return nil, 0, refuse("restart payout records", "native evidence in another unit")
+			}
+			continue
+		}
+		if (r.Kind == "movement" && r.Unit != "" && r.Unit != "native_bank_tokens") || (r.Kind != "movement" && (r.Unit != "" || r.Before != "" || r.After != "" || r.Classification != "" || r.EvidenceQuality != "")) {
+			return nil, 0, refuse("restart payout records", "an unknown or malformed payout record")
 		}
 		switch r.Kind {
 		case "accounting":
