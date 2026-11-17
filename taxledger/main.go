@@ -26,8 +26,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,10 +65,17 @@ func main() {
 	recheck := flag.Bool("recheck-holes", false, "recheck recorded index holes against cached blocks (dry run unless --apply)")
 	apply := flag.Bool("apply", false, "apply an index-hole recheck or a ledger scan back, requires --backup")
 	backup := flag.String("backup", "", "new private JSONL backup file on durable storage for an index-hole recheck or a ledger scan back")
+	repeated := flag.Bool("repeated-inclusions", false, "date transactions the chain included twice at the copy that took effect and clear the holes this proves (dry run unless --apply)")
+	repeatedHeights := flag.String("hole-heights", "", "comma-separated recorded hole heights for --repeated-inclusions, default every uncleared hole")
+	compareHeights := flag.String("compare-heights", "", "comma-separated hole heights whose accounts --repeated-inclusions also rebuilds the way the API answers and compares with chain state")
+	compareAccounts := flag.Int("compare-accounts", 1, "accounts compared per --compare-heights hole")
 	flag.Parse()
 	otherOp := *flows || *daysAppend || *daysFrom != ""
+	if *repeated && (otherOp || *recheck) {
+		log.Fatal("--repeated-inclusions cannot be combined with another ledger operation")
+	}
 	if (*apply || *backup != "") && otherOp {
-		log.Fatal("--apply and --backup are only supported with --recheck-holes or the ledger scan back")
+		log.Fatal("--apply and --backup are only supported with --recheck-holes, --repeated-inclusions or the ledger scan back")
 	}
 	if *recheck && otherOp {
 		log.Fatal("--recheck-holes cannot be combined with another ledger operation")
@@ -111,6 +120,27 @@ func main() {
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	if *repeated {
+		hs, err := heightList(*repeatedHeights)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cs, err := heightList(*compareHeights)
+		if err != nil {
+			log.Fatal(err)
+		}
+		sum, err := srv.RepairRepeatedInclusions(*chain, node, taxapi.RepeatedInclusionsOptions{Apply: *apply, BackupPath: *backup, Heights: hs, Compare: cs, CompareAccounts: *compareAccounts, Workers: *workers}, log.Printf)
+		if out, jerr := json.Marshal(sum); jerr == nil {
+			log.Printf("repeated inclusions summary: %s", out)
+		}
+		if err != nil {
+			log.Fatalf("repeated inclusions: %v", err)
+		}
+		if !*apply {
+			log.Printf("repeated inclusions: dry run, nothing written")
+		}
+		return
+	}
 	if *recheck {
 		if _, _, err := srv.RecheckIndexHoles(*chain, node, taxapi.RecheckIndexHolesOptions{Apply: *apply, BackupPath: *backup}, log.Printf); err != nil {
 			log.Fatalf("index holes: %v", err)
@@ -200,4 +230,19 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
 	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
+}
+
+func heightList(v string) ([]int64, error) {
+	var out []int64
+	for _, f := range strings.Split(v, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		h, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("height %q: %w", f, err)
+		}
+		out = append(out, h)
+	}
+	return out, nil
 }

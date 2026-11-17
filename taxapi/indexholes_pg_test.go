@@ -93,6 +93,8 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 		tempMsgsTable,
 		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false, PRIMARY KEY (chain, height))",
 		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text, PRIMARY KEY (chain, height, address))",
+		"CREATE TEMP TABLE tax_tx_inclusions (chain text, height bigint, tx_index bigint, hash text, tx_id bigint, block_id bigint, code bigint, codespace text NOT NULL DEFAULT '', effective boolean, charged text NOT NULL DEFAULT '', granter text NOT NULL DEFAULT '', recorded_at timestamptz, PRIMARY KEY (chain, height, tx_index))",
+		"CREATE TEMP TABLE tax_index_hole_clearances (chain text, height bigint, chain_txs bigint, placed bigint, accounts bigint, cleared_at timestamptz, PRIMARY KEY (chain, height))",
 		"INSERT INTO chains VALUES (1,'cosmoshub-4')",
 		"INSERT INTO blocks VALUES (1,1,100,true,true),(2,1,101,true,true),(3,1,200,true,true),(4,1,201,true,true)",
 		// The vote's one row is at the height that charged its fee.

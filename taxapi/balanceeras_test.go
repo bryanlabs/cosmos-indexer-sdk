@@ -39,7 +39,10 @@ func TestUnnamedStakingHeightsPostgres(t *testing.T) {
 	database = database.WithContext(ctx)
 	for _, sql := range []string{
 		tempSearchPath,
-		"CREATE TEMP TABLE taxable_events (category text, from_addr text, to_addr text, block_height bigint)",
+		"CREATE TEMP TABLE taxable_events (category text, from_addr text, to_addr text, block_height bigint, message_id bigint)",
+		"CREATE TEMP TABLE messages (id bigint, tx_id bigint)",
+		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, height bigint)",
+		"CREATE TEMP TABLE tax_tx_inclusions (tx_id bigint, block_id bigint, code bigint, charged text, granter text, effective boolean)",
 		"INSERT INTO taxable_events VALUES " +
 			"('delegate','cosmos1w','',9000000)," +
 			"('undelegate','','cosmos1w',12000000)," +

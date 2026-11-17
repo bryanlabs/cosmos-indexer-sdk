@@ -44,6 +44,10 @@ type rawTxInfo struct {
 	Fee        sdk.Coins
 	FeeGranter string
 	FeeDecoded bool
+	// Reincluded is a failed copy of bytes another inclusion ran or paid the
+	// fee for. The signers' sequences allow only one inclusion past the ante
+	// handler, so this copy was turned away and paid nothing.
+	Reincluded bool
 }
 
 // decodeTxFee reads the declared fee and fee granter from a transaction's
@@ -236,7 +240,7 @@ func resolvePreEventFees(txs []nodeTx, raw []rawTxInfo, collected sdk.Coins) ([]
 	for i, t := range txs {
 		info := raw[i]
 		if !info.FeeDecoded {
-			if t.Code != 0 && anteOnlyFailure(t.Code, info.Codespace) {
+			if t.Code != 0 && (anteOnlyFailure(t.Code, info.Codespace) || info.Reincluded) {
 				continue
 			}
 			return nil, "undecodable transaction"
@@ -244,7 +248,7 @@ func resolvePreEventFees(txs []nodeTx, raw []rawTxInfo, collected sdk.Coins) ([]
 		switch {
 		case t.Code == 0:
 			paid = paid.Add(info.Fee...)
-		case anteOnlyFailure(t.Code, info.Codespace), info.Fee.IsZero():
+		case anteOnlyFailure(t.Code, info.Codespace), info.Reincluded, info.Fee.IsZero():
 		default:
 			candidates = append(candidates, i)
 		}
@@ -332,7 +336,7 @@ func settlePreEventBlock(height int64, b scannedBlock, next feeCollectorBegin) p
 			}
 			// A failure only the ante handler raises, or a zero fee, paid
 			// nothing whatever the block collected.
-			if anteOnlyFailure(b.txs[i].Code, b.raw[i].Codespace) || (b.raw[i].FeeDecoded && b.raw[i].Fee.IsZero()) {
+			if anteOnlyFailure(b.txs[i].Code, b.raw[i].Codespace) || b.raw[i].Reincluded || (b.raw[i].FeeDecoded && b.raw[i].Fee.IsZero()) {
 				b.txs[i].Rejected, b.txs[i].Charged = true, ""
 				st.FailedUncharged++
 				continue

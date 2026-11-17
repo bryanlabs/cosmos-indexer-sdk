@@ -41,6 +41,8 @@ func TestBalanceLedgerFeesAndHolesPostgres(t *testing.T) {
 		"CREATE TEMP TABLE tax_failed_tx_fees (tx_id bigint, charged text)",
 		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false)",
 		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text)",
+		"CREATE TEMP TABLE tax_tx_inclusions (chain text, height bigint, tx_index bigint, hash text, tx_id bigint, block_id bigint, code bigint, codespace text NOT NULL DEFAULT '', effective boolean, charged text NOT NULL DEFAULT '', granter text NOT NULL DEFAULT '', recorded_at timestamptz, PRIMARY KEY (chain, height, tx_index))",
+		"CREATE TEMP TABLE tax_index_hole_clearances (chain text, height bigint, chain_txs bigint, placed bigint, accounts bigint, cleared_at timestamptz, PRIMARY KEY (chain, height))",
 		"INSERT INTO blocks VALUES (1,1,10),(2,1,20),(3,1,30)",
 		"INSERT INTO addresses VALUES (1,'cosmos1grantee'),(2,'cosmos1granter')",
 		"INSERT INTO denoms VALUES (1,'uatom')",

@@ -93,6 +93,8 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 		tempMsgsTable,
 		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false, PRIMARY KEY (chain, height))",
 		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text, PRIMARY KEY (chain, height, address))",
+		"CREATE TEMP TABLE tax_tx_inclusions (chain text, height bigint, tx_index bigint, hash text, tx_id bigint, block_id bigint, code bigint, codespace text NOT NULL DEFAULT '', effective boolean, charged text NOT NULL DEFAULT '', granter text NOT NULL DEFAULT '', recorded_at timestamptz, PRIMARY KEY (chain, height, tx_index))",
+		"CREATE TEMP TABLE tax_index_hole_clearances (chain text, height bigint, chain_txs bigint, placed bigint, accounts bigint, cleared_at timestamptz, PRIMARY KEY (chain, height))",
 		"CREATE TEMP TABLE tax_failed_tx_fees (tx_id bigint PRIMARY KEY, charged text)",
 		"CREATE TEMP TABLE tax_fee_grants (tx_id bigint PRIMARY KEY, granter text)",
 		"CREATE TEMP TABLE tax_ledger_scans (chain text PRIMARY KEY, fee_grants_from bigint, fee_grants_to bigint)",

@@ -49,6 +49,10 @@ type Server struct {
 	statementMaxRows    int64
 	statementTimeout    time.Duration
 	statementSummaryOff bool
+
+	// preview, set only on a repair run's own Server, stands in for the
+	// inclusion and clearance tables.
+	preview *inclusionPreview
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {

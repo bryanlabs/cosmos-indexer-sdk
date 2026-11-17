@@ -40,14 +40,24 @@ func (s *Server) unnamedStakingHeights(chain, addr string, lo int64) ([]int64, e
 	if chainParam(chain) != apiMainnet || lo+1 >= hubStakingDelegatorFrom {
 		return nil, nil
 	}
+	// A staking event is dated at its transaction's effective inclusion.
+	rel, rp := s.effectiveRel()
 	var heights []int64
 	err := s.db.Raw(`
-SELECT DISTINCT block_height FROM (
-  SELECT block_height FROM taxable_events WHERE from_addr = @wallet AND category IN @cats AND block_height > @lo AND block_height < @hi
+SELECT DISTINCT h FROM (
+  SELECT COALESCE(pb.height, te.block_height) AS h FROM taxable_events te
+  LEFT JOIN messages m ON m.id = te.message_id
+  LEFT JOIN `+rel+` p ON p.tx_id = m.tx_id
+  LEFT JOIN blocks pb ON pb.id = p.block_id
+  WHERE te.from_addr = @wallet AND te.category IN @cats AND te.block_height < @hi
   UNION ALL
-  SELECT block_height FROM taxable_events WHERE to_addr = @wallet AND category IN @cats AND block_height > @lo AND block_height < @hi
-) s ORDER BY block_height`,
-		map[string]any{"wallet": addr, "cats": stakingCategories, "lo": lo, "hi": int64(hubStakingDelegatorFrom)}).
+  SELECT COALESCE(pb.height, te.block_height) AS h FROM taxable_events te
+  LEFT JOIN messages m ON m.id = te.message_id
+  LEFT JOIN `+rel+` p ON p.tx_id = m.tx_id
+  LEFT JOIN blocks pb ON pb.id = p.block_id
+  WHERE te.to_addr = @wallet AND te.category IN @cats AND te.block_height < @hi
+) s WHERE h > @lo AND h < @hi ORDER BY h`,
+		withParams(rp, map[string]any{"wallet": addr, "cats": stakingCategories, "lo": lo, "hi": int64(hubStakingDelegatorFrom)})).
 		Scan(&heights).Error
 	return heights, err
 }

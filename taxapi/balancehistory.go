@@ -119,6 +119,9 @@ func BalanceHistoryMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}, &BalanceDay{}, &BalanceBuild{}, &BalanceDeferred{}); err != nil {
 		return err
 	}
+	if err := inclusionsMigrate(db); err != nil {
+		return err
+	}
 	if err := db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_txes_block_id ON txes (block_id)").Error; err != nil {
 		return err
 	}
@@ -570,16 +573,19 @@ func (s *Server) indexHoles(chain, addr string, lo, hi int64) (int64, int64, err
 }
 
 // holeHeights lists, ascending, the recorded index holes in (lo, hi] that may
-// touch addr.
+// touch addr, leaving out holes whose block was proven complete once its
+// repeated inclusions were placed.
 func (s *Server) holeHeights(chain, addr string, lo, hi int64) ([]int64, error) {
 	var heights []int64
+	cleared, cp := s.clearedHoleCond("h")
 	err := s.db.Raw(`
 SELECT h.height FROM tax_index_holes h
 WHERE h.chain = @chain AND h.height > @lo AND h.height <= @hi
 AND (NOT h.addresses_known OR EXISTS (SELECT 1 FROM tax_index_hole_addresses a
      WHERE a.chain = h.chain AND a.height = h.height AND a.address = @addr))
+AND `+cleared+`
 ORDER BY h.height`,
-		map[string]any{"chain": chain, "addr": addr, "lo": lo, "hi": hi}).Scan(&heights).Error
+		withParams(cp, map[string]any{"chain": chain, "addr": addr, "lo": lo, "hi": hi})).Scan(&heights).Error
 	return heights, err
 }
 
@@ -634,6 +640,8 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 // plus the wallet's redelegations, and the highest height of a redelegation
 // that cannot be attributed.
 func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
+	// A transaction's events are dated at its effective inclusion.
+	rel, rp := s.effectiveRel()
 	var msgRows []ledgerAttrRow
 	if err := s.db.Raw(`
 SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
@@ -641,7 +649,8 @@ FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
 JOIN messages m ON m.id = me.message_id
 JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
+LEFT JOIN `+rel+` p ON p.tx_id = x.id
+JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
 WHERE me.id IN (
@@ -655,7 +664,7 @@ WHERE me.id IN (
 AND (t.type IN @types OR t.type = 'create_validator')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 ORDER BY b.height, me.id, a.index`,
-		map[string]any{"addr": addr, "op": operator, "types": ledgerMessageTypes, "ids": ids, "lo": lo, "hi": hi}).
+		withParams(rp, map[string]any{"addr": addr, "op": operator, "types": ledgerMessageTypes, "ids": ids, "lo": lo, "hi": hi})).
 		Scan(&msgRows).Error; err != nil {
 		return nil, 0, fmt.Errorf("message events: %w", err)
 	}
@@ -684,12 +693,13 @@ JOIN message_events me0 ON me0.id = a0.message_event_id
 JOIN message_event_types t0 ON t0.id = me0.message_event_type_id
 JOIN messages m ON m.id = me0.message_id
 JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
+LEFT JOIN `+rel+` p ON p.tx_id = x.id
+JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
 WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr AND t0.type IN ('withdraw_rewards', 'message')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
             WHERE r.message_id = me0.message_id AND rt.type = 'redelegate')`,
-		map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi}).
+		withParams(rp, map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi})).
 		Scan(&redelMsgs).Error; err != nil {
 		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
 	}
@@ -701,12 +711,13 @@ FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
 JOIN messages m ON m.id = me.message_id
 JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
+LEFT JOIN `+rel+` p ON p.tx_id = x.id
+JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
 WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message')
 ORDER BY b.height, me.message_id, me.index, a.index`,
-			map[string]any{"msgs": redelMsgs}).
+			withParams(rp, map[string]any{"msgs": redelMsgs})).
 			Scan(&redelRows).Error; err != nil {
 			return nil, 0, fmt.Errorf("redelegation events: %w", err)
 		}
@@ -819,25 +830,35 @@ type ledgerFeeRow struct {
 // the node, and the count still unknown is returned.
 func (s *Server) ledgerFees(ids []int64, addr string, lo, hi int64, node *ledgerNode) ([]ledgerFee, int, error) {
 	var rows []ledgerFeeRow
+	// A row with an effective inclusion pays as that inclusion did: at its
+	// block, with its outcome and through its fee grant.
+	rel, rp := s.effectiveRel()
 	if err := s.db.Raw(`
-SELECT x.id AS tx_id, x.hash, b.height, x.code, d.base AS denom, f.amount::text AS amount,
-       o.tx_id IS NOT NULL AS resolved, COALESCE(o.charged, '') AS charged
+SELECT x.id AS tx_id, x.hash, b.height, COALESCE(p.code, x.code) AS code, d.base AS denom, f.amount::text AS amount,
+       (p.tx_id IS NOT NULL OR o.tx_id IS NOT NULL) AS resolved,
+       CASE WHEN p.tx_id IS NOT NULL THEN p.charged ELSE COALESCE(o.charged, '') END AS charged
 FROM (
   SELECT f.tx_id, f.denomination_id, f.amount FROM fees f
   JOIN addresses ad ON ad.id = f.payer_address_id
   WHERE ad.address = @addr AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = f.tx_id)
+  AND NOT EXISTS (SELECT 1 FROM `+rel+` pg WHERE pg.tx_id = f.tx_id AND pg.granter <> '')
   UNION ALL
   SELECT f.tx_id, f.denomination_id, f.amount FROM tax_fee_grants g
   JOIN fees f ON f.tx_id = g.tx_id
   WHERE g.granter = @addr
+  UNION ALL
+  SELECT f.tx_id, f.denomination_id, f.amount FROM `+rel+` pg
+  JOIN fees f ON f.tx_id = pg.tx_id
+  WHERE pg.granter = @addr AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = pg.tx_id)
 ) f
 JOIN txes x ON x.id = f.tx_id
-JOIN blocks b ON b.id = x.block_id
+LEFT JOIN `+rel+` p ON p.tx_id = x.id
+JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
 JOIN denoms d ON d.id = f.denomination_id
 LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
 WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 ORDER BY b.height, x.id`,
-		map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi}).
+		withParams(rp, map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi})).
 		Scan(&rows).Error; err != nil {
 		return nil, 0, fmt.Errorf("fees: %w", err)
 	}
@@ -860,7 +881,8 @@ ORDER BY b.height, x.id`,
 			pending = append(pending, r)
 		}
 	}
-	if len(pending) > 0 && node != nil {
+	// A repair run's preview never records fee outcomes.
+	if len(pending) > 0 && node != nil && s.preview == nil {
 		resolved := s.resolveFailedFees(pending, node)
 		for id, charged := range resolved {
 			r := failed[id]
