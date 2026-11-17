@@ -2,7 +2,9 @@ package taxapi
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -118,20 +120,72 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 		require.Equal(t, int64(1), addresses)
 	}
 
-	dropped, left, err := s.RecheckIndexHoles(apiMainnet, &ledgerNode{cache: dir}, t.Logf)
+	var original []IndexHole
+	require.NoError(t, database.Order("height").Find(&original).Error)
+	var originalAddresses []IndexHoleAddress
+	require.NoError(t, database.Order("height, address").Find(&originalAddresses).Error)
+	unchanged := func() {
+		t.Helper()
+		var got []IndexHole
+		require.NoError(t, database.Order("height").Find(&got).Error)
+		require.Equal(t, original, got)
+		var addresses []IndexHoleAddress
+		require.NoError(t, database.Order("height, address").Find(&addresses).Error)
+		require.Equal(t, originalAddresses, addresses)
+	}
+	node := &ledgerNode{cache: dir}
+	planPath := filepath.Join(t.TempDir(), "dry-run.jsonl")
+	dropped, left, err := s.RecheckIndexHoles(apiMainnet, node, RecheckIndexHolesOptions{BackupPath: planPath}, t.Logf)
 	require.NoError(t, err)
 	require.Equal(t, 1, dropped)
 	require.Equal(t, 1, left)
+	unchanged()
+
+	_, _, err = s.RecheckIndexHoles(apiMainnet, node, RecheckIndexHolesOptions{Apply: true}, t.Logf)
+	require.ErrorContains(t, err, "requires --backup")
+	unchanged()
+	_, _, err = s.RecheckIndexHoles(apiMainnet, node, RecheckIndexHolesOptions{Apply: true, BackupPath: planPath}, t.Logf)
+	require.ErrorContains(t, err, "file exists")
+	unchanged()
+	_, _, err = s.RecheckIndexHoles(apiMainnet, node, RecheckIndexHolesOptions{Apply: true, BackupPath: filepath.Join(t.TempDir(), "absent", "backup.jsonl")}, t.Logf)
+	require.Error(t, err)
+	unchanged()
+
+	backupPath := filepath.Join(t.TempDir(), "apply.jsonl")
+	dropped, left, err = s.RecheckIndexHoles(apiMainnet, node, RecheckIndexHolesOptions{Apply: true, BackupPath: backupPath}, t.Logf)
+	require.NoError(t, err)
+	require.Equal(t, 1, dropped)
+	require.Equal(t, 1, left)
+	f, err := os.Open(backupPath)
+	require.NoError(t, err)
+	defer f.Close()
+	stat, err := f.Stat()
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), stat.Mode().Perm())
+	dec := json.NewDecoder(f)
+	var first, second indexHoleChange
+	require.NoError(t, dec.Decode(&first))
+	require.NoError(t, dec.Decode(&second))
+	require.Equal(t, original[0], first.Before)
+	require.Equal(t, originalAddresses, first.BeforeAddresses)
+	require.Nil(t, first.After)
+	require.Empty(t, first.AfterAddresses)
+	require.Equal(t, original[1], second.Before)
+	require.Empty(t, second.BeforeAddresses)
+	require.True(t, first.Apply)
+	require.Equal(t, 1, first.Version)
 	var holes []IndexHole
 	require.NoError(t, database.Order("height").Find(&holes).Error)
 	require.Equal(t, []IndexHole{{Chain: apiMainnet, Height: 200, ChainTxs: 1, AddressesKnown: true}}, holes)
+	require.Equal(t, holes[0], *second.After)
+	require.Equal(t, []IndexHoleAddress{{Chain: apiMainnet, Height: 200, Address: backTestGranter}}, second.AfterAddresses)
 	var addrs []string
 	require.NoError(t, database.Model(&IndexHoleAddress{}).Order("height, address").Pluck("address", &addrs).Error)
 	require.Equal(t, []string{backTestGranter}, addrs, "the dropped hole's accounts go with it and the kept one names its own")
-	n, first, err := s.indexHoles(apiMainnet, backTestGranter, 0, 300)
+	n, firstHeight, err := s.indexHoles(apiMainnet, backTestGranter, 0, 300)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), n)
-	require.Equal(t, int64(200), first)
+	require.Equal(t, int64(200), firstHeight)
 
 	// Repair only this synthetic fixture. Membership is now correct, but a
 	// sweep still cannot attest it. Only the explicit recheck removes it.
@@ -139,7 +193,7 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 	cleared, err := s.clearIndexHoles(apiMainnet, []int64{1})
 	require.NoError(t, err)
 	require.Zero(t, cleared)
-	dropped, left, err = s.RecheckIndexHoles(apiMainnet, &ledgerNode{cache: dir}, t.Logf)
+	dropped, left, err = s.RecheckIndexHoles(apiMainnet, node, RecheckIndexHolesOptions{Apply: true, BackupPath: filepath.Join(t.TempDir(), "repair.jsonl")}, t.Logf)
 	require.NoError(t, err)
 	require.Equal(t, 1, dropped)
 	require.Zero(t, left)

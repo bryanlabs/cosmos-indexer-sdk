@@ -2,6 +2,8 @@
 // no longer holds: it scans blocks from the archive block cache back from the
 // start of the scanned span, then records validator rates for those days from
 // an archive node's REST API. Both steps resume where the last run stopped.
+// The scan is a dry run unless --apply, which needs a new --backup file:
+// every chunk's plan is synced there before its database transaction.
 //
 // With -days-from it instead stores every address's holdings at the end of
 // each day from -days-from to -days-to, walking back from the serving node
@@ -21,6 +23,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"log"
@@ -57,8 +60,20 @@ func main() {
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
 	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
-	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
+	recheck := flag.Bool("recheck-holes", false, "recheck recorded index holes against cached blocks (dry run unless --apply)")
+	apply := flag.Bool("apply", false, "apply an index-hole recheck or a ledger scan back, requires --backup")
+	backup := flag.String("backup", "", "new private JSONL backup file on durable storage for an index-hole recheck or a ledger scan back")
 	flag.Parse()
+	otherOp := *flows || *daysAppend || *daysFrom != ""
+	if (*apply || *backup != "") && otherOp {
+		log.Fatal("--apply and --backup are only supported with --recheck-holes or the ledger scan back")
+	}
+	if *recheck && otherOp {
+		log.Fatal("--recheck-holes cannot be combined with another ledger operation")
+	}
+	if *apply && *backup == "" {
+		log.Fatal("--apply requires --backup on durable storage")
+	}
 
 	// The commission trace runs thousands of small per-wallet queries whose
 	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
@@ -97,12 +112,15 @@ func main() {
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
 	if *recheck {
-		if _, _, err := srv.RecheckIndexHoles(*chain, node, log.Printf); err != nil {
+		if _, _, err := srv.RecheckIndexHoles(*chain, node, taxapi.RecheckIndexHolesOptions{Apply: *apply, BackupPath: *backup}, log.Printf); err != nil {
 			log.Fatalf("index holes: %v", err)
 		}
 		return
 	}
-	from, err := srv.ExtendLedgerScanBack(*chain, node, *floor, *chunk, *workers, log.Printf)
+	from, sum, err := srv.ExtendLedgerScanBack(*chain, node, *floor, *chunk, *workers, taxapi.LedgerBackOptions{Apply: *apply, BackupPath: *backup}, log.Printf)
+	if out, jerr := json.Marshal(sum); jerr == nil {
+		log.Printf("ledger scan back summary: %s", out)
+	}
 	switch {
 	case errors.Is(err, taxapi.ErrLedgerScanUnindexed):
 		log.Printf("ledger scan back: stopped at the span start %d: %v", from, err)
@@ -110,6 +128,10 @@ func main() {
 		log.Fatalf("ledger scan back: stopped at the span start %d: %v", from, err)
 	default:
 		log.Printf("ledger scan back: span starts at the floor %d", from)
+	}
+	if !*apply {
+		log.Printf("ledger scan back: dry run, nothing written; validator rates are recorded only with --apply")
+		return
 	}
 	if *rates {
 		if err := srv.BackfillValidatorRates(*chain, node, log.Printf); err != nil {

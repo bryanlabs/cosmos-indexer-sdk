@@ -488,7 +488,7 @@ func (s *Server) dayEndBlock(ids []int64, day time.Time) (heightTime, error) {
 		return heightTime{}, res.Error
 	}
 	if res.RowsAffected == 0 || !h.TimeStamp.Before(cutoff) {
-		return heightTime{}, balanceIncomplete{fmt.Sprintf("block %d, the last block of %s, is not in the index", next.Height-1, day.Format(apiDateLayout))}
+		return heightTime{}, balanceIncomplete{fmt.Sprintf("the last block of %s is not in the index yet: index coverage resumes at block %d", day.Format(apiDateLayout), next.Height)}
 	}
 	return h, nil
 }
