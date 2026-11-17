@@ -121,7 +121,9 @@ class SplitHistory(ClosedHistory):
         require(source['height'] == binding['first'] - 1, 'closed opening native height differs')
         self.cache, self.last = {}, source['height']
         self.target, self.completion = binding['through'], None
-        self.anchor = source
+        # A part that opens mid-source sends the native helper an anchor at its own opening height,
+        # but the source completion record still names the source's first height.
+        self.anchor = self.source_anchor = source
         if first > binding['first']:
             row = HistoryWindow.__getitem__(self, first - 1)
             self.anchor = dict(schema=row['schema'], kind='source_anchor', release=row['release'], chain=row['chain'], height=row['height'],

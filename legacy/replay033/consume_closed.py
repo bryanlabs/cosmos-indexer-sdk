@@ -44,7 +44,8 @@ def closed_lines(root, binding, name):
 class ClosedHistory(HistoryWindow):
     def __init__(self, root, binding):
         self.rows = iter(closed_lines(root, binding, 'native-history'))
-        self.anchor = self.validate(next(self.rows), anchor=True)
+        # The completion record names the first height of the whole source, so it is checked against the source anchor.
+        self.anchor = self.source_anchor = self.validate(next(self.rows), anchor=True)
         require(self.anchor['height'] == binding['first'] - 1, 'closed opening native height differs')
         self.cache, self.last = {}, self.anchor['height']
         self.target, self.completion = binding['through'], None
@@ -56,7 +57,7 @@ class ClosedHistory(HistoryWindow):
         if self.completion is None:
             r = next(self.rows)
             require(set(r) == set('schema kind first_height height commit unexecuted_next_header unexecuted_next_block_hash'.split()), 'unknown closed history completion field')
-            require(r['schema'] == 'native033-lossless-history-v1' and r['kind'] == 'history_completed' and r['first_height'] == self.anchor['height'] + 1 and r['height'] == self.target, 'closed native history completion identity differs')
+            require(r['schema'] == 'native033-lossless-history-v1' and r['kind'] == 'history_completed' and r['first_height'] == self.source_anchor['height'] + 1 and r['height'] == self.target, 'closed native history completion identity differs')
             require(exact(r['commit']) == exact(self.cache[self.target]['commit']) and int(r['unexecuted_next_header']['height']) == height and r['unexecuted_next_header']['chain_id'] == 'cosmoshub-1', 'actual terminal native commit or unexecuted next header differs')
             self.completion = r
             require(next(self.rows, None) is None, 'trailing complete native history')

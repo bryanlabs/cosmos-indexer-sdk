@@ -1,8 +1,12 @@
 import base64
 import copy
+import gzip
+import hashlib
+from pathlib import Path
+import tempfile
 import unittest
 from consume_bounded import CommitJournal
-from consume_split import fast_forward, json
+from consume_split import SplitHistory, fast_forward, json
 from reconcile_whole import check_profiles
 from verify_movement_rehearsal import commitment
 
@@ -65,6 +69,55 @@ class FastForward(unittest.TestCase):
             with self.subTest(change=change):
                 with self.assertRaises((ValueError, KeyError)):
                     fast_forward(iter(json.dumps(r, separators=(',', ':')).encode() for r in rows), 1, 30 if change == 'short' else 12)
+
+
+RELEASE = 'cosmos-sdk v0.33.2 (gaia), tendermint v0.31.0-dev0-fix0, iavl v0.12.1'
+GENESIS = '73a866b21723ecbc28b6d15951b2eb3aa2f2443650ff6df489bf55ac5edceefa'
+
+
+class SourceEndCompletion(unittest.TestCase):
+    """A part that opens mid-source and runs to the source end reads the source's own completion record."""
+    def source(self, directory, last, first_height=1):
+        def commit(height): return dict(Version=height, Hash=str(height))
+        common = dict(schema='native033-lossless-history-v1', release=RELEASE, chain='cosmoshub-1')
+        rows = [dict(common, kind='source_anchor', height=0, commit=commit(0), native_commit_info={}, genesis_sha256=GENESIS)]
+        rows += [dict(common, kind='height', height=h, commit=commit(h), native_commit_info={}, header=dict(height=h), block_hash=str(h),
+                      transactions=[], begin={}, deliver=[], end={}) for h in range(1, last + 1)]
+        rows.append(dict(schema='native033-lossless-history-v1', kind='history_completed', first_height=first_height, height=last, commit=commit(last),
+                         unexecuted_next_header=dict(height=last + 1, chain_id='cosmoshub-1'), unexecuted_next_block_hash=str(last + 1)))
+        raw = b''.join(json.dumps(r, separators=(',', ':')).encode() + b'\n' for r in rows)
+        path = directory / 'native-history.source-closed.gz'
+        path.write_bytes(gzip.compress(raw, mtime=0))
+        spec = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(), compressed_bytes=path.stat().st_size, records=len(rows),
+                    raw_bytes=len(raw), raw_sha256=hashlib.sha256(raw).hexdigest(), completion_kind='history_completed')
+        return dict(first=1, through=last, streams={'native-history': spec})
+
+    def walk(self, history, first, last):
+        for h in range(first, last + 1):
+            self.assertEqual(history[h]['height'], h)
+        return history[last + 1]['header']
+
+    def test_mid_source_part_closes_at_the_source_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            b = self.source(root, 12)
+            for first in (1, 2, 7, 12):
+                with self.subTest(first=first):
+                    history = SplitHistory(root, b, first)
+                    self.assertEqual(history.anchor['height'], first - 1)
+                    self.assertEqual(self.walk(history, first, 12), dict(height=13, chain_id='cosmoshub-1'))
+                    self.assertEqual(history.completion['first_height'], 1)
+
+    def test_wrong_completion_first_height_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for wrong in (0, 2, 7, 8):
+                b = self.source(root, 12, first_height=wrong)
+                for first in (1, 8):
+                    with self.subTest(wrong=wrong, first=first):
+                        history = SplitHistory(root, b, first)
+                        with self.assertRaisesRegex(ValueError, 'completion identity differs'):
+                            self.walk(history, first, 12)
 
 
 class FiveSeams(unittest.TestCase):
