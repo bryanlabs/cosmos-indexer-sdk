@@ -834,19 +834,35 @@ func (s *Server) ledgerFees(ids []int64, addr string, lo, hi int64, node *ledger
 	// A row with an effective inclusion pays as that inclusion did: at its
 	// block, with its outcome and through its fee grant.
 	rel, rp := s.effectiveRel()
-	if err := s.db.Raw(`SELECT * FROM (`+datedBranches(`
+	prefix, payer, granted := "", `fees f
+  JOIN addresses ad ON ad.id = f.payer_address_id
+  WHERE ad.address = @addr`, `tax_fee_grants g
+  JOIN fees f ON f.tx_id = g.tx_id
+  WHERE g.granter = @addr`
+	if s.blockReads {
+		// A repair checks one block at a time, and some wallets it names have
+		// paid over a million fees, so the fees are read from the window's
+		// transactions instead of from the payer.
+		prefix = `WITH w AS MATERIALIZED (SELECT tx_id FROM ` + windowTxs(rel) + ` wt),
+payer AS MATERIALIZED (SELECT id FROM addresses WHERE address = @addr)
+`
+		payer = `w
+  JOIN fees f ON f.tx_id = w.tx_id
+  WHERE f.payer_address_id IN (SELECT id FROM payer)`
+		granted = `w
+  JOIN tax_fee_grants g ON g.tx_id = w.tx_id
+  JOIN fees f ON f.tx_id = g.tx_id
+  WHERE g.granter = @addr`
+	}
+	if err := s.db.Raw(prefix+`SELECT * FROM (`+datedBranches(`
 SELECT x.id AS tx_id, x.hash, b.height, COALESCE(p.code, x.code) AS code, d.base AS denom, f.amount::text AS amount,
        (p.tx_id IS NOT NULL OR o.tx_id IS NOT NULL) AS resolved,
        CASE WHEN p.tx_id IS NOT NULL THEN p.charged ELSE COALESCE(o.charged, '') END AS charged
 FROM (
-  SELECT f.tx_id, f.denomination_id, f.amount FROM fees f
-  JOIN addresses ad ON ad.id = f.payer_address_id
-  WHERE ad.address = @addr AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = f.tx_id)
+  SELECT f.tx_id, f.denomination_id, f.amount FROM `+payer+` AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = f.tx_id)
   AND NOT EXISTS (SELECT 1 FROM `+rel+` pg WHERE pg.tx_id = f.tx_id AND pg.granter <> '')
   UNION ALL
-  SELECT f.tx_id, f.denomination_id, f.amount FROM tax_fee_grants g
-  JOIN fees f ON f.tx_id = g.tx_id
-  WHERE g.granter = @addr
+  SELECT f.tx_id, f.denomination_id, f.amount FROM `+granted+`
   UNION ALL
   SELECT f.tx_id, f.denomination_id, f.amount FROM `+rel+` pg
   JOIN fees f ON f.tx_id = pg.tx_id

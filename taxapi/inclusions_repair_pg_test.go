@@ -501,7 +501,7 @@ func TestSettlePreEventReincluded(t *testing.T) {
 	require.Equal(t, nodeTx{Hash: "QQ", Code: 5, Charged: "40uatom"}, b.txs[1])
 }
 
-// requireSameBlockReads proves the repair's block-driven event reads return
+// requireSameBlockReads proves the repair's block-driven event and fee reads return
 // what the wallet-driven reads the API uses return, for every wallet over
 // every one-block window and over the whole range.
 func requireSameBlockReads(t *testing.T, f inclusionFixture, s *Server) {
@@ -514,7 +514,7 @@ func requireSameBlockReads(t *testing.T, f inclusionFixture, s *Server) {
 	for _, h := range heights {
 		windows = append(windows, [2]int64{h - 1, h})
 	}
-	seen := 0
+	seen, fees := 0, 0
 	for _, w := range f.w {
 		operator, _ := AccountOperator(w)
 		for _, win := range windows {
@@ -525,7 +525,15 @@ func requireSameBlockReads(t *testing.T, f inclusionFixture, s *Server) {
 			require.Equal(t, wantU, gotU)
 			require.Equal(t, want, got, "window %v", win)
 			seen += len(got)
+			wantF, wantFU, err := s.ledgerFees(ids, w, win[0], win[1], nil)
+			require.NoError(t, err)
+			gotF, gotFU, err := blocked.ledgerFees(ids, w, win[0], win[1], nil)
+			require.NoError(t, err)
+			require.Equal(t, wantFU, gotFU)
+			require.ElementsMatch(t, wantF, gotF, "fees window %v", win)
+			fees += len(gotF)
 		}
 	}
 	require.Positive(t, seen)
+	require.Positive(t, fees)
 }
