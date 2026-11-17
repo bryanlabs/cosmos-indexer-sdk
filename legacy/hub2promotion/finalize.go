@@ -738,17 +738,19 @@ type exportRecord struct {
 	Amount    string `json:"amount"`
 	// The native observer (Hub 1) also records store evidence and a
 	// classification on each movement. Hub 2's export carries none of these.
-	Unit            string `json:"unit"`
-	Before          string `json:"before"`
-	After           string `json:"after"`
-	Classification  string `json:"classification"`
-	EvidenceQuality string `json:"evidence_quality"`
+	Unit            string          `json:"unit,omitempty"`
+	Before          json.RawMessage `json:"before,omitempty"`
+	After           json.RawMessage `json:"after,omitempty"`
+	Classification  string          `json:"classification,omitempty"`
+	EvidenceQuality string          `json:"evidence_quality,omitempty"`
 }
 
 // exportEvidenceUnits are the native evidence kinds an observed export
 // carries beside its payouts, with the one unit each is written in. They
 // move no tokens; the importer reads them as evidence the same way.
 var exportEvidenceUnits = map[string]string{"native_state": "native_store_bytes", "native_state_checkpoint": "native_store_bytes", "native_state_hash": "native_store_sha256", "native_execution": "native_execution_evidence"}
+
+func present(m json.RawMessage) bool { return len(m) != 0 && string(m) != "null" }
 
 // readPayoutRecords reads the native record of what the migration-height
 // export actually paid out. Each paid reward and commission appears once.
@@ -773,7 +775,8 @@ func readPayoutRecords(records, proof Pin, b finalBounds) (map[string]int64, int
 	defer f.Close()
 	h := sha256.New()
 	sc := bufio.NewScanner(io.TeeReader(f, h))
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	// A store checkpoint line can run to several MiB.
+	sc.Buffer(make([]byte, 64<<10), 64<<20)
 	out := map[string]int64{}
 	var count, completed, accounting int64
 	for sc.Scan() {
@@ -792,7 +795,7 @@ func readPayoutRecords(records, proof Pin, b finalBounds) (map[string]int64, int
 			}
 			continue
 		}
-		if (r.Kind == "movement" && r.Unit != "" && r.Unit != "native_bank_tokens") || (r.Kind != "movement" && (r.Unit != "" || r.Before != "" || r.After != "" || r.Classification != "" || r.EvidenceQuality != "")) {
+		if (r.Kind == "movement" && r.Unit != "" && r.Unit != "native_bank_tokens") || (r.Kind != "movement" && (r.Unit != "" || present(r.Before) || present(r.After) || r.Classification != "" || r.EvidenceQuality != "")) {
 			return nil, 0, refuse("restart payout records", "an unknown or malformed payout record")
 		}
 		switch r.Kind {

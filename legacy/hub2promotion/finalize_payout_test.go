@@ -30,7 +30,9 @@ func TestReadPayoutRecordsSkipsNativeEvidence(t *testing.T) {
 	good := []map[string]any{
 		rec(map[string]any{"kind": "native_state_checkpoint", "label": "export/store:bank", "unit": "native_store_bytes", "before": "ab"}),
 		rec(map[string]any{"kind": "native_state", "label": "", "unit": "native_store_bytes", "before": "ab", "after": "cd", "validator": "val"}),
-		rec(map[string]any{"kind": "native_state_hash", "label": "x", "unit": "native_store_sha256", "before": "ab", "after": "cd"}),
+		rec(map[string]any{"kind": "native_state_hash", "label": "x", "unit": "native_store_sha256", "before": map[string]any{"sha256": "ab"}, "after": map[string]any{"sha256": "cd"}}),
+		rec(map[string]any{"kind": "native_state_checkpoint", "label": "export/store:staking", "unit": "native_store_bytes", "before": []string{strings.Repeat("a", 3<<20)}}),
+		rec(map[string]any{"kind": "native_execution", "label": "native_withdrawal_result", "unit": "native_execution_evidence", "before": nil, "after": map[string]any{"code": 0}}),
 		rec(map[string]any{"kind": "native_execution", "label": "native_withdrawal_result", "unit": "native_execution_evidence", "code": 105, "validator": "val", "delegator": "a"}),
 		rec(map[string]any{"kind": "accounting", "label": "delegator_reward", "validator": "val", "delegator": "a"}),
 		rec(map[string]any{"kind": "movement", "label": "delegator_reward/bank.add", "unit": "native_bank_tokens", "before": "1", "after": "6", "classification": "reward", "evidence_quality": "native", "validator": "val", "delegator": "a", "denom": "uatom", "amount": "5"}),
