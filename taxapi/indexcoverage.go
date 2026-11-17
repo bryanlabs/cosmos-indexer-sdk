@@ -728,7 +728,7 @@ func chainLabel(chain string) string {
 
 func coverageNote(c *IndexCoverage) string {
 	if c.Complete {
-		return fmt.Sprintf("Every %s block from genesis (%s) to the tip is indexed. Earlier Cosmos Hub chains are not covered.", c.Chain, c.GenesisDate)
+		return fmt.Sprintf("Every %s block from genesis (%s) to the tip is indexed. Earlier Cosmos Hub chains are not in reports yet.", c.Chain, c.GenesisDate)
 	}
 	var partial []string
 	for _, y := range c.Years {
@@ -776,9 +776,11 @@ func (c *IndexCoverage) MonthCovered(month string) bool {
 
 // Period evaluates a request window [start, end) (end exclusive, as every
 // handler treats it). A zero start means all history, which begins at
-// genesis. Days before genesis count as covered: that activity is on an
-// earlier chain, which no backfill will add, so the period is judged from
-// genesis on and carries a note saying so instead of an incomplete flag.
+// genesis. A period that starts before genesis and runs past it is judged
+// from genesis on and carries a note, so a calendar year badge and its
+// period agree. A period entirely before genesis is incomplete: reports do
+// not include the earlier Hub chains yet, so it has no data, and calling it
+// complete would vouch for an empty report.
 func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 	genesisDay, _ := time.Parse(apiDateLayout, c.GenesisDate)
 	tipDay := utcDay(c.TipTime)
@@ -801,8 +803,9 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 		p.Note = genesisNote(c)
 	}
 	if before && utcDay(end.Add(-time.Nanosecond)).Before(genesisDay) {
-		p.Status, p.Complete = coverageStatusComplete, true
-		p.Note = fmt.Sprintf("This period is entirely before %s genesis (%s). Earlier Cosmos Hub chains are not indexed, so this report has no data for it.", c.Chain, c.GenesisDate)
+		p.Status, p.Complete = coverageStatusIncomplete, false
+		p.Note = ""
+		p.Warning = preGenesisWarning(c)
 		return p
 	}
 	if through.Before(from) {
@@ -837,7 +840,12 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 
 // genesisNote explains a period that starts before genesis.
 func genesisNote(c *IndexCoverage) string {
-	return fmt.Sprintf("This period starts before %s genesis (%s). Cosmos Hub activity before that day is on earlier chains, which Cosmos Tax does not index, so this report starts at genesis.", c.Chain, c.GenesisDate)
+	return fmt.Sprintf("This period starts before %s genesis (%s). Cosmos Hub activity before that day is on earlier Hub chains, which are not in reports yet, so this report starts at genesis.", c.Chain, c.GenesisDate)
+}
+
+// preGenesisWarning explains a period that ends before genesis.
+func preGenesisWarning(c *IndexCoverage) string {
+	return fmt.Sprintf("This period is entirely before %s genesis (%s). Earlier Cosmos Hub chains are not in reports yet, so this report has no data for it.", c.Chain, c.GenesisDate)
 }
 
 func periodWarning(p PeriodCoverage) string {

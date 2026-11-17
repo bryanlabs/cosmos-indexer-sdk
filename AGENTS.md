@@ -56,8 +56,10 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   event runs (every pass when events are the criterion, hourly otherwise).
   Snapshots publish every 25 bucket reads, so a pass cut off by its timeout
   still publishes; until every bucket has been read the status is `scanning`
-  and a period it cannot vouch for is `unknown`. Days before genesis count as
-  covered and add `note` / `X-Index-Coverage-Note` instead. Year start
+  and a period it cannot vouch for is `unknown`. A period that starts before
+  genesis and runs past it is judged from genesis and adds `note` /
+  `X-Index-Coverage-Note`; a period entirely before genesis is `incomplete`
+  with a warning (earlier Hub chains are not in reports yet). Year start
   heights for cosmoshub-4 are hard-coded in `hubYearStarts`; later years are
   found by binary search on indexed blocks. A block counts when
   `tx_indexed`; `TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true` also requires
