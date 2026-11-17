@@ -88,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /validator-commission-flows", s.handleValidatorCommissionFlows)
 	mux.HandleFunc("GET /commission-flows", s.handleCommissionFlowsHub)
 	mux.HandleFunc("GET /address-labels", s.handleAddressLabels)
+	mux.HandleFunc("GET /validators", s.handleValidatorList)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
 	mux.HandleFunc("GET /validators/attest/check", s.handleAttestationCheck)
 	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
