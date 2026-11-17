@@ -448,7 +448,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 			for _, c := range p.Checks {
 				if c.Height != p.Height && !c.OK {
 					p.Accepted, changed = false, true
-					p.PlaceBlockers = append(p.PlaceBlockers, "a moved transaction's accounts do not check out at the block the index dated it at")
+					p.PlaceBlockers = append(p.PlaceBlockers, "a moved transaction's accounts do not check out at the block the index dated it at ("+c.Reason+")")
 					break
 				}
 			}

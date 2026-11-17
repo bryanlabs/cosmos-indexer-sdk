@@ -270,6 +270,9 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 		}
 		return body.Pagination, nil
 	})
+	if lostBondDenom(err) {
+		a.Delegations, a.Shares, err = n.storeDelegations(addr, height)
+	}
 	if err != nil {
 		return a, fmt.Errorf("delegations: %w", err)
 	}

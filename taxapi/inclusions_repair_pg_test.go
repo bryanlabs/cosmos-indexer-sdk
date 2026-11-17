@@ -52,7 +52,7 @@ func (f inclusionTestNode) serve(t *testing.T, cache string) *ledgerNode {
 		case strings.HasPrefix(r.URL.Path, "/cosmos/staking/v1beta1/delegations/"):
 			body = map[string]any{"delegation_responses": []any{}, incPageKey: page}
 		case strings.HasSuffix(r.URL.Path, "/unbonding_delegations"):
-			body = map[string]any{"unbonding_responses": []any{}, incPageKey: page}
+			body = map[string]any{incUnbondingKey: []any{}, incPageKey: page}
 		default:
 			http.NotFound(w, r)
 			return
@@ -91,19 +91,21 @@ type inclusionFixture struct {
 // Heights of the fixture. From Gaia v7 (10085397) failed transactions carry
 // events; before it their fees are settled from the next block's payout.
 const (
-	incHeldA   = 10100005 // A turned away (wrong sequence); the index row sits here
-	incHoleA   = 10100010 // A ran
-	incHoleB   = 10100020 // B ran
-	incHeldB   = 10100030 // B turned away later; the index row sits here
-	incHeldC   = 10100035 // C turned away
-	incHoleC   = 10100040 // C failed after paying its fee
-	incHoleX   = 10100050 // X ran and is not in the index at all
-	incHeldP   = 9100005  // before v7: P turned away
-	incHoleP   = 9100010  // P failed after paying its fee
-	incHoleU   = 9100020  // two equal failed fees, one paid: not decidable
-	incBetween = 10100025 // a date between B's run and the copy the index dated it at
-	incFeeX    = "50uatom"
-	incPageKey = "pagination"
+	incHeldA        = 10100005 // A turned away (wrong sequence); the index row sits here
+	incHoleA        = 10100010 // A ran
+	incHoleB        = 10100020 // B ran
+	incHeldB        = 10100030 // B turned away later; the index row sits here
+	incHeldC        = 10100035 // C turned away
+	incHoleC        = 10100040 // C failed after paying its fee
+	incHoleX        = 10100050 // X ran and is not in the index at all
+	incHeldP        = 9100005  // before v7: P turned away
+	incHoleP        = 9100010  // P failed after paying its fee
+	incHoleU        = 9100020  // two equal failed fees, one paid: not decidable
+	incBetween      = 10100025 // a date between B's run and the copy the index dated it at
+	incFeeX         = "50uatom"
+	incPageKey      = "pagination"
+	incUnbondingKey = "unbonding_responses"
+	incCodeKey      = "code"
 )
 
 func newInclusionFixture(t *testing.T) inclusionFixture {
@@ -466,7 +468,7 @@ func TestRepairRepeatedInclusionsRefusesUnprovenHeldBlockPostgres(t *testing.T) 
 	p := plans[incHoleA]
 	require.False(t, p.Accepted)
 	require.False(t, p.Proven)
-	require.Contains(t, p.PlaceBlockers, "a moved transaction's accounts do not check out at the block the index dated it at")
+	require.Contains(t, p.PlaceBlockers, "a moved transaction's accounts do not check out at the block the index dated it at (a liquid balance differs)")
 	require.True(t, plans[incHoleB].Proven)
 	require.Equal(t, 3, sum.Proven)
 	require.Equal(t, 3, sum.Placements)

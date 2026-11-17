@@ -49,6 +49,7 @@ func main() {
 	chain := flag.String("chain", "mainnet", "chain the ledger scan belongs to")
 	cache := flag.String("cache", "/cache", "archive block cache directory for this chain")
 	archive := flag.String("archive-rest", os.Getenv("ARCHIVE_REST"), "archive node REST origin for validator state")
+	archiveRPC := flag.String("archive-rpc", os.Getenv("ARCHIVE_RPC"), "archive node RPC origin for staking store reads where its delegation query fails")
 	floor := flag.Int64("floor", 0, "lowest height to scan back to")
 	chunk := flag.Int64("chunk", 5000, "blocks recorded per database transaction")
 	workers := flag.Int("workers", 16, "blocks read in parallel")
@@ -120,6 +121,11 @@ func main() {
 	node, err := taxapi.NewArchiveLedgerNode(*cache, *archive)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *archiveRPC != "" {
+		if err := node.UseArchiveRPC(*archiveRPC); err != nil {
+			log.Fatal(err)
+		}
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
 	if *repeated {

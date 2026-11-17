@@ -30,6 +30,18 @@ func NewArchiveLedgerNode(cacheDir, archiveREST string) (*ledgerNode, error) {
 	return &ledgerNode{rest: rest, cache: cacheDir}, nil
 }
 
+// UseArchiveRPC gives the node an archive RPC origin for the staking store
+// reads that stand in when the archive's delegation query cannot answer for
+// a height. Block reads still come from the cache.
+func (n *ledgerNode) UseArchiveRPC(origin string) error {
+	rpc, err := servicehttp.New(&http.Client{Timeout: 60 * time.Second}, origin)
+	if err != nil {
+		return err
+	}
+	n.rpc = rpc
+	return nil
+}
+
 // ErrLedgerScanUnindexed is where a backward scan stops at a block that is
 // not fully indexed yet. It is the normal end of a run while lower years are
 // still being indexed.

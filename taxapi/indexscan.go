@@ -45,7 +45,7 @@ type nodeTx struct {
 // height's ten-thousand-block folder.
 func (n *ledgerNode) rpcResult(method string, height int64, out any) error {
 	if n.cache == "" {
-		return n.rpc.GetJSON("/"+method, url.Values{"height": {strconv.FormatInt(height, 10)}}, out)
+		return n.rpc.GetJSON("/"+method, url.Values{rpcHeightParam: {strconv.FormatInt(height, 10)}}, out)
 	}
 	f, err := os.Open(filepath.Join(n.cache, strconv.FormatInt(height/10000, 10), fmt.Sprintf("%d-%s.raw.gz", height, method)))
 	if err != nil {
