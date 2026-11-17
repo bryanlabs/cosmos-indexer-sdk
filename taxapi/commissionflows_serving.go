@@ -51,6 +51,14 @@ func flowCorrected(suffix string) commissionServingSource {
 	return commissionServingSource{Version: flowCorrectedPrefix + suffix, Build: flowCorrectedBuild, Profile: flowCorrectedProfile, FromDay: flowCorrectedFrom, AsOf: flowCorrectedAsOf}
 }
 
+// flowCorrectedRoot is a corrected-build retry that may serve only its one
+// pinned validator root.
+func flowCorrectedRoot(suffix, root string) commissionServingSource {
+	r := flowCorrected(suffix)
+	r.Root = root
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
@@ -69,6 +77,9 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 			r.Root = "2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"
 			return r
 		}(),
+		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v2", "ab12977c1a2135f7aeea69534171ee3c2bec9a03f3650cbf5dff76caefb19345"),
+		flowCorrectedRoot("accel-four-s03-20261115-deadline-retry-v2", "290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"),
+		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v2", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
 		flowCorrected("accel-four-s01-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-v1"),
 		flowCorrected("accel-four-s03-20261115-v1"),
@@ -79,6 +90,8 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrected("accel-later-s01-20261115-v1"),
 		flowCorrected("accel-later-s02-20261115-v1"),
 		flowCorrected("accel-later-s03-20261115-v1"),
+		flowCorrected("accel-four-s02-20261115-split-b-v2"),
+		flowCorrected("accel-four-s01-20261115-split-b-v2"),
 		flowCorrected("full324-four-20261115-v2"),
 		flowCorrected("full324-later-two-20261115-v2"),
 	},
