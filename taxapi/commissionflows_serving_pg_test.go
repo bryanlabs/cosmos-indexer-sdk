@@ -1,6 +1,8 @@
 package taxapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -270,7 +272,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 22)
+	require.Len(t, seen, 24)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -288,7 +290,36 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		require.NotContains(t, roots, src.Root, src.Version)
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 8)
+	require.Len(t, roots, 10)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
+	require.Equal(t, flowLSMPrefix+"accel-four-s01-20261115-lsm-retry-v1", roots["bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"])
+	require.Equal(t, flowLSMPrefix+"accel-four-s06-20261115-lsm-retry-v1", roots["85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"])
+}
+
+// The LSM reward retries bind the reward-free corrections manifest: the
+// version names its digest and the profile is the base profile combined with
+// it, never the six-reward manifest the corrected shards used.
+func TestCommissionServingLSMRetriesBindRewardFreeManifest(t *testing.T) {
+	const base = "53da2904e3a6893e92745b1db9766b356da09042f52ec5384d0beb11a46aa913"
+	combined := func(corrections string) string {
+		b, _ := json.Marshal([]string{base, corrections})
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	require.Equal(t, flowCorrectedProfile, combined("ade534f8e5f78bd9dc9c52945d0116059e36496d3a4394f09143a3670c659f6b"))
+	require.Equal(t, flowLSMProfile, combined("40d6961721383adb2aa8bf4ad19ac9b8df7f834a3687dd1cd63a144bef654eb4"))
+	require.Equal(t, "ops818-page82a-profile"+base[:12]+"-sources40d696172138-", flowLSMPrefix)
+	lsm := 0
+	for _, src := range defaultCommissionServingSources[apiMainnet] {
+		if !strings.HasPrefix(src.Version, flowLSMPrefix) {
+			require.NotEqual(t, flowLSMProfile, src.Profile, src.Version)
+			continue
+		}
+		lsm++
+		require.Equal(t, flowLSMBuild, src.Build, src.Version)
+		require.Equal(t, flowLSMProfile, src.Profile, src.Version)
+		require.Len(t, src.Root, 64, src.Version)
+	}
+	require.Equal(t, 2, lsm)
 }

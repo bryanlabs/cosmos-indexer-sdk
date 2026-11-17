@@ -59,6 +59,23 @@ func flowCorrectedRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// The LSM reward retries run the native build that reads the corrections
+// manifest without the six tokenize-share rewards, after hub4 heights
+// 31944427 and 31944434 were re-indexed to store those rewards themselves.
+// Their stored profile binds that manifest, so build, profile and version
+// prefix all differ from the corrected shards.
+const (
+	flowLSMBuild   = "sha256:b7075f6a5b020616d7ad4b6b8f1275e6a699f10a30ff148dde7e800e4e0e56b8"
+	flowLSMProfile = "dc197eef1ed664d2f53b2453a3355ac97cd052f827b2bf117cd180db25dbba68"
+	flowLSMPrefix  = "ops818-page82a-profile53da2904e3a6-sources40d696172138-"
+)
+
+// flowLSMRoot is an LSM reward retry that may serve only its one pinned
+// validator root.
+func flowLSMRoot(suffix, root string) commissionServingSource {
+	return commissionServingSource{Version: flowLSMPrefix + suffix, Build: flowLSMBuild, Profile: flowLSMProfile, FromDay: flowCorrectedFrom, AsOf: flowCorrectedAsOf, Root: root}
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
@@ -83,6 +100,8 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrectedRoot("accel-later-s02-20261115-deadline-retry-v3", "50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"),
 		flowCorrectedRoot("accel-four-s07-20261115-deadline-retry-v2", "320bcb826109bdff2fcab865b3971af8023c5d8b2ba24f02961a4faca99425aa"),
 		flowCorrectedRoot("accel-later-s03-20261115-deadline-retry-v2", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
+		flowLSMRoot("accel-four-s01-20261115-lsm-retry-v1", "bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"),
+		flowLSMRoot("accel-four-s06-20261115-lsm-retry-v1", "85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"),
 		flowCorrected("accel-four-s01-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-v1"),
 		flowCorrected("accel-four-s03-20261115-v1"),
