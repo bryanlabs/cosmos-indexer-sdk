@@ -173,6 +173,13 @@ func verifyLocalIdentity(ctx context.Context, q querier, m Manifest) error {
 	}
 	return CheckScope(ctx, q, m.Scope)
 }
+
+// headerlessTaxHeightsSQL counts tax heights with no historical header. It is a
+// set difference rather than NOT EXISTS: inside the load transaction the new
+// chain has no statistics, and the planner chose a nested loop that rescanned
+// every header for each tax row.
+const headerlessTaxHeightsSQL = `SELECT count(*) FROM (SELECT e.height FROM legacy.taxable_events e WHERE e.chain_id=$1 AND e.height>0 EXCEPT SELECT b.height FROM legacy.blocks b WHERE b.chain_id=$1) missing`
+
 func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 	if m.Scope.RawStage {
 		return m.verifyRawSQL(ctx, q)
@@ -247,7 +254,7 @@ func verifyProjection(ctx context.Context, q querier, m Manifest) error {
 		return errors.New("canonical payout missing/duplicate/unbound")
 	}
 	var bad int64
-	if e = q.QueryRowContext(ctx, `SELECT count(*) FROM legacy.taxable_events e WHERE e.chain_id=$1 AND e.height>0 AND NOT EXISTS(SELECT 1 FROM legacy.blocks b WHERE b.chain_id=e.chain_id AND b.height=e.height)`, m.Scope.chain()).Scan(&bad); e != nil {
+	if e = q.QueryRowContext(ctx, headerlessTaxHeightsSQL, m.Scope.chain()).Scan(&bad); e != nil {
 		return e
 	}
 	if bad != 0 {

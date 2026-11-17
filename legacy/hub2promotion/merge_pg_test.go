@@ -29,6 +29,7 @@ func TestPG1PopulatedDestinationAtomicExactAndRetry(t *testing.T) {
 	require.NoError(t, e)
 	require.Equal(t, before, after)
 	require.NoError(t, verifyProjection(ctx, f.owner, f.m))
+	requireHeaderlessTaxHeights(t, f)
 	a, e := AuditOutcome(ctx, f.owner, f.m, f.runtime)
 	require.NoError(t, e)
 	require.Equal(t, OutcomeExact, a)
@@ -274,4 +275,26 @@ func TestPG8MutatingAndMalformedSourceRefusals(t *testing.T) {
 			requireEmptyUnchanged(t, f, before)
 		})
 	}
+}
+
+// The headerless-height check finds a tax row past the last header and agrees
+// with the NOT EXISTS form it replaced. The orphan row is rolled back.
+func requireHeaderlessTaxHeights(t *testing.T, f fixture) {
+	t.Helper()
+	ctx, cancel := deadline(t)
+	defer cancel()
+	tx, e := f.owner.BeginTx(ctx, nil)
+	require.NoError(t, e)
+	defer tx.Rollback()
+	chain := f.m.Scope.chain()
+	notExists := `SELECT count(DISTINCT e.height) FROM legacy.taxable_events e WHERE e.chain_id=$1 AND e.height>0 AND NOT EXISTS(SELECT 1 FROM legacy.blocks b WHERE b.chain_id=e.chain_id AND b.height=e.height)`
+	var n, old int64
+	require.NoError(t, tx.QueryRowContext(ctx, headerlessTaxHeightsSQL, chain).Scan(&n))
+	require.Zero(t, n)
+	_, e = tx.ExecContext(ctx, `INSERT INTO legacy.taxable_events SELECT chain_id,height+1000000,phase,tx_index,msg_index,sub_index,category,amount,denom,asset,from_addr,to_addr,validator_address,reward_trigger,detail,timestamp,tx_hash,amount_source FROM legacy.taxable_events WHERE chain_id=$1 AND height>0 ORDER BY height LIMIT 2`, chain)
+	require.NoError(t, e)
+	require.NoError(t, tx.QueryRowContext(ctx, headerlessTaxHeightsSQL, chain).Scan(&n))
+	require.NoError(t, tx.QueryRowContext(ctx, notExists, chain).Scan(&old))
+	require.Positive(t, n)
+	require.Equal(t, old, n)
 }
