@@ -23,6 +23,14 @@ const correctionFiveAuthority = "75d80fe8b880c46e53f8c40a1fceceaddd5eb1810b704e4
 const correctionSevenAuthority = "6f197daab25cf15cbc3f687a95a1a3f114204ba7e13dbbfe926d94935dee3fbe"
 const correctionSixAuthority = "517d989962e93b47d8e7a4ad115f5047d814cba9701b9d3a6e36370ecf0bcdcb"
 
+// The six tokenize-share reward corrections stood in for message 4 of two
+// hub4 txs that an earlier indexer build skipped as undecodable. Once those
+// heights are re-indexed the indexer stores the same rewards itself, so this
+// manifest, otherwise identical to the six-reward one, carries none. Only these
+// exact bytes may omit them; earlier manifests still require all six, so rows
+// stored under them stay loadable.
+var correctionRewardFreeManifests = map[string]bool{"40d6961721383adb2aa8bf4ad19ac9b8df7f834a3687dd1cd63a144bef654eb4": true}
+
 // This is a derived manifest. Its exact bytes, reviewed normalizer and retained
 // authorities are pinned before launch, separately from the unchanged authz profile.
 type CommissionSourceCorrections struct {
@@ -152,11 +160,13 @@ func correctionCoinEqual(a, b map[string]string) bool {
 	}
 	return true
 }
-func (p *CommissionSourceCorrections) validate() error {
+func (p *CommissionSourceCorrections) validate() error { return p.validateRewards(6) }
+
+func (p *CommissionSourceCorrections) validateRewards(rewards int) error {
 	if p.Schema != commissionCorrectionSchema || p.Chain != "cosmoshub-4" || !p.From.Equal(flowDay(p.From)) || !p.AsOf.Equal(flowDay(p.AsOf)) || !p.From.Before(p.AsOf) || !correctionHash(p.BaseProfileSHA256) || !correctionHash(p.NormalizerSHA256) || p.FiveAuthoritySHA256 != correctionFiveAuthority || p.SevenAuthoritySHA256 != correctionSevenAuthority || p.SixAuthoritySHA256 != correctionSixAuthority {
 		return fmt.Errorf("native correction manifest authority or window mismatch")
 	}
-	if len(p.Windows) != 6 || len(p.Fees) > 786 || len(p.Fees) < 779 || len(p.Rewards) != 6 {
+	if len(p.Windows) != 6 || len(p.Fees) > 786 || len(p.Fees) < 779 || len(p.Rewards) != rewards {
 		return fmt.Errorf("native correction bounded scope mismatch")
 	}
 	windows := map[string]CommissionCorrectionWindow{}
@@ -313,7 +323,11 @@ func LoadCommissionSourceCorrections(path, expected string) (*CommissionSourceCo
 	if d.Decode(new(any)) != io.EOF {
 		return nil, fmt.Errorf("native correction manifest trailing data")
 	}
-	if e = p.validate(); e != nil {
+	rewards := 6
+	if correctionRewardFreeManifests[expected] {
+		rewards = 0
+	}
+	if e = p.validateRewards(rewards); e != nil {
 		return nil, e
 	}
 	p.digest = expected
