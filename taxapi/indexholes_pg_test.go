@@ -16,13 +16,22 @@ import (
 )
 
 const (
-	cachedBlock     = "block"
-	coinSpent       = "coin_spent"
-	spender         = "spender"
-	tempSearchPath  = "SET search_path = pg_temp"
-	tempChainsTable = "CREATE TEMP TABLE chains (id bigint, chain_id text)"
-	tempTxesTable   = "CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)"
-	tempMsgsTable   = "CREATE TEMP TABLE messages (id bigint, tx_id bigint)"
+	cachedBlock         = "block"
+	coinSpent           = "coin_spent"
+	spender             = "spender"
+	tempSearchPath      = "SET search_path = pg_temp"
+	tempChainsTable     = "CREATE TEMP TABLE chains (id bigint, chain_id text)"
+	tempTxesTable       = "CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)"
+	tempMsgsTable       = "CREATE TEMP TABLE messages (id bigint, tx_id bigint)"
+	tempInclusionsTable = "CREATE TEMP TABLE tax_tx_inclusions (chain text, height bigint, tx_index bigint, hash text, tx_id bigint, block_id bigint, code bigint, codespace text NOT NULL DEFAULT '', effective boolean, charged text NOT NULL DEFAULT '', granter text NOT NULL DEFAULT '', recorded_at timestamptz, PRIMARY KEY (chain, height, tx_index))"
+	tempClearancesTable = "CREATE TEMP TABLE tax_index_hole_clearances (chain text, height bigint, chain_txs bigint, placed bigint, accounts bigint, cleared_at timestamptz, PRIMARY KEY (chain, height))"
+	tempDenomsTable     = "CREATE TEMP TABLE denoms (id bigint, base text)"
+	tempHolesKeyed      = "CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false, PRIMARY KEY (chain, height))"
+	tempHoleAddrsKeyed  = "CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text, PRIMARY KEY (chain, height, address))"
+	tempHubChainRow     = "INSERT INTO chains VALUES (1,'cosmoshub-4')"
+	tempBlockEventTypes = "CREATE TEMP TABLE block_event_types (id bigint, type text)"
+	tempBlockEventKeys  = "CREATE TEMP TABLE block_event_attribute_keys (id bigint, key text)"
+	tempAddressesTable  = "CREATE TEMP TABLE addresses (id bigint, address text)"
 )
 
 type cachedTxResult struct {
@@ -91,11 +100,11 @@ func TestRecheckIndexHolesPostgres(t *testing.T) {
 		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, height bigint, tx_indexed boolean, block_events_indexed boolean)",
 		tempTxesTable,
 		tempMsgsTable,
-		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false, PRIMARY KEY (chain, height))",
-		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text, PRIMARY KEY (chain, height, address))",
-		"CREATE TEMP TABLE tax_tx_inclusions (chain text, height bigint, tx_index bigint, hash text, tx_id bigint, block_id bigint, code bigint, codespace text NOT NULL DEFAULT '', effective boolean, charged text NOT NULL DEFAULT '', granter text NOT NULL DEFAULT '', recorded_at timestamptz, PRIMARY KEY (chain, height, tx_index))",
-		"CREATE TEMP TABLE tax_index_hole_clearances (chain text, height bigint, chain_txs bigint, placed bigint, accounts bigint, cleared_at timestamptz, PRIMARY KEY (chain, height))",
-		"INSERT INTO chains VALUES (1,'cosmoshub-4')",
+		tempHolesKeyed,
+		tempHoleAddrsKeyed,
+		tempInclusionsTable,
+		tempClearancesTable,
+		tempHubChainRow,
 		"INSERT INTO blocks VALUES (1,1,100,true,true),(2,1,101,true,true),(3,1,200,true,true),(4,1,201,true,true)",
 		// The vote's one row is at the height that charged its fee.
 		"INSERT INTO txes VALUES (1,1,'" + txHash(kept) + "',0),(2,2,'" + txHash(vote) + "',11),(3,4,'" + txHash(lost) + "',0),(4,3,'FILLER-A',0),(5,3,'FILLER-B',0)",

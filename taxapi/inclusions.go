@@ -3,9 +3,16 @@ package taxapi
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
+)
+
+// Named query parameters the ledger's reads share.
+const (
+	qpIDs  = "ids"
+	qpAddr = "addr"
 )
 
 // TxInclusion is one inclusion of a transaction's bytes in a block. The chain
@@ -64,8 +71,18 @@ func (IndexHoleClearance) TableName() string { return "tax_index_hole_clearances
 // inclusionsMigrate creates the inclusion and clearance tables. A hash has at
 // most one effective inclusion, and so does each txes row.
 func inclusionsMigrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(&TxInclusion{}, &IndexHoleClearance{}); err != nil {
-		return err
+	// Created only when missing, found by name on the search path as the
+	// readers find it; an existing table is never altered.
+	for _, m := range []interface{ TableName() string }{TxInclusion{}, IndexHoleClearance{}} {
+		var exists bool
+		if err := db.Raw("SELECT to_regclass(?) IS NOT NULL", m.TableName()).Scan(&exists).Error; err != nil {
+			return err
+		}
+		if !exists {
+			if err := db.Migrator().CreateTable(m); err != nil {
+				return err
+			}
+		}
 	}
 	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tax_tx_inclusions_effective_tx ON tax_tx_inclusions (tx_id) WHERE effective").Error; err != nil {
 		return err
@@ -134,4 +151,106 @@ func withParams(ms ...map[string]any) map[string]any {
 		}
 	}
 	return out
+}
+
+// datedBranches dates the txes rows x a query reads at their effective
+// inclusion's block, as b. q is one SELECT with {{BLOCK}} where b is joined
+// and {{OWN}} at the end of its WHERE clause; {{P}}, where given, joins p,
+// the effective inclusion at the row's own block. The result is two branches:
+// rows at their own block that no effective inclusion dates elsewhere, then
+// rows one does, joined from that inclusion. Neither branch puts an outer
+// join in the path a wallet-driven plan takes, so the API's reads keep the
+// plans the indexes serve.
+//
+// hit, when given, is the wallet match as the own branch reads it (through
+// the wallet's attribute index) and as the placed branch reads it (checked
+// on each event of the few placed rows), put at {{HIT}}.
+func datedBranches(q, rel string, hit ...string) string {
+	ownHit, placedHit := "", ""
+	if len(hit) == 2 {
+		ownHit, placedHit = hit[0], hit[1]
+	}
+	own := strings.NewReplacer(
+		"{{BLOCK}}", "JOIN blocks b ON b.id = x.block_id",
+		"{{P}}", "LEFT JOIN "+rel+" p ON p.tx_id = x.id",
+		"{{OWN}}", "AND NOT EXISTS (SELECT 1 FROM "+rel+" po WHERE po.tx_id = x.id AND po.block_id <> x.block_id)",
+		"{{HIT}}", ownHit,
+	).Replace(q)
+	placed := strings.NewReplacer(
+		"{{BLOCK}}", "JOIN "+rel+" p ON p.tx_id = x.id AND p.block_id <> x.block_id\nJOIN blocks b ON b.id = p.block_id",
+		"{{P}}", "",
+		"{{OWN}}", "",
+		"{{HIT}}", placedHit,
+	).Replace(q)
+	return own + "\nUNION ALL\n" + placed
+}
+
+// windowTxs is the relation (tx_id, height, time_stamp) of txes rows dated in
+// (@lo, @hi] on @ids, read from the window's blocks: rows at their own block
+// with no effective inclusion elsewhere, then rows an effective inclusion
+// dates there.
+func windowTxs(rel string) string {
+	return `(SELECT x.id AS tx_id, b.height, b.time_stamp FROM blocks b
+  JOIN txes x ON x.block_id = b.id
+  WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
+  AND NOT EXISTS (SELECT 1 FROM ` + rel + ` p WHERE p.tx_id = x.id AND p.block_id <> x.block_id)
+  UNION ALL
+  SELECT p.tx_id, b.height, b.time_stamp FROM ` + rel + ` p
+  JOIN blocks b ON b.id = p.block_id
+  JOIN txes x ON x.id = p.tx_id
+  WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi AND p.block_id <> x.block_id)`
+}
+
+// blockReadQueries are ledgerEvents' message event, block event and
+// redelegation message reads for a window a few blocks wide, driven from the
+// window's blocks. Each event's attributes are read by event id and matched to
+// the wallet there, never through the wallet's attribute index. The
+// materialized steps keep the planner from turning that around.
+func blockReadQueries(rel string) (msgQuery, blockQuery, redelQuery string) {
+	events := func(types string) string {
+		return `ev AS MATERIALIZED (
+  SELECT me.id, me.message_id, me.index, w.height, w.time_stamp, t.type FROM ` + windowTxs(rel) + ` w
+  JOIN messages m ON m.tx_id = w.tx_id
+  JOIN message_events me ON me.message_id = m.id
+  JOIN message_event_types t ON t.id = me.message_event_type_id
+  WHERE ` + types + `
+), attrs AS MATERIALIZED (
+  SELECT ev.id, ev.type, a.index, a.message_event_attribute_key_id AS key_id, a.value FROM ev
+  JOIN message_event_attributes a ON a.message_event_id = ev.id
+), hit AS MATERIALIZED (
+  SELECT id FROM attrs GROUP BY id, type
+  HAVING bool_or(value = @addr) OR (type = 'create_validator' AND bool_or(value = @op))
+)`
+	}
+	msgQuery = `
+WITH ` + events("(t.type IN @types OR t.type = 'create_validator')") + `
+SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, 1 AS phase, ev.type, k.key, x.value
+FROM ev JOIN hit ON hit.id = ev.id
+JOIN attrs x ON x.id = ev.id
+JOIN message_event_attribute_keys k ON k.id = x.key_id
+ORDER BY ev.height, ev.id, x.index`
+	blockQuery = `
+WITH ev AS MATERIALIZED (
+  SELECT be.id, be.lifecycle_position, b.height, b.time_stamp, t.type FROM blocks b
+  JOIN block_events be ON be.block_id = b.id
+  JOIN block_event_types t ON t.id = be.block_event_type_id
+  WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi AND t.type IN @types
+), attrs AS MATERIALIZED (
+  SELECT ev.id, a.index, a.block_event_attribute_key_id AS key_id, a.value FROM ev
+  JOIN block_event_attributes a ON a.block_event_id = ev.id
+), hit AS MATERIALIZED (
+  SELECT id FROM attrs GROUP BY id HAVING bool_or(value = @addr)
+)
+SELECT ev.id AS event_id, ev.height, ev.time_stamp, CASE WHEN ev.lifecycle_position = 0 THEN 0 ELSE 2 END AS phase, ev.type, k.key, x.value
+FROM ev JOIN hit ON hit.id = ev.id
+JOIN attrs x ON x.id = ev.id
+JOIN block_event_attribute_keys k ON k.id = x.key_id
+ORDER BY ev.height, ev.id, x.index`
+	redelQuery = `
+WITH ` + events("t.type IN ('withdraw_rewards', 'message')") + `
+SELECT DISTINCT ev.message_id FROM ev JOIN attrs x ON x.id = ev.id
+WHERE x.value = @addr
+AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
+            WHERE r.message_id = ev.message_id AND rt.type = 'redelegate')`
+	return msgQuery, blockQuery, redelQuery
 }

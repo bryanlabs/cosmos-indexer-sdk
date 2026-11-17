@@ -418,6 +418,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 				p.Kinds[inclusionPaidFee]++
 			}
 		}
+		p.PlaceBlockers, p.Blockers = uniqueStrings(p.PlaceBlockers), uniqueStrings(p.Blockers)
 		p.Accepted = len(p.PlaceBlockers) == 0
 	}
 
@@ -435,7 +436,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 				preview.effective = append(preview.effective, p.Effective...)
 			}
 		}
-		sv := &Server{db: s.db, oracle: s.oracle, native: s.native, preview: preview}
+		sv := &Server{db: s.db, oracle: s.oracle, native: s.native, preview: preview, blockReads: true}
 		if err := sv.checkInclusionPlans(chain, ids, node, plans, workers, &rates); err != nil {
 			return sum, err
 		}
@@ -602,7 +603,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 		}
 		// Prove again from the rows just written, inside the transaction,
 		// before anything commits.
-		sv := &Server{db: tx, oracle: s.oracle, native: s.native}
+		sv := &Server{db: tx, oracle: s.oracle, native: s.native, blockReads: true}
 		var proven []*inclusionHole
 		for _, p := range plans {
 			if p.Proven {
@@ -647,7 +648,7 @@ FROM txes x
 JOIN blocks b ON b.id = x.block_id
 LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
 WHERE x.hash IN @hashes AND b.chain_id IN @ids`,
-			map[string]any{"hashes": list[lo:min(lo+500, len(list))], "ids": ids}).Scan(&rows).Error; err != nil {
+			map[string]any{"hashes": list[lo:min(lo+500, len(list))], qpIDs: ids}).Scan(&rows).Error; err != nil {
 			return nil, fmt.Errorf("index rows: %w", err)
 		}
 		for _, r := range rows {
@@ -666,7 +667,7 @@ func (s *Server) blockIDs(ids []int64, heights map[int64]bool) (map[int64]uint, 
 		ID     uint
 		Height int64
 	}
-	if err := s.db.Raw("SELECT id, height FROM blocks WHERE chain_id IN @ids AND height IN @hs", map[string]any{"ids": ids, "hs": list}).Scan(&rows).Error; err != nil {
+	if err := s.db.Raw("SELECT id, height FROM blocks WHERE chain_id IN @ids AND height IN @hs", map[string]any{qpIDs: ids, "hs": list}).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := map[int64]uint{}
@@ -801,7 +802,7 @@ func (s *Server) checkAccountAcross(chain string, ids []int64, node *ledgerNode,
 	if err != nil {
 		return "", err
 	}
-	if err := s.db.Raw("SELECT time_stamp FROM blocks WHERE chain_id IN @ids AND height = @h", map[string]any{"ids": ids, "h": h}).Scan(&at.Time).Error; err != nil {
+	if err := s.db.Raw("SELECT time_stamp FROM blocks WHERE chain_id IN @ids AND height = @h", map[string]any{qpIDs: ids, "h": h}).Scan(&at.Time).Error; err != nil {
 		return "", err
 	}
 	if at.Time.IsZero() {
@@ -961,7 +962,7 @@ func (s *Server) compareHoles(chain string, ids []int64, node *ledgerNode, plans
 		}
 		sort.SliceStable(cands, func(i, j int) bool { return cands[i].fees < cands[j].fees })
 		var times []heightTime
-		if err := s.db.Raw("SELECT height, time_stamp FROM blocks WHERE chain_id IN @ids AND height IN @hs ORDER BY height", map[string]any{"ids": ids, "hs": []int64{h - 1, h}}).Scan(&times).Error; err != nil {
+		if err := s.db.Raw("SELECT height, time_stamp FROM blocks WHERE chain_id IN @ids AND height IN @hs ORDER BY height", map[string]any{qpIDs: ids, "hs": []int64{h - 1, h}}).Scan(&times).Error; err != nil {
 			return nil, err
 		}
 		if len(times) != 2 {
@@ -1005,4 +1006,16 @@ func (s *Server) compareHoles(chain string, ids []int64, node *ledgerNode, plans
 		}
 	}
 	return out, nil
+}
+
+func uniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := in[:0]
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }

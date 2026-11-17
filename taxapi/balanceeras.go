@@ -49,13 +49,13 @@ SELECT DISTINCT h FROM (
   LEFT JOIN messages m ON m.id = te.message_id
   LEFT JOIN `+rel+` p ON p.tx_id = m.tx_id
   LEFT JOIN blocks pb ON pb.id = p.block_id
-  WHERE te.from_addr = @wallet AND te.category IN @cats AND te.block_height < @hi
+  WHERE te.from_addr = @wallet AND te.category IN @cats AND ((te.block_height > @lo AND te.block_height < @hi) OR p.tx_id IS NOT NULL)
   UNION ALL
   SELECT COALESCE(pb.height, te.block_height) AS h FROM taxable_events te
   LEFT JOIN messages m ON m.id = te.message_id
   LEFT JOIN `+rel+` p ON p.tx_id = m.tx_id
   LEFT JOIN blocks pb ON pb.id = p.block_id
-  WHERE te.to_addr = @wallet AND te.category IN @cats AND te.block_height < @hi
+  WHERE te.to_addr = @wallet AND te.category IN @cats AND ((te.block_height > @lo AND te.block_height < @hi) OR p.tx_id IS NOT NULL)
 ) s WHERE h > @lo AND h < @hi ORDER BY h`,
 		withParams(rp, map[string]any{"wallet": addr, "cats": stakingCategories, "lo": lo, "hi": int64(hubStakingDelegatorFrom)})).
 		Scan(&heights).Error

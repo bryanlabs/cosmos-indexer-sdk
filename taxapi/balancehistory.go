@@ -585,7 +585,7 @@ AND (NOT h.addresses_known OR EXISTS (SELECT 1 FROM tax_index_hole_addresses a
      WHERE a.chain = h.chain AND a.height = h.height AND a.address = @addr))
 AND `+cleared+`
 ORDER BY h.height`,
-		withParams(cp, map[string]any{"chain": chain, "addr": addr, "lo": lo, "hi": hi})).Scan(&heights).Error
+		withParams(cp, map[string]any{apiChain: chain, qpAddr: addr, "lo": lo, "hi": hi})).Scan(&heights).Error
 	return heights, err
 }
 
@@ -642,34 +642,30 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
 	// A transaction's events are dated at its effective inclusion.
 	rel, rp := s.effectiveRel()
-	var msgRows []ledgerAttrRow
-	if err := s.db.Raw(`
-SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
+	params := withParams(rp, map[string]any{qpAddr: addr, "op": operator, "types": ledgerMessageTypes, qpIDs: ids, "lo": lo, "hi": hi})
+	msgQuery := `SELECT * FROM (` + datedBranches(`
+SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value, a.index AS attr_index
 FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
 JOIN messages m ON m.id = me.message_id
 JOIN txes x ON x.id = m.tx_id
-LEFT JOIN `+rel+` p ON p.tx_id = x.id
-JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
+{{BLOCK}}
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.id IN (
+WHERE {{HIT}}
+AND (t.type IN @types OR t.type = 'create_validator')
+AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi {{OWN}}`, rel, `me.id IN (
   SELECT a0.message_event_id FROM message_event_attributes a0
   WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr
   UNION
   SELECT a1.message_event_id FROM message_event_attributes a1
   JOIN message_events me1 ON me1.id = a1.message_event_id
   JOIN message_event_types t1 ON t1.id = me1.message_event_type_id
-  WHERE left(a1.value, 100) = left(@op, 100) AND a1.value = @op AND t1.type = 'create_validator')
-AND (t.type IN @types OR t.type = 'create_validator')
-AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, me.id, a.index`,
-		withParams(rp, map[string]any{"addr": addr, "op": operator, "types": ledgerMessageTypes, "ids": ids, "lo": lo, "hi": hi})).
-		Scan(&msgRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("message events: %w", err)
-	}
-	var blockRows []ledgerAttrRow
-	if err := s.db.Raw(`
+  WHERE left(a1.value, 100) = left(@op, 100) AND a1.value = @op AND t1.type = 'create_validator')`,
+		`(EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me.id AND a0.value = @addr)
+  OR (t.type = 'create_validator' AND EXISTS (SELECT 1 FROM message_event_attributes a1 WHERE a1.message_event_id = me.id AND a1.value = @op)))`) + `) u
+ORDER BY height, event_id, attr_index`
+	blockQuery := `
 SELECT be.id AS event_id, b.height, b.time_stamp, CASE WHEN be.lifecycle_position = 0 THEN 0 ELSE 2 END AS phase, t.type, k.key, a.value
 FROM block_events be
 JOIN block_event_types t ON t.id = be.block_event_type_id
@@ -681,42 +677,47 @@ WHERE be.id IN (
   WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr)
 AND t.type IN @types
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, be.id, a.index`,
-		map[string]any{"addr": addr, "types": ledgerBlockTypes, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&blockRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("block events: %w", err)
-	}
-	var redelMsgs []uint64
-	if err := s.db.Raw(`
-SELECT DISTINCT me0.message_id FROM message_event_attributes a0
-JOIN message_events me0 ON me0.id = a0.message_event_id
+ORDER BY b.height, be.id, a.index`
+	redelQuery := `SELECT DISTINCT message_id FROM (` + datedBranches(`
+SELECT me0.message_id FROM message_events me0
 JOIN message_event_types t0 ON t0.id = me0.message_event_type_id
 JOIN messages m ON m.id = me0.message_id
 JOIN txes x ON x.id = m.tx_id
-LEFT JOIN `+rel+` p ON p.tx_id = x.id
-JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
-WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr AND t0.type IN ('withdraw_rewards', 'message')
+{{BLOCK}}
+WHERE {{HIT}} AND t0.type IN ('withdraw_rewards', 'message')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = me0.message_id AND rt.type = 'redelegate')`,
-		withParams(rp, map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi})).
-		Scan(&redelMsgs).Error; err != nil {
+            WHERE r.message_id = me0.message_id AND rt.type = 'redelegate') {{OWN}}`, rel,
+		`me0.id IN (SELECT a0.message_event_id FROM message_event_attributes a0 WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr)`,
+		`EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me0.id AND a0.value = @addr)`) + `) u`
+	if s.blockReads {
+		msgQuery, blockQuery, redelQuery = blockReadQueries(rel)
+	}
+	var msgRows []ledgerAttrRow
+	if err := s.db.Raw(msgQuery, params).Scan(&msgRows).Error; err != nil {
+		return nil, 0, fmt.Errorf("message events: %w", err)
+	}
+	var blockRows []ledgerAttrRow
+	if err := s.db.Raw(blockQuery, withParams(params, map[string]any{"types": ledgerBlockTypes})).Scan(&blockRows).Error; err != nil {
+		return nil, 0, fmt.Errorf("block events: %w", err)
+	}
+	var redelMsgs []uint64
+	if err := s.db.Raw(redelQuery, params).Scan(&redelMsgs).Error; err != nil {
 		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
 	}
 	var redelRows []ledgerAttrRow
 	if len(redelMsgs) > 0 {
-		if err := s.db.Raw(`
-SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
+		if err := s.db.Raw(`SELECT * FROM (`+datedBranches(`
+SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value, me.index AS event_index, a.index AS attr_index
 FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
 JOIN messages m ON m.id = me.message_id
 JOIN txes x ON x.id = m.tx_id
-LEFT JOIN `+rel+` p ON p.tx_id = x.id
-JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
+{{BLOCK}}
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message')
-ORDER BY b.height, me.message_id, me.index, a.index`,
+WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message') {{OWN}}`, rel)+`) u
+ORDER BY height, message_id, event_index, attr_index`,
 			withParams(rp, map[string]any{"msgs": redelMsgs})).
 			Scan(&redelRows).Error; err != nil {
 			return nil, 0, fmt.Errorf("redelegation events: %w", err)
@@ -833,7 +834,7 @@ func (s *Server) ledgerFees(ids []int64, addr string, lo, hi int64, node *ledger
 	// A row with an effective inclusion pays as that inclusion did: at its
 	// block, with its outcome and through its fee grant.
 	rel, rp := s.effectiveRel()
-	if err := s.db.Raw(`
+	if err := s.db.Raw(`SELECT * FROM (`+datedBranches(`
 SELECT x.id AS tx_id, x.hash, b.height, COALESCE(p.code, x.code) AS code, d.base AS denom, f.amount::text AS amount,
        (p.tx_id IS NOT NULL OR o.tx_id IS NOT NULL) AS resolved,
        CASE WHEN p.tx_id IS NOT NULL THEN p.charged ELSE COALESCE(o.charged, '') END AS charged
@@ -852,13 +853,13 @@ FROM (
   WHERE pg.granter = @addr AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = pg.tx_id)
 ) f
 JOIN txes x ON x.id = f.tx_id
-LEFT JOIN `+rel+` p ON p.tx_id = x.id
-JOIN blocks b ON b.id = COALESCE(p.block_id, x.block_id)
+{{BLOCK}}
+{{P}}
 JOIN denoms d ON d.id = f.denomination_id
 LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
-WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, x.id`,
-		withParams(rp, map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi})).
+WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi {{OWN}}`, rel)+`) u
+ORDER BY height, tx_id`,
+		withParams(rp, map[string]any{qpAddr: addr, qpIDs: ids, "lo": lo, "hi": hi})).
 		Scan(&rows).Error; err != nil {
 		return nil, 0, fmt.Errorf("fees: %w", err)
 	}
@@ -959,7 +960,7 @@ JOIN blocks b ON b.id = x.block_id
 JOIN fees f ON f.tx_id = x.id
 LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
 WHERE b.chain_id IN @ids AND b.height > @lo AND x.code <> 0 AND o.tx_id IS NULL`,
-		map[string]any{"ids": ids, "lo": latest - depth}).Scan(&rows).Error; err != nil {
+		map[string]any{qpIDs: ids, "lo": latest - depth}).Scan(&rows).Error; err != nil {
 		logf("failed-fee sweep: %v", err)
 		return
 	}
@@ -1052,7 +1053,7 @@ WHERE be.id IN (
   WHERE left(a0.value, 100) IN @reasons AND a0.value IN @reasons)
 AND t.type = 'slash' AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 ORDER BY b.height, be.id, a.index`,
-		map[string]any{"reasons": reasons, "ids": ids, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
+		map[string]any{"reasons": reasons, qpIDs: ids, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("slashes: %w", err)
 	}
 	if len(rows) == 0 {
@@ -1445,7 +1446,7 @@ FROM tax_validator_rates r
 WHERE r.chain = @chain AND r.operator IN @ops AND r.height < @hi
 AND r.height >= COALESCE((SELECT max(p.height) FROM tax_validator_rates p
   WHERE p.chain = @chain AND p.operator = r.operator AND p.height <= @lo), @lo)
-ORDER BY r.operator, r.height`, map[string]any{"chain": chain, "ops": validators, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
+ORDER BY r.operator, r.height`, map[string]any{apiChain: chain, "ops": validators, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("validator rates: %w", err)
 	}
 	out := map[string][]rateSample{}

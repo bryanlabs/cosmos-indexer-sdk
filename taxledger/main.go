@@ -86,9 +86,11 @@ func main() {
 
 	// The commission trace runs thousands of small per-wallet queries whose
 	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
-	// of work. Session-only, so other jobs and the API keep their settings.
+	// of work. The repeated-inclusion repair reads the same way, one account
+	// and one block at a time. Session-only, so other jobs and the API keep
+	// their settings.
 	var runtime []string
-	if *flows {
+	if *flows || *repeated {
 		runtime = append(runtime, "jit=off")
 	}
 	db, err := indexerDB.PostgresDbConnect(
