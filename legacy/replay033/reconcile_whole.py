@@ -70,6 +70,26 @@ SAVE_DIFFERENCES = {
 }
 
 
+# The saving build plus one fix to the check at the end of a part. A part that
+# opens inside a source range recorded every height, then refused at the
+# source's closing record, which names the first height of the whole source:
+# the check compared it with the part's own opening instead. The fix keeps the
+# source's opening for that one comparison. Nothing that records a height
+# changed, and a part that opens at its source start compares the same height
+# as before. Only the last heights of the three source ranges that a
+# saving-build run had recorded to the end, then refused on exactly that
+# check, may come from this build. Each must open from that run's sealed
+# savepoint, and the two runs' progress lines over every height both verified
+# must be the same.
+COMPLETION_FIX = '6267bb77ceae4e694ec9f7158141d7e3c543f5b4'
+COMPLETION_FIX_DIFFERENCES = {
+    'legacy/replay033/consume_closed.py': ('2de9b06d58c41a1fe9d6078616a4555816c2db135e44781c1710756d5057e2ae', 'e8145cbb43e9457169f6554d6c48ec4f6bc962090c14cd5b3fa02ee8c7c077ef'),
+    'legacy/replay033/consume_split.py': ('a50d443dce28772a0719b5ba9faee79b1af79f0bba2ce850a07f1c39d7c2a92c', 'ba41026a3e401e1d5809a468a17d1de355fc0a7e11b537cac9595ae8c4e74ff0'),
+}
+COMPLETION_FIX_PARTS = ((197501, 200000), (397501, 400000), (497501, 500000))
+COMPLETION_REFUSAL = b'ValueError: closed native history completion identity differs'
+
+
 def pinned(path, digest):
     require(path.is_file() and not path.is_symlink() and sha(path) == digest, 'changed, missing or nonregular sealed artifact')
     return json.loads(path.read_bytes())
@@ -208,6 +228,38 @@ def check_stretches(sealed, stretches):
     return checked
 
 
+def pinned_log(path, seal, name):
+    """A log file the seal pinned, checked against its pin."""
+    log = path.parent / name
+    require(log.is_file() and not log.is_symlink() and seal['artifact_pins'].get(name) == sha(log), 'log changed or missing from the sealed artifact inventory: ' + name)
+    return log
+
+
+def check_completion_fix(sealed):
+    """Each part of the completion-fix build, against the saving-build run that recorded the same heights and refused only at the closing check."""
+    saved = {(path.parent / s['result_path']).parent.resolve(): (s, path) for _, s, path in sealed if s['savepoint_of_killed_run'] and s['signed_source_commit'] == WITH_SAVE}
+    checked = []
+    for result, seal, path in sealed:
+        if seal['signed_source_commit'] != COMPLETION_FIX:
+            continue
+        first, through = result['first'], result['through']
+        require((first, through) in COMPLETION_FIX_PARTS and seal['helper_proof'] == REBUILT and seal['opening_kind'] == 'interrupted_run_state' and not seal['savepoint_of_killed_run'],
+                'the completion fix build may record only the reviewed closing parts: %d..%d' % (first, through))
+        killed, killed_path = saved.get(Path(seal['interrupted_run']).resolve(), (None, None))
+        require(killed is not None and killed['killed_run_gave_heights'][1] == first - 1 and Path(killed['result_path']).parent.name == str(first - 1), 'completion fix part %d does not open from a sealed savepoint of the saving build' % first)
+        run = Path(killed['killed_run_proof'])
+        require((killed_path.parent / run).resolve() == (killed_path.parent / killed['result_path']).parent.parent.parent.resolve(), 'savepoint seal names another killed run')
+        refusal = pinned_log(killed_path, killed, str(run / 'consumer.private.log')).read_bytes().strip().split(b'\n')[-1]
+        require(refusal == COMPLETION_REFUSAL, 'the saving-build run of part %d did not stop at the closing check' % first)
+        before = progress_lines(pinned_log(killed_path, killed, str(run / 'native-consumer.private.log')), first, through)
+        after = progress_lines(pinned_log(path, seal, str(Path(seal['result_path']).parent / 'native-consumer.private.log')), first, through)
+        hundreds = [b'bounded_native_verified_height=%d' % h for h in range((first + 99) // 100 * 100, through + 1, 100)]
+        require([line.split()[0] for line in after] == hundreds and before and before == after[:-1], 'the two builds verified the heights of part %d differently' % first)
+        checked.append(dict(first=first, through=through, saving_build_run=str(run), saving_build_refusal=COMPLETION_REFUSAL.decode(), progress_lines_equal=len(before),
+                            equal_through=int(before[-1].split()[0].split(b'=')[1]), progress_lines_sha256=hashlib.sha256(b'\n'.join(before)).hexdigest()))
+    return checked
+
+
 def check_builds(sealed, witness, pair=None):
     """All parts from one recorder, or from recorders whose every difference is accounted for."""
     by_commit = {}
@@ -232,6 +284,13 @@ def check_builds(sealed, witness, pair=None):
                     require(SAVE_DIFFERENCES.get(name) == (old.get(name), new.get(name)), 'unreviewed source difference between the two builds: ' + name)
             same_recording(pair, {c: by_commit[c][0][1]['native_helper_sha256'] for c in (BEFORE_SAVE, WITH_SAVE)})
             saving = True
+            continue
+        if commit == COMPLETION_FIX:
+            require(WITH_SAVE in by_commit, 'the completion fix build joins only beside the saving build it fixes')
+            w = by_commit[WITH_SAVE][0][1]['signed_code_pins']
+            changed = sorted(name for name in set(a) | set(w) if a.get(name) != w.get(name) and not records_nothing(name))
+            require(changed == sorted(COMPLETION_FIX_DIFFERENCES) and all(COMPLETION_FIX_DIFFERENCES[name] == (w.get(name), a.get(name)) for name in changed), 'unreviewed source difference from the saving build: ' + ', '.join(changed))
+            require(len(check_completion_fix(sealed)) == len(parts), 'completion fix parts not all checked')
             continue
         require(commit == OLDER and reference == NEWER, 'unreviewed difference in recording code between parts, commit %s: %s' % (commit, ', '.join(differing)))
         for name in set(a) | set(b):
@@ -345,6 +404,7 @@ def verify(config, repo, progress=None, facts_path=None):
     profiles = [result for result, _, _ in sealed]
     builds = check_builds(sealed, config.get('cross_build_witness'), config.get('both_builds_stretch'))
     stretches = check_stretches(sealed, config.get('weaker_proof_stretches'))
+    completion_fix = check_completion_fix(sealed)
     summary = check_profiles(profiles)
     fact_blocks, fact_bytes = join_facts(sealed)
     jailings = check_jailings(config.get('jailed_without_stake_moved'))
@@ -375,6 +435,7 @@ def verify(config, repo, progress=None, facts_path=None):
                 production_import_or_public_promotion_authorized=False, input_config_sha256=hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest(),
                 profile_seals=config['profiles'], accepted_terminal_seal_sha256=TERMINAL_SHA,
                 signed_source_commits=builds, cross_build_witness=config.get('cross_build_witness'), both_builds_stretch=config.get('both_builds_stretch'), first_heights_recorded_again_by_reproducible_helper=stretches,
+                closing_check_fix_parts=completion_fix,
                 stake_asset_reduction_blocks=fact_blocks, stake_asset_reduction_fact_rows=sum(e['fact_rows'] for e in fact_blocks),
                 stake_asset_reductions_joined_sha256=hashlib.sha256(fact_bytes).hexdigest(),
                 penalty_blocks_with_stake_moved=list(PENALTY_HEIGHTS), jailings_with_no_stake_moved=jailings, stake_asset_tax_classification='unclassified',

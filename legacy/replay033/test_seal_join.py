@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from reconcile_whole import JAILED_WITHOUT_STAKE_MOVED, REBUILT, STAMP_ONLY, check_jailings, check_stretches
+from reconcile_whole import COMPLETION_FIX, COMPLETION_FIX_DIFFERENCES, COMPLETION_REFUSAL, check_completion_fix
 from reconcile_whole import BEFORE_SAVE, BUILD_DIFFERENCES, NEWER, OLDER, PENALTY_HEIGHTS, SAVE_DIFFERENCES, WITH_SAVE, check_builds, join_facts
 from seal_closed import FACTS, bound_facts, stake_facts
 
@@ -345,6 +346,60 @@ class SavingBuild(unittest.TestCase):
             self.new['legacy/replay033/cmd/consume-native/main.go'] = 'another-main'
             with self.assertRaises(ValueError):
                 check_builds(self.parts(), None, pair)
+
+
+class ClosingCheckFix(unittest.TestCase):
+    """The completion-fix build joins only for a closing part whose heights a saving-build run verified the same way before refusing at the closing check."""
+
+    def setUp(self):
+        self.saving = {'legacy/replay033/cmd/consume-native/slash_native.go': 'bb', **{k: v[1] for k, v in SAVE_DIFFERENCES.items()}}
+        self.saving.update({k: v[0] for k, v in COMPLETION_FIX_DIFFERENCES.items()})
+        self.fixed = dict(self.saving, **{k: v[1] for k, v in COMPLETION_FIX_DIFFERENCES.items()}, **{'legacy/replay033/test_consume_split.py': 'tt'})
+
+    def sealed(self, root, first=397501, through=400000, killed_through=399900, phase=0, refusal=COMPLETION_REFUSAL, helper_proof=REBUILT, opening=397500):
+        line = lambda h, extra=0: 'bounded_native_verified_height=%d typed_phases=%d\n' % (h, h * 3 + extra)
+        killed, fixed = root / 'killed/proof', root / 'fixed/proof'
+        (killed / 'savepoints/397500').mkdir(parents=True)
+        fixed.mkdir(parents=True)
+        (killed / 'native-consumer.private.log').write_text(''.join(line(h) for h in range(305000, killed_through + 1, 100)) + 'native bounded financial proof refused: EOF is not bounded completion\n')
+        (killed / 'consumer.private.log').write_bytes(b'{"rebuilt_height": 1}\nTraceback (most recent call last):\n' + refusal + b'\n')
+        (fixed / 'native-consumer.private.log').write_text(''.join(line(h, phase if h == 399000 else 0) for h in range(397600, through + 1, 100)))
+        pins = lambda *names: {n: hashlib.sha256((root / n).read_bytes()).hexdigest() for n in names}
+        saved = dict(signed_source_commit=WITH_SAVE, signed_code_pins=self.saving, native_helper_sha256='h-save', savepoint_of_killed_run=True, killed_run_gave_heights=[304901, 397500],
+                     result_path='killed/proof/savepoints/397500/part.private.json', killed_run_proof='killed/proof', helper_proof=REBUILT,
+                     artifact_pins=pins('killed/proof/consumer.private.log', 'killed/proof/native-consumer.private.log'))
+        fix = dict(signed_source_commit=COMPLETION_FIX, signed_code_pins=self.fixed, native_helper_sha256='h-fix', savepoint_of_killed_run=False, helper_proof=helper_proof,
+                   opening_kind='interrupted_run_state', interrupted_run=str(killed / 'savepoints' / str(opening)), result_path='fixed/proof/complete-component.private.json',
+                   artifact_pins=pins('fixed/proof/native-consumer.private.log'))
+        return [(dict(first=304901, through=397500), saved, root / 'seal-304901.json'), (dict(first=first, through=through), fix, root / 'seal-397501.json')]
+
+    def test_closing_part_joins_with_equal_progress_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            sealed = self.sealed(Path(d))
+            self.assertEqual(check_builds(sealed, None), sorted([WITH_SAVE, COMPLETION_FIX]))
+            self.assertEqual([(c['first'], c['progress_lines_equal'], c['equal_through']) for c in check_completion_fix(sealed)], [(397501, 24, 399900)])
+            with self.assertRaises(ValueError):
+                check_completion_fix(sealed[1:])
+
+    def test_any_difference_in_lines_runs_or_code_refuses(self):
+        for change in (dict(phase=1), dict(killed_through=399800), dict(through=399900), dict(first=397502), dict(refusal=b'ValueError: something else'),
+                       dict(helper_proof=STAMP_ONLY), dict(opening=395000)):
+            with tempfile.TemporaryDirectory() as d:
+                with self.assertRaises(ValueError, msg=str(change)):
+                    check_builds(self.sealed(Path(d), **change), None)
+        with tempfile.TemporaryDirectory() as d:
+            sealed = self.sealed(Path(d))
+            with (Path(d) / 'killed/proof/native-consumer.private.log').open('a') as log:
+                log.write('bounded_native_verified_height=400000 typed_phases=1\n')
+            with self.assertRaises(ValueError):
+                check_builds(sealed, None)
+        for name, digest in (('legacy/replay033/cmd/consume-native/slash_native.go', 'changed'), ('legacy/replay033/cmd/consume-native/main.go', 'another-main'),
+                             ('legacy/replay033/consume_split.py', COMPLETION_FIX_DIFFERENCES['legacy/replay033/consume_split.py'][0])):
+            with tempfile.TemporaryDirectory() as d:
+                self.setUp()
+                self.fixed[name] = digest
+                with self.assertRaisesRegex(ValueError, 'unreviewed', msg=name):
+                    check_builds(self.sealed(Path(d)), None)
 
 
 class ManyParts(unittest.TestCase):
