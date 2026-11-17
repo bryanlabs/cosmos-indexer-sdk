@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,6 +270,25 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 19)
+	require.Len(t, seen, 20)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
+}
+
+// Each retry collection serves only its one pinned root, and no root is
+// pinned by two of them: later-s02 has two deadline retries (v2 and v3),
+// each under its own version.
+func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
+	roots := map[string]string{}
+	for _, src := range defaultCommissionServingSources[apiMainnet] {
+		if !strings.Contains(src.Version, "-retry-") {
+			require.Empty(t, src.Root, src.Version)
+			continue
+		}
+		require.Len(t, src.Root, 64, src.Version)
+		require.NotContains(t, roots, src.Root, src.Version)
+		roots[src.Root] = src.Version
+	}
+	require.Len(t, roots, 6)
+	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
+	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 }

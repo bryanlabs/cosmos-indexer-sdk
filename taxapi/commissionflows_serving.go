@@ -80,6 +80,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v2", "ab12977c1a2135f7aeea69534171ee3c2bec9a03f3650cbf5dff76caefb19345"),
 		flowCorrectedRoot("accel-four-s03-20261115-deadline-retry-v2", "290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v2", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
+		flowCorrectedRoot("accel-later-s02-20261115-deadline-retry-v3", "50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"),
 		flowCorrected("accel-four-s01-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-v1"),
 		flowCorrected("accel-four-s03-20261115-v1"),
