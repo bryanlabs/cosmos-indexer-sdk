@@ -43,6 +43,9 @@ type JournalLine struct {
 	ValidatorCountry string `json:"validator_country"`
 	// Methodology is the methodology version the line was produced under.
 	Methodology string `json:"methodology_version"`
+	// ChainID is the Hub chain of the entry, set only while an earlier Hub
+	// chain is in reports.
+	ChainID string `json:"chain_id,omitempty"`
 }
 
 // Chart of accounts used by the journal. Names are stable so a controller can
@@ -76,8 +79,15 @@ const (
 func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	// Fee rows are loaded after event rows; a ledger wants strict date order.
 	rows := append([]Row(nil), input...)
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Time.Before(rows[j].Time) })
+	sort.SliceStable(rows, func(i, j int) bool { return rowBefore(rows[i], rows[j]) })
 	var out []JournalLine
+	// Each row's lines carry its chain; stamped counts the lines done.
+	stamped, rowChain := 0, ""
+	stamp := func() {
+		for ; stamped < len(out); stamped++ {
+			out[stamped].ChainID = rowChain
+		}
+	}
 	swapsByTx := map[string][]Row{}
 	for _, r := range rows {
 		if r.Category == apiSwap {
@@ -86,6 +96,8 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	}
 	swapDone := map[string]bool{}
 	for i, r := range rows {
+		stamp()
+		rowChain = r.ChainID
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
@@ -257,6 +269,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			}
 		}
 	}
+	stamp()
 	return out
 }
 
@@ -283,10 +296,22 @@ func shortHash(h string) string {
 // WriteJournalCSV writes journal lines with a trial-balance footer.
 func WriteJournalCSV(out io.Writer, lines []JournalLine) error {
 	w := csv.NewWriter(out)
-	_ = w.Write([]string{apiDateUTC, apiTxHash, "entry_id", "account", "debit_usd", "credit_usd", apiAsset, "quantity", "price_usd", apiCategory, apiMemo, "counterparty", apiValidator, "validator_country", apiMethodologyVersion})
+	// The chain column is added only while an earlier Hub chain is in
+	// reports, when every line names its chain.
+	withChain := false
+	for _, l := range lines {
+		withChain = withChain || l.ChainID != ""
+	}
+	write := func(rec []string, chainID string) {
+		if withChain {
+			rec = append(rec, chainID)
+		}
+		_ = w.Write(rec)
+	}
+	write([]string{apiDateUTC, apiTxHash, "entry_id", "account", "debit_usd", "credit_usd", apiAsset, "quantity", "price_usd", apiCategory, apiMemo, "counterparty", apiValidator, "validator_country", apiMethodologyVersion}, "chain_id")
 	var debits, credits decimal.Decimal
 	for _, l := range lines {
-		_ = w.Write([]string{l.Date, l.TxHash, l.EntryID, l.Account, l.Debit, l.Credit, spreadsheetLabel(l.Asset), l.Quantity, l.PriceUSD, l.Category, l.Memo, l.Counterparty, l.Validator, l.ValidatorCountry, l.Methodology})
+		write([]string{l.Date, l.TxHash, l.EntryID, l.Account, l.Debit, l.Credit, spreadsheetLabel(l.Asset), l.Quantity, l.PriceUSD, l.Category, l.Memo, l.Counterparty, l.Validator, l.ValidatorCountry, l.Methodology}, l.ChainID)
 		if d, err := decimal.NewFromString(l.Debit); err == nil {
 			debits = debits.Add(d)
 		}
@@ -294,7 +319,7 @@ func WriteJournalCSV(out io.Writer, lines []JournalLine) error {
 			credits = credits.Add(c)
 		}
 	}
-	_ = w.Write([]string{"", "", apiTotalLabel, "", debits.StringFixed(2), credits.StringFixed(2), "", "", "", "", "trial balance: debits equal credits", "", "", "", MethodologyVersion})
+	write([]string{"", "", apiTotalLabel, "", debits.StringFixed(2), credits.StringFixed(2), "", "", "", "", "trial balance: debits equal credits", "", "", "", MethodologyVersion}, "")
 	w.Flush()
 	return w.Error()
 }

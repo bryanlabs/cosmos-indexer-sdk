@@ -122,4 +122,9 @@ type TaxableEvent struct {
 	BlockHeight int64     `gorm:"index:idx_tax_height"`
 	Timestamp   time.Time `gorm:"index:idx_tax_time"`
 	TxHash      string    `gorm:"index:idx_tax_txhash"`
+
+	// ChainID is set by the tax API on rows read from an earlier Hub chain
+	// (cosmoshub-1 to 3, the legacy schema). It is not stored in this table,
+	// which holds the current chain only.
+	ChainID string `gorm:"-" json:"-"`
 }

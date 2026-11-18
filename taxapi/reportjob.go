@@ -105,6 +105,12 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 	if err != nil {
 		return nil, err
 	}
+	// A report built while an earlier Hub chain is in reports is a different
+	// report: publishing, unpublishing or reimporting an era starts a fresh
+	// one instead of serving a cached result built without it.
+	if eras := s.legacyEras(chain).key(); eras != "" {
+		key += "|eras:" + eras
+	}
 
 	// A poll of a report still being built answers from its job row alone. The
 	// build runs the readiness checks itself before it publishes a result, and

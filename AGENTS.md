@@ -69,7 +69,27 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `X-Index-Coverage-Incomplete-Years` and `X-Index-Coverage-Note`; `/report-job`, `/positions` and
   `/validator-statement` also return `index_coverage` in the body, evaluated
   per response so cached jobs pick up backfill progress. No route clamps
-  dates to the index start). Every handler normalises `chain` through `chainParam` in
+  dates to the index start).
+  Earlier Hub chains (cosmoshub-1 to 3, `taxapi/legacyeras.go`): the API
+  reads the `legacy` schema (`eras`, `import_ranges`, `reconciliation`,
+  `taxable_events`, `tx_inclusions`, `blocks`, `balance_days`) every 5
+  minutes (`TAX_LEGACY_ERAS_INTERVAL`, `TAX_LEGACY_ERAS=off` turns it off).
+  An era joins reports only when it and every later era have
+  `published = true`, so the set in reports is always cosmoshub-3, then 2
+  and 3, then 1 to 3. While none is in reports every response is
+  byte-for-byte what it was before eras existed, apart from `eras[]` on
+  `/index-coverage` (`TestLegacyErasUnpublishedChangeNothingPostgres`).
+  Once one is: legacy rows are read with SQL (heights restart on every
+  chain, so order is always era, height, phase, tx_index, msg_index,
+  sub_index, never height alone), a genesis row is read only on the
+  earliest era in reports, rows past an era's export height are dropped,
+  events, 8949, journal, previews and balance statements gain a chain id
+  column, years and the date floor move to the earliest era, and past-date
+  balances on those chains come from `legacy.balance_days` (refused for a
+  wallet whose `reconciliation` row is not `closed*`). Commission flows and
+  the validator statement stay cosmoshub-4 only. A missing or unreadable
+  schema (no USAGE grant) leaves reports as they are and logs once.
+  Every handler normalises `chain` through `chainParam` in
   `taxapi/server.go` (`cosmoshub`, `cosmoshub-4` and `mainnet` are the same
   oracle key); never read `q.Get("chain")` raw. `/events?preview=1` emits the preview
   columns the website parses. A Gaia release that changes event shapes gets a

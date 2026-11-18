@@ -15,6 +15,9 @@ type walletRows struct {
 	Events []tax.TaxableEvent
 	Fees   []feeRec
 	Memos  map[string]string
+	// stampChain is true when earlier Hub chains are in reports; every row
+	// then names its chain.
+	stampChain bool
 }
 
 type reportInput struct {
@@ -58,7 +61,21 @@ func (s *Server) reportReadiness(chain string, addresses []string, start, end ti
 // cache evidence all belong to the same PostgreSQL MVCC snapshot. Materialize
 // before pricing so external services cannot prolong a database transaction.
 func (s *Server) readReportInput(chain string, addresses []string, start, end time.Time, fingerprint bool) (reportInput, error) {
+	return s.readWalletInput(chain, addresses, start, end, fingerprint, s.legacyEras(chain))
+}
+
+// readCurrentChainInput is readReportInput on cosmoshub-4 alone, for
+// readers keyed by cosmoshub-4 heights (commission flows).
+func (s *Server) readCurrentChainInput(chain string, addresses []string, start, end time.Time) (reportInput, error) {
+	return s.readWalletInput(chain, addresses, start, end, false, nil)
+}
+
+func (s *Server) readWalletInput(chain string, addresses []string, start, end time.Time, fingerprint bool, eras *legacyEraState) (reportInput, error) {
 	var input reportInput
+	// The era state is read before the snapshot opens: the reader facade
+	// holds only the database. The legacy schema is queried only when an
+	// earlier chain is in reports, so a role that cannot read it never aborts
+	// a report's transaction.
 	err := s.withReadSnapshot(func(reader *Server) error {
 		refundPairs, err := reader.reportReadiness(chain, addresses, start, end)
 		if err != nil {
@@ -68,6 +85,13 @@ func (s *Server) readReportInput(chain string, addresses []string, start, end ti
 			rows, err := reader.loadWalletRows(chain, addr, start, end, refundPairs)
 			if err != nil {
 				return err
+			}
+			if eras.active() {
+				events, fees, err := reader.legacyWalletRows(eras, addr, start, end)
+				if err != nil {
+					return err
+				}
+				rows = withLegacyRows(rows, events, fees)
 			}
 			input.Wallets = append(input.Wallets, rows)
 		}

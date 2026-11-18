@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"encoding/csv"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -36,7 +37,7 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			sorted = append(sorted, r)
 		}
 	}
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	sort.SliceStable(sorted, func(i, j int) bool { return rowBefore(sorted[i], sorted[j]) })
 	lots := map[string][]lot{}
 	denoms := map[string]string{}
 	for _, r := range sorted {
@@ -150,9 +151,13 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		cw.Flush()
 		return
 	}
+	note := "Open lots from acquisitions seen in the indexed history, FIFO, per wallet. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before cosmoshub-4 genesis are not represented."
+	if eras := s.legacyEras(chain); eras.active() {
+		note = fmt.Sprintf("Open lots from acquisitions seen in the indexed history, FIFO, per wallet, across the Cosmos Hub restarts from %s (%s) on. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before %s are not represented.", eras.earliest().ChainID, dayString(eras.earliest().Start), eras.earliest().ChainID)
+	}
 	writeJSON(w, map[string]any{
 		apiAddress: addr, apiChain: chain, "as_of": day, apiMethodologyVersion: MethodologyVersion,
-		apiNote:          "Open lots from acquisitions seen in the indexed history, FIFO, per wallet. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before cosmoshub-4 genesis are not represented. Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
+		apiNote:          note + " Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
 		"positions":      positions,
 		"index_coverage": s.periodCoverage(time.Time{}, asOf.AddDate(0, 0, 1)),
 	})
