@@ -75,7 +75,7 @@ func scanBackBlock(height int64, chain []nodeTx, index []backTx) backBlock {
 			continue
 		}
 		seen[id] = true
-		if t.Code != 0 {
+		if t.Code != 0 && t.ChargeKnown {
 			b.fees = append(b.fees, FailedTxFee{TxID: id, Charged: t.Charged})
 		}
 		if t.Granter != "" {
@@ -174,6 +174,93 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 		}
 	}
 	return from, nil
+}
+
+// FailedFeeCounts is what RecordFailedTxFees settled: failed transactions
+// found charged their fee, found charged nothing, and left unsettled.
+type FailedFeeCounts struct {
+	Charged, Uncharged, Unsettled int
+}
+
+// RecordFailedTxFees settles, for every failed transaction in [lo, hi) that
+// has a fee row and no recorded outcome, the fee its block results show it
+// was charged, reading the blocks from node a chunk of heights at a time,
+// and records it when write is set. A transaction its results do not settle
+// stays unrecorded, so the report keeps its declared fee. It stops at the
+// first block it cannot read. Rows already recorded are never changed, so a
+// rerun resumes.
+func (s *Server) RecordFailedTxFees(chain string, node *ledgerNode, lo, hi, chunk int64, workers int, write bool, logf func(string, ...any)) (FailedFeeCounts, error) {
+	var n FailedFeeCounts
+	ids, err := s.chainRowIDs(chain)
+	if err != nil {
+		return n, err
+	}
+	for from := lo; from < hi; from += chunk {
+		to := min(hi, from+chunk)
+		var rows []ledgerFeeRow
+		if err := s.db.Raw(`
+SELECT DISTINCT x.id AS tx_id, x.hash, b.height
+FROM blocks b
+JOIN txes x ON x.block_id = b.id
+JOIN fees f ON f.tx_id = x.id
+LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
+WHERE b.chain_id IN @ids AND b.height >= @lo AND b.height < @hi AND x.code <> 0 AND o.tx_id IS NULL
+ORDER BY b.height`, map[string]any{"ids": ids, "lo": from, "hi": to}).Scan(&rows).Error; err != nil {
+			return n, fmt.Errorf("failed txs %d to %d: %w", from, to-1, err)
+		}
+		byHeight := map[int64][]ledgerFeeRow{}
+		var heights []int64
+		for _, r := range rows {
+			if _, ok := byHeight[r.Height]; !ok {
+				heights = append(heights, r.Height)
+			}
+			byHeight[r.Height] = append(byHeight[r.Height], r)
+		}
+		charges := make([]map[string]string, len(heights))
+		readErr := make([]error, len(heights))
+		next := make(chan int)
+		var wg sync.WaitGroup
+		for w := 0; w < max(workers, 1); w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range next {
+					charges[i], readErr[i] = node.failedTxCharges(heights[i])
+				}
+			}()
+		}
+		for i := range heights {
+			next <- i
+		}
+		close(next)
+		wg.Wait()
+		var fees []FailedTxFee
+		for i, h := range heights {
+			if readErr[i] != nil {
+				return n, fmt.Errorf("block %d: %w", h, readErr[i])
+			}
+			for _, r := range byHeight[h] {
+				charged, ok := charges[i][strings.ToUpper(r.Hash)]
+				switch {
+				case !ok:
+					n.Unsettled++
+					continue
+				case charged == "":
+					n.Uncharged++
+				default:
+					n.Charged++
+				}
+				fees = append(fees, FailedTxFee{TxID: r.TxID, Charged: charged})
+			}
+		}
+		if write && len(fees) > 0 {
+			if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(fees, 1000).Error; err != nil {
+				return n, fmt.Errorf("record failed-tx fees %d to %d: %w", from, to-1, err)
+			}
+		}
+		logf("failed-tx fees: %d to %d: settled %d of %d (so far %d charged, %d charged nothing, %d unsettled; write=%v)", from, to-1, len(fees), len(rows), n.Charged, n.Uncharged, n.Unsettled, write)
+	}
+	return n, nil
 }
 
 // RecheckIndexHoles reads every recorded hole's block from node again and

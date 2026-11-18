@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	txtypes "github.com/cosmos/cosmos-sdk/types/tx"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -25,14 +26,82 @@ type nodeTx struct {
 	Hash     string
 	Code     uint32
 	Accounts []string
-	// Charged is the coins a failed transaction's fee deduction moved.
-	Charged string
+	// Charged is the coins a failed transaction's fee deduction moved, and
+	// ChargeKnown says the block results settle it. Only a failed
+	// transaction has either.
+	Charged     string
+	ChargeKnown bool
 	// Granter is the account whose fee grant paid the fee, if any.
 	Granter string
 	// Rejected is a failed transaction with no events: the ante handler
 	// turned it away, so it changed nothing, not even the fee, and the same
 	// bytes can be included again in a later block.
 	Rejected bool
+}
+
+// failedTxResult is what the block results say about one failed
+// transaction, read where the SDK emitted no coin events (before Gaia v6 on
+// cosmoshub-4).
+type failedTxResult struct {
+	Code      uint32
+	Codespace string
+	Log       string
+	GasWanted int64
+	TxBytes   int
+	Signers   int
+	// Fee is the fee the transaction declared, "" for none, and FeeRead
+	// says the transaction's bytes decoded.
+	Fee     string
+	FeeRead bool
+}
+
+// Before SDK 0.44 a failed transaction's result carries no events at all, so
+// the fee it paid follows from where it failed. runTx in SDK 0.41 and 0.42
+// decodes the transaction and checks its messages' ValidateBasic first, then
+// runs the ante handler, which deducts the fee, on a cached store that is
+// written only when the whole ante chain passes, and runs the messages after
+// that. So a transaction turned away before or inside the ante handler paid
+// nothing, and one whose message failed paid its declared fee. runMsgs names
+// the failing message's index in every error it returns, and nothing before
+// it does, so the log tells the two apart, except for three cases: an
+// out-of-gas panic, which reads the same in the ante handler and in a
+// message; a panic, whose log is redacted; and an error with no ABCI code,
+// which is redacted to "internal".
+const (
+	msgFailurePrefix  = "failed to execute message; message index: "
+	msgUnroutedPrefix = "unrecognized message "
+	msgIndexMarker    = "; message index: "
+	outOfGasPrefix    = "out of gas in location: "
+	// sdkInternalCode and sdkPanicCode are the redacted errors.
+	sdkInternalCode = 1
+	sdkPanicCode    = 111222
+	// preCoinEventsAnteGas bounds the gas the SDK 0.42 ante handler spends
+	// on one signature beyond the transaction size charge of ten gas a
+	// byte. An out-of-gas panic in a transaction whose gas limit reaches
+	// that for every signature came from a message: the ante handler had
+	// finished within the limit.
+	preCoinEventsAnteGas = 100000
+)
+
+// preCoinEventsCharge settles a failed transaction's fee from its result in
+// a block without coin events. ok is false when the result does not settle
+// it.
+func preCoinEventsCharge(r failedTxResult) (charged string, ok bool) {
+	switch {
+	case strings.HasPrefix(r.Log, msgFailurePrefix),
+		strings.HasPrefix(r.Log, msgUnroutedPrefix) && strings.Contains(r.Log, msgIndexMarker):
+		return r.Fee, r.FeeRead
+	case r.Codespace == "sdk" && strings.HasPrefix(r.Log, outOfGasPrefix):
+		limit := int64(10*r.TxBytes) + int64(max(r.Signers, 1))*preCoinEventsAnteGas
+		if r.FeeRead && (r.Fee == "" || r.GasWanted >= limit) {
+			return r.Fee, true
+		}
+		return "", false
+	case r.Codespace == "undefined" && r.Code == sdkInternalCode,
+		r.Codespace == "undefined" && r.Code == sdkPanicCode:
+		return "", false
+	}
+	return "", true
 }
 
 // rpcResult reads one RPC response at height, from the block cache when the
@@ -83,12 +152,17 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 		Result struct {
 			Height     string `json:"height"`
 			TxsResults []struct {
-				Code   uint32 `json:"code"`
-				Events []struct {
+				Code      uint32 `json:"code"`
+				Codespace string `json:"codespace"`
+				Log       string `json:"log"`
+				GasWanted string `json:"gas_wanted"`
+				Events    []struct {
 					Type       string    `json:"type"`
 					Attributes []rpcAttr `json:"attributes"`
 				} `json:"events"`
 			} `json:"txs_results"`
+			BeginBlockEvents    []struct{ Type string } `json:"begin_block_events"`
+			FinalizeBlockEvents []struct{ Type string } `json:"finalize_block_events"`
 		} `json:"result"`
 	}
 	if err := n.rpcResult("block_results", height, &res); err != nil {
@@ -100,6 +174,15 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 	txs, results := blk.Result.Block.Data.Txs, res.Result.TxsResults
 	if len(txs) != len(results) {
 		return nil, fmt.Errorf("block %d has %d txs and %d results", height, len(txs), len(results))
+	}
+	// SDK 0.44 and later emit coin events in every block's own events (the
+	// mint at least) and on every failed transaction that paid its fee.
+	coinEvents := false
+	for _, e := range append(res.Result.BeginBlockEvents, res.Result.FinalizeBlockEvents...) {
+		if e.Type == "coin_spent" || e.Type == "coin_received" || e.Type == "coinbase" {
+			coinEvents = true
+			break
+		}
 	}
 	pat := regexp.MustCompile(sdk.GetConfig().GetBech32AccountAddrPrefix() + `1[02-9ac-hj-np-z]{38,58}`)
 	out := make([]nodeTx, 0, len(txs))
@@ -135,8 +218,17 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 			}
 		}
 		tx := nodeTx{Hash: strings.ToUpper(hex.EncodeToString(sum[:])), Code: t.Code, Granter: granter, Rejected: t.Code != 0 && len(t.Events) == 0}
-		if t.Code != 0 {
-			tx.Charged = strings.Join(spent, ",")
+		switch {
+		case t.Code == 0:
+		case coinEvents || len(t.Events) > 0:
+			tx.Charged, tx.ChargeKnown = strings.Join(spent, ","), true
+		default:
+			gw, _ := strconv.ParseInt(t.GasWanted, 10, 64)
+			fee, signers, read := declaredFee(raw)
+			tx.Charged, tx.ChargeKnown = preCoinEventsCharge(failedTxResult{
+				Code: t.Code, Codespace: t.Codespace, Log: t.Log, GasWanted: gw,
+				TxBytes: len(raw), Signers: signers, Fee: fee, FeeRead: read,
+			})
 		}
 		for a := range found {
 			tx.Accounts = append(tx.Accounts, a)
@@ -145,6 +237,30 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 		out = append(out, tx)
 	}
 	return out, nil
+}
+
+// declaredFee reads the fee, without zero coins, and the number of
+// signatures from a transaction's bytes. ok is false for bytes that do not
+// decode.
+func declaredFee(raw []byte) (fee string, signers int, ok bool) {
+	var tx txtypes.TxRaw
+	if err := tx.Unmarshal(raw); err != nil {
+		return "", 0, false
+	}
+	var auth txtypes.AuthInfo
+	if err := auth.Unmarshal(tx.AuthInfoBytes); err != nil {
+		return "", 0, false
+	}
+	var coins sdk.Coins
+	if auth.Fee != nil {
+		for _, c := range auth.Fee.Amount {
+			if c.Amount.IsNil() || !c.Amount.IsPositive() {
+				continue
+			}
+			coins = append(coins, c)
+		}
+	}
+	return coins.String(), len(tx.Signatures), true
 }
 
 type indexedTx struct {
