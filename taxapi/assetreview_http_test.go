@@ -23,7 +23,7 @@ func assetReviewFixture(t *testing.T) (*Server, *gorm.DB, string, string) {
 	if err := dbpkg.MigrateModels(db); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&tax.TaxableEvent{}, &ReportJob{}); err != nil {
+	if err := db.AutoMigrate(&tax.TaxableEvent{}, &ReportJob{}, &FailedTxFee{}); err != nil {
 		t.Fatal(err)
 	}
 	wallet := "cosmos1testwallet"
