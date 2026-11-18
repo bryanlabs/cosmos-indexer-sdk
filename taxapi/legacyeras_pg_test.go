@@ -390,9 +390,23 @@ func TestLegacyErasCoveragePostgres(t *testing.T) {
 	require.Equal(t, "2019-12-11", snap.GenesisDate)
 	require.Equal(t, int64(5200791), snap.GenesisHeight)
 	require.True(t, snap.Complete)
-	require.Equal(t, 2019, snap.Years[0].Year)
-	require.Equal(t, "cosmoshub-3", snap.Years[0].Chains[0].ChainID)
-	require.Equal(t, int64(3), snap.Years[0].ExpectedBlocks)
+	// 2019 is partial: cosmoshub-1 and 2 ran in it and are not in reports.
+	y2019 := snap.Years[0]
+	require.Equal(t, 2019, y2019.Year)
+	require.False(t, y2019.Complete)
+	require.False(t, y2019.TxComplete)
+	require.Len(t, y2019.Chains, 3)
+	require.Equal(t, "cosmoshub-1", y2019.Chains[0].ChainID)
+	require.True(t, y2019.Chains[0].NotInReports)
+	require.Equal(t, int64(0), y2019.Chains[1].IndexedBlocks)
+	require.Equal(t, "2019-04-22", y2019.Chains[1].From)
+	require.Equal(t, "cosmoshub-3", y2019.Chains[2].ChainID)
+	require.False(t, y2019.Chains[2].NotInReports)
+	require.Equal(t, int64(23), y2019.ExpectedBlocks)
+	require.Equal(t, int64(3), y2019.IndexedBlocks)
+	require.Equal(t, "2019-12-11", *y2019.EarliestCoveredDate)
+	require.True(t, snap.Years[1].Complete, "2020 is cosmoshub-3 only")
+	require.Contains(t, snap.Note, "2019 is partial")
 	y2021 := snap.Years[2]
 	require.Equal(t, 2021, y2021.Year)
 	require.Len(t, y2021.Chains, 2)
@@ -403,9 +417,25 @@ func TestLegacyErasCoveragePostgres(t *testing.T) {
 
 	p := snap.Period(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))
 	require.True(t, p.Complete, "%+v", p)
+	// A 2019 report reaches back into cosmoshub-1 and 2: incomplete, not a
+	// quiet start at cosmoshub-3 genesis.
 	p = snap.Period(time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
 	require.True(t, p.BeforeGenesis)
-	require.Contains(t, p.Note, "(cosmoshub-1 and cosmoshub-2), which are not in reports yet")
+	require.False(t, p.Complete)
+	require.Equal(t, coverageStatusIncomplete, p.Status)
+	require.Empty(t, p.Note)
+	require.Len(t, p.IncompleteYears, 1)
+	require.Equal(t, 2019, p.IncompleteYears[0].Year)
+	require.Contains(t, p.Warning, "from 2019-03-13 to that day is on earlier Hub chains (cosmoshub-1 and cosmoshub-2), which are not in reports yet")
+	require.NotContains(t, p.Warning, "backfill")
+	p = snap.Period(time.Date(2019, 12, 1, 0, 0, 0, 0, time.UTC), time.Date(2020, 7, 1, 0, 0, 0, 0, time.UTC))
+	require.False(t, p.Complete)
+	// From cosmoshub-3 genesis on it is complete, 2019 included.
+	p = snap.Period(time.Date(2019, 12, 11, 0, 0, 0, 0, time.UTC), time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	require.True(t, p.Complete, "%+v", p)
+	// All history starts at the first day in reports, as before.
+	p = snap.Period(time.Time{}, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
+	require.True(t, p.Complete, "%+v", p)
 	p = snap.Period(time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2019, 6, 1, 0, 0, 0, 0, time.UTC))
 	require.False(t, p.Complete)
 	require.Contains(t, p.Warning, "entirely before cosmoshub-3 genesis")

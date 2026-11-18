@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // YearChainCoverage is one Hub chain's part of a calendar year. Heights
@@ -17,6 +18,46 @@ type YearChainCoverage struct {
 	IndexedBlocks  int64  `json:"indexed_blocks"`
 	From           string `json:"from"`
 	Through        string `json:"through"`
+	// NotInReports marks an earlier Hub chain that is not in reports yet:
+	// its blocks count as expected and none as indexed.
+	NotInReports bool `json:"not_in_reports,omitempty"`
+}
+
+// hubLaunchDay is the UTC day of the first cosmoshub-1 block.
+var hubLaunchDay = time.Date(2019, 3, 13, 0, 0, 0, 0, time.UTC)
+
+// missingEras are the earlier Hub chains before the earliest one in
+// reports, ascending.
+func (st *legacyEraState) missingEras() []legacyEra {
+	var out []legacyEra
+	for _, e := range st.eras {
+		if e.Era < st.earliest().Era {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// missingSegments places an earlier Hub chain that is not in reports in its
+// calendar years. A chain whose first and last blocks fall in one year is
+// that year whole. One placed across years needs its year boundaries, which
+// are read only for a published chain; without them the chain is counted in
+// the year the reports start, with no block count.
+func missingSegments(e legacyEra, first legacyEra) []eraYearSegment {
+	switch {
+	case len(e.years) > 0:
+		return e.years
+	case e.placed() && e.Start.UTC().Year() == e.End.UTC().Year():
+		return []eraYearSegment{{Year: e.Start.UTC().Year(), Lo: e.FirstHeight, Hi: e.ExportHeight, From: e.startDay(), Through: e.endDay(), ExpectedBlocks: e.ExportHeight - e.FirstHeight + 1}}
+	}
+	return []eraYearSegment{{Year: first.Start.UTC().Year()}}
+}
+
+func dayStringOrEmpty(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return dayString(t)
 }
 
 // withEras returns the coverage reports see: the cosmoshub-4 snapshot, plus
@@ -25,7 +66,10 @@ type YearChainCoverage struct {
 // chain in reports, its years are added (a year that spans a restart is
 // counted across both chains, with each chain's heights under chains), and
 // its days count as covered when every one of its heights is imported.
-// genesis_height, tip and indexed_range stay cosmoshub-4's.
+// A year the chains before the earliest one in reports also ran in is
+// partial: their blocks count as expected and none as indexed, and the days
+// they ran are not covered. genesis_height, tip and indexed_range stay
+// cosmoshub-4's.
 func withEras(snap *IndexCoverage, st *legacyEraState) *IndexCoverage {
 	if snap == nil || !st.active() {
 		return snap
@@ -38,17 +82,33 @@ func withEras(snap *IndexCoverage, st *legacyEraState) *IndexCoverage {
 		hub4[y.Year] = y
 	}
 	type part struct {
-		e   legacyEra
-		seg eraYearSegment
+		e       legacyEra
+		seg     eraYearSegment
+		missing bool
 	}
 	parts := map[int][]part{}
 	var years []int
+	add := func(e legacyEra, seg eraYearSegment, missing bool) {
+		if _, ok := parts[seg.Year]; !ok {
+			years = append(years, seg.Year)
+		}
+		parts[seg.Year] = append(parts[seg.Year], part{e, seg, missing})
+	}
+	if missing := st.missingEras(); len(missing) > 0 {
+		c.missingFrom = hubLaunchDay
+		if missing[0].placed() {
+			c.missingFrom = missing[0].startDay()
+		}
+		c.missingChains = earlierChainsThan(c.earliestEra)
+		for _, e := range missing {
+			for _, seg := range missingSegments(e, st.earliest()) {
+				add(e, seg, true)
+			}
+		}
+	}
 	for _, e := range st.effective {
 		for _, seg := range e.years {
-			if _, ok := parts[seg.Year]; !ok {
-				years = append(years, seg.Year)
-			}
-			parts[seg.Year] = append(parts[seg.Year], part{e, seg})
+			add(e, seg, false)
 		}
 	}
 	for _, y := range snap.Years {
@@ -65,11 +125,18 @@ func withEras(snap *IndexCoverage, st *legacyEraState) *IndexCoverage {
 		var y YearCoverage
 		var legacyRanges []dayRange
 		var chains []YearChainCoverage
+		partial := false
 		for _, p := range parts[year] {
-			indexed := overlap(p.e.spans, p.seg.Lo, p.seg.Hi)
 			if y.Year == 0 {
 				y = YearCoverage{Year: year, firstDay: p.seg.From, Gaps: []CoverageGap{}}
 			}
+			if p.missing {
+				partial = true
+				y.ExpectedBlocks += p.seg.ExpectedBlocks
+				chains = append(chains, YearChainCoverage{ChainID: p.e.ChainID, FirstHeight: p.seg.Lo, LastHeight: p.seg.Hi, ExpectedBlocks: p.seg.ExpectedBlocks, From: dayStringOrEmpty(p.seg.From), Through: dayStringOrEmpty(p.seg.Through), NotInReports: true})
+				continue
+			}
+			indexed := overlap(p.e.spans, p.seg.Lo, p.seg.Hi)
 			y.FirstHeight, y.LastHeight = p.seg.Lo, p.seg.Hi
 			y.lastDay = p.seg.Through
 			y.ExpectedBlocks += p.seg.ExpectedBlocks
@@ -108,6 +175,11 @@ func withEras(snap *IndexCoverage, st *legacyEraState) *IndexCoverage {
 			y.ranges = legacyRanges
 			y.Chains = chains
 			finishEraYear(&y)
+		}
+		if partial {
+			y.Complete, y.TxComplete, y.BlockEventsComplete = false, false, false
+			y.PercentIndexed = min(y.PercentIndexed, 99.9)
+			c.partialYears = append(c.partialYears, year)
 		}
 		ranges = joinDayRanges(ranges, y.ranges)
 		c.Years = append(c.Years, y)
@@ -161,6 +233,13 @@ func eraCoverageNote(c *IndexCoverage) string {
 	if c.earliestEra != hub1ChainID {
 		tail = fmt.Sprintf(" Earlier Hub chains (%s) are not in reports yet.", earlierChainsThan(c.earliestEra))
 	}
+	if len(c.partialYears) > 0 {
+		var ys []string
+		for _, y := range c.partialYears {
+			ys = append(ys, fmt.Sprint(y))
+		}
+		tail += fmt.Sprintf(" %s is partial until they are: Hub activity from %s to %s genesis is not in reports.", strings.Join(ys, " and "), dayString(c.missingFrom), c.earliestEra)
+	}
 	return fmt.Sprintf("Every Cosmos Hub block from %s genesis (%s) to the %s tip is indexed, across the chain restarts.%s", c.earliestEra, c.GenesisDate, apiHubChainID, tail)
 }
 
@@ -170,6 +249,12 @@ func eraGenesisNote(c *IndexCoverage) string {
 		return fmt.Sprintf("This period starts before the Cosmos Hub launched (%s genesis, %s), so this report starts at that day.", c.earliestEra, c.GenesisDate)
 	}
 	return fmt.Sprintf("This period starts before %s genesis (%s). Cosmos Hub activity before that day is on earlier Hub chains (%s), which are not in reports yet, so this report starts at %s genesis.", c.earliestEra, c.GenesisDate, earlierChainsThan(c.earliestEra), c.earliestEra)
+}
+
+// eraPartialWarning explains a period that reaches back into days the
+// earlier Hub chains not in reports yet ran.
+func eraPartialWarning(c *IndexCoverage) string {
+	return fmt.Sprintf("This period reaches back before %s genesis (%s). Cosmos Hub activity from %s to that day is on earlier Hub chains (%s), which are not in reports yet, so it is missing from this report.", c.earliestEra, c.GenesisDate, dayString(c.missingFrom), c.missingChains)
 }
 
 // eraPreGenesisWarning is preGenesisWarning while earlier Hub chains are in

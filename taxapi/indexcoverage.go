@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -197,6 +198,12 @@ type IndexCoverage struct {
 	// earliestEra is the first Hub chain in reports when it is earlier than
 	// cosmoshub-4, else empty.
 	earliestEra string
+	// missingFrom is the first day of the earlier Hub chains not in reports
+	// yet, zero when every one is; missingChains names them, and
+	// partialYears are the years they ran in.
+	missingFrom   time.Time
+	missingChains string
+	partialYears  []int
 }
 
 // PeriodCoverage says whether a requested period is fully indexed. It rides
@@ -822,6 +829,17 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 		p.Warning = fmt.Sprintf("This period starts after the latest indexed block (%s).", dayString(tipDay))
 		return p
 	}
+	// A period that reaches back into days earlier Hub chains not in
+	// reports yet ran is judged from the first of those days, so it is
+	// incomplete rather than quietly starting at genesis.
+	partial := false
+	if before && !c.missingFrom.IsZero() {
+		reach := maxTime(utcDay(start), c.missingFrom)
+		if reach.Before(from) {
+			from, partial = reach, true
+			p.Note = ""
+		}
+	}
 	for _, y := range c.Years {
 		a, b := maxTime(from, y.firstDay), minTime(through, y.lastDay)
 		if a.After(b) || c.covers(a, b) {
@@ -843,6 +861,15 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 	default:
 		p.Status = coverageStatusIncomplete
 		p.Warning = periodWarning(p)
+		if partial {
+			p.Warning = eraPartialWarning(c)
+			for _, y := range p.IncompleteYears {
+				if !slices.Contains(c.partialYears, y.Year) {
+					p.Warning += " " + periodWarning(p)
+					break
+				}
+			}
+		}
 	}
 	return p
 }
