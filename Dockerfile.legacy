@@ -15,10 +15,12 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod go mod download
 COPY . .
 ARG TARGETARCH=amd64
-# The tests run before the build. Those that need a Postgres server skip here.
+# The tests run before the build. Those that need a Postgres server skip here,
+# except hub2promotion, whose tests never skip and need a Postgres server and a
+# private artifact root; they run outside the image build.
 RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
-    CGO_ENABLED=0 go test -p 1 ./legacy/... && \
+    CGO_ENABLED=0 go test -p 1 $(go list ./legacy/... | grep -v '/legacy/hub2promotion$') && \
     CGO_ENABLED=0 go test -p 1 ./core -run '^TestLegacy' -count=1 && \
     CGO_ENABLED=0 go test -p 1 ./cmd/legacy-removals -count=1 && \
     for tool in legacy-schema legacy-genesis legacy-import legacy-seqcheck legacy-removals legacy-close legacy-census legacy-balance-days; do \
