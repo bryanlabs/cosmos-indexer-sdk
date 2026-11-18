@@ -102,9 +102,12 @@ type Result struct {
 	Rows             int64
 	Wallets          int
 	EventRows, Fees  int64
-	ChangeRows       int64
-	OtherDenomRows   int64
-	ModuleAccounts   int
+	// AddedMoves counts the undelegations and redelegations replayed from
+	// ExtraMoves, which the stored rows hold no row for.
+	AddedMoves     int64
+	ChangeRows     int64
+	OtherDenomRows int64
+	ModuleAccounts int
 
 	// Spendable balance gate.
 	LiquidCompared, LiquidExact, LiquidDeposit, LiquidChange, LiquidOpen int
@@ -243,8 +246,17 @@ type wallet struct {
 }
 
 type ledger struct {
-	wallets map[string]*wallet
-	rates   map[string]*rate
+	// timedRedelegations dates a redelegation the stored row gives no
+	// completion time from its block time (Hubs 1 and 2).
+	timedRedelegations bool
+	// msgShares holds the shares an undelegation or redelegation message
+	// named, for a chain whose messages named shares rather than tokens.
+	msgShares map[[3]int64]sdkmath.LegacyDec
+	// msgTokens holds the token amount an undelegation or redelegation
+	// message named, where the chain's messages named tokens.
+	msgTokens map[[3]int64]sdkmath.Int
+	wallets   map[string]*wallet
+	rates     map[string]*rate
 	// trails, when set, collects what each movement did to each delegation
 	// on a validator whose price moved (first pass).
 	trails map[[2]string][]contribution
@@ -761,6 +773,9 @@ type move struct {
 	from, to, validator, detail string
 	when                        time.Time
 	fee                         bool
+	// added is the movement file record this move was made from; its
+	// addresses are placed when it runs.
+	added *MoveRecord
 }
 
 type redelegation struct {
@@ -878,7 +893,15 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 	if err != nil {
 		return nil, err
 	}
-	exact := exactChains[chain]
+	exact := exactChains[chain] || ForceExact[chain]
+	msgShares, err := messageShares(chain)
+	if err != nil {
+		return nil, err
+	}
+	msgTokens, err := messageTokens(chain)
+	if err != nil {
+		return nil, err
+	}
 	var openingVals, closingVals map[string]*valState
 	var slashes []*slash
 	if exact {
@@ -905,6 +928,17 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 		if slashes, err = loadSlashes(ctx, db, chain, out.Through, operators); err != nil {
 			return nil, err
 		}
+		added, err := extraSlashes(ctx, db, chain, operators)
+		if err != nil {
+			return nil, err
+		}
+		slashes = append(slashes, added...)
+		sort.SliceStable(slashes, func(i, j int) bool {
+			if slashes[i].height != slashes[j].height {
+				return slashes[i].height < slashes[j].height
+			}
+			return slashes[i].index < slashes[j].index
+		})
 	}
 	newLedger := func() *ledger {
 		l := &ledger{wallets: map[string]*wallet{}, rates: map[string]*rate{}, instant: map[instantKey]*big.Int{}}
@@ -946,6 +980,9 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 		}
 		if exact {
 			l.exact = true
+			l.timedRedelegations = untimedRedelegations[chain] || (ForceExact[chain] && !exactChains[chain])
+			l.msgShares = msgShares
+			l.msgTokens = msgTokens
 			l.vals = map[string]*valState{}
 			for operator, v := range openingVals {
 				l.vals[operator] = &valState{tokens: v.tokens, shares: v.shares}
@@ -1085,7 +1122,12 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 			dirty = map[string]bool{}
 			return nil
 		}
+		nextCheck := CheckpointEvery
 		advance := func(height int64) error {
+			for CheckpointEvery > 0 && nextCheck < height && nextCheck <= out.Through {
+				l.checkpoint(nextCheck)
+				nextCheck += CheckpointEvery
+			}
 			for days[day].last < height {
 				if len(dirty) > 0 || len(l.touched) > 0 {
 					if err := flush(day); err != nil {
@@ -1124,6 +1166,24 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 		if err != nil {
 			return err
 		}
+		added, err := extraMoves(ctx, db, chain)
+		if err != nil {
+			return err
+		}
+		nextAdded := 0
+		// A stored row runs before an added movement of the same message.
+		before := func(a, b *move) bool {
+			if a.height != b.height {
+				return a.height < b.height
+			}
+			if a.phase != b.phase {
+				return a.phase < b.phase
+			}
+			if a.tx != b.tx {
+				return a.tx < b.tx
+			}
+			return a.msg < b.msg
+		}
 		charge, err := read(fees, true)
 		if err != nil {
 			return err
@@ -1145,9 +1205,13 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 			}
 			return nil
 		}
-		for event != nil || charge != nil {
+		for event != nil || charge != nil || nextAdded < len(added) {
+			head := event
+			if nextAdded < len(added) && (head == nil || before(added[nextAdded], head)) {
+				head = added[nextAdded]
+			}
 			// A block's fees are charged before its messages run.
-			if charge != nil && (event == nil || charge.height <= event.height) {
+			if charge != nil && (head == nil || charge.height <= head.height) {
 				if err := slashUntil(charge.height, 2); err != nil {
 					return err
 				}
@@ -1174,7 +1238,12 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 				}
 				continue
 			}
-			m := event
+			m := head
+			if m.added != nil {
+				if err := l.placeAdded(m); err != nil {
+					return err
+				}
+			}
 			if err := slashUntil(m.height, m.phase); err != nil {
 				return err
 			}
@@ -1184,12 +1253,22 @@ WHERE chain_id = $1 AND height <= $2 GROUP BY 1 ORDER BY 1`, chain, out.Through)
 			if err := l.apply(m, out, touch, held, burned, tracked); err != nil {
 				return err
 			}
+			if m != event {
+				nextAdded++
+				out.EventRows--
+				out.AddedMoves++
+				continue
+			}
 			if event, err = read(events, false); err != nil {
 				return err
 			}
 		}
 		if err := slashUntil(out.Through+1, 0); err != nil {
 			return err
+		}
+		for CheckpointEvery > 0 && nextCheck <= out.Through {
+			l.checkpoint(nextCheck)
+			nextCheck += CheckpointEvery
 		}
 		for key, paid := range l.instant {
 			out.CompletesUnmatched++
@@ -1341,7 +1420,7 @@ func (l *ledger) apply(m *move, out *Result, touch func(string) *wallet, held, b
 		w := touch(m.to)
 		released := value
 		if l.exact {
-			released = l.undelegate(w, m.validator, sdkmath.NewIntFromBigInt(value)).BigInt()
+			released = l.release(w, m, value).BigInt()
 		} else {
 			l.bond(w, m.to, m.validator, -1, value)
 		}
@@ -1384,14 +1463,21 @@ func (l *ledger) apply(m *move, out *Result, touch func(string) *wallet, held, b
 		}
 		w := touch(m.from)
 		if l.exact {
-			released := l.undelegate(w, r.Source, sdkmath.NewIntFromBigInt(value))
+			mm := *m
+			mm.validator = r.Source
+			released := l.release(w, &mm, value)
 			if released.IsZero() {
 				l.exactAnomalies++
 				return nil
 			}
 			issued := l.delegate(w, m.from, r.Destination, released)
 			if r.Completion == "" {
-				return fmt.Errorf("a redelegation row carries no completion time")
+				if !l.timedRedelegations {
+					return fmt.Errorf("a redelegation row carries no completion time")
+				}
+				// Hubs 1 and 2 store no completion time: the chain set it to
+				// the block time plus the unbonding time.
+				r.Completion = m.when.Add(unbondingTime).Format(time.RFC3339Nano)
 			}
 			if strings.HasPrefix(r.Completion, "0001-") {
 				// From a validator that was not bonded: no entry.

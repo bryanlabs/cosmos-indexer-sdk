@@ -17,11 +17,18 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 )
 
-// A chain whose stored history records every slash is replayed exactly: each
-// validator's tokens and shares and each delegation's shares follow the
-// arithmetic of the chain's staking module (Cosmos SDK v0.37 for
-// cosmoshub-3), so no price range is needed.
-var exactChains = map[string]bool{"cosmoshub-3": true}
+// Every legacy chain is replayed exactly: each validator's tokens and shares
+// and each delegation's shares follow the arithmetic of the chain's staking
+// module, so no price range is needed. The stored block events of
+// cosmoshub-1 and cosmoshub-2 do not hold their slashes, the share amounts
+// their messages named or the movements that released no tokens; the caller
+// adds those through ExtraSlashes, MessageShares, MessageTokens and
+// ExtraMoves.
+var exactChains = map[string]bool{"cosmoshub-1": true, "cosmoshub-2": true, "cosmoshub-3": true}
+
+// untimedRedelegations are the chains whose stored redelegation rows carry
+// no completion time.
+var untimedRedelegations = map[string]bool{"cosmoshub-1": true, "cosmoshub-2": true}
 
 // Slash fractions of cosmoshub-3, from the slashing parameters of its genesis
 // file (unchanged in the next one).
@@ -211,6 +218,14 @@ func (l *ledger) recheck(dirty map[string]bool) {
 // that are not yet mature, the rest from the validator's tokens.
 func (l *ledger) applySlash(s *slash, touch func(string) *wallet) {
 	v := l.val(s.operator)
+	if s.power == 0 {
+		// An added slash that names no power takes the validator's
+		// consensus power from its tokens when the slash runs.
+		s.power = v.tokens.Quo(sdkmath.NewInt(1000000)).Int64()
+		if Trace != nil {
+			Trace("added slash %s height=%d power=%d", short(s.operator), s.height, s.power)
+		}
+	}
 	amount := sdkmath.NewInt(s.power).Mul(sdkmath.NewInt(1000000))
 	remaining := sdkmath.LegacyNewDecFromInt(amount).Mul(s.fraction).TruncateInt()
 	if s.infraction < s.height {
@@ -490,4 +505,262 @@ func (l *ledger) exactGate(out *Result, closing map[string]*valState, closingSha
 			Trace("validator %s tokens=%s expected=%s shares=%s expected=%s", short(operator), v.tokens, c.tokens, v.shares, c.shares)
 		}
 	}
+}
+
+// ForceExact replays a chain exactly although its stored block events do not
+// hold its slashes, so that its validators can be compared with an archive.
+var ForceExact = map[string]bool{}
+
+// SlashRecord is a slash the stored block events of a chain do not hold:
+// the height whose begin block ran it, the validator, the power it was
+// charged on and whether it was a double sign.
+type SlashRecord struct {
+	Height int64
+	// Operator is the sha256 of the validator's operator address, in hex.
+	Operator string
+	Power    int64
+	Double   bool
+	// Infraction is the height the slash reaches back to; zero means the
+	// downtime rule (the height less the update delay less one).
+	Infraction int64
+}
+
+// ExtraSlashes holds, per chain, slashes added to the stored ones.
+var ExtraSlashes = map[string][]SlashRecord{}
+
+// Checkpoint, when set, receives every validator's tokens and shares at
+// each height that is a multiple of CheckpointEvery, after that height's
+// last movement, in an exact replay.
+var (
+	Checkpoint      func(height int64, operator, tokens, shares string)
+	CheckpointEvery int64 = 10000
+)
+
+func (l *ledger) checkpoint(height int64) {
+	if Checkpoint == nil || !l.exact {
+		return
+	}
+	operators := make([]string, 0, len(l.vals))
+	for operator := range l.vals {
+		operators = append(operators, operator)
+	}
+	sort.Strings(operators)
+	for _, operator := range operators {
+		v := l.vals[operator]
+		Checkpoint(height, operator, v.tokens.String(), v.shares.String())
+	}
+}
+
+func extraSlashes(ctx context.Context, db *sql.DB, chain string, operators []string) ([]*slash, error) {
+	records := ExtraSlashes[chain]
+	if len(records) == 0 {
+		return nil, nil
+	}
+	byHash := map[string]string{}
+	for _, operator := range operators {
+		byHash[hashOf(operator)] = operator
+	}
+	out := make([]*slash, 0, len(records))
+	for i, r := range records {
+		operator, ok := byHash[r.Operator]
+		if !ok {
+			return nil, fmt.Errorf("an added slash names a validator this build cannot place")
+		}
+		var when time.Time
+		if err := db.QueryRowContext(ctx, `SELECT time FROM legacy.blocks WHERE chain_id = $1 AND height = $2`, chain, r.Height).Scan(&when); err != nil {
+			return nil, fmt.Errorf("an added slash names a height with no stored block")
+		}
+		s := &slash{height: r.Height, index: -1000 + i, when: when, operator: operator, power: r.Power, double: r.Double, infraction: r.Infraction}
+		if r.Double {
+			s.fraction = fractionDoubleSign
+		} else {
+			s.fraction = fractionDowntime
+			if s.infraction == 0 {
+				s.infraction = r.Height - updateDelay - 1
+			}
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// MessageShares holds, per chain, the shares each undelegation and
+// redelegation message named, keyed by height, transaction and message.
+// cosmoshub-1 messages named shares; its stored rows hold the tokens the
+// chain paid out.
+var MessageShares = map[string]map[[3]int64]string{}
+
+// MessageTokens holds, per chain, the token amount each undelegation and
+// redelegation message named, keyed by height, transaction and message.
+var MessageTokens = map[string]map[[3]int64]string{}
+
+func messageTokens(chain string) (map[[3]int64]sdkmath.Int, error) {
+	named := MessageTokens[chain]
+	if len(named) == 0 {
+		return nil, nil
+	}
+	out := make(map[[3]int64]sdkmath.Int, len(named))
+	for key, text := range named {
+		n, ok := sdkmath.NewIntFromString(text)
+		if !ok || n.IsNegative() {
+			return nil, fmt.Errorf("a message token amount is not readable")
+		}
+		out[key] = n
+	}
+	return out, nil
+}
+
+func messageShares(chain string) (map[[3]int64]sdkmath.LegacyDec, error) {
+	named := MessageShares[chain]
+	if len(named) == 0 {
+		return nil, nil
+	}
+	out := make(map[[3]int64]sdkmath.LegacyDec, len(named))
+	for key, text := range named {
+		d, err := sdkmath.LegacyNewDecFromStr(text)
+		if err != nil {
+			return nil, fmt.Errorf("a message share amount is not readable")
+		}
+		out[key] = d
+	}
+	return out, nil
+}
+
+// release unbonds what a stored undelegation or redelegation row moved:
+// the shares its message named when the chain's messages named shares,
+// otherwise the tokens the row holds.
+func (l *ledger) release(w *wallet, m *move, value *big.Int) sdkmath.Int {
+	shares, named := l.msgShares[[3]int64{m.height, int64(m.tx), int64(m.msg)}]
+	if !named {
+		if l.msgShares != nil {
+			l.exactAnomalies++
+			if Trace != nil {
+				Trace("exact unbond with no message shares height=%d", m.height)
+			}
+		}
+		amount, stated := l.msgTokens[[3]int64{m.height, int64(m.tx), int64(m.msg)}]
+		if !stated {
+			if l.msgTokens != nil {
+				l.exactAnomalies++
+				if Trace != nil {
+					Trace("exact unbond with no message amount height=%d", m.height)
+				}
+			}
+			return l.undelegate(w, m.validator, sdkmath.NewIntFromBigInt(value))
+		}
+		// The message named a token amount; the chain turned it into shares
+		// and paid out what those shares were worth, which the stored row
+		// holds and can be a uatom or two less.
+		issued := l.undelegate(w, m.validator, amount)
+		if issued.BigInt().Cmp(value) != 0 {
+			l.exactAnomalies++
+			if Trace != nil {
+				Trace("exact unbond pays other than the stored row %s height=%d paid=%s stored=%s", short(m.validator), m.height, issued, value)
+			}
+		}
+		return issued
+	}
+	p := w.pairOf(m.validator)
+	p.ops++
+	if held := p.dec(); shares.GT(held) {
+		l.exactAnomalies++
+		if Trace != nil {
+			Trace("exact unbond over %s shares=%s held=%s", short(m.validator), shares, held)
+		}
+		shares = held
+	}
+	if l.val(m.validator).tokens.IsZero() {
+		l.exactAnomalies++
+		return sdkmath.ZeroInt()
+	}
+	issued := l.unbond(m.validator, p, shares)
+	if issued.BigInt().Cmp(value) != 0 {
+		l.exactAnomalies++
+		if Trace != nil {
+			Trace("exact unbond pays other than the stored row %s height=%d paid=%s stored=%s", short(m.validator), m.height, issued, value)
+		}
+	}
+	return issued
+}
+
+// MoveRecord is an undelegation or redelegation the chain ran that the
+// stored rows hold no row for: its message released no tokens (a uatom
+// unbonded from a validator whose share price fell below one), so no taxable
+// event was written, but its shares still left the delegation. Addresses are
+// the sha256 of the address, in hex, placed against the replay's wallets and
+// validators when the movement runs. Tokens is the amount the message named.
+type MoveRecord struct {
+	Height                                  int64
+	Tx, Msg                                 int
+	Kind, Delegator, Validator, Destination string
+	Tokens, Completion                      string
+}
+
+// ExtraMoves holds, per chain, movements added to the stored rows, in
+// height, transaction and message order.
+var ExtraMoves = map[string][]MoveRecord{}
+
+func extraMoves(ctx context.Context, db *sql.DB, chain string) ([]*move, error) {
+	records := ExtraMoves[chain]
+	out := make([]*move, 0, len(records))
+	for i := range records {
+		r := &records[i]
+		if r.Kind != "undelegate" && r.Kind != "redelegate" {
+			return nil, fmt.Errorf("an added movement is neither an undelegation nor a redelegation")
+		}
+		var when time.Time
+		if err := db.QueryRowContext(ctx, `SELECT time FROM legacy.blocks WHERE chain_id = $1 AND height = $2`, chain, r.Height).Scan(&when); err != nil {
+			return nil, fmt.Errorf("an added movement names a height with no stored block")
+		}
+		m := &move{height: r.Height, phase: 2, tx: r.Tx, msg: r.Msg, category: r.Kind, amount: "0", unit: denom, when: when, added: r}
+		if n := len(out); n > 0 && (out[n-1].height > m.height || (out[n-1].height == m.height && (out[n-1].tx > m.tx || (out[n-1].tx == m.tx && out[n-1].msg >= m.msg)))) {
+			return nil, fmt.Errorf("added movements are not in height, transaction and message order")
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// placeAdded names an added movement's delegator and validators: the
+// delegator holds a delegation to the validator it moves from, so both are
+// in the replay already.
+func (l *ledger) placeAdded(m *move) error {
+	r := m.added
+	var delegator string
+	for address := range l.wallets {
+		if hashOf(address) == r.Delegator {
+			delegator = address
+			break
+		}
+	}
+	validator := func(hash string) string {
+		for operator := range l.vals {
+			if hashOf(operator) == hash {
+				return operator
+			}
+		}
+		return ""
+	}
+	source := validator(r.Validator)
+	if delegator == "" || source == "" {
+		return fmt.Errorf("an added movement at height %d names a delegator or validator the replay does not hold", m.height)
+	}
+	var detail []byte
+	var err error
+	if r.Kind == "undelegate" {
+		m.to, m.validator = delegator, source
+		detail, err = json.Marshal(undelegation{Completion: r.Completion})
+	} else {
+		destination := validator(r.Destination)
+		if destination == "" {
+			return fmt.Errorf("an added redelegation at height %d names a destination the replay does not hold", m.height)
+		}
+		m.from = delegator
+		detail, err = json.Marshal(redelegation{Source: source, Destination: destination, Completion: r.Completion})
+	}
+	if err != nil {
+		return err
+	}
+	m.detail = string(detail)
+	return nil
 }
