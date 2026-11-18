@@ -114,6 +114,11 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowGiantRoot("accel-four-s01-20261118-fanout-v2", "48b61e4b3eeb060cdbcea7dab31dff25bf04be77c344da0d32c0d6e68f8f70ba"),
 		flowGiantRoot("accel-four-s01b-20261118-fanout-v2", "066df80725a01e1c27270b034e66486b6cd46d04d45e8e49b357c1a710db29b4"),
 		flowGiantRoot("accel-four-s01b-20261118-fanout-v2", "31c1763c0d2bfaa85a33b9af53f0d7b9b8249cf2d225145ff2e3e23da2bc51be"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "4e09d1dfc7e6cdb78129a723dbc0d459052d8adbcc6e704a492520f5c05211f9"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "9cd3bff2c9449e24004bfe0fa0d08b8466fb60c4d7666e33a8826bf4e92b313e"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "11ad1e6695406f2ec282e61c3d2a68a278336c6d6c70a999f31aeb78b5315354"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "607606f87da17ce8a8581cda77daff29c9c325a011b63fafc4a30fbf29efaff5"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "a21b65a9b88ec88fd0ad5015fe2907e2d89971bad4fe92d3808889b807198e1a"),
 		{
 			Version: "ops818-unjail-profile930320029ed0-sources962174bfb014-s06-retry-20261115-v2",
 			Build:   "sha256:fa71e36b2feec15498ec94b778e2571deebc1e11197a9da7b94968b658d3a874",

@@ -275,7 +275,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 46)
+	require.Len(t, seen, 51)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -293,7 +293,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		require.NotContains(t, roots, src.Root, src.Version)
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 29)
+	require.Len(t, roots, 34)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])
