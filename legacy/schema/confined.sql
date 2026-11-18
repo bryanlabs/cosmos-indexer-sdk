@@ -35,6 +35,7 @@ SELECT problem || ': ' || n FROM (
     UNION ALL SELECT 'functions that run with their owner''s rights and the role may call',
         (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          WHERE p.prosecdef AND n.nspname <> 'pg_catalog' AND n.nspname <> 'information_schema'
+         AND p.prorettype NOT IN ('trigger'::regtype, 'event_trigger'::regtype)
          AND has_function_privilege('{{role}}', p.oid, 'EXECUTE'))
     UNION ALL SELECT 'default privileges that would give the role new tables or sequences outside legacy',
         (SELECT count(*) FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
