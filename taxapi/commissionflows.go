@@ -390,7 +390,9 @@ type flowCredit struct {
 // messages of its single-hop ibc_in rows. The ledger also records a receive
 // whose acknowledgement was an error (a bad receiver, a failed forward), where
 // no coin moved, so a returning row counts only when its message credited
-// addr exactly that amount.
+// addr exactly that amount. Attributes are read per event (LATERAL with
+// OFFSET 0), so a wallet with many such messages cannot turn the read into a
+// hash join over the whole attribute table.
 func (s *Server) flowReturnCredits(addr string, events []tax.TaxableEvent) (map[flowCredit]bool, error) {
 	var ids []uint
 	for _, e := range events {
@@ -416,9 +418,9 @@ func (s *Server) flowReturnCredits(addr string, events []tax.TaxableEvent) (map[
 SELECT me.message_id, a2.value
 FROM message_events me
 JOIN message_event_types mt ON mt.id = me.message_event_type_id AND mt.type = 'coin_received'
-JOIN message_event_attributes a1 ON a1.message_event_id = me.id
+JOIN LATERAL (SELECT message_event_attribute_key_id, value FROM message_event_attributes WHERE message_event_id = me.id OFFSET 0) a1 ON true
 JOIN message_event_attribute_keys k1 ON k1.id = a1.message_event_attribute_key_id AND k1.key = 'receiver'
-JOIN message_event_attributes a2 ON a2.message_event_id = me.id
+JOIN LATERAL (SELECT message_event_attribute_key_id, value FROM message_event_attributes WHERE message_event_id = me.id OFFSET 0) a2 ON true
 JOIN message_event_attribute_keys k2 ON k2.id = a2.message_event_attribute_key_id AND k2.key = 'amount'
 WHERE me.message_id IN ? AND a1.value = ?`, chunk, addr).Scan(&part).Error; err != nil {
 			return nil, err
