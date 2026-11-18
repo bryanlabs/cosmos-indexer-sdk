@@ -119,6 +119,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "11ad1e6695406f2ec282e61c3d2a68a278336c6d6c70a999f31aeb78b5315354"),
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "607606f87da17ce8a8581cda77daff29c9c325a011b63fafc4a30fbf29efaff5"),
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "a21b65a9b88ec88fd0ad5015fe2907e2d89971bad4fe92d3808889b807198e1a"),
+		flowGiantRoot("accel-four-s07-r300-20261118-fanout-v2", "320bcb826109bdff2fcab865b3971af8023c5d8b2ba24f02961a4faca99425aa"),
 		{
 			Version: "ops818-unjail-profile930320029ed0-sources962174bfb014-s06-retry-20261115-v2",
 			Build:   "sha256:fa71e36b2feec15498ec94b778e2571deebc1e11197a9da7b94968b658d3a874",
@@ -135,7 +136,6 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrectedRoot("accel-four-s03-20261115-deadline-retry-v3", "290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v4", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
 		flowCorrectedRoot("accel-later-s02-20261115-deadline-retry-v3", "50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"),
-		flowCorrectedRoot("accel-four-s07-20261115-deadline-retry-v2", "320bcb826109bdff2fcab865b3971af8023c5d8b2ba24f02961a4faca99425aa"),
 		flowCorrectedRoot("accel-later-s03-20261115-deadline-retry-v2", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
 		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v3", "5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v3", "6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"),
