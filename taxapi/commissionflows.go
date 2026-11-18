@@ -178,8 +178,10 @@ const (
 // crowd (a reward, payroll or airdrop distributor, or an operator account
 // that shares commission with its delegators). Commission that reaches it is
 // reported as distributed there, not followed pro-rata into every recipient.
-// The threshold sits in the gap between ordinary busy wallets (at most about
-// 1,200 receivers in the traced graph) and the distributors (23,000 and up).
+// In the stored traces no receiving wallet sends to more than about 2,000
+// wallets and no hop-1 wallet to more than about 9,000; four wallets at hops
+// 2 and 3 send to 13,000 to 25,000+, and the operator account that stopped
+// four traces sends to about 380,000.
 const (
 	flowFanoutHeuristic    = "heuristic:wide-distributor/v1"
 	flowFanoutMaxReceivers = 10000
