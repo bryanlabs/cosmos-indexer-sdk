@@ -49,6 +49,7 @@ func refundCachePGFixture(t *testing.T) *Server {
 		"CREATE TEMP TABLE tx_signer_addresses (tx_id bigint, address_id bigint)",
 		"CREATE TEMP TABLE denoms (id bigint, base text)",
 		"CREATE TEMP TABLE fees (id bigint, tx_id bigint, payer_address_id bigint, denomination_id bigint, amount numeric(78,0))",
+		"CREATE TEMP TABLE tax_failed_tx_fees (tx_id bigint, charged text)",
 		"CREATE TEMP TABLE taxable_events (id bigint, message_id bigint, sub_index bigint, category text, amount text, denom text, asset text, from_addr text, to_addr text, validator_address text, reward_trigger text, detail text, block_height bigint, timestamp timestamptz, tx_hash text)",
 		"CREATE TEMP TABLE message_events (id bigint, message_id bigint, message_event_type_id bigint)",
 		"CREATE TEMP TABLE message_event_types (id bigint, type text)",

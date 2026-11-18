@@ -402,18 +402,8 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		}
 	}
 
-	// Fees (generic SDK Fee table): a spend by the payer.
-	var fees []feeRec
-	if err := s.db.Table("fees").
-		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
-		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
-		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
-		Joins("JOIN txes ON txes.id = fees.tx_id").
-		Joins("JOIN blocks ON blocks.id = txes.block_id").
-		Joins("JOIN chains ON chains.id = blocks.chain_id").
-		Where("chains.chain_id IN ?", chainIDs(chain)).
-		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
-		Scan(&fees).Error; err != nil {
+	fees, err := s.walletFees(chain, addr, start, end)
+	if err != nil {
 		return walletRows{}, err
 	}
 	memos, err := s.eventMemos(events)
@@ -432,6 +422,36 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		sort.SliceStable(events, func(i, j int) bool { return events[i].Timestamp.Before(events[j].Timestamp) })
 	}
 	return walletRows{Events: events, Fees: fees, Memos: memos}, nil
+}
+
+// feeChargedCondition keeps a fee row unless the chain is recorded as having
+// charged nothing for it. A successful transaction paid its declared fee. A
+// failed one paid it only when the ante handler passed and a message then
+// failed; when the ante handler rejected the transaction (a wrong sequence,
+// for one) its state was reverted and nothing was charged.
+// tax_failed_tx_fees holds the outcome read from the chain's block results,
+// with an empty charged column for nothing charged. The balance ledger applies
+// the same rule (ledgerFees).
+const feeChargedCondition = `(txes.code = 0 OR NOT EXISTS (
+ SELECT 1 FROM tax_failed_tx_fees uncharged
+ WHERE uncharged.tx_id = fees.tx_id AND uncharged.charged = ''))`
+
+// walletFees loads the fees addr paid in [start,end) from the generic SDK Fee
+// table, a spend by the payer, leaving out fees the chain did not charge.
+func (s *Server) walletFees(chain, addr string, start, end time.Time) ([]feeRec, error) {
+	var fees []feeRec
+	err := s.db.Table("fees").
+		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
+		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
+		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
+		Joins("JOIN txes ON txes.id = fees.tx_id").
+		Joins("JOIN blocks ON blocks.id = txes.block_id").
+		Joins("JOIN chains ON chains.id = blocks.chain_id").
+		Where("chains.chain_id IN ?", chainIDs(chain)).
+		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
+		Where(feeChargedCondition).
+		Scan(&fees).Error
+	return fees, err
 }
 
 func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
