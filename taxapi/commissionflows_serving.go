@@ -78,9 +78,11 @@ func flowLSMRoot(suffix, root string) commissionServingSource {
 
 // The giant reruns stop tracing at a wallet that sent ATOM to more than
 // 50,000 receivers. They share the corrected profile, window and version
-// prefix but run their own build, and each entry serves one validator whose
-// run never reached such a wallet, so its result is the one the corrected
-// build computes.
+// prefix but run their own build. Most entries serve a validator whose run
+// never reached such a wallet, so its result is the one the corrected build
+// computes. The rest reached one, never finished on the corrected build, and
+// booked under 0.1% of their commission to wide_distributor, which bounds
+// what the stop can change.
 const flowGiantBuild = "sha256:324924bc987eeaa3d0475a9c0bda70cddf718027c421c890ca90663389eeba46"
 
 func flowGiantRoot(suffix, root string) commissionServingSource {
@@ -104,6 +106,9 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "91839f8b6913340a41e7915e84d50818dcadff35b8a7a04e3b367a4cb098fb3b"),
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "2877ad667da5260e6188746799121924cb3fd1e13043450dad6192ec7387803a"),
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "55b998caa2945907f1b1177130043fd61b382dc3de466e51aacb22f058164509"),
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "8af885ef7203f0e9e32249b1580b75c12374417434c72ca643d534a8a64f7570"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "0c019c02d744f8202ad5771e5c22e143caaeb432a0cc81c62d81a18ae78a93de"),
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "bb7050112168b67a4ae2a62d5db9f0f27bfa83c0772458919caeedef5d0ea1d4"),
 		{
 			Version: "ops818-unjail-profile930320029ed0-sources962174bfb014-s06-retry-20261115-v2",
 			Build:   "sha256:fa71e36b2feec15498ec94b778e2571deebc1e11197a9da7b94968b658d3a874",
