@@ -187,9 +187,9 @@ func TestFlowWideDistributorStopsReceiver(t *testing.T) {
 		require.Equal(t, "40", fate(tr, rule, "2025-01", flowHeld, "", false), flowRuleNames[rule])
 	}
 	require.Equal(t, []string{r}, l.loaded, "the distributor is never loaded as a wallet")
-	require.Equal(t, 10000, flowFanoutMaxReceivers)
-	require.Contains(t, FlowClassNotes[flowWideDistributor], "more than 10,000", "the page states the threshold the code uses")
-	require.Contains(t, FlowMethod, "more than 10,000")
+	require.Equal(t, 50000, flowFanoutMaxReceivers)
+	require.Contains(t, FlowClassNotes[flowWideDistributor], "more than 50,000", "the page states the threshold the code uses")
+	require.Contains(t, FlowMethod, "more than 50,000")
 }
 
 // A receiving wallet (hop 0) that pays out to a crowd stays traced, so what

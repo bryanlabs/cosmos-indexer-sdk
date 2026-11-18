@@ -165,6 +165,23 @@ func TestCommissionFlowWideDistributorPostgres(t *testing.T) {
 	require.Equal(t, "more than 29 distinct receivers of uatom from 2025-01-01 to 2025-04-01", labels[1].Evidence)
 	require.Equal(t, flowStop{}, wide.known(hub), "known never reads the index")
 
+	// At the real threshold: a wallet just under it is still traced, one
+	// receiver more is a distributor.
+	const big = "cosmos1nearlywide"
+	require.NoError(t, s.db.Exec("INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', ?, 'cosmos1crowd'||g, '2025-02-01T00:00:00Z' FROM generate_series(1, ?) g", big, flowFanoutMaxReceivers-1).Error)
+	full := &dbFlowLoader{s: s, chain: apiMainnet, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: true}
+	stop, err = full.stop(big, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "49,999 receivers are still traced")
+	require.NoError(t, s.db.Exec("INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) VALUES ('transfer', '1', 'uatom', ?, 'cosmos1crowdlast', '2025-02-02T00:00:00Z'), ('transfer', '1', 'uatom', ?, 'cosmos1crowd7', '2025-02-02T00:00:00Z')", big, big).Error)
+	stop, err = full.stop(big, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "exactly 50,000 receivers are still traced")
+	require.NoError(t, s.db.Exec("INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) VALUES ('transfer', '1', 'uatom', ?, 'cosmos1crowdnext', '2025-02-03T00:00:00Z')", big).Error)
+	stop, err = full.distributor(big, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, stop, "50,001 receivers make a distributor")
+
 	var stored int64
 	require.NoError(t, s.db.Model(&AddressLabel{}).Where("kind = ?", labelWideDistributor).Count(&stored).Error)
 	require.Zero(t, stored, "a wide distributor depends on the window and is never stored as a label")

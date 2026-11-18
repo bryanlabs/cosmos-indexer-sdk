@@ -178,13 +178,13 @@ const (
 // crowd (a reward, payroll or airdrop distributor, or an operator account
 // that shares commission with its delegators). Commission that reaches it is
 // reported as distributed there, not followed pro-rata into every recipient.
-// In the stored traces no receiving wallet sends to more than about 2,000
-// wallets and no hop-1 wallet to more than about 9,000; four wallets at hops
-// 2 and 3 send to 13,000 to 25,000+, and the operator account that stopped
-// four traces sends to about 380,000.
+// No wallet in the stored traces sends to more than about 26,000 wallets,
+// and traces that pass through those finish; the operator account that
+// stopped four traces sends to about 380,000. 50,000 stops that account and
+// changes no stored result.
 const (
-	flowFanoutHeuristic    = "heuristic:wide-distributor/v1"
-	flowFanoutMaxReceivers = 10000
+	flowFanoutHeuristic    = "heuristic:wide-distributor-50k/v1"
+	flowFanoutMaxReceivers = 50000
 	labelWideDistributor   = "wide_distributor"
 )
 
