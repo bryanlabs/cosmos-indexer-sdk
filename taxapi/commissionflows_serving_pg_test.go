@@ -263,26 +263,29 @@ func TestAcceptFlowVersionRules(t *testing.T) {
 }
 
 func TestDefaultCommissionServingSources(t *testing.T) {
+	// The giant reruns share a version across several pinned roots, so a
+	// source is its version plus its root.
 	seen := map[string]bool{}
 	for _, src := range defaultCommissionServingSources[apiMainnet] {
-		require.False(t, seen[src.Version], src.Version)
-		seen[src.Version] = true
+		key := src.Version + "/" + src.Root
+		require.False(t, seen[key], key)
+		seen[key] = true
 		require.Equal(t, flowCorrectedFrom, src.FromDay)
 		require.Equal(t, flowCorrectedAsOf, src.AsOf)
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 29)
+	require.Len(t, seen, 37)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
-// Each retry collection serves only its one pinned root, and no root is
+// Each retry and giant entry serves only its one pinned root, and no root is
 // pinned by two of them: later-s02 has two deadline retries (v2 and v3),
 // each under its own version.
 func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	roots := map[string]string{}
 	for _, src := range defaultCommissionServingSources[apiMainnet] {
-		if !strings.Contains(src.Version, "-retry-") {
+		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild {
 			require.Empty(t, src.Root, src.Version)
 			continue
 		}
@@ -290,7 +293,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		require.NotContains(t, roots, src.Root, src.Version)
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 12)
+	require.Len(t, roots, 20)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])

@@ -76,12 +76,33 @@ func flowLSMRoot(suffix, root string) commissionServingSource {
 	return commissionServingSource{Version: flowLSMPrefix + suffix, Build: flowLSMBuild, Profile: flowLSMProfile, FromDay: flowCorrectedFrom, AsOf: flowCorrectedAsOf, Root: root}
 }
 
+// The giant reruns stop tracing at a wallet that sent ATOM to more than
+// 50,000 receivers. They share the corrected profile, window and version
+// prefix but run their own build, and each entry serves one validator whose
+// run never reached such a wallet, so its result is the one the corrected
+// build computes.
+const flowGiantBuild = "sha256:324924bc987eeaa3d0475a9c0bda70cddf718027c421c890ca90663389eeba46"
+
+func flowGiantRoot(suffix, root string) commissionServingSource {
+	r := flowCorrectedRoot(suffix, root)
+	r.Build = flowGiantBuild
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
 // holds an accepted result for it.
 var defaultCommissionServingSources = map[string][]commissionServingSource{
 	apiMainnet: {
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "5e6e5429e48f651ba98b03e3791deda86e390d13112e503e902939d08d86aa10"),
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "e5ede2045f7c06ec1da4432418d34d7f4f4a2a429d88531a60e0f7eb23a8cd64"),
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "fcea1968b7af091e011302f4924bd95858b19dd48001e6cf02fd700e691f5bcb"),
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "274a1c06a584325f3d85da4a602930b04d10455e39edbd665ccffad5e1ddf7d9"),
+		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "86c5c4e665fef7b0671134a194322556b90ff8e12ee4a9f5e80839c7a300d1dc"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "91839f8b6913340a41e7915e84d50818dcadff35b8a7a04e3b367a4cb098fb3b"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "2877ad667da5260e6188746799121924cb3fd1e13043450dad6192ec7387803a"),
+		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "55b998caa2945907f1b1177130043fd61b382dc3de466e51aacb22f058164509"),
 		{
 			Version: "ops818-unjail-profile930320029ed0-sources962174bfb014-s06-retry-20261115-v2",
 			Build:   "sha256:fa71e36b2feec15498ec94b778e2571deebc1e11197a9da7b94968b658d3a874",
