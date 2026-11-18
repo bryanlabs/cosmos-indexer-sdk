@@ -92,7 +92,7 @@ func TestCommissionFlowVersionsAppendOnlyPostgres(t *testing.T) {
 	node, err := NewLedgerNode()
 	require.NoError(t, err)
 	loader := &dbFlowLoader{s: s, chain: apiMainnet, node: node, private: true, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
-	stop, err := loader.stop(flowPGDeposit)
+	stop, err := loader.stop(flowPGDeposit, flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowExchangeLike, stop.Class)
 	require.Equal(t, "proof-chain", loader.channelChain("transfer", "channel-1"))

@@ -61,6 +61,7 @@ const (
 	flowContract          = "contract_or_ica"
 	flowBeyondHops        = "beyond_hops"
 	flowBusyWallet        = "busy_wallet"
+	flowWideDistributor   = "wide_distributor"
 	flowUnresolved        = "unresolved"
 	flowOriginOther       = ""
 	flowDust              = "0.000001"
@@ -158,7 +159,17 @@ type flowLoader interface {
 	// index cannot rebuild that day; the wallet then starts empty.
 	opening(addr string, day time.Time) (h flowHoldings, known bool, err error)
 	events(addr string, start, end time.Time) ([]flowEvent, error)
-	stop(addr string) (flowStop, error)
+	// stop is the fate of coins sent to addr, which the trace does not follow,
+	// or an empty class for an ordinary wallet. [start, end) is the trace
+	// window, which the wide distributor rule counts receivers over.
+	stop(addr string, start, end time.Time) (flowStop, error)
+	// distributor is the wide distributor stop for addr over [start, end), or
+	// an empty class. It ends the transfers a receiving wallet (hop 0) pays
+	// out, since that wallet is traced, not stopped.
+	distributor(addr string, start, end time.Time) (flowStop, error)
+	// known is the stop for addr from labels and address shape alone, with
+	// no index read.
+	known(addr string) flowStop
 	ibcDestination(e flowEvent) string
 }
 
@@ -370,6 +381,7 @@ type flowTrace struct {
 	queue      flowQueue
 	seq        int
 	stops      map[string]flowStop
+	sources    map[string]flowStop
 	Fates      map[FlowFateKey]decimal.Decimal
 	Commission map[string]decimal.Decimal
 	Unresolved []string
@@ -378,7 +390,7 @@ type flowTrace struct {
 func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flowTrace {
 	return &flowTrace{
 		Validator: validator, From: from, AsOf: asOf, load: load, started: time.Now(),
-		Wallets: map[string]*flowWallet{}, stops: map[string]flowStop{}, attempted: map[string]bool{},
+		Wallets: map[string]*flowWallet{}, stops: map[string]flowStop{}, sources: map[string]flowStop{}, attempted: map[string]bool{},
 		Fates: map[FlowFateKey]decimal.Decimal{}, Commission: map[string]decimal.Decimal{},
 	}
 }
@@ -717,9 +729,28 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 	if !tagged(parts) {
 		return nil
 	}
-	stop, err := t.stopFor(e.To)
-	if err != nil {
-		return err
+	var stop flowStop
+	if w.Hop == 0 && e.To != "" {
+		// A receiving wallet that pays out to more than
+		// flowFanoutMaxReceivers wallets distributes the commission it
+		// holds; its payouts end there instead of opening one hop-1 wallet
+		// per recipient. A labelled receiver keeps its own fate, read
+		// without a query per recipient.
+		src, err := t.sourceStop(w.Addr)
+		if err != nil {
+			return err
+		}
+		if src.Class != "" {
+			if stop = t.load.known(e.To); stop.Class == "" {
+				stop = src
+			}
+		}
+	}
+	if stop.Class == "" {
+		var err error
+		if stop, err = t.stopFor(e.To); err != nil {
+			return err
+		}
 	}
 	if stop.Class == "" && w.Hop >= flowMaxHops {
 		stop = flowStop{Class: flowBeyondHops}
@@ -760,11 +791,25 @@ func (t *flowTrace) stopFor(addr string) (flowStop, error) {
 	if s, ok := t.stops[addr]; ok {
 		return s, nil
 	}
-	s, err := t.load.stop(addr)
+	s, err := t.load.stop(addr, t.From, t.AsOf)
 	if err != nil {
 		return flowStop{}, err
 	}
 	t.stops[addr] = s
+	return s, nil
+}
+
+// sourceStop is the wide distributor stop for a receiving wallet's payouts,
+// cached in t.sources.
+func (t *flowTrace) sourceStop(addr string) (flowStop, error) {
+	if s, ok := t.sources[addr]; ok {
+		return s, nil
+	}
+	s, err := t.load.distributor(addr, t.From, t.AsOf)
+	if err != nil {
+		return flowStop{}, err
+	}
+	t.sources[addr] = s
 	return s, nil
 }
 

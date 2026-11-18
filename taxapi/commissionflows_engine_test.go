@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -22,7 +23,9 @@ type fakeFlowLedger struct {
 	openings map[string]flowHoldings
 	rows     map[string][]flowEvent
 	stops    map[string]flowStop
+	wide     map[string]bool
 	loaded   []string
+	stopped  []string
 }
 
 func (l *fakeFlowLedger) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -44,7 +47,22 @@ func (l *fakeFlowLedger) events(addr string, start, end time.Time) ([]flowEvent,
 	return out, nil
 }
 
-func (l *fakeFlowLedger) stop(addr string) (flowStop, error) { return l.stops[addr], nil }
+func (l *fakeFlowLedger) stop(addr string, start, end time.Time) (flowStop, error) {
+	l.stopped = append(l.stopped, addr)
+	if s, ok := l.stops[addr]; ok {
+		return s, nil
+	}
+	return l.distributor(addr, start, end)
+}
+
+func (l *fakeFlowLedger) distributor(addr string, _, _ time.Time) (flowStop, error) {
+	if l.wide[addr] {
+		return flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, nil
+	}
+	return flowStop{}, nil
+}
+
+func (l *fakeFlowLedger) known(addr string) flowStop { return l.stops[addr] }
 
 func (l *fakeFlowLedger) ibcDestination(e flowEvent) string { return flowTestChain }
 
@@ -67,7 +85,7 @@ func (l *fakeFlowLedger) commission(k flowKey, to string, v int64) {
 }
 
 func newFakeFlowLedger() *fakeFlowLedger {
-	return &fakeFlowLedger{openings: map[string]flowHoldings{}, rows: map[string][]flowEvent{}, stops: map[string]flowStop{
+	return &fakeFlowLedger{openings: map[string]flowHoldings{}, rows: map[string][]flowEvent{}, wide: map[string]bool{}, stops: map[string]flowStop{
 		flowTestExchange: {Class: flowExchange, Detail: "Test Exchange"},
 	}}
 }
@@ -150,6 +168,72 @@ func TestFlowFollowsHopsAndReplaysDiscoveredWallet(t *testing.T) {
 	require.Equal(t, "75", fate(tr, flowRuleFIFO, "2025-01", flowHeldDownstream, "hop 3", false))
 	require.True(t, tr.Wallets[w3].simulated().Equal(amt(75)))
 	require.Equal(t, 1, tr.Wallets[w1].Hop)
+}
+
+// A wallet a hop out that pays out to a crowd ends the trace there, the way
+// a busy wallet does, even when it is a validator operator account.
+func TestFlowWideDistributorStopsReceiver(t *testing.T) {
+	l := newFakeFlowLedger()
+	r, hub := flowTestReceiver, "cosmos1hub"
+	l.wide[hub] = true
+	l.commission(flowAt(1, 0), r, 100)
+	l.send(flowAt(2, 0), r, hub, 60)
+	l.send(flowAt(3, 0), hub, "cosmos1delegatorone", 30)
+	l.send(flowAt(3, 1), hub, "cosmos1delegatortwo", 30)
+	tr := runFlowTest(t, l, r)
+
+	for rule := 0; rule < flowRules; rule++ {
+		require.Equal(t, "60", fate(tr, rule, "2025-01", flowWideDistributor, flowFanoutHeuristic, false), flowRuleNames[rule])
+		require.Equal(t, "40", fate(tr, rule, "2025-01", flowHeld, "", false), flowRuleNames[rule])
+	}
+	require.Equal(t, []string{r}, l.loaded, "the distributor is never loaded as a wallet")
+	require.Equal(t, 10000, flowFanoutMaxReceivers)
+	require.Contains(t, FlowClassNotes[flowWideDistributor], "more than 10,000", "the page states the threshold the code uses")
+	require.Contains(t, FlowMethod, "more than 10,000")
+}
+
+// A receiving wallet (hop 0) that pays out to a crowd stays traced, so what
+// it keeps or restakes is still reported, but its payouts end as distributed
+// instead of opening a wallet per recipient. A labelled receiver keeps its
+// fate, and no receiver is looked up one by one.
+func TestFlowWideDistributorAtHopZero(t *testing.T) {
+	l := newFakeFlowLedger()
+	op := flowTestReceiver
+	l.wide[op] = true
+	l.openings[op] = flowHoldings{Liquid: amt(100)}
+	l.commission(flowAt(1, 0), op, 100)
+	l.rows[op] = append(l.rows[op], flowEvent{Key: flowAt(1, 5), Category: flowCatDelegate, Dir: apiOut, Amount: amt(20), From: op, Validator: flowTestValidator})
+	for i := 0; i < 50; i++ {
+		l.send(flowAt(2, i), op, fmt.Sprintf("cosmos1delegator%02d", i), 2)
+	}
+	l.send(flowAt(3, 0), op, flowTestExchange, 40)
+	tr := runFlowTest(t, l, op)
+
+	// FIFO: the 20 restaked and the first 80 out are the 100 held before.
+	require.Equal(t, "0", fate(tr, flowRuleFIFO, "2025-01", flowRestakedOwn, "", false))
+	require.Equal(t, "20", fate(tr, flowRuleFIFO, "2025-01", flowWideDistributor, flowFanoutHeuristic, false))
+	require.Equal(t, "40", fate(tr, flowRuleFIFO, "2025-01", flowExchange, "Test Exchange", false))
+	require.Equal(t, "40", fate(tr, flowRuleFIFO, "2025-01", flowHeld, "", false))
+	// Pro-rata: half of every outflow and of what is left is commission.
+	require.Equal(t, "10", fate(tr, flowRuleProRata, "2025-01", flowRestakedOwn, "", false))
+	require.Equal(t, "50", fate(tr, flowRuleProRata, "2025-01", flowWideDistributor, flowFanoutHeuristic, false))
+	require.Equal(t, "20", fate(tr, flowRuleProRata, "2025-01", flowExchange, "Test Exchange", false))
+	require.Equal(t, "20", fate(tr, flowRuleProRata, "2025-01", flowHeld, "", false))
+	require.Equal(t, []string{op}, l.loaded)
+	require.Empty(t, l.stopped, "receivers of a distributor are not looked up one by one")
+}
+
+// An ordinary receiving wallet still opens hop 1 for each receiver.
+func TestFlowNarrowReceiverStillFollowed(t *testing.T) {
+	l := newFakeFlowLedger()
+	r, w1 := flowTestReceiver, "cosmos1hop1"
+	l.commission(flowAt(1, 0), r, 100)
+	l.send(flowAt(2, 0), r, w1, 100)
+	tr := runFlowTest(t, l, r)
+
+	require.Equal(t, []string{r, w1}, l.loaded)
+	require.Equal(t, []string{w1}, l.stopped)
+	require.Equal(t, "100", fate(tr, flowRuleFIFO, "2025-01", flowHeldDownstream, "hop 1", false))
 }
 
 func TestFlowTransfersBetweenReceiversCountOnce(t *testing.T) {

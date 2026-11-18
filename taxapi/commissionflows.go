@@ -173,11 +173,39 @@ const (
 	flowMemoDigitsCheck = "0123456789"
 )
 
+// Wide distributor rule: a wallet that sent the native coin to more than
+// flowFanoutMaxReceivers distinct wallets over the trace window pays out to a
+// crowd (a reward, payroll or airdrop distributor, or an operator account
+// that shares commission with its delegators). Commission that reaches it is
+// reported as distributed there, not followed pro-rata into every recipient.
+// The threshold sits in the gap between ordinary busy wallets (at most about
+// 1,200 receivers in the traced graph) and the distributors (23,000 and up).
+const (
+	flowFanoutHeuristic    = "heuristic:wide-distributor/v1"
+	flowFanoutMaxReceivers = 10000
+	labelWideDistributor   = "wide_distributor"
+)
+
 var flowMemoShape = regexp.MustCompile(`^[0-9A-Za-z_-]+$`)
 
 func depositMemo(memo string) bool {
 	memo = strings.TrimSpace(memo)
 	return len(memo) >= flowMemoMinLen && len(memo) <= flowMemoMaxLen && flowMemoShape.MatchString(memo) && strings.ContainsAny(memo, flowMemoDigitsCheck)
+}
+
+// fanoutReceivers counts the distinct wallets addr sent the native coin to in
+// [start, end), stopping at limit+1, so a wide wallet costs one bounded read.
+// category is wrapped so the planner walks idx_tax_from for this one sender
+// instead of intersecting it with the large category index.
+func (s *Server) fanoutReceivers(addr string, start, end time.Time, limit int) (int, error) {
+	var n int
+	err := s.db.Raw(`
+SELECT count(*) FROM (
+	SELECT DISTINCT to_addr FROM taxable_events
+	WHERE from_addr = ? AND category || '' = ? AND denom = ? AND to_addr <> '' AND to_addr <> ?
+		AND timestamp >= ? AND timestamp < ?
+	LIMIT ?) receivers`, addr, apiTransfer, s.native.Denom, addr, start, end, limit+1).Scan(&n).Error
+	return n, err
 }
 
 // memoDepositSenders counts the distinct senders that paid addr with a
@@ -212,15 +240,21 @@ const (
 
 // dbFlowLoader reads a trace's wallets from the index.
 type dbFlowLoader struct {
-	s        *Server
-	chain    string
-	node     *ledgerNode
-	labels   map[string]AddressLabel
-	mu       *sync.Mutex
-	chans    map[string]string
-	private  bool
-	archive  *flowArchive
-	progress func(commissionFlowProgress)
+	s      *Server
+	chain  string
+	node   *ledgerNode
+	labels map[string]AddressLabel
+	mu     *sync.Mutex
+	// wide holds the wide distributors this loader found, for the evidence.
+	// They are never stored as address labels, since they depend on the
+	// trace window.
+	wide map[string]AddressLabel
+	// fanoutLimit overrides flowFanoutMaxReceivers in tests.
+	fanoutLimit int
+	chans       map[string]string
+	private     bool
+	archive     *flowArchive
+	progress    func(commissionFlowProgress)
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -485,26 +519,48 @@ func detailValue(detail, key string) string {
 	return v
 }
 
-func (l *dbFlowLoader) stop(addr string) (flowStop, error) {
+func labelStop(lab AddressLabel) flowStop {
+	switch {
+	case lab.Kind == labelModule && lab.Name == "distribution":
+		return flowStop{Class: flowCommunityPool}
+	case lab.Kind == labelModule:
+		return flowStop{Class: flowModule, Detail: lab.Name}
+	case lab.Kind == labelIBCEscrow:
+		return flowStop{Class: flowIBCOut, Detail: lab.Name}
+	case lab.Kind == labelExchangeLike:
+		return flowStop{Class: flowExchangeLike, Detail: lab.Source}
+	default:
+		return flowStop{Class: flowExchange, Detail: lab.Name}
+	}
+}
+
+// contractAddress is a 32-byte account: a contract or an interchain account.
+func contractAddress(addr string) bool { return len(addr) > len("cosmos1")+38+1 }
+
+// known is the stop for addr from its label or address shape alone, with no
+// index read. Exchange-like labels are inferred during runs, so they are left
+// out and the answer does not depend on which trace inferred one first.
+func (l *dbFlowLoader) known(addr string) flowStop {
+	l.mu.Lock()
+	lab, ok := l.labels[addr]
+	l.mu.Unlock()
+	if ok && lab.Kind != labelValidatorOperator && lab.Kind != labelExchangeLike {
+		return labelStop(lab)
+	}
+	if contractAddress(addr) {
+		return flowStop{Class: flowContract}
+	}
+	return flowStop{}
+}
+
+func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error) {
 	l.mu.Lock()
 	lab, ok := l.labels[addr]
 	l.mu.Unlock()
 	if ok && lab.Kind != labelValidatorOperator {
-		switch {
-		case lab.Kind == labelModule && lab.Name == "distribution":
-			return flowStop{Class: flowCommunityPool}, nil
-		case lab.Kind == labelModule:
-			return flowStop{Class: flowModule, Detail: lab.Name}, nil
-		case lab.Kind == labelIBCEscrow:
-			return flowStop{Class: flowIBCOut, Detail: lab.Name}, nil
-		case lab.Kind == labelExchangeLike:
-			return flowStop{Class: flowExchangeLike, Detail: lab.Source}, nil
-		default:
-			return flowStop{Class: flowExchange, Detail: lab.Name}, nil
-		}
+		return labelStop(lab), nil
 	}
-	// A 32-byte account is a contract or an interchain account.
-	if len(addr) > len("cosmos1")+38+1 {
+	if contractAddress(addr) {
 		return flowStop{Class: flowContract}, nil
 	}
 	n, err := l.s.memoDepositSenders(addr)
@@ -533,7 +589,37 @@ func (l *dbFlowLoader) stop(addr string) (flowStop, error) {
 	if rows > ledgerHeavyRows {
 		return flowStop{Class: flowBusyWallet}, nil
 	}
-	return flowStop{}, nil
+	// Last, so labels and the busy cutoff keep their fates; it also applies
+	// to validator operator accounts.
+	return l.distributor(addr, start, end)
+}
+
+// distributor is the wide distributor stop for addr over [start, end).
+func (l *dbFlowLoader) distributor(addr string, start, end time.Time) (flowStop, error) {
+	limit := l.fanoutLimit
+	if limit <= 0 {
+		limit = flowFanoutMaxReceivers
+	}
+	n, err := l.s.fanoutReceivers(addr, start, end, limit)
+	if err != nil {
+		return flowStop{}, err
+	}
+	if n <= limit {
+		return flowStop{}, nil
+	}
+	lab := AddressLabel{
+		Chain: l.chain, Address: addr, Name: "wide distributor", Kind: labelWideDistributor, Source: flowFanoutHeuristic,
+		Evidence: fmt.Sprintf("more than %d distinct receivers of %s from %s to %s", limit, l.s.native.Denom, start.Format(apiDateLayout), end.Format(apiDateLayout)), CreatedAt: nowUTC(),
+	}
+	l.mu.Lock()
+	if l.wide == nil {
+		l.wide = map[string]AddressLabel{}
+	}
+	if _, seen := l.wide[addr]; !seen {
+		l.wide[addr] = lab
+	}
+	l.mu.Unlock()
+	return flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, nil
 }
 
 func (l *dbFlowLoader) ibcDestination(e flowEvent) string {

@@ -38,6 +38,7 @@ var FlowClassNotes = map[string]string{ //nolint:gosec // class descriptions, no
 	flowContract:         "Sent to a contract or an interchain account, which the trace does not follow.",
 	flowBeyondHops:       "Moved more than three wallets away from the receiving wallets.",
 	flowBusyWallet:       "Sent to a wallet with too much activity to trace (an exchange, a bridge or a service, most likely).",
+	flowWideDistributor:  "Paid out by, or sent to, a wallet that sent ATOM to more than 10,000 different wallets during the trace window, such as a reward or airdrop distributor. Counted as distributed there rather than followed to each recipient. Inferred, not confirmed.",
 	flowUnresolved:       "The trace could not read the receiving wallet's history.",
 }
 
@@ -47,6 +48,7 @@ const FlowMethod = "Commission is followed from each withdrawal to the wallet th
 	"Mixed coins need a rule: first in first out spends a wallet's oldest coins first, pro-rata spends every origin in proportion. Both are stored; neither is the truth, and the gap between them is the uncertainty. " +
 	"Selling commission is normal: it is taxable income when withdrawn and pays for servers, staff and that tax. The figures describe on-chain movements, not intent, and are never ranked. " +
 	"Exchange labels come only from the label table, each with its source; addresses inferred from deposit-style memos are reported separately as exchange_like. " +
+	"A wallet that sent ATOM to more than 10,000 different wallets during the trace window is a wide distributor: commission sent to it, or paid out by it when it received the commission, is reported as wide_distributor instead of being split across every recipient. " +
 	"Amounts are in ATOM. USD is the amount times that month's average ATOM price on the days commission was withdrawn, so it is the value when earned, not the sale price. " +
 	"Commission paid in other denoms is listed as untracked."
 

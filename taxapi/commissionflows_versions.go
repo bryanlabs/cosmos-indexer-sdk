@@ -186,10 +186,18 @@ func (l *dbFlowLoader) evidence() CommissionFlowEvidence {
 	for _, label := range l.labels {
 		e.Labels = append(e.Labels, label)
 	}
+	for _, label := range l.wide {
+		e.Labels = append(e.Labels, label)
+	}
 	for key, chain := range l.chans {
 		e.Channels[key] = chain
 	}
-	sort.Slice(e.Labels, func(i, j int) bool { return e.Labels[i].Address < e.Labels[j].Address })
+	sort.Slice(e.Labels, func(i, j int) bool {
+		if e.Labels[i].Address != e.Labels[j].Address {
+			return e.Labels[i].Address < e.Labels[j].Address
+		}
+		return e.Labels[i].Kind < e.Labels[j].Kind
+	})
 	return e
 }
 

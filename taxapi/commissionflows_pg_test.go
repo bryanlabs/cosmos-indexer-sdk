@@ -32,8 +32,10 @@ const (
 )
 
 var (
-	flowPGOther   = flowPGValoper(1)
-	flowPGTestnet = flowPGValoper(2)
+	flowPGWindowStart = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	flowPGWindowEnd   = time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC)
+	flowPGOther       = flowPGValoper(1)
+	flowPGTestnet     = flowPGValoper(2)
 )
 
 func flowPGValoper(b byte) string {
@@ -110,6 +112,64 @@ func flowPGServer(t *testing.T) *Server {
 	return &Server{db: database, native: DefaultNativeAsset, oracle: NewOracle(prices.URL, "")}
 }
 
+// A wallet that pays the native coin out to more than the limit of distinct
+// receivers in the trace window is a wide distributor, even when it is a
+// validator operator account. Repeat payments, other coins, other categories
+// and payments outside the window do not count.
+func TestCommissionFlowWideDistributorPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	const hub = "cosmos1widedistributor"
+	for _, sql := range []string{
+		"CREATE TABLE message_event_attributes (value text)",
+		"CREATE TABLE block_event_attributes (value text)",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + hub + "', 'cosmos1payee'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,30) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + hub + "', 'cosmos1payee'||g, '2025-03-01T00:00:00Z' FROM generate_series(1,30) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + hub + "', 'cosmos1late'||g, '2025-05-01T00:00:00Z' FROM generate_series(1,10) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'ibc/ABC', '" + hub + "', 'cosmos1token'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,10) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'ibc_out', '1', 'uatom', '" + hub + "', 'osmo1ibc'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,10) g",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	n, err := s.fanoutReceivers(hub, flowPGWindowStart, flowPGWindowEnd, 100)
+	require.NoError(t, err)
+	require.Equal(t, 30, n, "distinct native transfer receivers in the window")
+	n, err = s.fanoutReceivers(hub, flowPGWindowStart, flowPGWindowEnd, 10)
+	require.NoError(t, err)
+	require.Equal(t, 11, n, "the count stops at the limit plus one")
+
+	operator := AddressLabel{Chain: apiMainnet, Address: hub, Name: "Some Validator", Kind: labelValidatorOperator, Source: "derived", CreatedAt: nowUTC()}
+	loader := func(limit int) *dbFlowLoader {
+		return &dbFlowLoader{s: s, chain: apiMainnet, labels: map[string]AddressLabel{hub: operator}, mu: &sync.Mutex{}, chans: map[string]string{}, private: true, fanoutLimit: limit}
+	}
+	narrow := loader(30)
+	stop, err := narrow.stop(hub, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "exactly the limit is still traced")
+	require.Len(t, narrow.evidence().Labels, 1)
+
+	wide := loader(29)
+	stop, err = wide.stop(hub, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, stop, "a validator operator account is not exempt")
+	src, err := wide.distributor(hub, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, stop, src)
+	stop, err = wide.stop(hub, flowPGWindowEnd, flowPGWindowEnd.AddDate(0, 2, 0))
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "the count is over the trace window only")
+	labels := wide.evidence().Labels
+	require.Len(t, labels, 2)
+	require.Equal(t, labelValidatorOperator, labels[0].Kind, "the operator label is kept")
+	require.Equal(t, labelWideDistributor, labels[1].Kind)
+	require.Equal(t, flowFanoutHeuristic, labels[1].Source)
+	require.Equal(t, "more than 29 distinct receivers of uatom from 2025-01-01 to 2025-04-01", labels[1].Evidence)
+	require.Equal(t, flowStop{}, wide.known(hub), "known never reads the index")
+
+	var stored int64
+	require.NoError(t, s.db.Model(&AddressLabel{}).Where("kind = ?", labelWideDistributor).Count(&stored).Error)
+	require.Zero(t, stored, "a wide distributor depends on the window and is never stored as a label")
+}
+
 func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	s := flowPGServer(t)
 
@@ -140,16 +200,16 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	for _, l := range labels {
 		loader.labels[l.Address] = l
 	}
-	stop, err := loader.stop(moduleAddress("distribution"))
+	stop, err := loader.stop(moduleAddress("distribution"), flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowCommunityPool, stop.Class)
-	stop, err = loader.stop(ics20EscrowAddress("transfer", "channel-141"))
+	stop, err = loader.stop(ics20EscrowAddress("transfer", "channel-141"), flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowIBCOut, Detail: "transfer/channel-141"}, stop)
-	stop, err = loader.stop(op)
+	stop, err = loader.stop(op, flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowExchange, Detail: "Named Exchange"}, stop)
-	stop, err = loader.stop(flowPGDeposit)
+	stop, err = loader.stop(flowPGDeposit, flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowExchangeLike, Detail: flowMemoHeuristic}, stop)
 	// Workers share one loader: lookups run while the memo heuristic stores
@@ -165,7 +225,7 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 200; j++ {
-				got, err := shared.stop(op)
+				got, err := shared.stop(op, flowPGWindowStart, flowPGWindowEnd)
 				if err == nil && got.Class != flowExchange {
 					err = fmt.Errorf("labelled address stopped as %s", got.Class)
 				}
@@ -178,7 +238,7 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			got, err := shared.stop(flowPGDeposit)
+			got, err := shared.stop(flowPGDeposit, flowPGWindowStart, flowPGWindowEnd)
 			if err == nil && got.Class != flowExchangeLike {
 				err = fmt.Errorf("deposit address stopped as %s", got.Class)
 			}
