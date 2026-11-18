@@ -132,6 +132,16 @@ func main() {
 		coverageEvery = d
 	}
 	srv.StartIndexCoverage(coverageEvery, os.Getenv("TAX_COVERAGE_REQUIRE_BLOCK_EVENTS") == "true", log.Printf)
+	// The earlier Hub chains (cosmoshub-1 to 3) in the legacy schema join
+	// reports once legacy.eras marks them published; the state is reread
+	// every TAX_LEGACY_ERAS_INTERVAL. TAX_LEGACY_ERAS=off never reads them.
+	if os.Getenv("TAX_LEGACY_ERAS") != "off" {
+		erasEvery := 5 * time.Minute
+		if d, err := time.ParseDuration(os.Getenv("TAX_LEGACY_ERAS_INTERVAL")); err == nil && d >= 10*time.Second {
+			erasEvery = d
+		}
+		srv.StartLegacyEras(erasEvery, log.Printf)
+	}
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)

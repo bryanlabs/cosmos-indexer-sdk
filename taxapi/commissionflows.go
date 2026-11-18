@@ -270,7 +270,7 @@ func (l *dbFlowLoader) events(addr string, start, end time.Time) ([]flowEvent, e
 // flowEvents is addr's native coin movements in [start,end), as the report
 // sees them: classified events, block events and fees.
 func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEvent, error) {
-	input, err := s.readReportInput(chain, []string{addr}, start, end, false)
+	input, err := s.readCurrentChainInput(chain, []string{addr}, start, end)
 	if err != nil {
 		return nil, err
 	}

@@ -32,6 +32,9 @@ type Form8949Row struct {
 	// asset on the sale date. Proceeds (and gain) are then 0, which is not a
 	// confirmed value; the line says so rather than report a silent 0.00.
 	ProceedsUnknown bool
+	// ChainID is the Hub chain of the disposal, set only while an earlier Hub
+	// chain is in reports.
+	ChainID string
 }
 
 const basisUnknownNote = " (basis unknown, complete in your aggregator)"
@@ -88,13 +91,23 @@ func basisUnknownForRow(r Row) bool {
 func Build8949(rows []Row) []Form8949Row {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	sort.SliceStable(sorted, func(i, j int) bool { return rowBefore(sorted[i], sorted[j]) })
 
 	lots := map[string][]lot{}    // asset -> FIFO lots (fungible)
 	nftLots := map[string][]lot{} // "<collection>/<token>" -> FIFO lots (qty always 1, cost in total USD)
 	var out []Form8949Row
+	// Each disposal line carries the chain of the row that sold; stamped
+	// counts the lines done.
+	stamped, rowChain := 0, ""
+	stamp := func() {
+		for ; stamped < len(out); stamped++ {
+			out[stamped].ChainID = rowChain
+		}
+	}
 
 	for _, r := range sorted {
+		stamp()
+		rowChain = r.ChainID
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
@@ -287,6 +300,7 @@ func Build8949(rows []Row) []Form8949Row {
 			}
 		}
 	}
+	stamp()
 	return out
 }
 
@@ -372,13 +386,27 @@ func BuildScheduleD(rows []Form8949Row) ScheduleD {
 func Write8949CSV(out io.Writer, rows []Form8949Row) error {
 	w := csv.NewWriter(out)
 	defer w.Flush()
-	_ = w.Write([]string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown", "Proceeds unknown"})
+	// The chain column is added only while an earlier Hub chain is in
+	// reports, when every line names its chain.
+	withChain := false
+	for _, r := range rows {
+		withChain = withChain || r.ChainID != ""
+	}
+	header := []string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown", "Proceeds unknown"}
+	if withChain {
+		header = append(header, "Chain ID")
+	}
+	_ = w.Write(header)
 	write := func(part string, longTerm bool) {
 		for _, r := range rows {
 			if r.LongTerm != longTerm {
 				continue
 			}
-			_ = w.Write([]string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown), boolStr(r.ProceedsUnknown)})
+			rec := []string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown), boolStr(r.ProceedsUnknown)}
+			if withChain {
+				rec = append(rec, r.ChainID)
+			}
+			_ = w.Write(rec)
 		}
 	}
 	write("I (short-term)", false)

@@ -1120,6 +1120,9 @@ type HistoricalBalance struct {
 	// UnpricedLines counts holdings with no USD price on that date; they are
 	// not in total_usd.
 	UnpricedLines int `json:"unpriced_lines"`
+	// ChainID is the Hub chain whose state the date shows. It is set only
+	// while an earlier Hub chain is in reports.
+	ChainID string `json:"chain_id,omitempty"`
 }
 
 const (
@@ -1143,6 +1146,26 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	for i, d := range days {
 		out[i] = HistoricalBalance{Address: addr, Date: d.UTC().Format(apiDateLayout), Lines: []BalanceLine{}}
 	}
+	// Days on an earlier Hub chain in reports are read from its stored
+	// daily holdings; every other day is rebuilt from cosmoshub-4 below.
+	legacyDone := make([]bool, len(days))
+	remaining := len(days)
+	if eras := s.legacyEras(chain); eras.active() {
+		meta := s.oracle.Denoms(chain)
+		for i, d := range days {
+			out[i].ChainID = apiHubChainID
+			if e, ok := eras.eraAtDayEnd(d); ok && eras.inReports(e.ChainID) {
+				if err := s.legacyBalanceDay(chain, meta, eras, e, addr, d, &out[i]); err != nil {
+					return nil, err
+				}
+				legacyDone[i] = true
+				remaining--
+			}
+		}
+	}
+	if remaining == 0 {
+		return out, nil
+	}
 	ids, err := s.chainRowIDs(chain)
 	if err != nil {
 		return nil, err
@@ -1159,6 +1182,9 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	var idx []int
 	var targets []heightTime
 	for i, d := range days {
+		if legacyDone[i] {
+			continue
+		}
 		ht, err := s.dayEndBlock(ids, d)
 		if err != nil {
 			out[i].Status, out[i].Reason = balanceStatusFor(err)

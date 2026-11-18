@@ -57,6 +57,11 @@ type Server struct {
 	statementMaxRows    int64
 	statementTimeout    time.Duration
 	statementSummaryOff bool
+
+	// legacy holds the earlier Hub chains' era state; legacySchema overrides
+	// the schema they are read from, for tests.
+	legacy       *legacyEraCache
+	legacySchema string
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -349,6 +354,8 @@ type feeRec struct {
 	Denom  string
 	Ts     time.Time
 	Hash   string
+	// ChainID is set on fees read from an earlier Hub chain.
+	ChainID string
 }
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),
@@ -470,11 +477,14 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		row.RewardTrigger = e.RewardTrigger
 		row.Detail = e.Detail
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
+		row.ChainID = rowChainID(input.stampChain, e.ChainID)
 		out = append(out, row)
 	}
 	implySwapPrices(out)
 	for _, f := range fees {
-		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, ""))
+		row := s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, "")
+		row.ChainID = rowChainID(input.stampChain, f.ChainID)
+		out = append(out, row)
 	}
 
 	return out

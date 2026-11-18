@@ -161,6 +161,9 @@ type YearCoverage struct {
 	CoveredRangeCount        int             `json:"covered_range_count"`
 	Gaps                     []CoverageGap   `json:"gaps"`
 	GapCount                 int             `json:"gap_count"`
+	// Chains splits the year by Hub chain. It is set only while an earlier
+	// Hub chain is in reports.
+	Chains []YearChainCoverage `json:"chains,omitempty"`
 
 	firstDay, lastDay time.Time
 	ranges            []dayRange
@@ -191,6 +194,9 @@ type IndexCoverage struct {
 	Note          string         `json:"note"`
 
 	ranges []dayRange
+	// earliestEra is the first Hub chain in reports when it is earlier than
+	// cosmoshub-4, else empty.
+	earliestEra string
 }
 
 // PeriodCoverage says whether a requested period is fully indexed. It rides
@@ -727,6 +733,9 @@ func chainLabel(chain string) string {
 }
 
 func coverageNote(c *IndexCoverage) string {
+	if c.Complete && c.earliestEra != "" {
+		return eraCoverageNote(c)
+	}
 	if c.Complete {
 		return fmt.Sprintf("Every %s block from genesis (%s) to the tip is indexed. Earlier Cosmos Hub chains are not in reports yet.", c.Chain, c.GenesisDate)
 	}
@@ -840,11 +849,17 @@ func (c *IndexCoverage) Period(start, end time.Time) PeriodCoverage {
 
 // genesisNote explains a period that starts before genesis.
 func genesisNote(c *IndexCoverage) string {
+	if c.earliestEra != "" {
+		return eraGenesisNote(c)
+	}
 	return fmt.Sprintf("This period starts before %s genesis (%s). Cosmos Hub activity before that day is on earlier Hub chains, which are not in reports yet, so this report starts at genesis.", c.Chain, c.GenesisDate)
 }
 
 // preGenesisWarning explains a period that ends before genesis.
 func preGenesisWarning(c *IndexCoverage) string {
+	if c.earliestEra != "" {
+		return eraPreGenesisWarning(c)
+	}
 	return fmt.Sprintf("This period is entirely before %s genesis (%s). Earlier Cosmos Hub chains are not in reports yet, so this report has no data for it.", c.Chain, c.GenesisDate)
 }
 
@@ -867,11 +882,7 @@ func unknownPeriodCoverage() PeriodCoverage {
 
 // periodCoverage evaluates [start, end) against the current snapshot.
 func (s *Server) periodCoverage(start, end time.Time) PeriodCoverage {
-	sc := s.indexCoverage()
-	if sc == nil {
-		return unknownPeriodCoverage()
-	}
-	snap := sc.Snapshot()
+	snap := s.coverageSnapshot()
 	if snap == nil {
 		return unknownPeriodCoverage()
 	}
@@ -916,11 +927,7 @@ func (s *Server) StartIndexCoverage(interval time.Duration, requireEvents bool, 
 // handleIndexCoverage serves GET /index-coverage[?start=&end=]. With a
 // period it adds period: the same evaluation reports carry.
 func (s *Server) handleIndexCoverage(w http.ResponseWriter, r *http.Request) {
-	sc := s.indexCoverage()
-	var snap *IndexCoverage
-	if sc != nil {
-		snap = sc.Snapshot()
-	}
+	snap := s.coverageSnapshot()
 	if snap == nil {
 		w.Header().Set("Retry-After", "60")
 		w.Header().Set(apiContentType, apiJSONContentType)
@@ -931,15 +938,21 @@ func (s *Server) handleIndexCoverage(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	w.Header().Set(apiContentType, apiJSONContentType)
 	w.Header().Set("Cache-Control", "public, max-age=60")
+	// eras lists every Hub chain, oldest first, and whether reports read it.
+	eras := erasCoverage(s.legacyEras(apiMainnet), snap)
 	if q.Get(apiStart) == "" && q.Get(apiEnd) == "" {
-		writeJSON(w, snap)
+		writeJSON(w, struct {
+			*IndexCoverage
+			Eras []EraCoverage `json:"eras"`
+		}{snap, eras})
 		return
 	}
 	period := snap.Period(dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
 	writeJSON(w, struct {
 		*IndexCoverage
+		Eras   []EraCoverage  `json:"eras"`
 		Period PeriodCoverage `json:"period"`
-	}{snap, period})
+	}{snap, eras, period})
 }
 
 // withPeriodCoverage stamps the requested period's coverage on a report or

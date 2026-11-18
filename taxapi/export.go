@@ -60,6 +60,10 @@ type Row struct {
 	// tags.go). It never changes the on-chain record; it changes the label an
 	// exporter emits and whether Form 8949 sees a disposal.
 	UserTag string
+	// ChainID is the Cosmos Hub chain the row happened on. It is set on every
+	// row only while an earlier Hub chain (cosmoshub-1 to 3) is in reports;
+	// otherwise it is empty and every row is cosmoshub-4.
+	ChainID string
 }
 
 // isTaxable mirrors tax.Category.Taxable; fees count as taxable spends.
@@ -182,9 +186,21 @@ func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
 	if err != nil {
 		return err
 	}
+	// The chain column is added only while an earlier Hub chain is in
+	// reports, when every row names its chain.
+	withChain := false
+	for _, row := range rows {
+		withChain = withChain || row.ChainID != ""
+	}
 	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", apiTaxable, apiPreviewDetail, "Price Implied", "User Tag", "Source")
+	if withChain {
+		records[0] = append(records[0], "Chain ID")
+	}
 	for i, row := range rows {
 		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, previewTaxableText(row), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger)
+		if withChain {
+			records[i+1] = append(records[i+1], row.ChainID)
+		}
 	}
 	return csv.NewWriter(out).WriteAll(records)
 }
@@ -286,7 +302,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				genericAssetDisplay(r), r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
-				r.From, r.To, r.Asset, apiHubChainID, boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
+				r.From, r.To, r.Asset, rowCSVChain(r), boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
 				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, apiValue), manualField(r, apiBasis), manualField(r, apiDate),
 				boolStr(r.isTaxable()), boolStr(r.PriceImplied), r.UserTag, r.Detail,
 			})
@@ -495,4 +511,12 @@ func boolStr(b bool) string {
 		return apiTrue
 	}
 	return apiFalse
+}
+
+// rowCSVChain is the chain column of the Generic CSV.
+func rowCSVChain(r Row) string {
+	if r.ChainID != "" {
+		return r.ChainID
+	}
+	return apiHubChainID
 }
