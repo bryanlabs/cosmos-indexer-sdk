@@ -275,7 +275,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 53)
+	require.Len(t, seen, 55)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -290,21 +290,28 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 			continue
 		}
 		require.Len(t, src.Root, 64, src.Version)
-		require.NotContains(t, roots, src.Root, src.Version)
+		// A withdraw-address rerun outranks the retry it replaces, which
+		// stays pinned as the fallback.
+		if prev, ok := roots[src.Root]; ok {
+			require.Contains(t, prev, "accel-withdraw-fix-", src.Version)
+			require.NotContains(t, src.Version, "accel-withdraw-fix-", src.Version)
+			continue
+		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 36)
+	require.Len(t, roots, 37)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s04-20261115-deadline-retry-v3", roots["6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"])
 	// The Cosmos Hub v29.1.0 upgrade stopped the earlier retries of these roots with stored errors, so the next version of each replaces it.
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v4", roots["ab12977c1a2135f7aeea69534171ee3c2bec9a03f3650cbf5dff76caefb19345"])
-	require.Equal(t, flowCorrectedPrefix+"accel-four-s04-20261115-deadline-retry-v4", roots["0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-0a11a4c00904-20261118-fanout-v1", roots["0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s03-20261115-deadline-retry-v3", roots["290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"])
 	require.Equal(t, flowLSMPrefix+"accel-four-s01-20261115-lsm-retry-v1", roots["bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"])
 	require.Equal(t, flowLSMPrefix+"accel-four-s06-20261115-lsm-retry-v1", roots["85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-52836aab8ac6-20261118-fanout-v1", roots["52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-d2d7b3c161a2-20261118-fanout-v1", roots["d2d7b3c161a280621a0b05189e3746f1d785eab94cc4de6096a76a621c80d2b5"])
 }
 
 // The LSM reward retries bind the reward-free corrections manifest: the
