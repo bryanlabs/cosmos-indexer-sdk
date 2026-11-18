@@ -480,3 +480,43 @@ func TestFlowReturnCreditsPostgres(t *testing.T) {
 	}
 	require.Equal(t, []uint{501, 504}, kept)
 }
+
+// The payout read against real tables: a merged 2021-style transfer event
+// pays the wallet a 2 uatom reward beside 6198375 uatom of principal, and a
+// newer message pays the wallet as another delegator's withdraw address.
+func TestFlowRewardPayoutsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	dist := moduleAddress("distribution")
+	for _, sql := range []string{
+		"ALTER TABLE blocks ADD COLUMN time_stamp timestamptz",
+		"UPDATE blocks SET time_stamp = '2025-01-01T00:00:00Z'::timestamptz + (height || ' minutes')::interval",
+		"CREATE TABLE message_event_types (id bigint, type text)",
+		"CREATE TABLE message_events (id bigint, message_id bigint, index bigint, message_event_type_id bigint)",
+		"CREATE TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TABLE message_event_attributes (id bigserial, message_event_id bigint, value text, index bigint, message_event_attribute_key_id bigint)",
+		"INSERT INTO message_event_types VALUES (1,'transfer'),(2,'coin_received')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'recipient'),(2,'sender'),(3,'amount'),(4,'receiver')",
+		"INSERT INTO message_events VALUES (10,1,1,1),(11,2,0,2),(12,2,3,1),(13,3,0,1)",
+		"INSERT INTO message_event_attributes (message_event_id, value, index, message_event_attribute_key_id) VALUES " +
+			"(10,'" + flowPGReceiver1 + "',0,1),(10,'" + dist + "',1,2),(10,'2uatom',2,3)," +
+			"(10,'" + flowPGReceiver1 + "',3,1),(10,'cosmos1notbonded',4,2),(10,'6198375uatom',5,3)," +
+			"(11,'" + flowPGReceiver1 + "',0,4),(11,'50uatom',1,3)," +
+			"(12,'" + flowPGReceiver1 + "',0,1),(12,'" + dist + "',1,2),(12,'50uatom,7ibc/ABC',2,3)," +
+			"(13,'" + flowPGReceiver2 + "',0,1),(13,'" + dist + "',1,2),(13,'9uatom',2,3)",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	start, end := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	paid, err := s.flowRewardPayouts(apiMainnet, flowPGReceiver1, start, end)
+	require.NoError(t, err)
+	require.Len(t, paid, 2)
+	require.Equal(t, "2", paid[1].Amount.String())
+	require.Equal(t, "50", paid[2].Amount.String())
+	require.Equal(t, int64(200), paid[2].Key.Height)
+	// Message 2 has no reward row to the wallet: it becomes a reward inflow.
+	got := reconcileRewardPayouts(flowPGReceiver1, nil, paid)
+	require.Len(t, got, 2)
+	none, err := s.flowRewardPayouts(apiMainnet, flowPGReceiver1, end, end.AddDate(0, 1, 0))
+	require.NoError(t, err)
+	require.Empty(t, none)
+}

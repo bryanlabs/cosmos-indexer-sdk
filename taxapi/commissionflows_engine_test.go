@@ -289,3 +289,99 @@ func TestFlowPoolProRataKeepsTotals(t *testing.T) {
 	require.True(t, sum.Equal(amt(1)), sum.String())
 	require.True(t, p.total().Equal(amt(2)), p.total().String())
 }
+
+// Reward rows name the delegator even when the chain paid its withdraw
+// address. The trace must take reward coins from what was paid.
+func TestFlowRewardsFollowTheWithdrawAddress(t *testing.T) {
+	const withdraw = "cosmos1withdraw"
+	k := flowAt(1, 5)
+	booked := []flowEvent{
+		{Key: k, Category: apiReward, Dir: "in", Amount: amt(50), To: flowTestReceiver, Validator: flowTestOther},
+	}
+	// The delegator was paid nothing: its reward row is dropped.
+	require.Empty(t, reconcileRewardPayouts(flowTestReceiver, booked, nil))
+	// Its withdraw address has no reward row but was paid 50.
+	got := reconcileRewardPayouts(withdraw, nil, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(50)}})
+	require.Len(t, got, 1)
+	require.Equal(t, apiReward, got[0].Category)
+	require.Equal(t, "50", got[0].Amount.String())
+	require.Equal(t, withdraw, got[0].To)
+	// Commission rows already name the receiver; only the rest of the
+	// payout is reward, so a 50 reward row paid 120 with 100 commission keeps 20.
+	mixed := []flowEvent{
+		{Key: k, Category: apiCommission, Dir: "in", Amount: amt(100), To: flowTestReceiver, Validator: flowTestValidator},
+		{Key: k, Category: apiReward, Dir: "in", Amount: amt(50), To: flowTestReceiver, Validator: flowTestOther},
+	}
+	got = reconcileRewardPayouts(flowTestReceiver, mixed, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(120)}})
+	require.Len(t, got, 2)
+	require.Equal(t, "100", got[0].Amount.String())
+	require.Equal(t, "20", got[1].Amount.String())
+	// A reward paid where it was booked is unchanged.
+	got = reconcileRewardPayouts(flowTestReceiver, booked, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(50)}})
+	require.Equal(t, booked, got)
+
+	// In a trace, the phantom reward dilutes the pro-rata share of
+	// commission that left: 100 of 150 instead of all of it.
+	run := func(rows []flowEvent) *flowTrace {
+		l := newFakeFlowLedger()
+		l.commission(flowAt(1, 0), flowTestReceiver, 100)
+		l.rows[flowTestReceiver] = append(l.rows[flowTestReceiver], rows...)
+		l.send(flowAt(2, 0), flowTestReceiver, flowTestExchange, 100)
+		return runFlowTest(t, l, flowTestReceiver)
+	}
+	before := run(booked)
+	require.Equal(t, "66.666666666667", fate(before, flowRuleProRata, "2025-01", flowExchange, "Test Exchange", false))
+	after := run(reconcileRewardPayouts(flowTestReceiver, booked, nil))
+	require.Equal(t, "100", fate(after, flowRuleProRata, "2025-01", flowExchange, "Test Exchange", false))
+	require.Equal(t, "100", fate(after, flowRuleFIFO, "2025-01", flowExchange, "Test Exchange", false))
+}
+
+// Older SDK logs merge a message's transfers into one event with several
+// recipient, sender, amount triples (an undelegate paying a 2 uatom reward
+// and moving 6198375 uatom of principal). Only the distribution triple to
+// the wallet is a payout.
+func TestFlowRewardPayoutsPairMergedTransfers(t *testing.T) {
+	const (
+		wallet = "cosmos1wallet"
+		pool   = "cosmos1notbonded"
+	)
+	dist := moduleAddress("distribution")
+	at := time.Date(2021, 10, 1, 0, 0, 0, 0, time.UTC)
+	ev := func(id uint, idx uint64, key, value string) flowTransferAttr {
+		return flowTransferAttr{EventID: id, MessageID: 7, Height: 8000002, TimeStamp: at, Index: idx, Key: key, Value: value}
+	}
+	merged := []flowTransferAttr{
+		ev(1, 0, "recipient", wallet), ev(1, 1, "sender", dist), ev(1, 2, "amount", "2uatom"),
+		ev(1, 3, "recipient", wallet), ev(1, 4, "sender", pool), ev(1, 5, "amount", "6198375uatom"),
+	}
+	got := rewardPayoutsFrom(merged, wallet, dist, "uatom")
+	require.Len(t, got, 1)
+	require.Equal(t, "2", got[7].Amount.String())
+	// A second event in the same message (newer SDKs) adds up.
+	more := append(merged, ev(2, 0, "recipient", wallet), ev(2, 1, "sender", dist), ev(2, 2, "amount", "5uatom,3ibc/ABC"))
+	require.Equal(t, "7", rewardPayoutsFrom(more, wallet, dist, "uatom")[7].Amount.String())
+	// The distribution triple to someone else is not this wallet's payout.
+	other := []flowTransferAttr{
+		ev(3, 0, "recipient", pool), ev(3, 1, "sender", dist), ev(3, 2, "amount", "9uatom"),
+		ev(3, 3, "recipient", wallet), ev(3, 4, "sender", pool), ev(3, 5, "amount", "4uatom"),
+	}
+	require.Empty(t, rewardPayoutsFrom(other, wallet, dist, "uatom"))
+}
+
+// A native source correction is a reward proved against the chain. It stays
+// as booked and uses its share of the payout, so the indexed reward row in
+// the same message keeps only the rest and nothing is counted twice.
+func TestFlowRewardPayoutsKeepSourceCorrections(t *testing.T) {
+	k := flowAt(1, 5)
+	corrected := flowEvent{Key: k, Category: apiReward, Dir: "in", Amount: amt(30), To: flowTestReceiver, Trigger: flowSourceCorrectionTrigger}
+	indexed := flowEvent{Key: k, Category: apiReward, Dir: "in", Amount: amt(50), To: flowTestReceiver, Validator: flowTestOther}
+	got := reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected, indexed}, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(50)}})
+	require.Len(t, got, 2)
+	require.Equal(t, "30", got[0].Amount.String())
+	require.Equal(t, flowSourceCorrectionTrigger, got[0].Trigger)
+	require.Equal(t, "20", got[1].Amount.String())
+	got = reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected}, nil)
+	require.Equal(t, []flowEvent{corrected}, got)
+	got = reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected}, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(30)}})
+	require.Equal(t, []flowEvent{corrected}, got)
+}

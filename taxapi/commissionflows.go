@@ -348,7 +348,14 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 	if err != nil {
 		return nil, err
 	}
-	return commissionFlowEventsFromRows(rows, addr, s.native.Denom, credited), nil
+	out := commissionFlowEventsFromRows(rows, addr, s.native.Denom, credited)
+	paid, err := s.flowRewardPayouts(chain, addr, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out = reconcileRewardPayouts(addr, out, paid)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Key.before(out[j].Key) })
+	return out, nil
 }
 
 func commissionFlowEventsFromRows(rows walletRows, addr, native string, credited map[flowCredit]bool) []flowEvent {
@@ -379,6 +386,179 @@ func commissionFlowEventsFromRows(rows walletRows, addr, native string, credited
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key.before(out[j].Key) })
 	return out
 }
+
+// flowRewardPayout is the native amount the distribution module paid one
+// wallet in one message.
+type flowRewardPayout struct {
+	Key    flowKey
+	Amount decimal.Decimal
+}
+
+// flowRewardPayouts is what the distribution module actually paid addr in
+// [start,end), by message. Reward rows name the delegator even when the
+// chain paid its withdraw address, so the trace takes reward coins from
+// these payouts instead.
+func (s *Server) flowRewardPayouts(chain, addr string, start, end time.Time) (map[uint]flowRewardPayout, error) {
+	ids, err := s.chainRowIDs(chain)
+	if err != nil {
+		return nil, err
+	}
+	var rows []flowTransferAttr
+	if err := s.db.Raw(`
+WITH r AS MATERIALIZED (
+  SELECT DISTINCT r.message_event_id FROM message_event_attributes r
+  JOIN message_event_attribute_keys kr ON kr.id = r.message_event_attribute_key_id AND kr.key = 'recipient'
+  WHERE left(r.value, 100) = left(@addr, 100) AND r.value = @addr),
+ev AS MATERIALIZED (
+  SELECT me.id, me.message_id, b.height, b.time_stamp FROM r
+  JOIN message_events me ON me.id = r.message_event_id
+  JOIN message_event_types t ON t.id = me.message_event_type_id AND t.type = 'transfer'
+  JOIN messages m ON m.id = me.message_id
+  JOIN txes x ON x.id = m.tx_id
+  JOIN blocks b ON b.id = x.block_id
+  WHERE b.chain_id IN @ids AND b.time_stamp >= @start AND b.time_stamp < @end)
+SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, a.index, k.key, a.value
+FROM ev
+JOIN message_event_attributes a ON a.message_event_id = ev.id
+JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
+ORDER BY ev.id, a.index`,
+		map[string]any{"addr": addr, "ids": ids, "start": start, "end": end}).
+		Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("reward payouts: %w", err)
+	}
+	return rewardPayoutsFrom(rows, addr, moduleAddress("distribution"), s.native.Denom), nil
+}
+
+// flowTransferAttr is one attribute of a transfer event, in emitted order.
+type flowTransferAttr struct {
+	EventID   uint
+	MessageID uint
+	Height    int64
+	TimeStamp time.Time
+	Index     uint64
+	Key       string
+	Value     string
+}
+
+// rewardPayoutsFrom sums, by message, the native coins sender paid addr.
+// Older SDK logs merge every transfer of a message into one event holding
+// several recipient, sender, amount triples, so attributes are paired by
+// position: each triple starts at a recipient.
+func rewardPayoutsFrom(rows []flowTransferAttr, addr, sender, denom string) map[uint]flowRewardPayout {
+	out := map[uint]flowRewardPayout{}
+	var rcpt, from, amount string
+	var cur flowTransferAttr
+	flush := func() {
+		if rcpt == addr && from == sender {
+			if v := nativeCoinAmount(amount, denom); v.IsPositive() {
+				p := out[cur.MessageID]
+				p.Key = flowKey{Time: cur.TimeStamp.UTC(), Height: cur.Height, Message: cur.MessageID, Sub: flowPayoutSub}
+				p.Amount = p.Amount.Add(v)
+				out[cur.MessageID] = p
+			}
+		}
+		rcpt, from, amount = "", "", ""
+	}
+	for i, r := range rows {
+		if i > 0 && r.EventID != rows[i-1].EventID {
+			flush()
+		}
+		cur = r
+		switch r.Key {
+		case "recipient":
+			flush()
+			rcpt = r.Value
+		case "sender":
+			from = r.Value
+		case "amount":
+			amount = r.Value
+		}
+	}
+	flush()
+	return out
+}
+
+// flowPayoutSub orders a reward payout that has no reward row after the
+// message's own rows.
+const flowPayoutSub = 1 << 30
+
+// nativeCoinAmount is denom's amount in a coins string such as "5uatom,7ibc/X".
+func nativeCoinAmount(coins, denom string) decimal.Decimal {
+	for _, c := range strings.Split(coins, ",") {
+		n, ok := strings.CutSuffix(strings.TrimSpace(c), denom)
+		if !ok || n == "" || strings.Trim(n, "0123456789") != "" {
+			continue
+		}
+		if v, err := decimal.NewFromString(n); err == nil {
+			return v
+		}
+	}
+	return decimal.Zero
+}
+
+// reconcileRewardPayouts makes addr's reward inflows match what the chain
+// paid it. In each message the reward rows booked to addr are cut to the
+// distribution payout to addr (less the commission rows and other rows from
+// the distribution module, which already name the real receiver), so a delegator whose withdraw address is another
+// account gets no coins it never held. A payout with no matching reward row
+// (addr is someone else's withdraw address) becomes a reward inflow.
+// Rewards without a message are left as booked. A native source correction
+// is a reward proved against the chain: it is kept as is and uses its share
+// of the payout.
+func reconcileRewardPayouts(addr string, events []flowEvent, paid map[uint]flowRewardPayout) []flowEvent {
+	room := map[uint]decimal.Decimal{}
+	for m, p := range paid {
+		room[m] = p.Amount
+	}
+	dist := moduleAddress("distribution")
+	for _, e := range events {
+		if e.Key.Message == 0 || e.Dir == apiOut {
+			continue
+		}
+		if e.Category == apiReward && e.Trigger != flowSourceCorrectionTrigger {
+			continue
+		}
+		if e.Category == apiCommission || e.From == dist || e.Trigger == flowSourceCorrectionTrigger {
+			if r, ok := room[e.Key.Message]; ok {
+				room[e.Key.Message] = decimal.Max(r.Sub(e.Amount), decimal.Zero)
+			}
+		}
+	}
+	out := events[:0:0]
+	for _, e := range events {
+		if e.Category != apiReward || e.Key.Message == 0 || e.Dir == apiOut || e.To != addr || e.Trigger == flowSourceCorrectionTrigger {
+			out = append(out, e)
+			continue
+		}
+		r := room[e.Key.Message]
+		take := decimal.Min(r, e.Amount)
+		room[e.Key.Message] = r.Sub(take)
+		if take.IsPositive() {
+			e.Amount = take
+			out = append(out, e)
+		}
+	}
+	msgs := make([]uint, 0, len(room))
+	for m, r := range room {
+		if r.IsPositive() {
+			msgs = append(msgs, m)
+		}
+	}
+	sort.Slice(msgs, func(i, j int) bool { return msgs[i] < msgs[j] })
+	for _, m := range msgs {
+		p := paid[m]
+		out = append(out, flowEvent{Key: p.Key, Category: apiReward, Dir: "in", Amount: room[m], From: dist, To: addr, Trigger: flowWithdrawAddressTrigger})
+	}
+	return out
+}
+
+// flowWithdrawAddressTrigger marks a reward the chain paid addr as another
+// delegator's withdraw address.
+const flowWithdrawAddressTrigger = "withdraw_address"
+
+// flowSourceCorrectionTrigger marks a reward credit a native source
+// correction added.
+const flowSourceCorrectionTrigger = "native_source_correction"
 
 // flowSingleHopNative reports whether e is an ibc_in row of the native denom
 // under a one-hop trace, which the chain releases from escrow as native coin.

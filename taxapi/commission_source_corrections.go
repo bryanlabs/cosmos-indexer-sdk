@@ -679,7 +679,7 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 				return walletRows{}, e
 			}
 			resolvedKey := flowKey{Time: g.tx.Timestamp.UTC(), Height: c.Height, Message: g.message, Sub: g.nextSub}
-			out.CommissionCorrections = append(out.CommissionCorrections, flowEvent{Key: resolvedKey, Category: apiReward, Dir: "in", Amount: amount, To: addr, Trigger: "native_source_correction"})
+			out.CommissionCorrections = append(out.CommissionCorrections, flowEvent{Key: resolvedKey, Category: apiReward, Dir: "in", Amount: amount, To: addr, Trigger: flowSourceCorrectionTrigger})
 			g.nextSub++
 			r.Effects = append(r.Effects, CommissionSourceEffectReceipt{EffectID: c.ID, TxHashSHA256: privateSHA([]byte(c.TxHash)), ProofSHA256: append([]string(nil), c.ProofSHA256...), Kind: "reward", Disposition: "native_credit_added_after_commuting_message_credits", SourceTxID: g.tx.ID, SourceMessageID: g.message, NativeEventIndex: c.NativeEventIndex, ResolvedSourceKey: &resolvedKey, SourceRowsSHA256: g.originalSHA})
 		}
