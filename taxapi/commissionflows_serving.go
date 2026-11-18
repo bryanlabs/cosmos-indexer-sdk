@@ -116,6 +116,10 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrected("accel-later-s03-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-split-b-v2"),
 		flowCorrected("accel-four-s01-20261115-split-b-v2"),
+		// Validators the stopped runs never reached, each list run on an idle host in its own version.
+		flowCorrected("accel-four-s06-20261115-remainder-v1"),
+		flowCorrected("accel-later-s02-20261115-remainder-v1"),
+		flowCorrected("accel-later-s01-20261115-remainder-v1"),
 		flowCorrected("full324-four-20261115-v2"),
 		flowCorrected("full324-later-two-20261115-v2"),
 	},

@@ -272,7 +272,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 26)
+	require.Len(t, seen, 29)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
