@@ -406,7 +406,8 @@ func (a rpcAttr) decoded() (string, string) {
 }
 
 // failedTxCharges reads one block's failed transactions from the node and
-// returns, by hash, the coins each one's fee deduction moved.
+// returns, by hash, the coins each one's fee deduction moved. A transaction
+// whose block results do not settle it is left out.
 func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
 	txs, err := n.blockTxs(height)
 	if err != nil {
@@ -414,7 +415,7 @@ func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
 	}
 	out := map[string]string{}
 	for _, t := range txs {
-		if t.Code != 0 {
+		if t.Code != 0 && t.ChargeKnown {
 			out[t.Hash] = t.Charged
 		}
 	}

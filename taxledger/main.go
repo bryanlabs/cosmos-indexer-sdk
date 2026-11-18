@@ -15,6 +15,11 @@
 // With -commission-flows it traces every validator's withdrawn commission
 // from -commission-flows-from to today and stores where it went (OPS-818).
 //
+// With -failed-fees-to it instead settles the fee outcome of every failed
+// transaction from -floor up to that height that has none yet, reading the
+// archive block cache, and records them with -failed-fees-write. Before Gaia v6 the block results carry no coin
+// events, so the outcome follows from where the transaction failed.
+//
 // Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, and NODE_REST_API for
 // -days-from, -days-append and -commission-flows (which also reads
 // ORACLE_URL for denoms).
@@ -97,6 +102,8 @@ func main() {
 	deriveTimeout := flag.Duration("commission-derive-statement-timeout", 2*time.Minute, "read only: per-query limit while deriving labels; a condition whose query hits it is recorded unmeasured")
 	flowsPrefetch := flag.Int("commission-wallet-prefetch", 0, "opt-in private versioned wallets one trace reads from the index ahead of its queue, each on its own connection (0 reads each wallet only when asked; results do not depend on it)")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
+	failedTo := flag.Int64("failed-fees-to", 0, "record failed-tx fee outcomes from -floor below this height, then stop")
+	failedWrite := flag.Bool("failed-fees-write", false, "write the outcomes -failed-fees-to settles; without it the run only counts them")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
 	if (*flowsProfile != "" || *flowsProfileSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsProfileSHA == "") {
@@ -176,6 +183,14 @@ func main() {
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	if *failedTo > 0 {
+		n, err := srv.RecordFailedTxFees(*chain, node, *floor, *failedTo, *chunk, *workers, *failedWrite, log.Printf)
+		if err != nil {
+			log.Fatalf("failed-tx fees: %v", err)
+		}
+		log.Printf("failed-tx fees: %d charged, %d charged nothing, %d left unsettled (write=%v)", n.Charged, n.Uncharged, n.Unsettled, *failedWrite)
+		return
+	}
 	if *recheck {
 		if _, _, err := srv.RecheckIndexHoles(*chain, node, log.Printf); err != nil {
 			log.Fatalf("index holes: %v", err)

@@ -132,8 +132,8 @@ func TestBlockTxsFromCacheRefusesMissingAndMislabelled(t *testing.T) {
 func TestScanBackBlock(t *testing.T) {
 	chain := []nodeTx{
 		{Hash: "AA", Code: 0, Granter: backTestGranter, Accounts: []string{backTestGranter, backTestSigner}},
-		{Hash: "BB", Code: 5, Charged: "2500uatom", Accounts: []string{backTestSigner}},
-		{Hash: "BB", Code: 5, Charged: "2500uatom", Accounts: []string{backTestSigner}},
+		{Hash: "BB", Code: 5, Charged: "2500uatom", ChargeKnown: true, Accounts: []string{backTestSigner}},
+		{Hash: "BB", Code: 5, Charged: "2500uatom", ChargeKnown: true, Accounts: []string{backTestSigner}},
 	}
 	index := []backTx{
 		{Height: 7, Indexed: true, Hash: "aa", Code: 0, Messages: true, TxID: 11},
