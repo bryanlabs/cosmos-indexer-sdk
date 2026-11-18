@@ -341,10 +341,12 @@ func loadLegacyEras(ctx context.Context, db *gorm.DB, schema string) (*legacyEra
 		}
 		st.effective = append([]legacyEra{e}, st.effective...)
 	}
-	// The first cosmoshub-4 block, for eras[]. Best effort: the public
-	// tables answer it from their (height, chain_id) index.
+	// When cosmoshub-4 started, for eras[]. Its first block carries the
+	// genesis time, which was reused from 2019, so the second block's time
+	// is the real start. Best effort: the public tables answer it from their
+	// (height, chain_id) index.
 	var hub4 []time.Time
-	if err := db.Raw("SELECT b.time_stamp FROM blocks b JOIN chains c ON c.id = b.chain_id WHERE c.chain_id IN ? AND b.height = ?", chainIDs(apiMainnet), hubYearStarts[0].Height).Scan(&hub4).Error; err == nil && len(hub4) > 0 {
+	if err := db.Raw("SELECT b.time_stamp FROM blocks b JOIN chains c ON c.id = b.chain_id WHERE c.chain_id IN ? AND b.height = ?", chainIDs(apiMainnet), hubYearStarts[0].Height+1).Scan(&hub4).Error; err == nil && len(hub4) > 0 {
 		st.hub4Start = hub4[0].UTC()
 	}
 	return st, nil
