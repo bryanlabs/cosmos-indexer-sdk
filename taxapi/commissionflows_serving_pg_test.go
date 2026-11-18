@@ -275,7 +275,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 51)
+	require.Len(t, seen, 53)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -285,7 +285,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	roots := map[string]string{}
 	for _, src := range defaultCommissionServingSources[apiMainnet] {
-		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild {
+		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild && src.Build != flowWithdrawFixBuild {
 			require.Empty(t, src.Root, src.Version)
 			continue
 		}
@@ -293,7 +293,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		require.NotContains(t, roots, src.Root, src.Version)
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 34)
+	require.Len(t, roots, 36)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])
@@ -304,6 +304,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s03-20261115-deadline-retry-v3", roots["290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"])
 	require.Equal(t, flowLSMPrefix+"accel-four-s01-20261115-lsm-retry-v1", roots["bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"])
 	require.Equal(t, flowLSMPrefix+"accel-four-s06-20261115-lsm-retry-v1", roots["85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-52836aab8ac6-20261118-fanout-v1", roots["52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"])
 }
 
 // The LSM reward retries bind the reward-free corrections manifest: the

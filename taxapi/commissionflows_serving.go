@@ -91,12 +91,26 @@ func flowGiantRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// The withdraw-address reruns fix reward rows that credited the delegator
+// when the chain paid a different withdraw address. They keep the corrected
+// profile, window and version prefix, run their own build, and each serves
+// only the validator whose rerun passed acceptance against its served row.
+const flowWithdrawFixBuild = "sha256:ae39819c1af339987de665826c35edb317e6ad11b5390d3d7e9a5476228c8e80"
+
+func flowWithdrawFixRoot(suffix, root string) commissionServingSource {
+	r := flowCorrectedRoot(suffix, root)
+	r.Build = flowWithdrawFixBuild
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
 // holds an accepted result for it.
 var defaultCommissionServingSources = map[string][]commissionServingSource{
 	apiMainnet: {
+		flowWithdrawFixRoot("accel-withdraw-fix-pilot-20261118-fanout-v1", "c367934baa77ab0ce85a84cbd4ec158dfcfdac3f0df7e6efdbf5d02eaff5938b"),
+		flowWithdrawFixRoot("accel-withdraw-fix-52836aab8ac6-20261118-fanout-v1", "52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"),
 		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "5e6e5429e48f651ba98b03e3791deda86e390d13112e503e902939d08d86aa10"),
 		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "e5ede2045f7c06ec1da4432418d34d7f4f4a2a429d88531a60e0f7eb23a8cd64"),
 		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "fcea1968b7af091e011302f4924bd95858b19dd48001e6cf02fd700e691f5bcb"),
