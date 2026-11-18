@@ -466,6 +466,20 @@ func TestLegacyErasCoveragePostgres(t *testing.T) {
 	require.True(t, body.Eras[0].InReports)
 	require.Equal(t, int64(8), body.Eras[1].HeightsIndexed)
 	require.Equal(t, "2019-04-22T17:00:00Z", body.Eras[1].StartTime.Format(time.RFC3339))
+	// cosmoshub-4 counts only its own heights, not the earlier chains'.
+	var hub4 int64
+	for _, y := range snap.Years {
+		for _, c := range y.Chains {
+			if c.ChainID == apiHubChainID {
+				hub4 += c.IndexedBlocks
+			}
+		}
+		if len(y.Chains) == 0 {
+			hub4 += y.IndexedBlocks
+		}
+	}
+	require.Equal(t, apiHubChainID, body.Eras[3].ChainID)
+	require.Equal(t, hub4, body.Eras[3].HeightsIndexed)
 }
 
 // Balances on a published earlier chain come from its stored daily

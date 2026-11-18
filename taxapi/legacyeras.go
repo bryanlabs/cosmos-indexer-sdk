@@ -473,8 +473,16 @@ func erasCoverage(st *legacyEraState, snap *IndexCoverage) []EraCoverage {
 	hub4 := EraCoverage{ChainID: apiHubChainID, Era: 4, Status: eraStatusLive, InReports: true}
 	if snap != nil {
 		hub4.FirstHeight, hub4.LastHeight = snap.GenesisHeight, snap.TipHeight
+		// Years before and across the restart also count the earlier
+		// chains' blocks; only cosmoshub-4's own belong here.
 		for _, y := range snap.Years {
-			hub4.HeightsIndexed += y.IndexedBlocks
+			n := y.IndexedBlocks
+			for _, c := range y.Chains {
+				if c.ChainID != apiHubChainID {
+					n -= c.IndexedBlocks
+				}
+			}
+			hub4.HeightsIndexed += n
 		}
 	}
 	if st != nil {
