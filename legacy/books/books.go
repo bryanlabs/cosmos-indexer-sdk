@@ -67,6 +67,64 @@ func depositAccounts(chain string) (held, burned string, ok bool) {
 	return sdk.AccAddress(tmhash.SumTruncated([]byte("govDepositedCoins"))).String(), sdk.AccAddress(tmhash.SumTruncated([]byte("govBurnedDepositCoins"))).String(), true
 }
 
+// LiquidRule is what a stored row of the category does to the spendable
+// balance of the address it was paid from and of the address it was paid to.
+func LiquidRule(category string) ([2]int, bool) {
+	rule, ok := liquidRule[category]
+	return rule, ok
+}
+
+// DepositRule is what a stored row of the category does to the governance
+// deposit account and to the burn account of the first two chains.
+func DepositRule(category string) ([2]int, bool) {
+	rule, ok := depositRule[category]
+	return rule, ok
+}
+
+// GovernanceAccounts names the governance deposit and burn accounts of the
+// first two chains; ok is false for a chain that has none.
+func GovernanceAccounts(chain string) (held, burned string, ok bool) {
+	return depositAccounts(chain)
+}
+
+// PaidTo is the address a reward or commission row was paid to when its
+// detail records one, and empty when the coins went to the row's own
+// address. A detail that carries other facts only (the commission paid out
+// when a validator was removed records its cause) names no other address.
+func PaidTo(category, detail string) (string, error) {
+	if (category != "reward" && category != "commission") || detail == "" {
+		return "", nil
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(detail), &fields) != nil {
+		return "", fmt.Errorf("a %s row carries a detail that is not readable", category)
+	}
+	raw, named := fields["paid_to"]
+	if !named {
+		return "", nil
+	}
+	var to string
+	if json.Unmarshal(raw, &to) != nil || to == "" {
+		return "", fmt.Errorf("a %s row carries a detail that names no paid address", category)
+	}
+	return to, nil
+}
+
+// FeeCoins splits a stored fee into its coins. A coin of zero with no
+// denomination, which Hub 3 accepted, comes back with an empty denom.
+func FeeCoins(fee string) (amounts []*big.Int, denoms []string, err error) {
+	for _, part := range strings.Split(fee, ",") {
+		found := feeCoin.FindStringSubmatch(part)
+		if found == nil {
+			return nil, nil, fmt.Errorf("a stored fee is not readable")
+		}
+		amount, _ := new(big.Int).SetString(found[1], 10)
+		amounts = append(amounts, amount)
+		denoms = append(denoms, found[2])
+	}
+	return amounts, denoms, nil
+}
+
 // PayoutSource is the amount source of a row the state export of a chain
 // paid into a balance with no transaction.
 const PayoutSource = "export_payout"
@@ -332,16 +390,14 @@ WHERE chain_id = $1 AND height <= $2`, chain, out.Through)
 		// A reward names the delegator who earned it and a commission the
 		// validator's own account. The coins went to the address the row
 		// records as paid, when it records one.
-		if (category == "reward" || category == "commission") && detail != "" {
-			var paid struct {
-				To string `json:"paid_to"`
-			}
-			if json.Unmarshal([]byte(detail), &paid) != nil || paid.To == "" {
-				rows.Close()
-				return nil, fmt.Errorf("a %s row carries a detail that names no paid address", category)
-			}
+		paidTo, err := PaidTo(category, detail)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if paidTo != "" {
 			accounts.at(to).touched[category+" paid to another address"] = true
-			accounts.move(paid.To, 1, value, category+" of another address")
+			accounts.move(paidTo, 1, value, category+" of another address")
 			continue
 		}
 		accounts.move(from, rule[0], value, category)
