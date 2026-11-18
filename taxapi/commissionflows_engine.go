@@ -60,6 +60,7 @@ const (
 	flowContract          = "contract_or_ica"
 	flowBeyondHops        = "beyond_hops"
 	flowBusyWallet        = "busy_wallet"
+	flowWideDistributor   = "wide_distributor"
 	flowUnresolved        = "unresolved"
 	flowOriginOther       = ""
 	flowDust              = "0.000001"

@@ -205,3 +205,46 @@ func TestFlowPoolProRataKeepsTotals(t *testing.T) {
 	require.True(t, sum.Equal(amt(1)), sum.String())
 	require.True(t, p.total().Equal(amt(2)), p.total().String())
 }
+
+// A wide distributor stop is a served class like any other: it has a note
+// and a methodology sentence that state the threshold the tracer uses, and
+// its lines keep their class on a validator's page and in the Hub totals.
+func TestFlowWideDistributorClassServed(t *testing.T) {
+	require.Equal(t, "50,000", groupThousands(flowFanoutMaxReceivers))
+	require.Equal(t, "999", groupThousands(999))
+	require.Equal(t, "1,000", groupThousands(1000))
+	require.Equal(t, "1,234,567", groupThousands(1234567))
+	note := FlowClassNotes[flowWideDistributor]
+	require.Contains(t, note, "more than "+groupThousands(flowFanoutMaxReceivers)+" different wallets", "the page states the threshold the code uses")
+	require.Contains(t, note, "The trace stops there")
+	require.Contains(t, FlowMethod, "more than "+groupThousands(flowFanoutMaxReceivers)+" different wallets")
+	require.Contains(t, FlowMethod, flowWideDistributor)
+	classes := []string{
+		flowHeld, flowRestakedOwn, flowRestakedOther, flowUnbonding, flowLocked, flowHeldDownstream, flowStakedDownstream,
+		flowUnbondDownstream, flowLockedDownstream, flowExchange, flowExchangeLike, flowIBCOut, flowFees, flowSwapped, flowSpent, flowTokenized,
+		flowBurned, flowCommunityPool, flowModule, flowContract, flowBeyondHops, flowBusyWallet, flowWideDistributor, flowUnresolved,
+	}
+	for _, class := range classes {
+		require.NotEmpty(t, FlowClassNotes[class], class)
+	}
+
+	s := &Server{native: DefaultNativeAsset}
+	withdrawn := map[string]decimal.Decimal{flowPGJan: decimal.RequireFromString("100000000")}
+	flows := []CommissionFlow{
+		{Month: flowPGJan, Class: flowWideDistributor, Detail: flowFanoutHeuristic, AmountBase: "60000000"},
+		{Month: flowPGJan, Class: flowHeld, AmountBase: "40000000"},
+	}
+	page := s.buildFlowMonths(flows, withdrawn, nil, nil, false)
+	require.Len(t, page, 1)
+	require.Equal(t, flowWideDistributor, page[0].Flows[0].Class)
+	require.Equal(t, flowFanoutHeuristic, page[0].Flows[0].Detail, "a validator's page keeps the heuristic that stopped the trace")
+	require.Equal(t, "60", page[0].Flows[0].Amount.String())
+	require.Equal(t, "0.6", page[0].Flows[0].Share.String())
+	hub := s.buildFlowMonths(flows, withdrawn, nil, nil, true)
+	require.Equal(t, flowWideDistributor, hub[0].Flows[0].Class)
+	require.Empty(t, hub[0].Flows[0].Detail, "the Hub collapses the detail like exchange_like")
+	total := flowTotals(hub)
+	require.Equal(t, "100", total.Withdrawn.String())
+	require.Equal(t, flowWideDistributor, total.Flows[0].Class)
+	require.Equal(t, "60", total.Flows[0].Amount.String())
+}

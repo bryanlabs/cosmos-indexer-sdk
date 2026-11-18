@@ -39,15 +39,29 @@ var FlowClassNotes = map[string]string{ //nolint:gosec // class descriptions, no
 	flowContract:         "Sent to a contract or an interchain account, which the trace does not follow.",
 	flowBeyondHops:       "Moved more than three wallets away from the receiving wallets.",
 	flowBusyWallet:       "Sent to a wallet with too much activity to trace (an exchange, a bridge or a service, most likely).",
+	flowWideDistributor:  "Sent to, or paid out by, a wallet that sent ATOM to more than " + flowFanoutText + " different wallets during the trace window, such as an exchange hot wallet or a reward or airdrop distributor. The trace stops there, so value reaching it is shown as one amount rather than followed to each recipient. Inferred, not confirmed.",
 	flowUnresolved:       "The trace could not read the receiving wallet's history.",
 }
 
+// flowFanoutText is the wide distributor threshold as the page writes it.
+var flowFanoutText = groupThousands(flowFanoutMaxReceivers)
+
+// groupThousands writes a non-negative count with comma separators.
+func groupThousands(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
 // FlowMethod is the method note served with every result.
-const FlowMethod = "Commission is followed from each withdrawal to the wallet that received it, then through every transfer, delegation, unbonding and IBC send of that wallet, and up to three wallets further. " +
+var FlowMethod = "Commission is followed from each withdrawal to the wallet that received it, then through every transfer, delegation, unbonding and IBC send of that wallet, and up to three wallets further. " +
 	"Each receiving wallet starts from its rebuilt holdings on the day before tracing starts, so coins it already held count as other coins. " +
 	"Mixed coins need a rule: first in first out spends a wallet's oldest coins first, pro-rata spends every origin in proportion. Both are stored; neither is the truth, and the gap between them is the uncertainty. " +
 	"Selling commission is normal: it is taxable income when withdrawn and pays for servers, staff and that tax. The figures describe on-chain movements, not intent, and are never ranked. " +
 	"Exchange labels come only from the label table, each with its source; addresses inferred from deposit-style memos are reported separately as exchange_like. " +
+	"A wallet that sent ATOM to more than " + flowFanoutText + " different wallets during the trace window (an exchange hot wallet or a reward or airdrop distributor, for example) is a wide distributor: the trace stops there, and commission sent to it, or paid out by it when it received the commission, is reported as wide_distributor instead of being split across every recipient. " +
 	"Amounts are in ATOM. USD is the amount times that month's average ATOM price on the days commission was withdrawn, so it is the value when earned, not the sale price. " +
 	"Commission paid in other denoms is listed as untracked."
 

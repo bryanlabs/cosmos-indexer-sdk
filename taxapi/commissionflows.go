@@ -167,6 +167,21 @@ const (
 	flowMemoDigitsCheck = "0123456789"
 )
 
+// Wide distributor rule: a wallet that sent the native coin to more than
+// flowFanoutMaxReceivers distinct wallets over the trace window pays out to a
+// crowd (a reward, payroll or airdrop distributor, or an operator account
+// that shares commission with its delegators). Commission that reaches it is
+// reported as distributed there, not followed pro-rata into every recipient.
+// No wallet in the stored traces sends to more than about 26,000 wallets,
+// and traces that pass through those finish; the operator account that
+// stopped four traces sends to about 380,000. 50,000 stops that account and
+// changes no stored result.
+const (
+	flowFanoutHeuristic    = "heuristic:wide-distributor-50k/v1"
+	flowFanoutMaxReceivers = 50000
+	labelWideDistributor   = "wide_distributor"
+)
+
 var flowMemoShape = regexp.MustCompile(`^[0-9A-Za-z_-]+$`)
 
 func depositMemo(memo string) bool {
