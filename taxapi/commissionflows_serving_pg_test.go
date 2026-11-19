@@ -277,7 +277,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 97)
+	require.Len(t, seen, 100)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -301,7 +301,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 75)
+	require.Len(t, roots, 78)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])
@@ -345,6 +345,9 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-65707e97ab7c-20261118-fanout-v3", roots["65707e97ab7c15f24279c6b0c181bcebddc72e7f8580bad4cbfcf189dbea9d7e"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-09450e35c400-20261118-fanout-v1", roots["09450e35c4006cbfbd842e08cc4791a2cdbab96a88654777cc9a040297d80c9b"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-84ac2be58662-20261118-fanout-v1", roots["84ac2be58662525df11258ecf1a826044fdaeb1f82b0a4e3e85a806f409a3fa0"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-00a65ed900f9-20261118-fanout-v1", roots["00a65ed900f97cecf840ff2051c08e7a1c384fe07f648ce2099f425b9c579fdf"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-728154820784-20261118-fanout-v1", roots["7281548207848f0d0f7de142b10be3830a4be0450cb51603ef323d5fa90d621f"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-f8bad4552c9c-20261118-fanout-v1", roots["f8bad4552c9c01b57663e31de2536595c1a5f36d4f818810c99b7579a0442d34"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-91839f8b6913-20261118-fanout-v2", roots["91839f8b6913340a41e7915e84d50818dcadff35b8a7a04e3b367a4cb098fb3b"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-ff3cb6404c89-20261118-fanout-v1", roots["ff3cb6404c897214795e05fbf454959486d59fce45dec6d3c8b4b22b06eb5dc7"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-cd2bce46a2f4-20261118-fanout-v1", roots["cd2bce46a2f4665cb28de5bd6c35dc1b8ca75ec39b9732721756afa14f4b028f"])
