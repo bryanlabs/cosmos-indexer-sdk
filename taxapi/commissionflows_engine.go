@@ -3,6 +3,7 @@ package taxapi
 import (
 	"container/heap"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -84,7 +85,22 @@ const (
 	flowCatGovDeposit         = string(tax.CategoryGovDeposit)
 	flowCatGovRefund          = string(tax.CategoryGovDepositRefund)
 	flowCatGovBurn            = string(tax.CategoryGovDepositBurn)
+	// flowCatSlash is a validator slash. It burns stake, so it is neither
+	// income nor a sale: the coins it takes end as burned.
+	flowCatSlash = "slash"
 )
+
+// flowSlashDetail is the burned detail of coins a validator slash took.
+const flowSlashDetail = "slash"
+
+// flowSlashSub keys a slash ahead of every other movement in its block, since
+// the chain slashes in begin block.
+const flowSlashSub = math.MinInt
+
+// flowUnbondingPeriod is the Hub's unbonding time. A double-sign slash names
+// no infraction height, so it reaches every unbonding and redelegation entry
+// begun within this long before it, which is the most the chain can take.
+const flowUnbondingPeriod = 21 * 24 * time.Hour
 
 var flowDustAmount = decimal.RequireFromString(flowDust)
 
@@ -124,6 +140,10 @@ type flowEvent struct {
 	Detail       string
 	// Lot names the NFT a reserve auction bid, refund or settlement is for.
 	Lot string
+	// Fraction is the share of the validator's bonded tokens a slash burned,
+	// and DoubleSign says it punished a double sign rather than downtime.
+	Fraction   decimal.Decimal
+	DoubleSign bool
 }
 
 // flowHoldings is a wallet's native coin at the end of a day, in base units.
@@ -171,6 +191,9 @@ type flowLoader interface {
 	// no index read.
 	known(addr string) flowStop
 	ibcDestination(e flowEvent) string
+	// slashes is every validator slash in [start, end), with Validator the
+	// operator and Amount the tokens it burned from the validator.
+	slashes(start, end time.Time) ([]flowEvent, error)
 }
 
 type flowPart struct {
@@ -270,6 +293,41 @@ func (p *flowPool) take(amount decimal.Decimal) (out []flowPart, short decimal.D
 	return out, decimal.Zero
 }
 
+// burn removes fraction of every part, as a slash takes the same share of
+// every coin bonded to the validator whatever the attribution rule.
+func (p *flowPool) burn(fraction decimal.Decimal) []flowPart {
+	if !fraction.IsPositive() {
+		return nil
+	}
+	if fraction.GreaterThanOrEqual(decimal.NewFromInt(1)) {
+		out := p.parts
+		p.parts = nil
+		return out
+	}
+	var out []flowPart
+	kept := p.parts[:0]
+	for _, x := range p.parts {
+		cut := x.Amount.Mul(fraction).Round(flowProRataPrecision)
+		if cut.IsPositive() {
+			out = append(out, flowPart{Origin: x.Origin, Amount: cut})
+		}
+		if rest := x.Amount.Sub(cut); rest.IsPositive() {
+			kept = append(kept, flowPart{Origin: x.Origin, Amount: rest})
+		}
+	}
+	p.parts = kept
+	return out
+}
+
+// burnAmount removes amount, or all the pool holds, spread over every part.
+func (p *flowPool) burnAmount(amount decimal.Decimal) []flowPart {
+	total := p.total()
+	if !total.IsPositive() || !amount.IsPositive() {
+		return nil
+	}
+	return p.burn(decimal.Min(amount, total).DivRound(total, flowProRataPrecision*2))
+}
+
 type flowPools struct {
 	liquid    *flowPool
 	staked    map[string]*flowPool
@@ -322,6 +380,16 @@ type flowWallet struct {
 	OpeningSource CommissionFlowHoldingSource
 	pools         [flowRules]*flowPools
 	Overdraw      [flowRules]decimal.Decimal
+	// entries are the unbondings and redelegations w began, which a later
+	// slash of their source validator can reach.
+	entries []flowEntry
+}
+
+// flowEntry is an unbonding (Dst empty) or a redelegation from Src.
+type flowEntry struct {
+	Key      flowKey
+	Src, Dst string
+	Amount   decimal.Decimal
 }
 
 // FlowFateKey is one line of a validator's result: coins of one commission
@@ -385,6 +453,8 @@ type flowTrace struct {
 	Fates      map[FlowFateKey]decimal.Decimal
 	Commission map[string]decimal.Decimal
 	Unresolved []string
+	// slashList is every validator slash in [From, AsOf).
+	slashList []flowEvent
 }
 
 func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flowTrace {
@@ -397,6 +467,11 @@ func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flow
 
 // run traces from the receiving wallets (hop 0) over [From, AsOf).
 func (t *flowTrace) run(group []string) error {
+	slashes, err := t.load.slashes(t.From, t.AsOf)
+	if err != nil {
+		return err
+	}
+	t.slashList = slashes
 	for _, addr := range group {
 		if err := t.discover(addr, 0, t.From, nil); err != nil {
 			return err
@@ -463,6 +538,7 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 	if err != nil {
 		return err
 	}
+	events = t.withSlashes(events, h, start)
 	t.Wallets[addr] = w
 	t.order = append(t.order, w)
 	t.reportProgress("events_loaded", addr, -1)
@@ -478,6 +554,77 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 	}
 	t.reportProgress("wallet_loaded", addr, -1)
 	return nil
+}
+
+// withSlashes adds to a wallet's events the slashes from start of every
+// validator it could have stake with: those in its opening holdings and those
+// its events name. The opening already reflects earlier slashes.
+func (t *flowTrace) withSlashes(events []flowEvent, h flowHoldings, start time.Time) []flowEvent {
+	if len(t.slashList) == 0 {
+		return events
+	}
+	vals := map[string]bool{}
+	for v := range h.Staked {
+		vals[v] = true
+	}
+	for v := range h.Unbonding {
+		vals[v] = true
+	}
+	for _, e := range events {
+		if e.Validator != "" {
+			vals[e.Validator] = true
+		}
+		if e.SrcValidator != "" {
+			vals[e.SrcValidator] = true
+		}
+	}
+	added := false
+	for _, sl := range t.slashList {
+		if vals[sl.Validator] && !sl.Key.Time.Before(start) {
+			events = append(events, sl)
+			added = true
+		}
+	}
+	if added {
+		sort.SliceStable(events, func(i, j int) bool { return events[i].Key.before(events[j].Key) })
+	}
+	return events
+}
+
+// slash burns e.Fraction of w's delegation to the slashed validator, and of
+// the entries it reaches, as the staking module does: unbondings from that
+// validator and redelegations away from it begun at or after the infraction.
+// A downtime infraction is two blocks before the slash; a double sign reaches
+// back one unbonding period (flowUnbondingPeriod). An entry loses the
+// fraction of its starting amount, capped by what its pool still holds.
+func (t *flowTrace) slash(w *flowWallet, e flowEvent) {
+	t.each(w, func(r int, p *flowPools) {
+		if b, ok := p.staked[e.Validator]; ok {
+			t.record(r, b.burn(e.Fraction), flowBurned, flowSlashDetail)
+		}
+	})
+	for _, en := range w.entries {
+		if en.Src != e.Validator {
+			continue
+		}
+		if e.DoubleSign {
+			if en.Key.Time.Before(e.Key.Time.Add(-flowUnbondingPeriod)) {
+				continue
+			}
+		} else if en.Key.Height < e.Key.Height-2 {
+			continue
+		}
+		loss := en.Amount.Mul(e.Fraction)
+		t.each(w, func(r int, p *flowPools) {
+			pool := p.unbonding[en.Src]
+			if en.Dst != "" {
+				pool = p.staked[en.Dst]
+			}
+			if pool != nil {
+				t.record(r, pool.burnAmount(loss), flowBurned, flowSlashDetail)
+			}
+		})
+	}
 }
 
 func flowMonth(at time.Time) string { return at.UTC().Format(apiMonthLayout) }
@@ -576,11 +723,15 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 		t.each(w, func(r int, p *flowPools) {
 			p.bucket(p.staked, e.Validator, r).add(t.takeFrom(w, r, p.liquid, amt, true))
 		})
+	case flowCatSlash:
+		t.slash(w, e)
 	case flowCatUndelegate:
+		w.entries = append(w.entries, flowEntry{Key: e.Key, Src: e.Validator, Amount: amt})
 		t.each(w, func(r int, p *flowPools) {
 			p.bucket(p.unbonding, e.Validator, r).add(t.takeFrom(w, r, p.bucket(p.staked, e.Validator, r), amt, true))
 		})
 	case flowCatRedelegate:
+		w.entries = append(w.entries, flowEntry{Key: e.Key, Src: e.SrcValidator, Dst: e.Validator, Amount: amt})
 		t.each(w, func(r int, p *flowPools) {
 			p.bucket(p.staked, e.Validator, r).add(t.takeFrom(w, r, p.bucket(p.staked, e.SrcValidator, r), amt, true))
 		})

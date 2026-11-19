@@ -254,9 +254,11 @@ type dbFlowLoader struct {
 	// fanoutLimit overrides flowFanoutMaxReceivers in tests.
 	fanoutLimit int
 	chans       map[string]string
-	private     bool
-	archive     *flowArchive
-	progress    func(commissionFlowProgress)
+	// slashed caches the window's validator slashes, by window.
+	slashed  map[[2]time.Time][]flowEvent
+	private  bool
+	archive  *flowArchive
+	progress func(commissionFlowProgress)
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -1079,7 +1081,8 @@ const (
 
 // flowDriftTolerance is how far, in base units, a traced wallet's simulated
 // holdings may be from the chain's and still count as reconciled. Unclaimed
-// rewards are not in a rebuilt balance, and slashing is not yet an event.
+// rewards are not in a rebuilt balance, and a slash's fraction is derived
+// from the validator's power at the infraction, not its exact tokens.
 var flowDriftTolerance = decimal.NewFromInt(1000000)
 
 func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, validator string, from, asOf time.Time, save func(CommissionFlowRun, []CommissionFlow, CommissionFlowEvidence) error) (CommissionFlowRun, error) {

@@ -26,6 +26,7 @@ type fakeFlowLedger struct {
 	wide     map[string]bool
 	loaded   []string
 	stopped  []string
+	slashed  []flowEvent
 }
 
 func (l *fakeFlowLedger) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -65,6 +66,22 @@ func (l *fakeFlowLedger) distributor(addr string, _, _ time.Time) (flowStop, err
 func (l *fakeFlowLedger) known(addr string) flowStop { return l.stops[addr] }
 
 func (l *fakeFlowLedger) ibcDestination(e flowEvent) string { return flowTestChain }
+
+func (l *fakeFlowLedger) slashes(start, end time.Time) ([]flowEvent, error) {
+	var out []flowEvent
+	for _, e := range l.slashed {
+		if !e.Key.Time.Before(start) && e.Key.Time.Before(end) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// slash adds a downtime slash of validator at k taking fraction of its stake.
+func (l *fakeFlowLedger) slash(k flowKey, validator, fraction string) {
+	k.Sub, k.Message = flowSlashSub, 0
+	l.slashed = append(l.slashed, flowEvent{Key: k, Category: flowCatSlash, Dir: apiOut, Amount: amt(1), Validator: validator, Fraction: decimal.RequireFromString(fraction)})
+}
 
 var flowTestStart = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
