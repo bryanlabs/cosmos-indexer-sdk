@@ -125,6 +125,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowWithdrawFixRoot("accel-withdraw-fix-f54f5e725ac7-20261118-fanout-v1", "f54f5e725ac75b7c1be4fcaee9d2c5ac24fb41b08fb7f8838dca9fb79580ee74"),
 		flowWithdrawFixRoot("accel-withdraw-fix-a3e91bffa7c0-20261118-fanout-v1", "a3e91bffa7c05edeb6836f0d37d7bd8d8ed18788e8dd4af9b806caa5d7b2de71"),
 		flowWithdrawFixRoot("accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v2", "c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"),
+		flowWithdrawFixRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v1", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
 		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "5e6e5429e48f651ba98b03e3791deda86e390d13112e503e902939d08d86aa10"),
 		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "e5ede2045f7c06ec1da4432418d34d7f4f4a2a429d88531a60e0f7eb23a8cd64"),
 		flowGiantRoot("accel-four-s02-20261118-fanout-v2", "fcea1968b7af091e011302f4924bd95858b19dd48001e6cf02fd700e691f5bcb"),
