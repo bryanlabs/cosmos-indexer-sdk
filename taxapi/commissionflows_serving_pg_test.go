@@ -311,7 +311,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowLSMPrefix+"accel-four-s01-20261115-lsm-retry-v1", roots["bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"])
 	require.Equal(t, flowLSMPrefix+"accel-four-s06-20261115-lsm-retry-v1", roots["85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-52836aab8ac6-20261118-fanout-v1", roots["52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"])
-	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-d2d7b3c161a2-20261118-fanout-v1", roots["d2d7b3c161a280621a0b05189e3746f1d785eab94cc4de6096a76a621c80d2b5"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-d2d7b3c161a2-20261118-fanout-v3", roots["d2d7b3c161a280621a0b05189e3746f1d785eab94cc4de6096a76a621c80d2b5"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-001308de5051-20261118-fanout-v3", roots["001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-a5b85d99e09a-20261118-fanout-v1", roots["a5b85d99e09a1b9844bbb4209119b7b1d730b83b37c8e45bae11e21c09428965"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-06d2a6fb6513-20261118-fanout-v1", roots["06d2a6fb65137dc2b6730a227548da0ab3d738cc6bf2a561c68ed9154c293c1b"])
