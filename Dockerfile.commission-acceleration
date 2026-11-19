@@ -7,11 +7,11 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     --mount=type=cache,target=/root/.cache/go-build,id=cosmos-tax-sdk-go-build \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/taxcommissionaccelerate ./taxcommissionaccelerate
-FROM ghcr.io/bryanlabs/cosmos-tax-sdk:commission-page-4bcc1ef-20261119@sha256:3469dc4b785d94c25a974092d6e5dd17faf5c4e4b55bfb3077e7ccad9ccbd033
+FROM ghcr.io/bryanlabs/cosmos-tax-sdk:commission-page-7320ae4-20261119@sha256:9060dd0ac934b1102f3a2b07315543e2eaede471792fd0ee75503e2c048fc053
 COPY --from=build /out/taxcommissionaccelerate /usr/local/bin/taxcommissionaccelerate
 ARG SOURCE_COMMIT
 LABEL org.opencontainers.image.revision=$SOURCE_COMMIT
-LABEL cosmos-tax.native-source="4bcc1ef5a70df2570465f0d457a5587ba32fcd9c"
-LABEL cosmos-tax.native-binary-sha256="5e66d6eaaf4df29ea6d0c3c4efc281a90f82ee158af416eddcd3e5d50428184b"
+LABEL cosmos-tax.native-source="7320ae4cbd73ef47851567ebdda9778739656da7"
+LABEL cosmos-tax.native-binary-sha256="624cfb78c9a3c367921f738f57e1ac193defc173c2727757010e41f5804a1954"
 USER tax
 ENTRYPOINT ["/usr/local/bin/taxcommissionaccelerate"]
