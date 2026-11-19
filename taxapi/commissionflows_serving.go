@@ -139,11 +139,13 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-b6de900ea24b-20261118-fanout-v1", "b6de900ea24b3ed88a9db14daf000adb1a2f52334f946166f6ad096c77c68548"),
 		// A labelled drift row: Hub marketplace bid escrow has no rows yet, and the row it replaces drifted 208,882 ATOM.
 		flowSlashRoot("accel-withdraw-fix-6fb852133855-20261118-fanout-v3", "6fb8521338557f53f633e24360bb5b102079730968e7b81d2f58fbfbb3b54cb0"),
+		// A labelled drift row: its rerun drifts 237 ATOM, and the row it replaces drifted 208,278 ATOM.
+		flowSlashRoot("accel-withdraw-fix-f1afab0130fb-20261118-fanout-v3", "f1afab0130fb05642a485af36968c826238e912292f4616ac0658957fcfb28d1"),
 		flowSlashRoot("accel-withdraw-fix-a3e91bffa7c0-20261118-fanout-v3", "a3e91bffa7c05edeb6836f0d37d7bd8d8ed18788e8dd4af9b806caa5d7b2de71"),
 		flowSlashRoot("accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v3", "c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"),
-		flowWithdrawFixRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v1", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
+		flowSlashRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v3", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
 		flowSlashRoot("accel-withdraw-fix-8df708d2db2f-20261118-fanout-v3", "8df708d2db2f5583431b8f9ce8a6e3ba9ae7840e0f78b38366948a69c0d24716"),
-		flowWithdrawFixRoot("accel-withdraw-fix-1e6691e3985a-20261118-fanout-v1", "1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"),
+		flowSlashRoot("accel-withdraw-fix-1e6691e3985a-20261118-fanout-v3", "1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"),
 		flowWithdrawFixRoot("accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v1", "fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"),
 		flowWithdrawFixRoot("accel-withdraw-fix-7f2f32dfb1d5-20261118-fanout-v1", "7f2f32dfb1d5d391d70b85d967e90ae248d7aa4dd109656f633a893c98febea6"),
 		flowWithdrawFixRoot("accel-withdraw-fix-75f92cb68a7f-20261118-fanout-v1", "75f92cb68a7f639c979be19a1d7ca4b7ce6ad63a2341562f3c966f82c7ab920d"),
