@@ -122,7 +122,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 	apiMainnet: {
 		flowWithdrawFixRoot("accel-withdraw-fix-pilot-20261118-fanout-v1", "c367934baa77ab0ce85a84cbd4ec158dfcfdac3f0df7e6efdbf5d02eaff5938b"),
 		flowSlashRoot("accel-withdraw-fix-52836aab8ac6-20261118-fanout-v3", "52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"),
-		flowWithdrawFixRoot("accel-withdraw-fix-0a11a4c00904-20261118-fanout-v1", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
+		flowSlashRoot("accel-withdraw-fix-0a11a4c00904-20261118-fanout-v3", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
 		flowSlashRoot("accel-withdraw-fix-d2d7b3c161a2-20261118-fanout-v3", "d2d7b3c161a280621a0b05189e3746f1d785eab94cc4de6096a76a621c80d2b5"),
 		flowSlashRoot("accel-withdraw-fix-001308de5051-20261118-fanout-v3", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
 		flowSlashRoot("accel-withdraw-fix-ab12977c1a21-20261118-fanout-v3", "ab12977c1a2135f7aeea69534171ee3c2bec9a03f3650cbf5dff76caefb19345"),
@@ -130,7 +130,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowWithdrawFixRoot("accel-withdraw-fix-06d2a6fb6513-20261118-fanout-v1", "06d2a6fb65137dc2b6730a227548da0ab3d738cc6bf2a561c68ed9154c293c1b"),
 		flowSlashRoot("accel-withdraw-fix-32608eb7f728-20261118-fanout-v3", "32608eb7f7286cab627246cc922e7b874857acf5a5dce90ebff5d5623f184eb2"),
 		flowWithdrawFixRoot("accel-withdraw-fix-6381eb3d4d63-20261118-fanout-v1", "6381eb3d4d63ccfe34abfde32b00c5692b94fb1081ba8628fb55a32d9b822201"),
-		flowWithdrawFixRoot("accel-withdraw-fix-7745d8ffeac6-20261118-fanout-v1", "7745d8ffeac67f746b31f6cbdc249829bb77eb1708c12f798a9dd9bb45ba9ce1"),
+		flowSlashRoot("accel-withdraw-fix-7745d8ffeac6-20261118-fanout-v3", "7745d8ffeac67f746b31f6cbdc249829bb77eb1708c12f798a9dd9bb45ba9ce1"),
 		flowWithdrawFixRoot("accel-withdraw-fix-17fa80ffb90c-20261118-fanout-v1", "17fa80ffb90c55459967e90d18555042a950e8b95b05f19ff2f922da458baa7e"),
 		flowWithdrawFixRoot("accel-withdraw-fix-2453c25e0fd9-20261118-fanout-v1", "2453c25e0fd99d77519b1f1ddc9805b827da1c1df87bc099d511a3626065633a"),
 		flowWithdrawFixRoot("accel-withdraw-fix-f54f5e725ac7-20261118-fanout-v1", "f54f5e725ac75b7c1be4fcaee9d2c5ac24fb41b08fb7f8838dca9fb79580ee74"),
