@@ -127,6 +127,15 @@ func flowClientTraceRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// flowLSMClientTraceRoot is a client-trace rerun of a validator whose served
+// row came from the LSM reward retry, so it keeps that retry's profile and
+// version prefix.
+func flowLSMClientTraceRoot(suffix, root string) commissionServingSource {
+	r := flowLSMRoot(suffix, root)
+	r.Build = flowClientTraceBuild
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
@@ -172,6 +181,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-a3c4f7ccef86-20261118-fanout-v3", "a3c4f7ccef864eaee6395a776fdf14b7c0b755ed21f49e9c89cfda0447dba7a1"),
 		flowSlashRoot("accel-withdraw-fix-65707e97ab7c-20261118-fanout-v3", "65707e97ab7c15f24279c6b0c181bcebddc72e7f8580bad4cbfcf189dbea9d7e"),
 		flowSlashRoot("accel-withdraw-fix-09450e35c400-20261118-fanout-v1", "09450e35c4006cbfbd842e08cc4791a2cdbab96a88654777cc9a040297d80c9b"),
+		flowSlashRoot("accel-withdraw-fix-84ac2be58662-20261118-fanout-v1", "84ac2be58662525df11258ecf1a826044fdaeb1f82b0a4e3e85a806f409a3fa0"),
 		flowSlashRoot("accel-withdraw-fix-91839f8b6913-20261118-fanout-v2", "91839f8b6913340a41e7915e84d50818dcadff35b8a7a04e3b367a4cb098fb3b"),
 		flowSlashRoot("accel-withdraw-fix-ff3cb6404c89-20261118-fanout-v1", "ff3cb6404c897214795e05fbf454959486d59fce45dec6d3c8b4b22b06eb5dc7"),
 		flowSlashRoot("accel-withdraw-fix-cd2bce46a2f4-20261118-fanout-v1", "cd2bce46a2f4665cb28de5bd6c35dc1b8ca75ec39b9732721756afa14f4b028f"),
@@ -223,7 +233,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrectedRoot("accel-later-s03-20261115-deadline-retry-v2", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
 		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v3", "5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v3", "6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"),
-		flowLSMRoot("accel-four-s01-20261115-lsm-retry-v1", "bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"),
+		flowLSMClientTraceRoot("accel-withdraw-fix-bc0089661f77-20261118-fanout-v4", "bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"),
 		flowLSMRoot("accel-four-s06-20261115-lsm-retry-v1", "85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"),
 		flowCorrected("accel-four-s01-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-v1"),
