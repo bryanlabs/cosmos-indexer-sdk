@@ -53,6 +53,8 @@ type Server struct {
 	flowVer     map[string]flowVersionCache
 	// flowVerDenied records that the denied-read notice was logged once.
 	flowVerDenied atomic.Bool
+	// flowPayloadFailed records that the unreadable-payload notice was logged once.
+	flowPayloadFailed atomic.Bool
 
 	statementMaxRows    int64
 	statementTimeout    time.Duration

@@ -1,6 +1,8 @@
 package taxapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -275,7 +277,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 93)
+	require.Len(t, seen, 94)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -285,7 +287,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	roots := map[string]string{}
 	for _, src := range defaultCommissionServingSources[apiMainnet] {
-		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild && src.Build != flowWithdrawFixBuild && src.Build != flowSlashBuild {
+		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild && src.Build != flowWithdrawFixBuild && src.Build != flowSlashBuild && src.Build != flowClientTraceBuild {
 			require.Empty(t, src.Root, src.Version)
 			continue
 		}
@@ -299,7 +301,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 71)
+	require.Len(t, roots, 72)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])
@@ -333,7 +335,8 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v1", roots["fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-7f2f32dfb1d5-20261118-fanout-v3", roots["7f2f32dfb1d5d391d70b85d967e90ae248d7aa4dd109656f633a893c98febea6"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-75f92cb68a7f-20261118-fanout-v3", roots["75f92cb68a7f639c979be19a1d7ca4b7ce6ad63a2341562f3c966f82c7ab920d"])
-	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-f467f62240db-20261118-fanout-v1", roots["f467f62240db0faad0c3394d0f0be34ec1ed8a1310d287c04cd46b648525b571"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-f467f62240db-20261118-fanout-v3", roots["f467f62240db0faad0c3394d0f0be34ec1ed8a1310d287c04cd46b648525b571"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-b970df6089e6-20261118-fanout-v4", roots["b970df6089e634f8cd9c6b5a4fff54656cb34cbb9d0cf568611e963d313dccdb"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-007bd61b16ac-20261118-fanout-v1", roots["007bd61b16ac3792987956d92c01c689478dac00d39979d0e8acb010a07c50b3"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-0da7be31faa8-20261118-fanout-v1", roots["0da7be31faa899b2a6ed0dcfb7fcdec0b2811c102eebbfc106027bab2f54d46c"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-0a69bace753e-20261118-fanout-v1", roots["0a69bace753e236747f228b9b9cd1bf54e7115f8bee6015e666002b4c46c9e84"])
@@ -376,4 +379,120 @@ func TestCommissionServingLSMRetriesBindRewardFreeManifest(t *testing.T) {
 		require.Len(t, src.Root, 64, src.Version)
 	}
 	require.Equal(t, 2, lsm)
+}
+
+// flowServePayloadSchema creates the collector's payload tables and the two
+// views the API is granted, as production has them.
+func flowServePayloadSchema(t *testing.T, s *Server) {
+	t.Helper()
+	for _, sql := range []string{
+		`CREATE TABLE tax_commission_flow_payloads (version text, chain text, validator text, field text, build text NOT NULL, codec text NOT NULL,
+			raw_sha256 text NOT NULL, raw_bytes bigint NOT NULL, encoded_sha256 text NOT NULL, encoded_bytes bigint NOT NULL, chunk_count bigint NOT NULL,
+			chunk_bytes bigint NOT NULL, PRIMARY KEY (version, chain, validator, field))`,
+		`CREATE TABLE tax_commission_flow_payload_chunks (version text, chain text, validator text, field text, ordinal bigint, sha256 text NOT NULL,
+			data bytea NOT NULL, PRIMARY KEY (version, chain, validator, field, ordinal))`,
+		`CREATE VIEW tax_commission_flow_served_payloads WITH (security_barrier) AS SELECT version, chain, validator, field, build, codec, raw_sha256,
+			raw_bytes, encoded_sha256, encoded_bytes, chunk_count, chunk_bytes FROM tax_commission_flow_payloads WHERE field IN ('run', 'rows')`,
+		`CREATE VIEW tax_commission_flow_served_payload_chunks WITH (security_barrier) AS SELECT version, chain, validator, field, ordinal, sha256, data
+			FROM tax_commission_flow_payload_chunks WHERE field IN ('run', 'rows')`,
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+}
+
+// flowServeInsertPayload stores raw as the collector does past its inline
+// limit: gzip bytes in 1 MiB chunks, an index, and returns the marker.
+func flowServeInsertPayload(t *testing.T, s *Server, version, validator, field, raw string, corrupt bool) string {
+	t.Helper()
+	var enc bytes.Buffer
+	zw := gzip.NewWriter(&enc)
+	_, err := zw.Write([]byte(raw))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	rawSum, encSum, chunkSum := sha256.Sum256([]byte(raw)), sha256.Sum256(enc.Bytes()), sha256.Sum256(enc.Bytes())
+	chunkSHA := hex.EncodeToString(chunkSum[:])
+	if corrupt {
+		chunkSHA = strings.Repeat("0", 64)
+	}
+	require.NoError(t, s.db.Exec(`INSERT INTO tax_commission_flow_payloads VALUES (?, ?, ?, ?, ?, 'gzip-json-bytes-v1', ?, ?, ?, ?, 1, 1048576)`,
+		version, apiMainnet, validator, field, flowServeBuild, hex.EncodeToString(rawSum[:]), len(raw), hex.EncodeToString(encSum[:]), enc.Len()).Error)
+	require.NoError(t, s.db.Exec(`INSERT INTO tax_commission_flow_payload_chunks VALUES (?, ?, ?, ?, 0, ?, ?)`,
+		version, apiMainnet, validator, field, chunkSHA, enc.Bytes()).Error)
+	marker, err := json.Marshal("cosmos-commission-payload/v1:" + field + ":" + hex.EncodeToString(rawSum[:]))
+	require.NoError(t, err)
+	return string(marker)
+}
+
+func TestCommissionFlowsServeChunkedPayloadsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	flowServeSchema(t, s)
+	flowServePayloadSchema(t, s)
+	s.flowSources = map[string][]commissionServingSource{apiMainnet: {flowServeSource("shard")}}
+	good, corrupt, missing := flowPGValoper(6), flowPGValoper(7), flowPGValoper(8)
+
+	store := func(validator string, corruptChunk bool, withIndex bool) {
+		run, err := json.Marshal(flowPGRun(validator, flowStatusReconciled, `{"2025-02":"700000"}`))
+		require.NoError(t, err)
+		rows, err := json.Marshal(flowPGRows(validator, [3]string{flowPGFeb, flowExchange, "700000"}))
+		require.NoError(t, err)
+		marker := `"cosmos-commission-payload/v1:rows:abc"`
+		if withIndex {
+			marker = flowServeInsertPayload(t, s, "shard", validator, "rows", string(rows), corruptChunk)
+		}
+		flowServeInsertRaw(t, s, "shard", flowServeBuild, flowServeProfile, validator, string(run), marker)
+	}
+	store(good, false, true)
+	store(corrupt, true, true)
+	store(missing, false, false)
+	// A private evidence payload the API views must never return.
+	flowServeInsertPayload(t, s, "shard", good, "evidence", `{"private":"evidence"}`, false)
+
+	check := func() {
+		s.flowVer = nil
+		served, err := s.servedCommissionFlows(apiMainnet, "")
+		require.NoError(t, err)
+		require.Len(t, served, 1, "only the verified chunked rows are served")
+		require.True(t, served[good].Versioned)
+		require.Len(t, served[good].Rows, len(flowRuleNames))
+		require.Equal(t, "700000", served[good].Rows[0].AmountBase)
+		var got ValidatorCommissionFlows
+		flowPGGet(t, s.handleValidatorCommissionFlows, "/validator-commission-flows?validator="+good, http.StatusOK, &got)
+		require.Equal(t, "0.7", got.Total.Withdrawn.String())
+		flowPGGet(t, s.handleValidatorCommissionFlows, "/validator-commission-flows?validator="+corrupt, http.StatusNotFound, nil)
+	}
+	check()
+
+	// As a role holding only the API's grants: the views, never the payload tables.
+	role := fmt.Sprintf("flow_chunk_api_%d", time.Now().UnixNano())
+	var schema string
+	require.NoError(t, s.db.Raw("SELECT current_schema()").Scan(&schema).Error)
+	for _, sql := range []string{
+		"CREATE ROLE " + role + " NOLOGIN",
+		"GRANT USAGE ON SCHEMA " + schema + " TO " + role,
+		"GRANT SELECT ON ALL TABLES IN SCHEMA " + schema + " TO " + role,
+		"REVOKE SELECT ON tax_commission_flow_versions, tax_commission_flow_payloads, tax_commission_flow_payload_chunks FROM " + role,
+		"GRANT SELECT (version, chain, validator, build, private_profile_sha256, computed_at, run_json, rows_json) ON tax_commission_flow_versions TO " + role,
+		"SET ROLE " + role,
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	t.Cleanup(func() {
+		_ = s.db.Exec("RESET ROLE").Error
+		_ = s.db.Exec("DROP OWNED BY " + role).Error
+		_ = s.db.Exec("DROP ROLE " + role).Error
+	})
+	require.Error(t, s.db.Exec("SELECT data FROM tax_commission_flow_payload_chunks").Error)
+	var evidence int64
+	require.NoError(t, s.db.Raw("SELECT count(*) FROM tax_commission_flow_served_payload_chunks WHERE field = 'evidence'").Scan(&evidence).Error)
+	require.Zero(t, evidence)
+	check()
+
+	// Without the view grants the chunked row is refused and nothing fails.
+	require.NoError(t, s.db.Exec("RESET ROLE").Error)
+	require.NoError(t, s.db.Exec("REVOKE SELECT ON tax_commission_flow_served_payloads, tax_commission_flow_served_payload_chunks FROM "+role).Error)
+	require.NoError(t, s.db.Exec("SET ROLE "+role).Error)
+	s.flowVer = nil
+	served, err := s.servedCommissionFlows(apiMainnet, "")
+	require.NoError(t, err)
+	require.Empty(t, served)
 }

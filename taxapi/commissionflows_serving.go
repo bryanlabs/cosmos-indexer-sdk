@@ -1,11 +1,14 @@
 package taxapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sort"
 	"strings"
@@ -114,6 +117,16 @@ func flowSlashRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// The client-trace reruns run the slash build plus the IBC refund pairing
+// that keeps a Skip Go send's client trace (sdk 7320ae4).
+const flowClientTraceBuild = "sha256:9b1737b7e47ac4e402b583e58d8aa45992d821d34a389c6a98300efd2c0053c7"
+
+func flowClientTraceRoot(suffix, root string) commissionServingSource {
+	r := flowCorrectedRoot(suffix, root)
+	r.Build = flowClientTraceBuild
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
@@ -149,7 +162,9 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowWithdrawFixRoot("accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v1", "fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"),
 		flowSlashRoot("accel-withdraw-fix-7f2f32dfb1d5-20261118-fanout-v3", "7f2f32dfb1d5d391d70b85d967e90ae248d7aa4dd109656f633a893c98febea6"),
 		flowSlashRoot("accel-withdraw-fix-75f92cb68a7f-20261118-fanout-v3", "75f92cb68a7f639c979be19a1d7ca4b7ce6ad63a2341562f3c966f82c7ab920d"),
-		flowWithdrawFixRoot("accel-withdraw-fix-f467f62240db-20261118-fanout-v1", "f467f62240db0faad0c3394d0f0be34ec1ed8a1310d287c04cd46b648525b571"),
+		flowSlashRoot("accel-withdraw-fix-f467f62240db-20261118-fanout-v3", "f467f62240db0faad0c3394d0f0be34ec1ed8a1310d287c04cd46b648525b571"),
+		// Its rows are over the inline limit and served from verified chunks.
+		flowClientTraceRoot("accel-withdraw-fix-b970df6089e6-20261118-fanout-v4", "b970df6089e634f8cd9c6b5a4fff54656cb34cbb9d0cf568611e963d313dccdb"),
 		flowWithdrawFixRoot("accel-withdraw-fix-007bd61b16ac-20261118-fanout-v1", "007bd61b16ac3792987956d92c01c689478dac00d39979d0e8acb010a07c50b3"),
 		flowWithdrawFixRoot("accel-withdraw-fix-0da7be31faa8-20261118-fanout-v1", "0da7be31faa899b2a6ed0dcfb7fcdec0b2811c102eebbfc106027bab2f54d46c"),
 		flowWithdrawFixRoot("accel-withdraw-fix-0a69bace753e-20261118-fanout-v1", "0a69bace753e236747f228b9b9cd1bf54e7115f8bee6015e666002b4c46c9e84"),
@@ -274,7 +289,7 @@ func acceptFlowVersion(src commissionServingSource, row flowVersionRow, chain st
 	if src.Root != "" && flowValidatorRoot(row.Validator) != src.Root {
 		return servedCommissionFlow{}, false
 	}
-	// A field moved to private payload chunks is not readable here.
+	// A chunked field that inlineFlowPayloads could not verify is refused.
 	if isFlowPayloadMarker(row.RunJSON) || isFlowPayloadMarker(row.RowsJSON) {
 		return servedCommissionFlow{}, false
 	}
@@ -312,6 +327,105 @@ func isFlowPayloadMarker(raw string) bool {
 	return json.Unmarshal([]byte(raw), &value) == nil && strings.HasPrefix(value, "cosmos-commission-payload/")
 }
 
+// Run and rows fields over the collector's 1 MiB inline limit are stored as
+// gzip chunks. The API reads them only through these views, which hold the
+// run and rows payloads and never the private evidence payloads.
+const (
+	flowServedPayloadsView = "tax_commission_flow_served_payloads"
+	flowServedChunksView   = "tax_commission_flow_served_payload_chunks"
+	flowPayloadCodec       = "gzip-json-bytes-v1"
+	flowPayloadChunkBytes  = 1 << 20
+	flowPayloadMaxRaw      = 64 << 20
+)
+
+type flowPayloadIndex struct {
+	Build         string
+	Codec         string
+	RawSHA256     string
+	RawBytes      int64
+	EncodedSHA256 string
+	EncodedBytes  int64
+	ChunkCount    int64
+	ChunkBytes    int64
+}
+
+type flowPayloadChunk struct {
+	Ordinal int64
+	SHA256  string
+	Data    []byte
+}
+
+// inlineFlowPayloads replaces a chunked run or rows marker with its verified
+// JSON. A payload that cannot be read or verified keeps its marker, so
+// acceptFlowVersion refuses the row exactly as before.
+func (s *Server) inlineFlowPayloads(row *flowVersionRow) {
+	for field, value := range map[string]*string{"run": &row.RunJSON, "rows": &row.RowsJSON} {
+		if !isFlowPayloadMarker(*value) {
+			continue
+		}
+		raw, err := s.readFlowPayload(*row, field, *value)
+		if err != nil {
+			if s.flowPayloadFailed.CompareAndSwap(false, true) {
+				log.Printf("commission flows: chunked %s payload not served: %v", field, err)
+			}
+			continue
+		}
+		*value = raw
+	}
+}
+
+// readFlowPayload rebuilds one chunked field, checking every ordered chunk,
+// the encoded and raw lengths and hashes, and the marker against its index.
+func (s *Server) readFlowPayload(row flowVersionRow, field, marker string) (string, error) {
+	where := "version = ? AND chain = ? AND validator = ? AND field = ?"
+	var m flowPayloadIndex
+	if err := s.db.Table(flowServedPayloadsView).Select("build, codec, raw_sha256, raw_bytes, encoded_sha256, encoded_bytes, chunk_count, chunk_bytes").
+		Where(where, row.Version, row.Chain, row.Validator, field).Take(&m).Error; err != nil {
+		return "", err
+	}
+	want, _ := json.Marshal("cosmos-commission-payload/v1:" + field + ":" + m.RawSHA256)
+	if m.Build != row.Build || m.Codec != flowPayloadCodec || string(want) != marker || m.ChunkBytes != flowPayloadChunkBytes ||
+		m.RawBytes <= 0 || m.RawBytes > flowPayloadMaxRaw || m.EncodedBytes <= 0 || m.EncodedBytes > flowPayloadMaxRaw ||
+		m.ChunkCount != (m.EncodedBytes-1)/m.ChunkBytes+1 {
+		return "", fmt.Errorf("payload index does not match its row")
+	}
+	var chunks []flowPayloadChunk
+	if err := s.db.Table(flowServedChunksView).Select("ordinal, sha256, data").
+		Where(where, row.Version, row.Chain, row.Validator, field).Order("ordinal ASC").Scan(&chunks).Error; err != nil {
+		return "", err
+	}
+	if int64(len(chunks)) != m.ChunkCount {
+		return "", fmt.Errorf("payload has %d of %d chunks", len(chunks), m.ChunkCount)
+	}
+	encoded := make([]byte, 0, m.EncodedBytes)
+	for i, c := range chunks {
+		sum := sha256.Sum256(c.Data)
+		last := int64(i) == m.ChunkCount-1
+		if c.Ordinal != int64(i) || len(c.Data) == 0 || int64(len(c.Data)) > m.ChunkBytes || (!last && int64(len(c.Data)) != m.ChunkBytes) || hex.EncodeToString(sum[:]) != c.SHA256 {
+			return "", fmt.Errorf("payload chunk %d out of order or corrupt", i)
+		}
+		encoded = append(encoded, c.Data...)
+	}
+	sum := sha256.Sum256(encoded)
+	if int64(len(encoded)) != m.EncodedBytes || hex.EncodeToString(sum[:]) != m.EncodedSHA256 {
+		return "", fmt.Errorf("payload encoded length or hash mismatch")
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(encoded))
+	if err != nil {
+		return "", err
+	}
+	zr.Multistream(false)
+	raw, err := io.ReadAll(io.LimitReader(zr, m.RawBytes+1))
+	if err != nil {
+		return "", err
+	}
+	sum = sha256.Sum256(raw)
+	if int64(len(raw)) != m.RawBytes || hex.EncodeToString(sum[:]) != m.RawSHA256 || !json.Valid(raw) {
+		return "", fmt.Errorf("payload raw length or hash mismatch")
+	}
+	return string(raw), nil
+}
+
 // acceptedFlowVersions returns, per validator, the accepted versioned result
 // from the highest-priority collection. validator limits the read to one.
 func (s *Server) acceptedFlowVersions(chain, validator string) (map[string]servedCommissionFlow, error) {
@@ -347,6 +461,9 @@ func (s *Server) acceptedFlowVersions(chain, validator string) (map[string]serve
 	var rows []flowVersionRow
 	if err := q.Scan(&rows).Error; err != nil {
 		return s.flowVersionsUnreadable(out, err)
+	}
+	for i := range rows {
+		s.inlineFlowPayloads(&rows[i])
 	}
 	// The cached set is stamped with what was actually read, so a row
 	// inserted between the two reads only causes one more read next time.
