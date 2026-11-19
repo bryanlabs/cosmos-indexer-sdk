@@ -78,8 +78,8 @@ func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificatio
 	return out
 }
 
-// Delegated governance votes, reward-address changes, validator unjails and
-// grant management move no coins. They are skipped only when the inner
+// Delegated governance votes, reward-address changes, validator unjails,
+// consumer-chain opt-ins and grant management move no coins. They are skipped only when the inner
 // message's own events confirm that.
 var authzNoTaxEffect = map[string]bool{
 	"/cosmos.gov.v1beta1.MsgVote":                        true,
@@ -88,6 +88,7 @@ var authzNoTaxEffect = map[string]bool{
 	"/cosmos.gov.v1.MsgVoteWeighted":                     true,
 	"/cosmos.distribution.v1beta1.MsgSetWithdrawAddress": true,
 	"/cosmos.slashing.v1beta1.MsgUnjail":                 true,
+	"/interchain_security.ccv.provider.v1.MsgOptIn":      true,
 	"/cosmos.authz.v1beta1.MsgGrant":                     true,
 	"/cosmos.authz.v1beta1.MsgRevoke":                    true,
 	"/cosmos.feegrant.v1beta1.MsgGrantAllowance":         true,
