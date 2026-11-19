@@ -275,7 +275,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 71)
+	require.Len(t, seen, 74)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -299,7 +299,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 50)
+	require.Len(t, roots, 53)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v2", roots["2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"])
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s05-20261115-deadline-retry-v3", roots["5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"])
@@ -326,6 +326,9 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-8df708d2db2f-20261118-fanout-v1", roots["8df708d2db2f5583431b8f9ce8a6e3ba9ae7840e0f78b38366948a69c0d24716"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-1e6691e3985a-20261118-fanout-v1", roots["1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v1", roots["fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-7f2f32dfb1d5-20261118-fanout-v1", roots["7f2f32dfb1d5d391d70b85d967e90ae248d7aa4dd109656f633a893c98febea6"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-75f92cb68a7f-20261118-fanout-v1", roots["75f92cb68a7f639c979be19a1d7ca4b7ce6ad63a2341562f3c966f82c7ab920d"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-f467f62240db-20261118-fanout-v1", roots["f467f62240db0faad0c3394d0f0be34ec1ed8a1310d287c04cd46b648525b571"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v2", roots["c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"])
 }
 
