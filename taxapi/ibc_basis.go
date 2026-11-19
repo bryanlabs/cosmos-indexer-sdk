@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
+	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
+	channeltypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
 const (
@@ -50,6 +53,17 @@ func ibcRefundDenom(denom string) string {
 	trace := transfertypes.ParseDenomTrace(denom)
 	if trace.Path != "" && trace.Validate() == nil {
 		return trace.IBCDenom()
+	}
+	// ParseDenomTrace reads only channel-N hops, so a trace through an IBC v2
+	// client (transfer/08-wasm-1369/0x...) comes back unparsed. Its voucher is
+	// still the hash of the complete trace.
+	parts := strings.Split(denom, "/")
+	hops := 0
+	for hops*2+2 < len(parts) && parts[hops*2] != "" && (channeltypes.IsValidChannelID(parts[hops*2+1]) || clienttypes.IsValidClientID(parts[hops*2+1])) {
+		hops++
+	}
+	if hops > 0 && parts[len(parts)-1] != "" {
+		return fmt.Sprintf("%s/%X", transfertypes.DenomPrefix, sha256.Sum256([]byte(denom)))
 	}
 	return denom
 }
