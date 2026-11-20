@@ -17,6 +17,8 @@ import (
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
+const actionTokenize = "tokenize"
+
 const (
 	withdrawTo      = "cosmos1withdrawaddrxxxxxxxxxxxxxxxxxxxxxxx"
 	withdrawToOther = "cosmos1withdrawotherxxxxxxxxxxxxxxxxxxxxxx"
@@ -100,7 +102,7 @@ func TestWithdrawAddressEveryRewardTrigger(t *testing.T) {
 			[]txlog.LogMessageEvent{ev("cancel_unbonding_delegation", [2]string{attributeValidator, val}, milliAtom)},
 		},
 		{
-			"tokenize", &MsgTokenizeShares{DelegatorAddress: del, ValidatorAddress: val},
+			actionTokenize, &MsgTokenizeShares{DelegatorAddress: del, ValidatorAddress: val},
 			[]txlog.LogMessageEvent{ev("tokenize_shares", [2]string{attributeDelegator, del}, [2]string{attributeValidator, val}, milliAtom, [2]string{"share_record_id", "7"})},
 		},
 	} {
@@ -372,7 +374,7 @@ func TestLegacyLSMWrappersShareStateOnlyForMoves(t *testing.T) {
 	tokenize := MsgTokenizeShares{DelegatorAddress: del, ValidatorAddress: val}
 	redeem := legacyRedeem(t, val)
 	for name, tc := range map[string]struct{ wrapped, inner sdk.Msg }{
-		"tokenize":            {&LegacyMsgTokenizeShares{tokenize}, &tokenize},
+		actionTokenize:        {&LegacyMsgTokenizeShares{tokenize}, &tokenize},
 		"redeem":              {redeem, &redeem.MsgRedeemTokensForShares},
 		"transfer record":     {&LegacyMsgTransferTokenizeShareRecord{MsgTransferTokenizeShareRecord{TokenizeShareRecordID: 7, Sender: del, NewOwner: otherDelegator}}, &MsgTransferTokenizeShareRecord{TokenizeShareRecordID: 7, Sender: del, NewOwner: otherDelegator}},
 		"withdraw record":     {&LegacyMsgWithdrawTokenizeShareRecordReward{MsgWithdrawTokenizeShareRecordReward{OwnerAddress: del, RecordID: 7}}, &MsgWithdrawTokenizeShareRecordReward{OwnerAddress: del, RecordID: 7}},
@@ -420,5 +422,5 @@ func TestLegacyLSMWrappersShareStateOnlyForMoves(t *testing.T) {
 	if got := withoutWithdrawAddress(out); len(got) != len(own) || summary(got) != summary(own) {
 		t.Fatalf("exec rows %+v, tokenize alone %+v", got, own)
 	}
-	assertMovedLast(t, out, []TaxableEvent{moved(del, withdrawTo, "500", fixtureNativeDenom, "tokenize")})
+	assertMovedLast(t, out, []TaxableEvent{moved(del, withdrawTo, "500", fixtureNativeDenom, actionTokenize)})
 }
