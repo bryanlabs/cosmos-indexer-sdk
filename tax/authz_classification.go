@@ -40,6 +40,12 @@ type classificationState struct {
 	// refused names, per delegator with rewards, why no transfer was booked
 	// for its rewards: the payments in the message do not say where they went.
 	refused []string
+	// unsplitAuthz is set inside a MsgExec whose log has no
+	// authz_msg_index. Its contract messages get no supplement rows, since
+	// the repair cannot split that log without the transaction body.
+	unsplitAuthz bool
+	// authz counts the MsgExec levels the message being classified is in.
+	authz int
 }
 
 func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificationState, depth int, path string) []TaxableEvent {
@@ -48,6 +54,11 @@ func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificatio
 		return nil
 	}
 	var out []TaxableEvent
+	if log != nil && len(log.Events) != 0 && !authzIndexed(log) {
+		state.unsplitAuthz = true
+	}
+	state.authz++
+	defer func() { state.authz-- }()
 	subs, err := authzSubLogs(m, log)
 	if err != nil {
 		state.issues = append(state.issues, fmt.Sprintf("authz %s: %v", path, err))

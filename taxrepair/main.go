@@ -137,6 +137,28 @@ func (b *backupWriter) verify() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// defaultSupplementBoundary is the message after the cutoff the wasm
+// supplement plan was taken at. The rollout passes the first message the
+// new indexer image wrote.
+const defaultSupplementBoundary = 138666819
+
+// replayUpper is the inclusive upper message ID of a replay: the one asked
+// for, or the message before the boundary. Messages from the boundary on
+// were written by an indexer that has the supplement, so a replay that
+// reached them would write its rows a second time.
+func replayUpper(to, boundary uint) (uint, error) {
+	if boundary == 0 {
+		return 0, fmt.Errorf("--supplement-boundary is required")
+	}
+	if to == 0 {
+		return boundary - 1, nil
+	}
+	if to >= boundary {
+		return 0, fmt.Errorf("--to-message-id %d reaches the supplement boundary %d", to, boundary)
+	}
+	return to, nil
+}
+
 func main() { os.Exit(run()) }
 
 func run() int {
@@ -151,7 +173,8 @@ func run() int {
 	addresses := flag.String("addresses", "", "optional comma-separated wallets")
 	batch := flag.Int("batch", 500, "bounded messages per batch")
 	from := flag.Uint("from-message-id", 0, "exclusive lower message ID for resume")
-	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
+	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default the message before --supplement-boundary)")
+	boundary := flag.Uint("supplement-boundary", defaultSupplementBoundary, "first message ID an indexer with the wasm supplement wrote; no replay reaches it")
 	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
 	kinds := flag.String("message-types", "", "optional comma-separated message type URLs; replay only messages of those types")
 	idsFile := flag.String("message-ids-file", "", "optional file of message ids, one per line; replay only those messages")
@@ -199,11 +222,9 @@ func run() int {
 	if err != nil {
 		fatal(err.Error())
 	}
-	maxID := *to
-	if maxID == 0 {
-		if err := db.Table("messages").Select("COALESCE(max(id),0)").Scan(&maxID).Error; err != nil {
-			fatal(err.Error())
-		}
+	maxID, err := replayUpper(*to, *boundary)
+	if err != nil {
+		fatal(err.Error())
 	}
 	if maxID < *from {
 		fatal("upper message ID precedes lower ID")

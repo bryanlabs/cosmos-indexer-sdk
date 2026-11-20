@@ -1,0 +1,144 @@
+{
+ "message_id": 163774,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "31852083",
+ "hash": "74B99527F6E848B55B5840D26BA2A5D9B675B5EE2FE3562D6934E417923859EC",
+ "timestamp": "2026-07-02T20:35:02Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1z7a5z0d3mxl3a9q58l8pfg5fdedtdvng865mx2"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1z7a5z0d3mxl3a9q58l8pfg5fdedtdvng865mx2"
+    },
+    {
+     "key": "amount",
+     "value": "1043941ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua"
+    },
+    {
+     "key": "amount",
+     "value": "1043941ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1z7a5z0d3mxl3a9q58l8pfg5fdedtdvng865mx2"
+    },
+    {
+     "key": "amount",
+     "value": "1043941ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua"
+    },
+    {
+     "key": "action",
+     "value": "place_limit"
+    },
+    {
+     "key": "order_id",
+     "value": "48"
+    },
+    {
+     "key": "side",
+     "value": "buy"
+    },
+    {
+     "key": "price",
+     "value": "2082676512967"
+    },
+    {
+     "key": "qty",
+     "value": "500000"
+    },
+    {
+     "key": "fills",
+     "value": "0"
+    },
+    {
+     "key": "matched_base",
+     "value": "0"
+    },
+    {
+     "key": "matched_quote",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}
