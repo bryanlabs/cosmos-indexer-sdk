@@ -205,8 +205,8 @@ func (s *Server) fanoutReceivers(addr string, start, end time.Time, limit int) (
 SELECT count(*) FROM (
 	SELECT DISTINCT to_addr FROM taxable_events
 	WHERE from_addr = ? AND category || '' = ? AND denom = ? AND to_addr <> '' AND to_addr <> ?
-		AND timestamp >= ? AND timestamp < ?
-	LIMIT ?) receivers`, addr, apiTransfer, s.native.Denom, addr, start, end, limit+1).Scan(&n).Error
+		AND timestamp >= ? AND timestamp < ? AND coalesce(reward_trigger, '') <> ?
+	LIMIT ?) receivers`, addr, apiTransfer, s.native.Denom, addr, start, end, tax.TriggerWithdrawAddress, limit+1).Scan(&n).Error
 	return n, err
 }
 
@@ -221,8 +221,8 @@ func (s *Server) memoDepositSenders(addr string) (int, error) {
 SELECT te.from_addr, t.memo FROM taxable_events te
 JOIN messages m ON m.id = te.message_id
 JOIN txes t ON t.id = m.tx_id
-WHERE te.to_addr = ? AND te.category IN ('transfer', 'ibc_in') AND t.memo <> ''
-LIMIT ?`, addr, flowMemoSample).Scan(&rows).Error; err != nil {
+WHERE te.to_addr = ? AND te.category IN ('transfer', 'ibc_in') AND t.memo <> '' AND coalesce(te.reward_trigger, '') <> ?
+LIMIT ?`, addr, tax.TriggerWithdrawAddress, flowMemoSample).Scan(&rows).Error; err != nil {
 		return 0, err
 	}
 	senders := map[string]bool{}
@@ -356,6 +356,7 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 		return nil, err
 	}
 	rows := input.Wallets[0]
+	rows.Events = withoutWithdrawAddressMoves(rows.Events)
 	credited, err := s.flowReturnCredits(addr, rows.Events)
 	if err != nil {
 		return nil, err
@@ -376,9 +377,31 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 	return out, nil
 }
 
+// isWithdrawAddressMove reports the parser's transfer of a delegator's
+// reward to the withdraw address the chain paid it to. The trace already
+// takes reward coins from what the distribution module actually paid each
+// wallet (flowRewardPayouts), so these rows would count the same coins
+// again, and they are left out of every flow read.
+func isWithdrawAddressMove(e tax.TaxableEvent) bool {
+	return e.RewardTrigger == tax.TriggerWithdrawAddress && e.Category == apiTransfer
+}
+
+func withoutWithdrawAddressMoves(events []tax.TaxableEvent) []tax.TaxableEvent {
+	out := make([]tax.TaxableEvent, 0, len(events))
+	for _, e := range events {
+		if !isWithdrawAddressMove(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func commissionFlowEventsFromRows(rows walletRows, addr, native string, credited map[flowCredit]bool) []flowEvent {
 	out := make([]flowEvent, 0, len(rows.Events)+len(rows.Fees)+len(rows.CommissionCorrections))
 	for _, e := range rows.Events {
+		if isWithdrawAddressMove(e) {
+			continue
+		}
 		if flowSingleHopNative(e, native) && !credited[flowCredit{e.MessageID, e.Amount + native}] {
 			continue
 		}

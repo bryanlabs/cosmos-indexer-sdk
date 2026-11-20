@@ -138,6 +138,9 @@ func (b *backupWriter) verify() (string, error) {
 func main() { os.Exit(run()) }
 
 func run() int {
+	if len(os.Args) > 1 && os.Args[1] == "withdraw-address-plan" {
+		return runWithdrawAddressPlan(os.Args[2:])
+	}
 	apply := flag.Bool("apply", false, "write repaired rows (requires --backup)")
 	path := flag.String("backup", "", "new JSONL backup file, never overwritten")
 	addresses := flag.String("addresses", "", "optional comma-separated wallets")

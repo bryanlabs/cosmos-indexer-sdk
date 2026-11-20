@@ -422,7 +422,9 @@ type commissionCorrectionEvent struct {
 func correctionEventsSHA(events []tax.TaxableEvent, hash string, message uint) string {
 	selected := make([]commissionCorrectionEvent, 0)
 	for _, e := range events {
-		if e.TxHash != hash || (message != 0 && e.MessageID != message) {
+		// The withdraw-address moves came after the profiles were recorded
+		// and change no flow, so they stay out of the fingerprint.
+		if e.TxHash != hash || (message != 0 && e.MessageID != message) || isWithdrawAddressMove(e) {
 			continue
 		}
 		selected = append(selected, commissionCorrectionEvent{e.MessageID, e.SubIndex, e.Category, e.Amount, e.Denom, e.FromAddr, e.ToAddr, e.ValidatorAddress, e.RewardTrigger, e.Detail, e.BlockHeight, e.Timestamp.UTC(), e.TxHash})

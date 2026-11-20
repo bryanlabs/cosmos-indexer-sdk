@@ -34,6 +34,9 @@ type classificationState struct {
 	// late holds rows that go after every other row of the top-level
 	// message.
 	late []TaxableEvent
+	// paid holds the delegator-to-withdraw-address transfers, which go after
+	// late.
+	paid []TaxableEvent
 }
 
 func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificationState, depth int, path string) []TaxableEvent {
