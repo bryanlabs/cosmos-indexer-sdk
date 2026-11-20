@@ -255,7 +255,9 @@ type dbFlowLoader struct {
 	fanoutLimit int
 	chans       map[string]string
 	// slashed caches the window's validator slashes, by window.
-	slashed  map[[2]time.Time][]flowEvent
+	slashed map[[2]time.Time][]flowEvent
+	// bonds caches the chain's self-bonds, by operator account.
+	bonds    map[string][]flowEvent
 	private  bool
 	archive  *flowArchive
 	progress func(commissionFlowProgress)
@@ -335,7 +337,15 @@ func flowHistoricalHoldings(b HistoricalBalance, denom string, strict bool) (flo
 }
 
 func (l *dbFlowLoader) events(addr string, start, end time.Time) ([]flowEvent, error) {
-	return l.s.flowEvents(l.chain, addr, start, end)
+	out, err := l.s.flowEvents(l.chain, addr, start, end)
+	if err != nil {
+		return nil, err
+	}
+	bonds, err := l.selfBonds()
+	if err != nil {
+		return nil, err
+	}
+	return withSelfBonds(out, bonds[addr], start, end), nil
 }
 
 // flowEvents is addr's native coin movements in [start,end), as the report
