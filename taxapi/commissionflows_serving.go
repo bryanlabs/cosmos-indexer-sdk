@@ -66,9 +66,10 @@ func flowCorrectedRoot(suffix, root string) commissionServingSource {
 // manifest without the six tokenize-share rewards, after hub4 heights
 // 31944427 and 31944434 were re-indexed to store those rewards themselves.
 // Their stored profile binds that manifest, so build, profile and version
-// prefix all differ from the corrected shards.
+// prefix all differ from the corrected shards. The served retry runs the
+// all-fixes native source (cb34569) against the same manifest.
 const (
-	flowLSMBuild   = "sha256:b7075f6a5b020616d7ad4b6b8f1275e6a699f10a30ff148dde7e800e4e0e56b8"
+	flowLSMBuild   = "sha256:60c188558503b4804a058708134873390291649b95dda5c79ac62f3d2b883de4"
 	flowLSMProfile = "dc197eef1ed664d2f53b2453a3355ac97cd052f827b2bf117cd180db25dbba68"
 	flowLSMPrefix  = "ops818-page82a-profile53da2904e3a6-sources40d696172138-"
 )
@@ -446,7 +447,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v3", "5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v3", "6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"),
 		flowLSMClientTraceRoot("accel-withdraw-fix-bc0089661f77-20261118-fanout-v4", "bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"),
-		flowLSMRoot("accel-four-s06-20261115-lsm-retry-v1", "85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"),
+		flowLSMRoot("accel-four-s06-20261115-lsm-retry-v9", "85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"),
 		flowCorrected("accel-four-s01-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-v1"),
 		flowCorrected("accel-four-s03-20261115-v1"),
