@@ -650,3 +650,27 @@ func TestLiquidityPoolProvideToOtherReceiver(t *testing.T) {
 		t.Fatalf("provide to receiver: %s", summary(rows))
 	}
 }
+
+// An ask that matched a bid when it was set books its listing fee only on
+// an exact forward; a forward of another amount writes no fee row, and the
+// bid's escrow pays the sale either way.
+func TestSetAskMatchListingFeeExactForward(t *testing.T) {
+	msg, log := fixtureWith(t, "wasm-set-ask-match-collection-bid", func(*txlog.LogMessage) {})
+	if got := triggers(parseFixtureMsg(t, msg, log)); !strings.Contains(got, "expense:listing_fee:1000") || !strings.Contains(got, "protocol_withdrawal:bid_filled:4000000") {
+		t.Fatalf("set-ask-match: %s", got)
+	}
+	msg, log = fixtureWith(t, "wasm-set-ask-match-collection-bid", func(l *txlog.LogMessage) {
+		seen := 0
+		for i, e := range l.Events {
+			if e.Type == string(CategoryTransfer) {
+				if seen++; seen == 2 {
+					setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, string(CategoryTransfer), attributeAmount, "999uatom")
+				}
+			}
+		}
+	})
+	got := triggers(parseFixtureMsg(t, msg, log))
+	if strings.Contains(got, triggerListingFee) || !strings.Contains(got, "protocol_withdrawal:bid_filled:4000000") {
+		t.Fatalf("forward differs: %s", got)
+	}
+}

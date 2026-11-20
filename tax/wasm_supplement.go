@@ -23,9 +23,10 @@ const (
 )
 
 const (
-	triggerBidFilled = "bid_filled"
-	detailFallback   = "fallback"
-	fallbackBank     = "bank"
+	triggerBidFilled  = "bid_filled"
+	saleCollectionBid = "collection_bid"
+	detailFallback    = "fallback"
+	fallbackBank      = "bank"
 )
 
 // Stargaze marketplace bid events. A bid escrows the bidder's coins in the
@@ -62,6 +63,7 @@ func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known [
 	out = append(out, marketplaceBidEvents(log, sender, known)...)
 	out = append(out, askSaleEvents(log, known)...)
 	out = append(out, askListingFeeEvents(log, sender, known)...)
+	out = append(out, matchListingFeeEvents(log, sender, known)...)
 	out = append(out, tldRegistrationEvents(log, sender, known)...)
 	out = append(out, forwardedDenomFeeEvents(log, sender, known)...)
 	out = append(out, streamswapEvents(log, sender, known)...)
@@ -245,7 +247,7 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, sender string, known [
 		before, after := eventLegs(items, i)
 		sale := "bid"
 		if strings.Contains(it.event, attrCollection) {
-			sale = "collection_bid"
+			sale = saleCollectionBid
 		}
 		detail := func(id string, extra ...string) string {
 			m := map[string]string{"bid_id": id, attrCollection: it.attrs[attrCollection], attrTokenID: it.attrs[attrTokenID], "sale": sale}
@@ -280,11 +282,17 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, sender string, known [
 				}
 			}
 		case eventFinalizeSale:
+			// A sale paid from a bid's escrow: the seller accepted the bid,
+			// or set or updated an ask that matched it at once.
 			id, s := it.attrs["bid"], "bid"
 			switch it.attrs["marketplace_action"] {
 			case "accept-bid":
 			case "accept-collection-bid":
-				id, s = it.attrs["collection_bid"], "collection_bid"
+				id, s = it.attrs[saleCollectionBid], saleCollectionBid
+			case "set-ask-match", "update-ask":
+				if it.attrs[saleCollectionBid] != "" {
+					id, s = it.attrs[saleCollectionBid], saleCollectionBid
+				}
 			default:
 				continue
 			}
@@ -365,6 +373,56 @@ func askSaleEvents(log *indexerTxTypes.LogMessage, known []TaxableEvent) []Taxab
 		})
 	}
 	return out
+}
+
+// matchListingFeeEvents books the listing fee of an ask that matched a bid
+// as soon as it was set: the signer, who is the seller the sale names, pays
+// the marketplace one coin before the sale, and the marketplace's first
+// payout forwards exactly that coin to another address. The sale itself is
+// paid from the bid's escrow, so no other coin leaves the signer.
+func matchListingFeeEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
+	if sender == "" {
+		return nil
+	}
+	var sale map[string]string
+	for _, ev := range log.Events {
+		switch ev.Type {
+		case eventSetAsk:
+			return nil
+		case eventFinalizeSale:
+			if sale != nil {
+				return nil
+			}
+			sale = attrMap(ev)
+		}
+	}
+	if sale == nil || sale["marketplace_action"] != "set-ask-match" || sale["seller_recipient"] != sender {
+		return nil
+	}
+	contract := sale[attributeContractAddress]
+	legs := transfersIn(log)
+	// The sale's own nft_sale row names the seller and the sale coin; any
+	// other known row naming them already accounts for the coin.
+	var others []TaxableEvent
+	for _, e := range known {
+		if e.Category != string(CategoryNFTSale) {
+			others = append(others, e)
+		}
+	}
+	if contract == "" || len(legs) < 2 || legs[0].from != sender || legs[0].to != contract || len(legs[0].coins) != 1 ||
+		!legs[0].coins.IsAllPositive() || namesAny(others, sender, legs[0].coins) {
+		return nil
+	}
+	for _, l := range legs[1:] {
+		if l.from == sender {
+			return nil
+		}
+	}
+	fwd := legs[1]
+	if fwd.from != contract || fwd.to == sender || fwd.to == contract || !coinsEqual(legs[0].coins, fwd.coins) {
+		return nil
+	}
+	return coinRows(CategoryExpense, legs[0].coins, sender, fwd.to, triggerListingFee, contractDetail(contract, map[string]string{"ask_id": sale["ask"]}))
 }
 
 // askListingFeeEvents books the fee a marketplace charges to list an NFT:
