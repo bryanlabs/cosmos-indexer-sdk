@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,10 +68,13 @@ func seedWaMessage(t *testing.T, db *gorm.DB, id uint, recipient string) {
 func waLoadScratch(t *testing.T) *gorm.DB {
 	t.Helper()
 	db := scratch(t)
-	// Unique names as in production, and ids that are not production's.
+	// Unique names and the event indexes as in production, and ids that are
+	// not production's.
 	for _, q := range []string{
 		"CREATE UNIQUE INDEX ON message_event_types(type)",
 		"CREATE UNIQUE INDEX ON message_event_attribute_keys(key)",
+		`CREATE UNIQUE INDEX "messageEventIndex" ON message_events(message_id, index)`,
+		`CREATE UNIQUE INDEX "messageAttributeIndex" ON message_event_attributes(message_event_id, index)`,
 		"INSERT INTO message_event_types(type) VALUES ('coin_spent'), ('coin_received'), ('burn')",
 		"INSERT INTO message_event_attribute_keys(key) VALUES ('spender'), ('receiver'), ('memo'), ('fee')",
 	} {
@@ -154,6 +158,22 @@ func TestWithdrawAddressLoadIntegration(t *testing.T) {
 		return nil
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without the event index the check plans a sequential scan on
+	// message_events, and the guard refuses it.
+	errGuard := errors.New("rolled back")
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`DROP INDEX "messageEventIndex"`).Error; err != nil {
+			return err
+		}
+		if _, err := explainWaPart(tx, parts[0], ids); err == nil || !strings.Contains(err.Error(), "Seq Scan on message_events") {
+			t.Fatalf("explain guard without the index: %v", err)
+		}
+		return errGuard
+	})
+	if !errors.Is(err, errGuard) {
 		t.Fatal(err)
 	}
 

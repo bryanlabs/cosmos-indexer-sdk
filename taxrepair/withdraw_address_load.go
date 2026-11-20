@@ -220,7 +220,7 @@ UNION ALL SELECT 'key', key, id FROM message_event_attribute_keys WHERE key IN (
 
 // waPlanRecords is the part's plan as a jsonb recordset; the check, insert
 // and post check all read it.
-const waPlanRecords = `jsonb_to_recordset(@plan::jsonb) AS p(message_id bigint, sub_index bigint, category text, amount text, denom text,
+const waPlanRecords = `jsonb_to_recordset(CAST(@plan AS jsonb)) AS p(message_id bigint, sub_index bigint, category text, amount text, denom text,
  asset text, from_addr text, to_addr text, block_height bigint, "timestamp" timestamptz, tx_hash text, validator_address text,
  reward_trigger text, detail text, class text, stored_rows bigint, stored_finger text)`
 
