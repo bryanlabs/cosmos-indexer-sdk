@@ -229,7 +229,12 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-b03cdf1c7313-20261118-fanout-v1", "b03cdf1c7313b261dcf5e40862ed7ff148b7654aa5d8bb244d21e8d1beef365b"),
 		flowClientTraceRoot("accel-withdraw-fix-8837e708a0bd-20261118-fanout-v1", "8837e708a0bd1c91f7d7267df9de922b07b297a01abd041f07d5b6ce797858ae"),
 		flowClientTraceRoot("accel-withdraw-fix-e448dfbf05be-20261118-fanout-v4", "e448dfbf05be26541b5fa7bcea3d85dcac6e5356759d89dadf4f9bd3c8b182d1"),
+		// 4643e858df25 drifts 15.7 ATOM more than its old row, inside tolerance,
+		// with overdraw down 282 ATOM and the slash burn and IBC refunds added.
 		flowClientTraceRoot("accel-withdraw-fix-4643e858df25-20261118-fanout-v1", "4643e858df25fd68d90a19ca3eb4f2a0a9c8c6cb604f2e5c92c284d5af480d62"),
+		flowClientTraceRoot("accel-withdraw-fix-2d473f4858d9-20261118-fanout-v4", "2d473f4858d9987775254ce4bff8939f812bfefeb04eb1e6f0a5ebde72969fd8"),
+		flowClientTraceRoot("accel-withdraw-fix-021b3d76a3a7-20261118-fanout-v1", "021b3d76a3a7b812b345102cb2856b74e57e6b5dae2ddd2eb53df30f8e550b0d"),
+		flowClientTraceRoot("accel-withdraw-fix-928644401359-20261118-fanout-v1", "9286444013590806985c200f2860b383a1aea12df40a1d155a8b2be7a75da37f"),
 		flowSlashRoot("accel-withdraw-fix-9514e5e20dd8-20261118-fanout-v1", "9514e5e20dd865faef28bb1ea76698d30acfbe03b81e365a1b55a25114e707a4"),
 		flowSlashRoot("accel-withdraw-fix-a106a4ef7b92-20261118-fanout-v1", "a106a4ef7b922fd9efd0d754bd7b354e997a647e814d2eabed9f920aa520af23"),
 		flowSlashRoot("accel-withdraw-fix-d29d6d635b9c-20261118-fanout-v1", "d29d6d635b9c4007dc01785d3a40e37966692f11206b4988c45b8dd07ab50589"),
