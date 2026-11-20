@@ -1,0 +1,1 @@
+nft_transfer|||cosmos13zd3gzvjnq3gqkxe5w9plhyc7txahnr5t5gmdfzpdjevk989neyqmve8u9/17|cosmos1agn6f0dsw22zda0kvrpadlspkrudmdluq25t4y|cosmos1mjfkfegaywg6xsqr87uytsld9l7kaldj7sf7q593jdch8cascm6scnswx0|||{"contract":"cosmos13zd3gzvjnq3gqkxe5w9plhyc7txahnr5t5gmdfzpdjevk989neyqmve8u9","escrow":"raffle"}
