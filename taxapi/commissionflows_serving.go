@@ -348,6 +348,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSelfBondRoot("accel-withdraw-fix-413d90f184e9-20261118-fanout-v5", "413d90f184e958cc95e72638cf4d3920c765132a8bb473a2d7deed096685bc80"),
 		// Zero-commission root: the served row has no commission either; its 6.81 ATOM drift came from an nft_sale credited at the gross price, which this build fixes.
 		flowSelfBondRoot("accel-withdraw-fix-c926dfa85984-20261118-fanout-v5", "c926dfa85984a9d27733ce7d6a60004a24b3a6855a2a93d837b8e87a453d4a7d"),
+		flowSelfBondRoot("accel-withdraw-fix-31c3561573d9-20261118-fanout-v1", "31c3561573d9829e2f337f69a707c40c5f936176352c5c6a7ebfe191ff96c185"),
 		flowSlashRoot("accel-withdraw-fix-1af3d755b507-20261118-fanout-v1", "1af3d755b5076aaae9cc46334b7f319e4d67159c92b8b46472f3bf4f3c00643d"),
 		flowSlashRoot("accel-withdraw-fix-67c999d116ef-20261118-fanout-v1", "67c999d116efad9e0f4bb723dbfccc9361424d5fb291f1385850b7a73885caeb"),
 		flowSlashRoot("accel-withdraw-fix-a1cccb7ecdaa-20261118-fanout-v1", "a1cccb7ecdaaa393785ca8490635b8275f67b90166d3f2711c8dfba60d576d15"),
