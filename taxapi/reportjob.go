@@ -191,7 +191,10 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 		s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{apiStatus: ReportJobFailed, apiError: err.Error()})
 		return
 	}
-	all = ApplyTags(all, tags)
+	if all, err = s.applyTags(all, tags); err != nil {
+		s.failReportJob(key, err)
+		return
+	}
 	var buf strings.Builder
 	if err := WritePreviewCSV(&buf, format, all); err != nil {
 		s.db.Model(&ReportJob{}).Where(apiKey, key).

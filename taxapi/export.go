@@ -64,6 +64,13 @@ type Row struct {
 	// block events). A withdraw-address move takes the lots its reward in
 	// that message booked.
 	MessageID uint `json:"-"`
+	// SubIndex is the row's index within its message and MessageIndex the
+	// message's index within the transaction. With TxHash they key a row
+	// tag. MessageIndex is loaded only with the report's tags
+	// (loadMessageIndexes); hasMessageIndex says it was.
+	SubIndex        int `json:"-"`
+	MessageIndex    int `json:"-"`
+	hasMessageIndex bool
 }
 
 // isRewardMove reports whether the row moves a reward the chain paid to the

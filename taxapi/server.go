@@ -79,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	mux.HandleFunc("GET /catalog", s.handleCatalog)
 	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
+	mux.HandleFunc("GET /tags/migrate", s.handleTagMigrate)
 	mux.HandleFunc("GET /journal", s.withPeriodCoverage(s.handleJournal))
 	mux.HandleFunc("GET /positions", s.withPeriodCoverage(s.handlePositions))
 	mux.HandleFunc("GET /validator-statement", s.withPeriodCoverage(s.handleValidatorStatement))
@@ -479,6 +480,7 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		row.RewardTrigger = e.RewardTrigger
 		row.Detail = e.Detail
 		row.MessageID = e.MessageID
+		row.SubIndex = e.SubIndex
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
 		out = append(out, row)
 	}
