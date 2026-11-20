@@ -252,6 +252,18 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		// 91442d368a45 drifts 57.8 ATOM more than its old row, inside tolerance,
 		// with wallets 15 to 488, overdraw down 8892 ATOM and the slash burn added.
 		flowClientTraceRoot("accel-withdraw-fix-91442d368a45-20261118-fanout-v1", "91442d368a45f15d2e40ce0b0a990d388e45a8fb46490d28877d52f5260af21c"),
+		flowClientTraceRoot("accel-withdraw-fix-f7e8484fc529-20261118-fanout-v1", "f7e8484fc5297478aa1f1746f02448ceff54d07dab8341ec4dde189ee4044b26"),
+		// 3c4cbfc796a3 has overdraw down 5000 ATOM, and 4567 ATOM moves from
+		// ibc_out to exchange_like after the withdraw-address fix.
+		flowClientTraceRoot("accel-withdraw-fix-3c4cbfc796a3-20261118-fanout-v1", "3c4cbfc796a3df578d91831a756af2097d9c3d09e2f26695df1f483eff8c87d0"),
+		// 3e8353a25770 drifts 0.23 ATOM more than its old row, inside tolerance,
+		// with shares unchanged; served for the corrected build.
+		flowClientTraceRoot("accel-withdraw-fix-3e8353a25770-20261118-fanout-v1", "3e8353a2577021f282d5233fa3ad024dd98f6e12d14e038e9d50f3daca85eca1"),
+		flowClientTraceRoot("accel-withdraw-fix-c094ace10c53-20261118-fanout-v1", "c094ace10c53d5e89062832b81b99265a5b884024b90f47fae9bfd05611f7901"),
+		// a54eb3d66496 drifts 0.54 and overdraws 6.4 ATOM more than its old row,
+		// inside tolerance on 220,610 ATOM, with shares unchanged; served for the
+		// corrected build.
+		flowClientTraceRoot("accel-withdraw-fix-a54eb3d66496-20261118-fanout-v1", "a54eb3d66496370f607e64ffb3b1ff1ea939901a626300de624373ab8b18c9b9"),
 		flowSlashRoot("accel-withdraw-fix-9514e5e20dd8-20261118-fanout-v1", "9514e5e20dd865faef28bb1ea76698d30acfbe03b81e365a1b55a25114e707a4"),
 		flowSlashRoot("accel-withdraw-fix-a106a4ef7b92-20261118-fanout-v1", "a106a4ef7b922fd9efd0d754bd7b354e997a647e814d2eabed9f920aa520af23"),
 		flowSlashRoot("accel-withdraw-fix-d29d6d635b9c-20261118-fanout-v1", "d29d6d635b9c4007dc01785d3a40e37966692f11206b4988c45b8dd07ab50589"),
