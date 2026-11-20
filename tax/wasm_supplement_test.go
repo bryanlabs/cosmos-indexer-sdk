@@ -656,8 +656,14 @@ func TestLiquidityPoolProvideToOtherReceiver(t *testing.T) {
 // bid's escrow pays the sale either way.
 func TestSetAskMatchListingFeeExactForward(t *testing.T) {
 	msg, log := fixtureWith(t, "wasm-set-ask-match-collection-bid", func(*txlog.LogMessage) {})
-	if got := triggers(parseFixtureMsg(t, msg, log)); !strings.Contains(got, "expense:listing_fee:1000") || !strings.Contains(got, "protocol_withdrawal:bid_filled:4000000") {
+	rows := parseFixtureMsg(t, msg, log)
+	if got := triggers(rows); !strings.Contains(got, "expense:listing_fee:1000") || !strings.Contains(got, "protocol_withdrawal:bid_filled:4000000") {
 		t.Fatalf("set-ask-match: %s", got)
+	}
+	for _, r := range rows {
+		if r.RewardTrigger == triggerBidFilled && strings.Contains(r.Detail, "payouts") {
+			t.Fatalf("the listing fee forward counted as a payout: %s", r.Detail)
+		}
 	}
 	msg, log = fixtureWith(t, "wasm-set-ask-match-collection-bid", func(l *txlog.LogMessage) {
 		seen := 0

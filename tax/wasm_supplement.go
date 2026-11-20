@@ -308,6 +308,15 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, sender string, known [
 					paid = paid.Add(leg.coins.AmountOf(denom))
 				}
 			}
+			// The forward of a matched ask's listing fee is the seller's
+			// expense, not a payout of the sale.
+			for _, fee := range matchListingFeeEvents(log, sender, known) {
+				if fee.Denom == denom {
+					if amt, ok := sdkmath.NewIntFromString(fee.Amount); ok {
+						paid = paid.Sub(amt)
+					}
+				}
+			}
 			d := detail(id)
 			if !paid.Equal(price) {
 				d = detail(id, "payouts", paid.String()+denom)
