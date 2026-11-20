@@ -373,8 +373,8 @@ func TestRepairReplayKeepsWithdrawAddressMoves(t *testing.T) {
 }
 
 // An authz Exec stored without bytes plans as no_body; with hash-checked
-// archive bytes it plans exactly when the parser reproduces its stored rows,
-// and is counted as recovered.
+// archive bytes it is classed from the parser's rows like any message, and
+// counted as recovered.
 func TestWithdrawAddressPlanRecoveredBodies(t *testing.T) {
 	db := waLoadScratch(t)
 	seedWaMessage(t, db, 50, waLoadWithdraw)

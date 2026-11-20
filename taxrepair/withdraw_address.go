@@ -284,8 +284,9 @@ CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(max(te.sub_index), -1) AS max
 }
 
 // planWithdrawAddressBatch plans one batch. bodies, when given, supplies
-// MsgExec bytes for messages stored without any; such a message is planned
-// only when the parser reproduces every row already stored for it.
+// MsgExec bytes for messages stored without any; such a message is classed
+// like any other (planned only when the parser reproduces its booked
+// rewards) and also counted as recovered.
 func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []uint, bodies map[uint][]byte) ([]waPlanRow, map[string]int, error) {
 	msgs, logs, stored, fingers, err := waLoad(db, ids)
 	if err != nil {
