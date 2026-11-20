@@ -298,6 +298,12 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowClientTraceRoot("accel-withdraw-fix-e1d7823dd0ed-20261118-fanout-v1", "e1d7823dd0eda9921631776af4458732e0b07b3aa3717e15610016f9fcb2f79f"),
 		flowClientTraceRoot("accel-withdraw-fix-9a1fedaa6b14-20261118-fanout-v1", "9a1fedaa6b144abab91593ac4ef48c4d435a6fa8b1370a1cb3a54f900406f3bc"),
 		flowClientTraceRoot("accel-withdraw-fix-830507242368-20261118-fanout-v1", "8305072423682cbd2812b2013f4088c5f69f0f1b8d18729fb6228b5b94befea3"),
+		flowSlashRoot("accel-withdraw-fix-1af3d755b507-20261118-fanout-v1", "1af3d755b5076aaae9cc46334b7f319e4d67159c92b8b46472f3bf4f3c00643d"),
+		flowSlashRoot("accel-withdraw-fix-67c999d116ef-20261118-fanout-v1", "67c999d116efad9e0f4bb723dbfccc9361424d5fb291f1385850b7a73885caeb"),
+		flowSlashRoot("accel-withdraw-fix-a1cccb7ecdaa-20261118-fanout-v1", "a1cccb7ecdaaa393785ca8490635b8275f67b90166d3f2711c8dfba60d576d15"),
+		// Frozen root served on its slash-build rerun; the old row overdrew 5.53 ATOM, and removing it moves about 3.9 ATOM from fees to restaked_own (10.97 pct class share).
+		flowSlashRoot("accel-withdraw-fix-b81cd9164582-20261118-fanout-v1", "b81cd916458286253f8db74313138b16cbbda05880c8e9e28e338a4935013498"),
+		flowSlashRoot("accel-withdraw-fix-b8a48e7e45e3-20261118-fanout-v1", "b8a48e7e45e3770ea9538325f8882b10746fee7a512e69b68fadc72c62f2dd5b"),
 		flowSlashRoot("accel-withdraw-fix-9514e5e20dd8-20261118-fanout-v1", "9514e5e20dd865faef28bb1ea76698d30acfbe03b81e365a1b55a25114e707a4"),
 		flowSlashRoot("accel-withdraw-fix-a106a4ef7b92-20261118-fanout-v1", "a106a4ef7b922fd9efd0d754bd7b354e997a647e814d2eabed9f920aa520af23"),
 		flowSlashRoot("accel-withdraw-fix-d29d6d635b9c-20261118-fanout-v1", "d29d6d635b9c4007dc01785d3a40e37966692f11206b4988c45b8dd07ab50589"),
