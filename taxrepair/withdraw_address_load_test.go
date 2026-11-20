@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -11,13 +10,14 @@ import (
 	"time"
 
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
-	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
-	"github.com/cosmos/cosmos-sdk/x/authz"
-	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"gorm.io/gorm"
 )
 
 const (
+	sqlSeedBlock    = "INSERT INTO blocks VALUES(?,?,?)"
+	sqlSeedTx       = "INSERT INTO txes VALUES(?,?,?,0)"
+	attrMsgIndex    = "msg_index"
 	waLoadDelegator = "cosmos1loaddelegatorxxxxxxxxxxxxxxxxxxxxxxxxxx"
 	waLoadWithdraw  = "cosmos1loadwithdrawxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 )
@@ -32,8 +32,8 @@ func seedWaMessage(t *testing.T, db *gorm.DB, id uint, recipient string) {
 		sql  string
 		args []any
 	}{
-		{"INSERT INTO blocks VALUES(?,?,?)", []any{id, 24000000 + id, stamp}},
-		{"INSERT INTO txes VALUES(?,?,?,0)", []any{id, id, "HASH" + string(rune('A'+id%26))}},
+		{sqlSeedBlock, []any{id, 24000000 + id, stamp}},
+		{sqlSeedTx, []any{id, id, "HASH" + string(rune('A'+id%26))}},
 		{"INSERT INTO message_types VALUES(?,?) ON CONFLICT DO NOTHING", []any{1, waClaimURL}},
 		{"INSERT INTO messages VALUES(?,?,1,0,NULL)", []any{id, id}},
 		{
@@ -50,6 +50,12 @@ func seedWaMessage(t *testing.T, db *gorm.DB, id uint, recipient string) {
 		waEvent("transfer", "recipient", recipient, "sender", waDistribution, "amount", "627uatom"),
 		waEvent("withdraw_rewards", "amount", "627uatom", "validator", waValidator, "delegator", waLoadDelegator),
 	}
+	seedWaEvents(t, db, id, log)
+}
+
+// seedWaEvents stores a message's event log with its event types and keys.
+func seedWaEvents(t *testing.T, db *gorm.DB, id uint, log []txlog.LogMessageEvent) {
+	t.Helper()
 	for i, e := range log {
 		var typeID, eventID uint
 		if err := db.Raw("INSERT INTO message_event_types(type) VALUES(?) ON CONFLICT (type) DO UPDATE SET type = excluded.type RETURNING id", e.Type).Scan(&typeID).Error; err != nil {
@@ -289,7 +295,7 @@ func TestWithdrawAddressLoadRefusals(t *testing.T) {
 
 // A load waits on the same messages row lock taxrepair's applyPlans takes,
 // and gives up at its lock timeout instead of interleaving.
-func TestWithdrawAddressLoadTakesTheRepairLock(t *testing.T) {
+func TestWithdrawAddressLoadWaitsOnMessageRowLocks(t *testing.T) {
 	db := waLoadScratch(t)
 	seedWaMessage(t, db, 30, waLoadWithdraw)
 	path := writeWaPlan(t, db, []uint{30})
@@ -305,7 +311,7 @@ func TestWithdrawAddressLoadTakesTheRepairLock(t *testing.T) {
 	}
 	start := time.Now()
 	if _, _, err := loadWaPart(db, parts[0], true); err == nil || !strings.Contains(err.Error(), "lock timeout") {
-		t.Fatalf("load under a held repair lock: %v", err)
+		t.Fatalf("load under messages rows held FOR UPDATE: %v", err)
 	}
 	if time.Since(start) < 9*time.Second {
 		t.Fatal("load did not wait for the lock")
@@ -351,7 +357,7 @@ func TestRepairReplayKeepsWithdrawAddressMoves(t *testing.T) {
 		t.Fatalf("%d plans", len(plans))
 	}
 	for _, p := range plans {
-		if len(p.Expected) != 2 || p.Expected[1].RewardTrigger != "withdraw_address" || p.Expected[1].ToAddr != waLoadWithdraw || p.Expected[1].SubIndex != 1 {
+		if len(p.Expected) != 2 || p.Expected[1].RewardTrigger != tax.TriggerWithdrawAddress || p.Expected[1].ToAddr != waLoadWithdraw || p.Expected[1].SubIndex != 1 {
 			t.Fatalf("message %d replays to %+v", p.MessageID, p.Expected)
 		}
 	}
@@ -372,63 +378,98 @@ func TestRepairReplayKeepsWithdrawAddressMoves(t *testing.T) {
 	}
 }
 
-// An authz Exec stored without bytes plans as no_body; with hash-checked
-// archive bytes it is classed from the parser's rows like any message, and
-// counted as recovered.
+// An authz Exec stored without bytes plans as no_body. With its archive
+// transaction it is classed from the parser's rows like any message, and
+// counted as recovered, but only when that transaction hashes to the stored
+// tx hash and holds a MsgExec at the stored message index; any other body is
+// refused and the message stays no_body.
 func TestWithdrawAddressPlanRecoveredBodies(t *testing.T) {
-	db := waLoadScratch(t)
-	seedWaMessage(t, db, 50, waLoadWithdraw)
-	seedWaMessage(t, db, 51, waLoadWithdraw)
-	if err := db.Exec("INSERT INTO message_types VALUES(2, ?)", typeURLAuthzExec).Error; err != nil {
-		t.Fatal(err)
+	db := mbScratch(t)
+	raws := map[uint][]byte{}
+	for _, id := range []uint{50, 51, 52, 53} {
+		raws[id], _ = seedMbMessage(t, db, id)
 	}
-	if err := db.Exec("UPDATE messages SET message_type_id = 2 WHERE id IN (50, 51)").Error; err != nil {
-		t.Fatal(err)
+	// 51's archive Exec claims for another delegator, so its stored reward
+	// row is not reproduced and nothing is planned for it.
+	raws[51], _ = mbTx(t, waLoadWithdraw)
+	other, _ := mbTx(t, waValidator)
+	for _, q := range []string{
+		"UPDATE txes SET hash = '" + mbHash(raws[51]) + "' WHERE id = 51",
+		"UPDATE txes SET hash = '" + mbHash(other) + "' WHERE id = 52",
+		"UPDATE messages SET message_index = 0 WHERE id = 53",
+	} {
+		if err := db.Exec(q).Error; err != nil {
+			t.Fatal(err)
+		}
 	}
 	codec, err := repairCodec()
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec := func(delegator string) []byte {
-		inner, err := codectypes.NewAnyWithValue(&disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: delegator, ValidatorAddress: waValidator})
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := (&authz.MsgExec{Grantee: waLoadWithdraw, Msgs: []*codectypes.Any{inner}}).Marshal()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-	_, counts, err := planWithdrawAddressBatch(db, codec, []uint{50, 51}, nil)
-	if err != nil || counts[waNoBody] != 2 {
+	ids := []uint{50, 51, 52, 53}
+	_, counts, err := planWithdrawAddressBatch(db, codec, ids, nil)
+	if err != nil || counts[waNoBody] != 4 {
 		t.Fatalf("without bodies %v %v", counts, err)
 	}
-	// 51's body names another delegator, so its stored reward row is not
-	// reproduced and nothing is planned for it.
-	bodies := map[uint][]byte{50: exec(waLoadDelegator), 51: exec(waLoadWithdraw)}
-	plans, counts, err := planWithdrawAddressBatch(db, codec, []uint{50, 51}, bodies)
+	bodies, err := readWaBodies(writeMbPlan(t, raws))
+	if err != nil || len(bodies) != 4 {
+		t.Fatalf("read bodies %d %v", len(bodies), err)
+	}
+	plans, counts, err := planWithdrawAddressBatch(db, codec, ids, bodies)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts[waExact] != 1 || counts[waRecoveredBody+"_"+waExact] != 1 || counts[waRecoveredBody+"_"+waNoBody] != 0 ||
+	if counts[waExact] != 1 || counts[waRecoveredBody+"_"+waExact] != 1 || counts[waNoBody] != 2 ||
+		counts[waRecoveredBody+"_refused_hash"] != 1 || counts[waRecoveredBody+"_refused_index"] != 1 ||
 		len(plans) != 1 || plans[0].MessageID != 50 || plans[0].SubIndex != 1 || plans[0].FromAddr != waLoadDelegator || plans[0].ToAddr != waLoadWithdraw {
 		t.Fatalf("with bodies %v %+v", counts, plans)
 	}
+	// A body is never taken from an id-to-bytes list: the old two-column
+	// form, and an archive line whose tx bytes do not hash to its own hash
+	// column, are refused when read.
 	path := filepath.Join(t.TempDir(), "bodies.tsv")
-	if err := os.WriteFile(path, []byte("50\t"+hex.EncodeToString(bodies[50])+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	read, err := readWaBodies(path)
-	if err != nil || !bytes.Equal(read[50], bodies[50]) || len(read) != 1 {
-		t.Fatalf("read %v", err)
-	}
-	for _, bad := range []string{"50\tzz\n", "x\t00\n", "50\t00\n50\t00\n"} {
+	for _, bad := range []string{
+		"50\t" + hex.EncodeToString(raws[50]) + "\n",
+		"50\t1\t" + mbHash(other) + "\t" + hex.EncodeToString(raws[50]) + "\n",
+	} {
 		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := readWaBodies(path); err == nil {
-			t.Fatalf("accepted %q", bad)
+			t.Fatalf("accepted %q", bad[:8])
 		}
+	}
+}
+
+// The planner names each refused message by id and reason, with no address,
+// so the refusals can be listed for handling by hand.
+func TestWithdrawAddressPlanNamesRefusedMessages(t *testing.T) {
+	db := waLoadScratch(t)
+	seedWaMessage(t, db, 95, waLoadWithdraw)
+	seedWaMessage(t, db, 96, waLoadWithdraw)
+	for _, q := range []string{
+		"DELETE FROM message_event_attributes WHERE message_event_id IN (SELECT id FROM message_events WHERE message_id = 96)",
+		"DELETE FROM message_events WHERE message_id = 96",
+	} {
+		if err := db.Exec(q).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedWaEvents(t, db, 96, []txlog.LogMessageEvent{
+		waEvent("message", "action", waClaimURL, "sender", waLoadDelegator, "module", "distribution"),
+		waEvent("transfer", "recipient", waLoadDelegator, "sender", waDistribution, "amount", "300uatom"),
+		waEvent("transfer", "recipient", waLoadWithdraw, "sender", waDistribution, "amount", "327uatom"),
+		waEvent("withdraw_rewards", "amount", "627uatom", "validator", waValidator, "delegator", waLoadDelegator),
+	})
+	codec, err := repairCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, counts, refused, err := planWaBatch(db, codec, []uint{95, 96}, nil)
+	if err != nil || counts[waExact] != 1 || counts[waRefusedSelf] != 1 || len(refused) != 1 {
+		t.Fatalf("%v %v %v", counts, refused, err)
+	}
+	if r := refused[96]; !strings.Contains(r, ","+waRefusedSelf) || strings.Contains(r, "cosmos1") {
+		t.Fatalf("message 96 refused as %q", r)
 	}
 }
