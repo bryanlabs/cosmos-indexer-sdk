@@ -54,15 +54,15 @@ func assertMovedLast(t *testing.T, out []TaxableEvent, want []TaxableEvent) {
 	t.Helper()
 	n := len(out) - len(want)
 	if n < 0 {
-		t.Fatalf("%d rows, want %d moves: %+v", len(out), len(want), out)
+		t.Fatalf("%d rows, want %d moves: %s", len(out), len(want), hashedRows(out))
 	}
 	for i, e := range out[:n] {
 		if e.RewardTrigger == TriggerWithdrawAddress {
-			t.Fatalf("move at %d before other rows: %+v", i, out)
+			t.Fatalf("move at %d before other rows: %s", i, hashedRows(out))
 		}
 	}
 	if !reflect.DeepEqual(out[n:], want) {
-		t.Fatalf("moves %+v, want %+v", out[n:], want)
+		t.Fatalf("moves %s, want %s", hashedRows(out[n:]), hashedRows(want))
 	}
 }
 

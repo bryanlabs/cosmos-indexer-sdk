@@ -289,3 +289,60 @@ func TestWithdrawAddressLoadTakesTheRepairLock(t *testing.T) {
 		t.Fatalf("%d rows written under a held lock", n)
 	}
 }
+
+// On the combined tree, the repair that replays messages (the wasm repair's
+// applyPlans) writes the moves itself: a message it replays keeps a move the
+// loader put there, and one without gets it, so the loader then has nothing
+// left to add.
+func TestRepairReplayKeepsWithdrawAddressMoves(t *testing.T) {
+	db := waLoadScratch(t)
+	for _, id := range []uint{40, 41} {
+		seedWaMessage(t, db, id, waLoadWithdraw)
+	}
+	_, parts, err := readWithdrawAddressPlan(writeWaPlan(t, db, []uint{41}), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, n, err := loadWaPart(db, parts[0], true); err != nil || n != 1 {
+		t.Fatalf("load: %d %v", n, err)
+	}
+	// Give 41's reward row a stale detail so the replay rewrites it.
+	if err := db.Exec("UPDATE taxable_events SET detail = '{\"stale\":true}' WHERE message_id = 41 AND sub_index = 0").Error; err != nil {
+		t.Fatal(err)
+	}
+	codec, err := repairCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := load(db, 0, 100, 100, nil)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("load rows %d %v", len(rows), err)
+	}
+	plans, _, err := planBatch(db, codec, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("%d plans", len(plans))
+	}
+	for _, p := range plans {
+		if len(p.Expected) != 2 || p.Expected[1].RewardTrigger != "withdraw_address" || p.Expected[1].ToAddr != waLoadWithdraw || p.Expected[1].SubIndex != 1 {
+			t.Fatalf("message %d replays to %+v", p.MessageID, p.Expected)
+		}
+	}
+	if err := applyPlans(db, plans); err != nil {
+		t.Fatal(err)
+	}
+	if n := waRowCount(t, db, "reward_trigger = 'withdraw_address' AND sub_index = 1 AND amount = '627' AND to_addr = '"+waLoadWithdraw+"'"); n != 2 {
+		t.Fatalf("%d moves after the replay", n)
+	}
+	if n := waRowCount(t, db, "detail = '{\"stale\":true}'"); n != 0 {
+		t.Fatal("replay left the stale row")
+	}
+	// The planner now finds both messages already moved, exactly as the
+	// parser books them, and plans nothing.
+	planned, counts, err := planWithdrawAddressBatch(db, codec, []uint{40, 41})
+	if err != nil || len(planned) != 0 || counts[waAlreadyExact] != 2 {
+		t.Fatalf("plan after the replay: %d rows %v %v", len(planned), counts, err)
+	}
+}

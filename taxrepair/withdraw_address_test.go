@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,5 +147,41 @@ func TestWithdrawAddressPlanLineEscapes(t *testing.T) {
 	want := "1\t2\ttransfer\t\t\t\t\t\t0\t1970-01-01T00:00:00Z\t\t\t\ta\\tb\\\\c\\nd\texact\t\t2\tf\t7\n"
 	if got != want {
 		t.Fatalf("line %q", got)
+	}
+}
+
+// The loader reads back exactly what the planner wrote, keeps each message
+// whole in one part, and hashes the bytes it loads.
+func TestWithdrawAddressPlanPartsRoundTrip(t *testing.T) {
+	stamp := time.Date(2025, 3, 1, 12, 0, 0, 123000000, time.UTC)
+	var b strings.Builder
+	for _, id := range []uint{9, 3, 3, 5} {
+		b.WriteString(waPlanLine(waPlanRow{TaxableEvent: tax.TaxableEvent{
+			MessageID: id, SubIndex: 1, Category: string(tax.CategoryTransfer), Amount: "627", Denom: waDenom, FromAddr: waDelegator, ToAddr: waWithdraw,
+			BlockHeight: 24000000, Timestamp: stamp, TxHash: "HASH", RewardTrigger: tax.TriggerWithdrawAddress,
+			Detail: "{\"protocol\":\"distribution\",\"reward_trigger\":\"claim\"}\ttab\\slash",
+		}, Class: waExact, Trigger: waClaim, StoredRows: 1, StoredFinger: "f", MessageTypeID: 2}))
+	}
+	path := filepath.Join(t.TempDir(), "plan.tsv")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum, parts, err := readWithdrawAddressPlan(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := sha256.Sum256([]byte(b.String()))
+	if sum != hex.EncodeToString(whole[:]) || len(parts) != 2 || parts[0].First != 3 || parts[0].Last != 5 || len(parts[0].Rows) != 3 || parts[1].First != 9 {
+		t.Fatalf("sum %s parts %+v", sum, parts)
+	}
+	r := parts[0].Rows[0]
+	if r.Detail != "{\"protocol\":\"distribution\",\"reward_trigger\":\"claim\"}\ttab\\slash" || !r.Timestamp.Equal(stamp) || r.StoredRows != 1 || r.Class != waExact {
+		t.Fatalf("row %+v", r)
+	}
+	if got := waMessageIDs(parts[0].Rows); len(got) != 2 || got[0] != 3 || got[1] != 5 {
+		t.Fatalf("ids %v", got)
+	}
+	if kept := waWithoutMoved(parts[0].Rows, "3"); len(kept) != 1 || kept[0].MessageID != 5 {
+		t.Fatalf("kept %+v", kept)
 	}
 }
