@@ -21,9 +21,11 @@ import (
 
 // The withdraw-address plan is loaded insert-only, in parts of whole
 // messages by message id, each part in its own transaction. A part locks its
-// messages rows in id order exactly as applyPlans does, so a taxrepair run
-// (which deletes and reinserts a message's rows) and a load of the same
-// message never interleave; the advisory lock keeps two loads apart.
+// messages rows FOR UPDATE in id order exactly as applyPlans does, and that
+// row lock is what keeps a taxrepair run (which deletes and reinserts a
+// message's rows) and a load of the same message from interleaving.
+// applyPlans does not take the advisory lock; waLoadLockKey only keeps two
+// loader runs (this one and message-bodies-load) apart.
 //
 // Every part is checked inside Postgres against the message's own stored
 // data before anything is written: the message still holds exactly the rows

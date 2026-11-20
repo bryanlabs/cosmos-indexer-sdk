@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -75,6 +74,7 @@ type waMessage struct {
 	MessageTypeID uint
 	Type          string
 	MessageBytes  []byte
+	MessageIndex  int
 	Code          int64
 	Height        int64
 	Stamp         time.Time
@@ -93,7 +93,8 @@ func runWithdrawAddressPlan(args []string) int {
 	idsFile := fs.String("message-ids-file", "", "file of target message ids, one per line")
 	out := fs.String("out", "", "new plan file (TSV), never overwritten")
 	batch := fs.Int("batch", 200, "messages per read batch")
-	bodiesFile := fs.String("bodies", "", "optional TSV of message id and hex MsgExec bytes recovered from hash-checked archive txs, used only where no bytes are stored")
+	refusedFile := fs.String("refused-out", "", "optional new file listing each refused message as message id and reason, with no addresses")
+	bodiesFile := fs.String("bodies", "", "optional archive file of message id, message index, tx hash and hex tx bytes (the message-bodies-load plan); a body is used only where no bytes are stored and the tx hashes to the stored hash with a MsgExec at the stored index")
 	_ = fs.Parse(args)
 	if *idsFile == "" || *out == "" || *batch < 1 || *batch > 2000 {
 		fatal("withdraw-address-plan needs --message-ids-file, --out and a batch of 1 to 2000")
@@ -102,7 +103,7 @@ func runWithdrawAddressPlan(args []string) int {
 	if err != nil {
 		fatal(err.Error())
 	}
-	var bodies map[uint][]byte
+	var bodies map[uint]mbRow
 	if *bodiesFile != "" {
 		if bodies, err = readWaBodies(*bodiesFile); err != nil {
 			fatal(err.Error())
@@ -133,12 +134,28 @@ func runWithdrawAddressPlan(args []string) int {
 		fatal(err.Error())
 	}
 	w := bufio.NewWriter(f)
+	var refusedOut *os.File
+	if *refusedFile != "" {
+		if refusedOut, err = os.OpenFile(*refusedFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err != nil {
+			fatal(err.Error())
+		}
+		defer refusedOut.Close()
+	}
 	classes := map[string]int{}
 	for start := 0; start < len(ids); start += *batch {
 		end := min(start+*batch, len(ids))
-		plans, counts, err := planWithdrawAddressBatch(db, codec, ids[start:end], bodies)
+		plans, counts, refused, err := planWaBatch(db, codec, ids[start:end], bodies)
 		if err != nil {
 			fatal(err.Error())
+		}
+		if refusedOut != nil {
+			for _, id := range ids[start:end] {
+				if r, ok := refused[id]; ok {
+					if _, err := fmt.Fprintf(refusedOut, "%d\t%s\n", id, r); err != nil {
+						fatal(err.Error())
+					}
+				}
+			}
 		}
 		for _, p := range plans {
 			if _, err := w.WriteString(waPlanLine(p)); err != nil {
@@ -163,27 +180,17 @@ func runWithdrawAddressPlan(args []string) int {
 	return 0
 }
 
-// readWaBodies reads message id and hex bytes lines.
-func readWaBodies(path string) (map[uint][]byte, error) {
-	b, err := os.ReadFile(path)
+// readWaBodies reads the archive transactions of a message-bodies-load
+// plan, each already checked to hash to its own hash column, keyed by
+// message id.
+func readWaBodies(path string) (map[uint]mbRow, error) {
+	_, rows, err := readRecoveredBodies(path)
 	if err != nil {
 		return nil, err
 	}
-	out := map[uint][]byte{}
-	for n, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-		id, body, ok := strings.Cut(line, "\t")
-		v, err := strconv.ParseUint(id, 10, 64)
-		if !ok || err != nil {
-			return nil, fmt.Errorf("bodies line %d: want message id, tab, hex bytes", n+1)
-		}
-		raw, err := hex.DecodeString(strings.TrimSpace(body))
-		if err != nil || len(raw) == 0 {
-			return nil, fmt.Errorf("bodies line %d: bad hex", n+1)
-		}
-		if _, dup := out[uint(v)]; dup {
-			return nil, fmt.Errorf("bodies line %d: message %d twice", n+1, v)
-		}
-		out[uint(v)] = raw
+	out := make(map[uint]mbRow, len(rows))
+	for _, r := range rows {
+		out[r.MessageID] = r
 	}
 	return out, nil
 }
@@ -216,9 +223,9 @@ func readMessageIDs(path string) ([]uint, error) {
 func waLoad(db *gorm.DB, ids []uint) (map[uint]waMessage, map[uint]*txlog.LogMessage, map[uint][]tax.TaxableEvent, map[uint]waFinger, error) {
 	arr := idArray(ids)
 	var msgs []waMessage
-	err := db.Raw(`SELECT m.id, m.message_type_id, mt.message_type AS type, m.message_bytes, t.code, b.height, b.time_stamp AS stamp, t.hash
+	err := db.Raw(`SELECT m.id, m.message_type_id, mt.message_type AS type, m.message_bytes, m.message_index, t.code, b.height, b.time_stamp AS stamp, t.hash
 FROM unnest(?::bigint[]) u(id)
-CROSS JOIN LATERAL (SELECT m.id, m.tx_id, m.message_type_id, m.message_bytes FROM messages m WHERE m.id = u.id OFFSET 0) m
+CROSS JOIN LATERAL (SELECT m.id, m.tx_id, m.message_type_id, m.message_bytes, m.message_index FROM messages m WHERE m.id = u.id OFFSET 0) m
 CROSS JOIN LATERAL (SELECT mt.message_type FROM message_types mt WHERE mt.id = m.message_type_id OFFSET 0) mt
 CROSS JOIN LATERAL (SELECT t.code, t.hash, t.block_id FROM txes t WHERE t.id = m.tx_id OFFSET 0) t
 CROSS JOIN LATERAL (SELECT b.height, b.time_stamp FROM blocks b WHERE b.id = t.block_id OFFSET 0) b`, arr).Scan(&msgs).Error
@@ -284,24 +291,38 @@ CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(max(te.sub_index), -1) AS max
 }
 
 // planWithdrawAddressBatch plans one batch. bodies, when given, supplies
-// MsgExec bytes for messages stored without any; such a message is classed
-// like any other (planned only when the parser reproduces its booked
-// rewards) and also counted as recovered.
-func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []uint, bodies map[uint][]byte) ([]waPlanRow, map[string]int, error) {
+// MsgExec bytes for messages stored without any, only where the archive
+// transaction hashes to the stored tx hash and holds a MsgExec at the stored
+// message index; any other body is counted as refused and not used. A
+// message with a used body is classed like any other (planned only when the
+// parser reproduces its booked rewards) and also counted as recovered.
+func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []uint, bodies map[uint]mbRow) ([]waPlanRow, map[string]int, error) {
+	rows, counts, _, err := planWaBatch(db, codec, ids, bodies)
+	return rows, counts, err
+}
+
+// planWaBatch is planWithdrawAddressBatch that also names, per message, why
+// it or one of its delegators was refused.
+func planWaBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []uint, bodies map[uint]mbRow) ([]waPlanRow, map[string]int, map[uint]string, error) {
 	msgs, logs, stored, fingers, err := waLoad(db, ids)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	refusedByID := map[uint]string{}
 	counts := map[string]int{}
 	var out []waPlanRow
 	for _, id := range ids {
 		m, ok := msgs[id]
 		if !ok {
-			return nil, nil, fmt.Errorf("message %d not found", id)
+			return nil, nil, nil, fmt.Errorf("message %d not found", id)
 		}
 		recovered := false
-		if b := bodies[id]; len(m.MessageBytes) == 0 && len(b) != 0 && m.Type == typeURLAuthzExec {
-			m.MessageBytes, recovered = b, true
+		if b, ok := bodies[id]; ok && len(m.MessageBytes) == 0 {
+			if reason := refuseRecoveredBody(b, m.Hash, m.MessageIndex, m.Type); reason != "" {
+				counts[waRecoveredBody+"_refused_"+reason]++
+			} else {
+				m.MessageBytes, recovered = b.Body, true
+			}
 		}
 		class, rows, refused := planWithdrawAddressMessage(codec, m, logs[id], stored[id])
 		counts[class]++
@@ -310,17 +331,26 @@ func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []u
 		}
 		// A message can move one delegator's reward and refuse another's
 		// (an authz Exec for several granters): count refused delegators too.
+		var reasons []string
+		if strings.HasPrefix(class, "refused_") {
+			reasons = append(reasons, class)
+		}
 		for reason, n := range refused {
 			counts["refused_delegators_"+reason] += n
+			reasons = append(reasons, fmt.Sprintf("refused_delegators_%s=%d", reason, n))
+		}
+		if len(reasons) != 0 {
+			sort.Strings(reasons)
+			refusedByID[id] = strings.Join(reasons, ",")
 		}
 		for _, r := range rows {
 			out = append(out, waPlanRow{TaxableEvent: r, Class: class, Trigger: waTrigger(r), StoredRows: fingers[id].N, StoredFinger: fingers[id].Finger, MessageTypeID: m.MessageTypeID})
 		}
 		if len(rows) != 0 && fingers[id].MaxSub+1 != fingers[id].N {
-			return nil, nil, fmt.Errorf("message %d fingerprint read disagrees with its rows", id)
+			return nil, nil, nil, fmt.Errorf("message %d fingerprint read disagrees with its rows", id)
 		}
 	}
-	return out, counts, nil
+	return out, counts, refusedByID, nil
 }
 
 func waTrigger(e tax.TaxableEvent) string {

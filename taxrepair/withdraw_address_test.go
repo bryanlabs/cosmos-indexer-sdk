@@ -14,6 +14,8 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
+const waTestHash = "HASH"
+
 const (
 	waDistribution = "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
 	waDelegator    = "cosmos1delegator"
@@ -61,7 +63,7 @@ func TestWithdrawAddressPlanAppendsParserMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	stamp := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
-	m := waMessage{ID: 50, Type: waClaimURL, Height: 24000000, Stamp: stamp, Hash: "HASH"}
+	m := waMessage{ID: 50, Type: waClaimURL, Height: 24000000, Stamp: stamp, Hash: waTestHash}
 	class, rows, _ := planWithdrawAddressMessage(codec, m, waClaimLog(waWithdraw), waStored(50))
 	if class != waExact || len(rows) != 1 {
 		t.Fatalf("class %s rows %d", class, len(rows))
@@ -69,7 +71,7 @@ func TestWithdrawAddressPlanAppendsParserMoves(t *testing.T) {
 	r := rows[0]
 	if r.MessageID != 50 || r.SubIndex != 1 || r.Category != string(tax.CategoryTransfer) || r.FromAddr != waDelegator || r.ToAddr != waWithdraw ||
 		r.Amount != "627" || r.Denom != waDenom || r.RewardTrigger != tax.TriggerWithdrawAddress || r.Detail != `{"protocol":"distribution","reward_trigger":"claim"}` ||
-		r.BlockHeight != 24000000 || !r.Timestamp.Equal(stamp) || r.TxHash != "HASH" || r.ValidatorAddress != "" {
+		r.BlockHeight != 24000000 || !r.Timestamp.Equal(stamp) || r.TxHash != waTestHash || r.ValidatorAddress != "" {
 		t.Fatalf("planned row %+v", r)
 	}
 	// The plan is exactly what a fresh parse indexes after the stored rows.
@@ -158,7 +160,7 @@ func TestWithdrawAddressPlanPartsRoundTrip(t *testing.T) {
 	for _, id := range []uint{9, 3, 3, 5} {
 		b.WriteString(waPlanLine(waPlanRow{TaxableEvent: tax.TaxableEvent{
 			MessageID: id, SubIndex: 1, Category: string(tax.CategoryTransfer), Amount: "627", Denom: waDenom, FromAddr: waDelegator, ToAddr: waWithdraw,
-			BlockHeight: 24000000, Timestamp: stamp, TxHash: "HASH", RewardTrigger: tax.TriggerWithdrawAddress,
+			BlockHeight: 24000000, Timestamp: stamp, TxHash: waTestHash, RewardTrigger: tax.TriggerWithdrawAddress,
 			Detail: "{\"protocol\":\"distribution\",\"reward_trigger\":\"claim\"}\ttab\\slash",
 		}, Class: waExact, Trigger: waClaim, StoredRows: 1, StoredFinger: "f", MessageTypeID: 2}))
 	}
