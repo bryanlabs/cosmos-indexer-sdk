@@ -404,17 +404,20 @@ func commissionFlowEventsFromRows(rows walletRows, addr, native string, credited
 	return out
 }
 
-// flowRewardPayout is the native amount the distribution module paid one
-// wallet in one message.
+// flowRewardPayout is the native reward amount the chain paid one wallet in
+// one message: from the distribution module, or from a tokenize-share
+// record's account settling that record's reward.
 type flowRewardPayout struct {
 	Key    flowKey
 	Amount decimal.Decimal
 }
 
-// flowRewardPayouts is what the distribution module actually paid addr in
+// flowRewardPayouts is what the chain actually paid addr as reward in
 // [start,end), by message. Reward rows name the delegator even when the
 // chain paid its withdraw address, so the trace takes reward coins from
-// these payouts instead.
+// these payouts instead. Most are paid by the distribution module; a
+// tokenize-share record's reward is paid by the record's own account
+// (shareRecordPayoutsFrom).
 func (s *Server) flowRewardPayouts(chain, addr string, start, end time.Time) (map[uint]flowRewardPayout, error) {
 	ids, err := s.chainRowIDs(chain)
 	if err != nil {
@@ -443,7 +446,23 @@ ORDER BY ev.id, a.index`,
 		Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("reward payouts: %w", err)
 	}
-	return rewardPayoutsFrom(rows, addr, moduleAddress("distribution"), s.native.Denom), nil
+	dist := moduleAddress("distribution")
+	paid := rewardPayoutsFrom(rows, addr, dist, s.native.Denom)
+	candidates := shareRewardCandidates(rows, addr, dist, s.native.Denom)
+	if len(candidates) == 0 {
+		return paid, nil
+	}
+	events, err := s.flowShareRewardEvents(candidates)
+	if err != nil {
+		return nil, err
+	}
+	for m, p := range shareRecordPayoutsFrom(rows, events, addr, s.native.Denom) {
+		q := paid[m]
+		q.Key = p.Key
+		q.Amount = q.Amount.Add(p.Amount)
+		paid[m] = q
+	}
+	return paid, nil
 }
 
 // flowTransferAttr is one attribute of a transfer event, in emitted order.
@@ -463,16 +482,22 @@ type flowTransferAttr struct {
 // position: each triple starts at a recipient.
 func rewardPayoutsFrom(rows []flowTransferAttr, addr, sender, denom string) map[uint]flowRewardPayout {
 	out := map[uint]flowRewardPayout{}
+	eachTransfer(rows, func(cur flowTransferAttr, rcpt, from, amount string) {
+		if rcpt == addr && from == sender {
+			addRewardPayout(out, cur, nativeCoinAmount(amount, denom))
+		}
+	})
+	return out
+}
+
+// eachTransfer calls fn with every recipient, sender, amount triple in rows,
+// paired by position, and the last attribute row read for it.
+func eachTransfer(rows []flowTransferAttr, fn func(cur flowTransferAttr, rcpt, from, amount string)) {
 	var rcpt, from, amount string
 	var cur flowTransferAttr
 	flush := func() {
-		if rcpt == addr && from == sender {
-			if v := nativeCoinAmount(amount, denom); v.IsPositive() {
-				p := out[cur.MessageID]
-				p.Key = flowKey{Time: cur.TimeStamp.UTC(), Height: cur.Height, Message: cur.MessageID, Sub: flowPayoutSub}
-				p.Amount = p.Amount.Add(v)
-				out[cur.MessageID] = p
-			}
+		if rcpt != "" || from != "" || amount != "" {
+			fn(cur, rcpt, from, amount)
 		}
 		rcpt, from, amount = "", "", ""
 	}
@@ -492,6 +517,122 @@ func rewardPayoutsFrom(rows []flowTransferAttr, addr, sender, denom string) map[
 		}
 	}
 	flush()
+}
+
+func addRewardPayout(out map[uint]flowRewardPayout, cur flowTransferAttr, v decimal.Decimal) {
+	if !v.IsPositive() {
+		return
+	}
+	p := out[cur.MessageID]
+	p.Key = flowKey{Time: cur.TimeStamp.UTC(), Height: cur.Height, Message: cur.MessageID, Sub: flowPayoutSub}
+	p.Amount = p.Amount.Add(v)
+	out[cur.MessageID] = p
+}
+
+// shareRewardCandidates is the messages in which addr was paid native coin
+// by an account other than the distribution module: the only messages where
+// a tokenize-share record can have paid it a reward.
+func shareRewardCandidates(rows []flowTransferAttr, addr, dist, denom string) []uint {
+	seen := map[uint]bool{}
+	var out []uint
+	eachTransfer(rows, func(cur flowTransferAttr, rcpt, from, amount string) {
+		if rcpt == addr && from != dist && from != addr && !seen[cur.MessageID] && nativeCoinAmount(amount, denom).IsPositive() {
+			seen[cur.MessageID] = true
+			out = append(out, cur.MessageID)
+		}
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+const (
+	flowEventShareReward     = "withdraw_tokenize_share_reward"
+	flowEventWithdrawRewards = "withdraw_rewards"
+)
+
+// flowShareEventAttr is one attribute of a withdraw_tokenize_share_reward or
+// withdraw_rewards event, in emitted order.
+type flowShareEventAttr struct {
+	EventID   uint
+	MessageID uint
+	Type      string
+	Index     uint64
+	Key       string
+	Value     string
+}
+
+// flowShareRewardEvents reads the withdraw_tokenize_share_reward and
+// withdraw_rewards events of those of ids that settled a tokenize-share
+// record's reward. Each read is a per-row lookup (LATERAL with OFFSET 0), so a
+// wallet with many candidate messages cannot turn it into a scan of the event
+// tables.
+func (s *Server) flowShareRewardEvents(ids []uint) ([]flowShareEventAttr, error) {
+	var rows []flowShareEventAttr
+	for start := 0; start < len(ids); start += 5000 {
+		chunk := ids[start:min(start+5000, len(ids))]
+		var part []flowShareEventAttr
+		if err := s.db.Raw(`
+WITH ev AS MATERIALIZED (
+  SELECT me.id, m.id AS message_id, t.type FROM messages m
+  JOIN LATERAL (SELECT id, message_event_type_id FROM message_events WHERE message_id = m.id OFFSET 0) me ON true
+  JOIN message_event_types t ON t.id = me.message_event_type_id AND t.type IN ('withdraw_tokenize_share_reward', 'withdraw_rewards')
+  WHERE m.id IN ?)
+SELECT ev.id AS event_id, ev.message_id, ev.type, a.index, k.key, a.value
+FROM ev
+JOIN LATERAL (SELECT message_event_attribute_key_id, index, value FROM message_event_attributes WHERE message_event_id = ev.id OFFSET 0) a ON true
+JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
+WHERE ev.message_id IN (SELECT message_id FROM ev WHERE type = 'withdraw_tokenize_share_reward')
+ORDER BY ev.id, a.index`, chunk).Scan(&part).Error; err != nil {
+			return nil, fmt.Errorf("share record reward events: %w", err)
+		}
+		rows = append(rows, part...)
+	}
+	return rows, nil
+}
+
+// shareRecordPayoutsFrom is, by message, the native reward tokenize-share
+// records paid addr. The x/liquid module settles a record's reward in two
+// steps: the record's account withdraws it from the distribution module
+// (withdraw_rewards with that account as delegator) and pays it on to the
+// owner's withdraw address, naming that address and the amount in
+// withdraw_tokenize_share_reward. A redeem by another wallet settles the
+// record the same way. So a transfer to addr counts only in a message whose
+// withdraw_tokenize_share_reward names addr, only from an account that
+// withdrew rewards in that same message, and never past the settled amount.
+// Accounts are known only from these events, never from their address.
+func shareRecordPayoutsFrom(transfers []flowTransferAttr, events []flowShareEventAttr, addr, denom string) map[uint]flowRewardPayout {
+	settled := map[uint]decimal.Decimal{}
+	payers := map[uint]map[string]bool{}
+	var payee string
+	for i, e := range events {
+		if i > 0 && e.EventID != events[i-1].EventID {
+			payee = ""
+		}
+		switch {
+		case e.Type == flowEventShareReward && e.Key == "withdraw_address":
+			payee = e.Value
+		case e.Type == flowEventShareReward && e.Key == "amount":
+			if payee == addr {
+				settled[e.MessageID] = settled[e.MessageID].Add(nativeCoinAmount(e.Value, denom))
+			}
+			payee = ""
+		case e.Type == flowEventWithdrawRewards && e.Key == "delegator" && e.Value != addr:
+			if payers[e.MessageID] == nil {
+				payers[e.MessageID] = map[string]bool{}
+			}
+			payers[e.MessageID][e.Value] = true
+		}
+	}
+	out := map[uint]flowRewardPayout{}
+	eachTransfer(transfers, func(cur flowTransferAttr, rcpt, from, amount string) {
+		if rcpt == addr && settled[cur.MessageID].IsPositive() && payers[cur.MessageID][from] {
+			addRewardPayout(out, cur, nativeCoinAmount(amount, denom))
+		}
+	})
+	for m, p := range out {
+		p.Amount = decimal.Min(p.Amount, settled[m])
+		out[m] = p
+	}
 	return out
 }
 
@@ -515,9 +656,9 @@ func nativeCoinAmount(coins, denom string) decimal.Decimal {
 
 // reconcileRewardPayouts makes addr's reward inflows match what the chain
 // paid it. In each message the reward rows booked to addr are cut to the
-// distribution payout to addr (less the commission rows and other rows from
-// the distribution module, which already name the real receiver), so a delegator whose withdraw address is another
-// account gets no coins it never held. A payout with no matching reward row
+// reward payout to addr (less the commission rows and other rows from the
+// distribution module, which already name the real receiver), so a delegator
+// whose withdraw address is another account gets no coins it never held. A payout with no matching reward row
 // (addr is someone else's withdraw address) becomes a reward inflow.
 // Rewards without a message are left as booked. A native source correction
 // is a reward proved against the chain: it is kept as is and uses its share

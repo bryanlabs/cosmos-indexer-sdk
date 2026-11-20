@@ -520,3 +520,46 @@ func TestFlowRewardPayoutsPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, none)
 }
+
+// The share-record read against real tables: a redeem by another wallet
+// settles the receiver's record (the record's account withdraws 40 uatom and
+// pays it on), beside an ordinary 50 uatom distribution payout and a plain
+// send from the same record account with no settlement, which stays out.
+func TestFlowShareRecordPayoutsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	dist := moduleAddress("distribution")
+	const record = "cosmos1record"
+	for _, sql := range []string{
+		"ALTER TABLE blocks ADD COLUMN time_stamp timestamptz",
+		"INSERT INTO blocks VALUES (6,1,250),(7,1,260)",
+		"INSERT INTO txes VALUES (5,6,'E',0,''),(6,7,'F',0,'')",
+		"INSERT INTO messages VALUES (5,5),(6,6)",
+		"UPDATE blocks SET time_stamp = '2025-01-01T00:00:00Z'::timestamptz + (height || ' minutes')::interval",
+		"CREATE TABLE message_event_types (id bigint, type text)",
+		"CREATE TABLE message_events (id bigint, message_id bigint, index bigint, message_event_type_id bigint)",
+		"CREATE TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TABLE message_event_attributes (id bigserial, message_event_id bigint, value text, index bigint, message_event_attribute_key_id bigint)",
+		"INSERT INTO message_event_types VALUES (1,'transfer'),(18,'withdraw_rewards'),(1245,'withdraw_tokenize_share_reward')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'recipient'),(2,'sender'),(3,'amount'),(4,'delegator'),(5,'withdraw_address'),(6,'validator')",
+		"INSERT INTO message_events VALUES (12,2,3,1),(20,5,3,1),(21,5,5,18),(22,5,12,1),(23,5,14,1245),(30,6,0,18),(31,6,1,1)",
+		"INSERT INTO message_event_attributes (message_event_id, value, index, message_event_attribute_key_id) VALUES " +
+			"(12,'" + flowPGReceiver1 + "',0,1),(12,'" + dist + "',1,2),(12,'50uatom',2,3)," +
+			"(20,'" + record + "',0,1),(20,'" + dist + "',1,2),(20,'40uatom',2,3)," +
+			"(21,'40uatom',0,3),(21,'" + flowPGValidator + "',1,6),(21,'" + record + "',2,4)," +
+			"(22,'" + flowPGReceiver1 + "',0,1),(22,'" + record + "',1,2),(22,'7ibc/ABC,40uatom',2,3)," +
+			"(23,'" + flowPGReceiver1 + "',0,5),(23,'7ibc/ABC,40uatom',1,3)," +
+			"(30,'70uatom',0,3),(30,'" + record + "',1,4)," +
+			"(31,'" + flowPGReceiver1 + "',0,1),(31,'" + record + "',1,2),(31,'70uatom',2,3)",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	start, end := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	paid, err := s.flowRewardPayouts(apiMainnet, flowPGReceiver1, start, end)
+	require.NoError(t, err)
+	require.Len(t, paid, 2)
+	require.Equal(t, "50", paid[2].Amount.String())
+	require.Equal(t, "40", paid[5].Amount.String())
+	require.Equal(t, int64(250), paid[5].Key.Height)
+	_, sent := paid[6]
+	require.False(t, sent)
+}
