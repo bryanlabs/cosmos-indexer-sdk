@@ -264,6 +264,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		// inside tolerance on 220,610 ATOM, with shares unchanged; served for the
 		// corrected build.
 		flowClientTraceRoot("accel-withdraw-fix-a54eb3d66496-20261118-fanout-v1", "a54eb3d66496370f607e64ffb3b1ff1ea939901a626300de624373ab8b18c9b9"),
+		flowClientTraceRoot("accel-withdraw-fix-e0c9d081b175-20261118-fanout-v1", "e0c9d081b175113666052f96fcaae1f38b803abc3fdcd7618fd05cc1f13e7210"),
 		flowSlashRoot("accel-withdraw-fix-9514e5e20dd8-20261118-fanout-v1", "9514e5e20dd865faef28bb1ea76698d30acfbe03b81e365a1b55a25114e707a4"),
 		flowSlashRoot("accel-withdraw-fix-a106a4ef7b92-20261118-fanout-v1", "a106a4ef7b922fd9efd0d754bd7b354e997a647e814d2eabed9f920aa520af23"),
 		flowSlashRoot("accel-withdraw-fix-d29d6d635b9c-20261118-fanout-v1", "d29d6d635b9c4007dc01785d3a40e37966692f11206b4988c45b8dd07ab50589"),

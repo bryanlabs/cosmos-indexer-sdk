@@ -277,7 +277,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 171)
+	require.Len(t, seen, 172)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -301,7 +301,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 146)
+	require.Len(t, roots, 147)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s04-20261115-deadline-retry-v3", roots["6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"])
 	// The Cosmos Hub v29.1.0 upgrade stopped the earlier retries of these roots with stored errors, so the next version of each replaces it.
@@ -418,6 +418,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-3e8353a25770-20261118-fanout-v1", roots["3e8353a2577021f282d5233fa3ad024dd98f6e12d14e038e9d50f3daca85eca1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-c094ace10c53-20261118-fanout-v1", roots["c094ace10c53d5e89062832b81b99265a5b884024b90f47fae9bfd05611f7901"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-a54eb3d66496-20261118-fanout-v1", roots["a54eb3d66496370f607e64ffb3b1ff1ea939901a626300de624373ab8b18c9b9"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-e0c9d081b175-20261118-fanout-v1", roots["e0c9d081b175113666052f96fcaae1f38b803abc3fdcd7618fd05cc1f13e7210"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-d29d6d635b9c-20261118-fanout-v1", roots["d29d6d635b9c4007dc01785d3a40e37966692f11206b4988c45b8dd07ab50589"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-91839f8b6913-20261118-fanout-v2", roots["91839f8b6913340a41e7915e84d50818dcadff35b8a7a04e3b367a4cb098fb3b"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-ff3cb6404c89-20261118-fanout-v1", roots["ff3cb6404c897214795e05fbf454959486d59fce45dec6d3c8b4b22b06eb5dc7"])
