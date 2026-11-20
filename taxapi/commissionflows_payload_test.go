@@ -55,7 +55,7 @@ func payloadFixtureDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := os.Getenv("COSMOS_TAX_PAYLOAD_TEST_DSN")
 	if dsn == "" {
-		t.Skip("set COSMOS_TAX_PAYLOAD_TEST_DSN to the isolated payload fixture database")
+		t.Skip("set COSMOS_TAX_PAYLOAD_TEST_DSN to an empty scratch database whose name starts with commission_payload_writer_")
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Discard})
 	require.NoError(t, err)

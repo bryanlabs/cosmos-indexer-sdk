@@ -75,7 +75,7 @@ func TestCommissionFlowVersionsAppendOnlyPostgres(t *testing.T) {
 	require.NoError(t, db.Create(&rows).Error)
 	opts := CommissionFlowBuildOptions{Version: "proof-v1", Build: "sha256:one", AsOf: asOf}
 	for _, q := range []string{
-		"CREATE TABLE taxable_events (message_id bigint, from_addr text, to_addr text, category text)",
+		"CREATE TABLE taxable_events (message_id bigint, from_addr text, to_addr text, category text, reward_trigger text)",
 		"CREATE TABLE messages (id bigint, tx_id bigint)",
 		"CREATE TABLE txes (id bigint, memo text)",
 		"INSERT INTO txes SELECT g, 'acct'||g FROM generate_series(1,120) g",
