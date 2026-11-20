@@ -366,6 +366,11 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 		return nil, err
 	}
 	out = reconcileRewardPayouts(addr, out, paid)
+	proceeds, err := s.flowSaleProceeds(addr, rows.Events)
+	if err != nil {
+		return nil, err
+	}
+	out = netSaleProceeds(out, addr, proceeds)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key.before(out[j].Key) })
 	return out, nil
 }
@@ -591,9 +596,7 @@ type flowCredit struct {
 // messages of its single-hop ibc_in rows. The ledger also records a receive
 // whose acknowledgement was an error (a bad receiver, a failed forward), where
 // no coin moved, so a returning row counts only when its message credited
-// addr exactly that amount. Attributes are read per event (LATERAL with
-// OFFSET 0), so a wallet with many such messages cannot turn the read into a
-// hash join over the whole attribute table.
+// addr exactly that amount.
 func (s *Server) flowReturnCredits(addr string, events []tax.TaxableEvent) (map[flowCredit]bool, error) {
 	var ids []uint
 	for _, e := range events {
@@ -601,20 +604,35 @@ func (s *Server) flowReturnCredits(addr string, events []tax.TaxableEvent) (map[
 			ids = append(ids, e.MessageID)
 		}
 	}
+	rows, err := s.flowReceived(addr, ids)
+	if err != nil {
+		return nil, err
+	}
 	out := map[flowCredit]bool{}
-	if len(ids) == 0 {
-		return out, nil
+	for _, r := range rows {
+		for _, coin := range strings.Split(r.Value, ",") {
+			out[flowCredit{r.MessageID, strings.TrimSpace(coin)}] = true
+		}
 	}
-	var rows []struct {
-		MessageID uint
-		Value     string
-	}
+	return out, nil
+}
+
+// flowReceipt is one coin_received amount the chain paid a wallet in a
+// message.
+type flowReceipt struct {
+	MessageID uint
+	Value     string
+}
+
+// flowReceived reads the coin_received amounts paid to addr in the messages
+// ids. Attributes are read per event (LATERAL with OFFSET 0), so a wallet with
+// many such messages cannot turn the read into a hash join over the whole
+// attribute table.
+func (s *Server) flowReceived(addr string, ids []uint) ([]flowReceipt, error) {
+	var rows []flowReceipt
 	for start := 0; start < len(ids); start += 5000 {
 		chunk := ids[start:min(start+5000, len(ids))]
-		var part []struct {
-			MessageID uint
-			Value     string
-		}
+		var part []flowReceipt
 		if err := s.db.Raw(`
 SELECT me.message_id, a2.value
 FROM message_events me
@@ -628,12 +646,7 @@ WHERE me.message_id IN ? AND a1.value = ?`, chunk, addr).Scan(&part).Error; err 
 		}
 		rows = append(rows, part...)
 	}
-	for _, r := range rows {
-		for _, coin := range strings.Split(r.Value, ",") {
-			out[flowCredit{r.MessageID, strings.TrimSpace(coin)}] = true
-		}
-	}
-	return out, nil
+	return rows, nil
 }
 
 // flowEventFromRow reads one ledger row as the movement of addr's native coin
