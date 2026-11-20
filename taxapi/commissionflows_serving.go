@@ -137,6 +137,16 @@ func flowSelfBondRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// The tokenize-share reward reruns run the self-bond build after a
+// tokenize-share record's reward payouts were counted in the trace (sdk 2d51444).
+const flowTokenizeRewardBuild = "sha256:613de71fb129fa7a3aaf1c6d8cc2f72df98ae5be6cc0ffa459703323b95dfa85"
+
+func flowTokenizeRewardRoot(suffix, root string) commissionServingSource {
+	r := flowCorrectedRoot(suffix, root)
+	r.Build = flowTokenizeRewardBuild
+	return r
+}
+
 // flowLSMClientTraceRoot is a client-trace rerun of a validator whose served
 // row came from the LSM reward retry, so it keeps that retry's profile and
 // version prefix.
@@ -162,7 +172,9 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowWithdrawFixRoot("accel-withdraw-fix-06d2a6fb6513-20261118-fanout-v1", "06d2a6fb65137dc2b6730a227548da0ab3d738cc6bf2a561c68ed9154c293c1b"),
 		flowSlashRoot("accel-withdraw-fix-32608eb7f728-20261118-fanout-v3", "32608eb7f7286cab627246cc922e7b874857acf5a5dce90ebff5d5623f184eb2"),
 		flowSlashRoot("accel-withdraw-fix-0d96280b5e9a-20261118-fanout-v3", "0d96280b5e9a7d7e720633d37a252722db055189337b778f1ae5d805a80eab84"),
-		flowSlashRoot("accel-withdraw-fix-1456c0b64ef4-20261118-fanout-v1", "1456c0b64ef40bd1073983d272a32eb28333805b6470a6903d4f776ec2eeb9fc"),
+		// 1456c0b64ef4 counts its tokenize-share record's reward payouts: drift
+		// 0.12 ATOM on 7,514 ATOM, overdraw 0.000036, shares unchanged.
+		flowTokenizeRewardRoot("accel-withdraw-fix-1456c0b64ef4-20261118-fanout-v5", "1456c0b64ef40bd1073983d272a32eb28333805b6470a6903d4f776ec2eeb9fc"),
 		flowSlashRoot("accel-withdraw-fix-6381eb3d4d63-20261118-fanout-v3", "6381eb3d4d63ccfe34abfde32b00c5692b94fb1081ba8628fb55a32d9b822201"),
 		flowSlashRoot("accel-withdraw-fix-7745d8ffeac6-20261118-fanout-v3", "7745d8ffeac67f746b31f6cbdc249829bb77eb1708c12f798a9dd9bb45ba9ce1"),
 		flowSlashRoot("accel-withdraw-fix-17fa80ffb90c-20261118-fanout-v3", "17fa80ffb90c55459967e90d18555042a950e8b95b05f19ff2f922da458baa7e"),
@@ -204,7 +216,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-53857068a2c7-20261118-fanout-v1", "53857068a2c766dfaeb9149bbef2f02eebcac0f091d4dd326a03b90cf73a3bd3"),
 		flowSlashRoot("accel-withdraw-fix-583d96ba1bba-20261118-fanout-v1", "583d96ba1bba3be225003af20b7cbad0899e6e8b98c12857d2dfbb2df7cdadf5"),
 		flowSlashRoot("accel-withdraw-fix-8a3aea50be11-20261118-fanout-v1", "8a3aea50be11ad5d460bc6e832b2ea5eb6e0774f75b9e3dda984158ce01b35c6"),
-		flowSlashRoot("accel-withdraw-fix-ce871c7c6e35-20261118-fanout-v1", "ce871c7c6e35d0f1629d9c44ffe8500872e58f6bca1e188223fe4e4835fdb062"),
+		flowTokenizeRewardRoot("accel-withdraw-fix-ce871c7c6e35-20261118-fanout-v5", "ce871c7c6e35d0f1629d9c44ffe8500872e58f6bca1e188223fe4e4835fdb062"),
 		flowSlashRoot("accel-withdraw-fix-06c9061fd494-20261118-fanout-v1", "06c9061fd4948af545ba753349029fc8c6a5de2dc1d2f725ca4531058177f714"),
 		flowSelfBondRoot("accel-withdraw-fix-0f53f6fc13d9-20261118-fanout-v5", "0f53f6fc13d9f7022c8ee7a0aa661c0440ea6027ff4e934e7952601cfb526e2c"),
 		flowSlashRoot("accel-withdraw-fix-162c315eab1a-20261118-fanout-v1", "162c315eab1a4d9544efe0fc8a5b3ad847f1381a728a99913751921ce365c019"),
@@ -217,7 +229,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-b5701732e313-20261118-fanout-v1", "b5701732e3137a2d9e86e4bde847fcbb6329c98481658c574c145f1a3811fb03"),
 		flowSlashRoot("accel-withdraw-fix-d4c6ccac7396-20261118-fanout-v1", "d4c6ccac73962d84cd3d4cec2c70851d0ea02940ce0436882450532c2df4f9e6"),
 		flowSlashRoot("accel-withdraw-fix-f009da4d5b44-20261118-fanout-v1", "f009da4d5b4452af83e81335ad2d4a2db70d9d7f8d226b30f76e4c8b5bcf5da8"),
-		flowSlashRoot("accel-withdraw-fix-f76e659775a6-20261118-fanout-v1", "f76e659775a647b387ed8fc2c4f49bf63e6f5d1c4756e3391863764cf6fb01c9"),
+		flowTokenizeRewardRoot("accel-withdraw-fix-f76e659775a6-20261118-fanout-v5", "f76e659775a647b387ed8fc2c4f49bf63e6f5d1c4756e3391863764cf6fb01c9"),
 		flowSlashRoot("accel-withdraw-fix-139a197e4cda-20261118-fanout-v1", "139a197e4cdaab48661383f71730eb1d481d25daf8906c311e7ad0294dc61649"),
 		flowSlashRoot("accel-withdraw-fix-39722f592341-20261118-fanout-v1", "39722f59234103dc29a8caaf03d6c1622b6954fb01f6b083bcd9106b2d7249f4"),
 		flowSlashRoot("accel-withdraw-fix-7f2e4c9d47f3-20261118-fanout-v1", "7f2e4c9d47f315d654fc6fa6a53fa0d908a5cf4ac432d5bee73708508e28ad8f"),
@@ -272,10 +284,9 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		// with shares unchanged; served for the corrected build.
 		flowClientTraceRoot("accel-withdraw-fix-3e8353a25770-20261118-fanout-v1", "3e8353a2577021f282d5233fa3ad024dd98f6e12d14e038e9d50f3daca85eca1"),
 		flowClientTraceRoot("accel-withdraw-fix-c094ace10c53-20261118-fanout-v1", "c094ace10c53d5e89062832b81b99265a5b884024b90f47fae9bfd05611f7901"),
-		// a54eb3d66496 drifts 0.54 and overdraws 6.4 ATOM more than its old row,
-		// inside tolerance on 220,610 ATOM, with shares unchanged; served for the
-		// corrected build.
-		flowClientTraceRoot("accel-withdraw-fix-a54eb3d66496-20261118-fanout-v1", "a54eb3d66496370f607e64ffb3b1ff1ea939901a626300de624373ab8b18c9b9"),
+		// a54eb3d66496 counts its tokenize-share record's reward payouts: drift
+		// 0.30 ATOM on 220,610 ATOM with no overdraw, shares unchanged.
+		flowTokenizeRewardRoot("accel-withdraw-fix-a54eb3d66496-20261118-fanout-v5", "a54eb3d66496370f607e64ffb3b1ff1ea939901a626300de624373ab8b18c9b9"),
 		flowClientTraceRoot("accel-withdraw-fix-e0c9d081b175-20261118-fanout-v1", "e0c9d081b175113666052f96fcaae1f38b803abc3fdcd7618fd05cc1f13e7210"),
 		flowClientTraceRoot("accel-withdraw-fix-debf605ff680-20261118-fanout-v1", "debf605ff68022a7b96ba4f05f55025383b8d76f7198338d672c30b406a10685"),
 		flowClientTraceRoot("accel-withdraw-fix-359f0bf28de5-20261118-fanout-v1", "359f0bf28de54aea4eb43e612f91fd001b794c1e292e0506fecfc1eed6ebcdfb"),
@@ -394,7 +405,9 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "11ad1e6695406f2ec282e61c3d2a68a278336c6d6c70a999f31aeb78b5315354"),
 		flowGiantRoot("accel-four-s07-20261118-fanout-v2", "607606f87da17ce8a8581cda77daff29c9c325a011b63fafc4a30fbf29efaff5"),
 		flowSlashRoot("accel-withdraw-fix-a21b65a9b88e-20261118-fanout-v1", "a21b65a9b88ec88fd0ad5015fe2907e2d89971bad4fe92d3808889b807198e1a"),
-		flowGiantRoot("accel-four-s07-r300-20261118-fanout-v2", "320bcb826109bdff2fcab865b3971af8023c5d8b2ba24f02961a4faca99425aa"),
+		// 320bcb826109 counts its tokenize-share record's reward payouts: drift
+		// 0.19 ATOM on 84,949 ATOM, overdraw 0.19, shares unchanged.
+		flowTokenizeRewardRoot("accel-withdraw-fix-320bcb826109-20261118-fanout-v6", "320bcb826109bdff2fcab865b3971af8023c5d8b2ba24f02961a4faca99425aa"),
 		{
 			Version: "ops818-unjail-profile930320029ed0-sources962174bfb014-s06-retry-20261115-v2",
 			Build:   "sha256:fa71e36b2feec15498ec94b778e2571deebc1e11197a9da7b94968b658d3a874",
