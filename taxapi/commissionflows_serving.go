@@ -147,6 +147,18 @@ func flowTokenizeRewardRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// The all-fixes reruns run one build with every trace fix so far: withdraw-address
+// moves, slash burns, client-trace refunds, self-bond delegations, nft_sale
+// proceeds, tokenize-share record rewards, the wasm fallback, and withdraw-address
+// moves left out of the delegator (sdk cb34569).
+const flowAllFixesBuild = "sha256:4c81b7cc1448c2a8a117d39f3fae7b3d8645d50a563a66caafdc3fbfb3c48151"
+
+func flowAllFixesRoot(suffix, root string) commissionServingSource {
+	r := flowCorrectedRoot(suffix, root)
+	r.Build = flowAllFixesBuild
+	return r
+}
+
 // flowLSMClientTraceRoot is a client-trace rerun of a validator whose served
 // row came from the LSM reward retry, so it keeps that retry's profile and
 // version prefix.
@@ -162,6 +174,9 @@ func flowLSMClientTraceRoot(suffix, root string) commissionServingSource {
 // holds an accepted result for it.
 var defaultCommissionServingSources = map[string][]commissionServingSource{
 	apiMainnet: {
+		flowAllFixesRoot("accel-withdraw-fix-cb45206dc2fe-20261118-fanout-v1", "cb45206dc2fe6ff60090ef898765e02de8ae1242cd158b19c466694b84829b8d"),
+		flowAllFixesRoot("accel-withdraw-fix-cab01accf0bc-20261118-fanout-v1", "cab01accf0bc0d466f3d0054f3c02163b2184d0bacaab7ba35007b71d337a488"),
+		flowAllFixesRoot("accel-withdraw-fix-5ddd3d9c5bcb-20261118-fanout-v1", "5ddd3d9c5bcb5ba1dc12461d702f5acf923b470e49be328ab7c2e6fab813428f"),
 		flowWithdrawFixRoot("accel-withdraw-fix-pilot-20261118-fanout-v1", "c367934baa77ab0ce85a84cbd4ec158dfcfdac3f0df7e6efdbf5d02eaff5938b"),
 		flowSlashRoot("accel-withdraw-fix-52836aab8ac6-20261118-fanout-v3", "52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"),
 		flowSlashRoot("accel-withdraw-fix-0a11a4c00904-20261118-fanout-v3", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
@@ -224,7 +239,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-70bb65c3bc87-20261118-fanout-v1", "70bb65c3bc87785d35081cbd0435a18962ef4eac525d0b54a0580907dc509737"),
 		flowSlashRoot("accel-withdraw-fix-8b22b9cdcee2-20261118-fanout-v1", "8b22b9cdcee26d056002e8efb2fcfad7a77c828f7b3a67661af9bbb6c14886e6"),
 		flowSlashRoot("accel-withdraw-fix-8f1c190dc60a-20261118-fanout-v1", "8f1c190dc60aa0c8acbfe877bd5dbeb274e68258b452908cc76eedd5adc4435c"),
-		flowSlashRoot("accel-withdraw-fix-940ef932a5d6-20261118-fanout-v1", "940ef932a5d68cf9104dfd219b2230285fb3b1f06721b9fd7fb2283a8500b03d"),
+		flowAllFixesRoot("accel-withdraw-fix-940ef932a5d6-20261118-fanout-v7", "940ef932a5d68cf9104dfd219b2230285fb3b1f06721b9fd7fb2283a8500b03d"),
 		flowSlashRoot("accel-withdraw-fix-b384bc959cad-20261118-fanout-v1", "b384bc959cad3296e74490e5fc7b9ad7e93e34593658e3276949d0db16096ecb"),
 		flowSlashRoot("accel-withdraw-fix-b5701732e313-20261118-fanout-v1", "b5701732e3137a2d9e86e4bde847fcbb6329c98481658c574c145f1a3811fb03"),
 		flowSlashRoot("accel-withdraw-fix-d4c6ccac7396-20261118-fanout-v1", "d4c6ccac73962d84cd3d4cec2c70851d0ea02940ce0436882450532c2df4f9e6"),
@@ -271,7 +286,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowClientTraceRoot("accel-withdraw-fix-1663fc05d7e2-20261118-fanout-v1", "1663fc05d7e2e2427b2063fdb264eda51e956e65e869efaa0a2f01c09971a12d"),
 		flowSlashRoot("accel-withdraw-fix-0af248dd5028-20261118-fanout-v1", "0af248dd5028935d07fa57bc8e3c5a88779c2119a479ea67fed440773020ca7b"),
 		flowClientTraceRoot("accel-withdraw-fix-7b7d4777c730-20261118-fanout-v1", "7b7d4777c730c08531bd3809dfec240e8d317e7f73ff324ea09713901a95b150"),
-		flowClientTraceRoot("accel-withdraw-fix-256067afb286-20261118-fanout-v1", "256067afb286cf77cbcd49c186eede037db3eb840d31dbe8d56b6fc6fc4faaa6"),
+		flowAllFixesRoot("accel-withdraw-fix-256067afb286-20261118-fanout-v7", "256067afb286cf77cbcd49c186eede037db3eb840d31dbe8d56b6fc6fc4faaa6"),
 		flowClientTraceRoot("accel-withdraw-fix-6ef922ee6733-20261118-fanout-v1", "6ef922ee6733c1be94bb847fe1e62b889d94aed3fa33e8fe2a685a4ff08b6976"),
 		// 91442d368a45 drifts 57.8 ATOM more than its old row, inside tolerance,
 		// with wallets 15 to 488, overdraw down 8892 ATOM and the slash burn added.
@@ -350,7 +365,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowClientTraceRoot("accel-withdraw-fix-f286ca180626-20261118-fanout-v1", "f286ca18062692eb61ec7f8d61a8e9c13ba245acacd1e6fe4efa15243e85d22c"),
 		flowClientTraceRoot("accel-withdraw-fix-e5ede2045f7c-20261118-fanout-v1", "e5ede2045f7c06ec1da4432418d34d7f4f4a2a429d88531a60e0f7eb23a8cd64"),
 		flowClientTraceRoot("accel-withdraw-fix-e1e0aecd720f-20261118-fanout-v1", "e1e0aecd720f6906e6988b490933cd76424582032eac8cc52ce9b0ce107baef3"),
-		flowSelfBondRoot("accel-withdraw-fix-7fb6148ba662-20261118-fanout-v5", "7fb6148ba662ced14e3684c70cf15f21af97a37b3be54101364c32e5fad74c9f"),
+		flowAllFixesRoot("accel-withdraw-fix-7fb6148ba662-20261118-fanout-v7", "7fb6148ba662ced14e3684c70cf15f21af97a37b3be54101364c32e5fad74c9f"),
 		flowClientTraceRoot("accel-withdraw-fix-a69be940f481-20261118-fanout-v1", "a69be940f481d9a799aeedeb7c79faf8217ffd94e7f729b937ccce8aa085f0af"),
 		flowSelfBondRoot("accel-withdraw-fix-6e8229a1bc25-20261118-fanout-v5", "6e8229a1bc254db678e1c7fe98994ee56e1e4015dde5bc78d546d841fa561521"),
 		flowSelfBondRoot("accel-withdraw-fix-6b4f68929944-20261118-fanout-v5", "6b4f6892994436ad949b990c5f6a01169035628e9fd646540c190250ab2c0214"),
