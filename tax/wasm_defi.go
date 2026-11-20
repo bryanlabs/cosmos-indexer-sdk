@@ -144,9 +144,9 @@ func streamswapEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 // liquidityPoolEvents records a constant-product pool deposit or withdrawal
 // the way Gravity DEX pool movements and Inflow vault shares are recorded,
 // as swaps between the coins and the pool's cw20 shares: the coins put into
-// the pool for the shares it mints (a transfer follows when it mints them
-// to a receiver other than the sender), or the shares sent back
-// and burned for the coins the pool pays out. The shares are carried at the
+// the pool for the shares it mints, or the shares sent back and burned for
+// the coins the pool pays out. When the pool mints the shares to a receiver
+// other than the sender, a transfer of the shares to that receiver follows. The shares are carried at the
 // cost of what was given for them. When the log does not show the shares
 // reaching the receiver (a pool that locks them), the coins are a deposit
 // the wallet still owns in that pool, and a withdrawal brings them back.
