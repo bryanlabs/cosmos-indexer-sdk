@@ -1,7 +1,9 @@
 package tax
 
 import (
+	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 
 	sdkmath "cosmossdk.io/math"
@@ -30,6 +32,8 @@ const (
 // marketplace until it is removed, replaced or filled.
 const (
 	eventSetBid              = "wasm-set-bid"
+	eventSetAsk              = "wasm-set-ask"
+	actionTransferNFT        = "transfer_nft"
 	eventUpdateBid           = "wasm-update-bid"
 	eventRemoveBid           = "wasm-remove-bid"
 	eventSetCollectionBid    = "wasm-set-collection-bid"
@@ -56,6 +60,8 @@ func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known [
 		return bankFallbackEvents(log, "", known)
 	}
 	out = append(out, marketplaceBidEvents(log, sender, known)...)
+	out = append(out, askSaleEvents(log, known)...)
+	out = append(out, askListingFeeEvents(log, sender, known)...)
 	out = append(out, tldRegistrationEvents(log, sender, known)...)
 	out = append(out, forwardedDenomFeeEvents(log, sender, known)...)
 	out = append(out, streamswapEvents(log, sender, known)...)
@@ -69,14 +75,86 @@ func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known [
 }
 
 // WasmSupplementForLog is the supplement rows of one contract message's log
-// as wasmSupplementEvents writes them after that message's known rows. The
-// repair uses it for contract messages inside a MsgExec, whose granter the
-// stored log does not name, so it passes no sender.
+// as wasmSupplementEvents writes them after that message's known rows.
 func WasmSupplementForLog(log *indexerTxTypes.LogMessage, sender string) []TaxableEvent {
 	if log == nil {
 		return nil
 	}
 	return wasmSupplementEvents(log, sender, wasmExecuteEvents(log, sender))
+}
+
+// AuthzWasmSupplementForLog is the supplement rows the indexer writes for
+// the contract messages inside a MsgExec, from its stored log alone: each
+// inner message's events, in inner message order, as classifyAuthz splits
+// them. The granter is not in the log, so no rule that needs the signer
+// runs, the same as in the indexer. A log without authz_msg_index cannot be
+// split without the transaction body and gets none.
+func AuthzWasmSupplementForLog(log *indexerTxTypes.LogMessage) []TaxableEvent {
+	return authzWasmSupplement(log, 0)
+}
+
+func authzWasmSupplement(log *indexerTxTypes.LogMessage, depth int) []TaxableEvent {
+	if log == nil || depth >= maxAuthzDepth || !authzIndexed(log) {
+		return nil
+	}
+	seen := map[int]bool{}
+	var idx []int
+	for _, ev := range log.Events {
+		for _, r := range authzRecords(ev.Attributes) {
+			i, err := strconv.Atoi(r.index)
+			if err == nil && !seen[i] {
+				seen[i] = true
+				idx = append(idx, i)
+			}
+		}
+	}
+	sort.Ints(idx)
+	var out []TaxableEvent
+	for _, i := range idx {
+		sub := authzSubLog(log, i)
+		switch {
+		case authzIndexed(sub):
+			out = append(out, authzWasmSupplement(sub, depth+1)...)
+		case contractMessageLog(sub):
+			out = append(out, WasmSupplementForLog(sub, "")...)
+		}
+	}
+	return out
+}
+
+// contractMessageLog reports the events of a contract execute, instantiate
+// or migrate message.
+func contractMessageLog(log *indexerTxTypes.LogMessage) bool {
+	for _, ev := range log.Events {
+		switch ev.Type {
+		case "execute", "instantiate", "migrate":
+			return true
+		}
+	}
+	return false
+}
+
+// SupplementRow reports a row only the wasm supplement writes, and whether
+// it is a bank fallback row: the fallback marker, a marketplace bid row
+// named by its bid_id, an accepted ask, or a streamswap, pool, limit order
+// or forwarded denom fee row.
+func SupplementRow(e TaxableEvent) (supplement, fallback bool) {
+	var d map[string]any
+	if strings.HasPrefix(e.Detail, "{") {
+		_ = json.Unmarshal([]byte(e.Detail), &d)
+	}
+	if d[detailFallback] == fallbackBank {
+		return true, true
+	}
+	switch e.RewardTrigger {
+	case TriggerStreamSubscribe, TriggerStreamWithdraw, TriggerStreamExit, TriggerStreamRefund, TriggerLPProvide, TriggerLPWithdraw,
+		TriggerLimitOrder, TriggerLimitFill, TriggerLimitCancel, TriggerLimitFee, triggerDenomCreationFee, triggerListingFee:
+		return true, false
+	case flowTriggerAuctionBid, flowTriggerAuctionRefund, triggerBidFilled:
+		_, ok := d["bid_id"]
+		return ok, false
+	}
+	return e.Category == string(CategoryNFTSale) && d[detailSale] == "ask", false
 }
 
 // flattenedLog reports a log in the pre-0.50 shape, where each event type
@@ -173,17 +251,17 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, sender string, known [
 		}
 		switch it.event {
 		case eventSetBid, eventSetCollectionBid:
-			if dep, ok := bidDeposit(it.attrs, contract, before); ok {
-				out = append(out, coinRows(CategoryProtocolDeposit, dep, it.attrs["creator"], contract, flowTriggerAuctionBid, detail(it.attrs["id"]))...)
+			if dep, price, ok := bidDeposit(it.attrs, contract, before); ok {
+				out = append(out, coinRows(CategoryProtocolDeposit, dep, it.attrs["creator"], contract, flowTriggerAuctionBid, depositDetail(detail, it.attrs["id"], price))...)
 			}
 		case eventUpdateBid, eventUpdateCollectionBid:
-			dep, ok := bidDeposit(it.attrs, contract, before)
+			dep, price, ok := bidDeposit(it.attrs, contract, before)
 			if !ok {
 				continue
 			}
 			refund := legsBetween(after, contract, it.attrs["creator"])
 			out = append(out, coinRows(CategoryProtocolWithdrawal, refund, contract, it.attrs["creator"], flowTriggerAuctionRefund, detail(it.attrs["id"]))...)
-			out = append(out, coinRows(CategoryProtocolDeposit, dep, it.attrs["creator"], contract, flowTriggerAuctionBid, detail(it.attrs["id"]))...)
+			out = append(out, coinRows(CategoryProtocolDeposit, dep, it.attrs["creator"], contract, flowTriggerAuctionBid, depositDetail(detail, it.attrs["id"], price))...)
 		case eventRemoveBid, eventRemoveCollectionBid:
 			// The event does not name the bidder; a bidder removing their
 			// own bid signs the message, and only the payout to them is the
@@ -230,6 +308,116 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, sender string, known [
 	return out
 }
 
+// askSaleEvents books a listed NFT bought at its asking price on a
+// marketplace whose accept_ask event names the seller, buyer, price and
+// payouts, as the nft_sale the Stargaze marketplace sale rule writes. It
+// holds only when the buyer paid the contract the price in the message, the
+// contract paid the seller the proceeds, the payouts add up to the price and
+// the collection moved the token to the buyer. The escrow release the known
+// rows already record stays, as a record-only nft_transfer.
+func askSaleEvents(log *indexerTxTypes.LogMessage, known []TaxableEvent) []TaxableEvent {
+	sold := map[string]bool{}
+	for _, e := range known {
+		if e.Category == string(CategoryNFTSale) {
+			sold[e.Asset] = true
+		}
+	}
+	legs := transfersIn(log)
+	var out []TaxableEvent
+	for _, ev := range log.Events {
+		if ev.Type != eventWasm {
+			continue
+		}
+		a := attrMap(ev)
+		contract, seller, buyer, denom := a[attributeContractAddress], a["seller"], a["buyer"], a["price_denom"]
+		asset := a[attrCollection] + "/" + a[attrTokenID]
+		if a[attributeAction] != "accept_ask" || contract == "" || seller == "" || buyer == "" || denom == "" || a[attrCollection] == "" || a[attrTokenID] == "" || sold[asset] {
+			continue
+		}
+		price, ok := sdkmath.NewIntFromString(a["price_amount"])
+		if !ok || !price.IsPositive() {
+			continue
+		}
+		parts := sdkmath.ZeroInt()
+		for _, k := range []string{"fee_amount", "seller_proceeds", "royalty_amount"} {
+			v, ok := sdkmath.NewIntFromString(firstNonEmpty(a[k], "0"))
+			if !ok || v.IsNegative() {
+				parts = sdkmath.ZeroInt()
+				break
+			}
+			parts = parts.Add(v)
+		}
+		proceeds, _ := sdkmath.NewIntFromString(firstNonEmpty(a["seller_proceeds"], "0"))
+		if !parts.Equal(price) || !coinsEqual(legsBetween(legs, buyer, contract), sdk.Coins{sdk.NewCoin(denom, price)}) ||
+			!legsBetween(legs, contract, seller).AmountOf(denom).Equal(proceeds) || !nftMovedTo(log, a[attrCollection], a[attrTokenID], buyer) {
+			continue
+		}
+		sold[asset] = true
+		out = append(out, TaxableEvent{
+			Category: string(CategoryNFTSale), FromAddr: seller, ToAddr: buyer,
+			Amount: price.String(), Denom: denom, Asset: asset,
+			Detail: contractDetail(contract, map[string]string{detailSale: "ask"}),
+		})
+	}
+	return out
+}
+
+// askListingFeeEvents books the fee a marketplace charges to list an NFT:
+// the ask's creator pays the marketplace, which forwards exactly that coin
+// to one other address in the same message, and no other coins move. It is
+// an expense, as a name registration is. The creator is read from the ask
+// event, so the rule needs no signer and runs inside a MsgExec too.
+func askListingFeeEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
+	var ask map[string]string
+	for _, ev := range log.Events {
+		if ev.Type != eventSetAsk {
+			continue
+		}
+		if ask != nil {
+			return nil
+		}
+		ask = attrMap(ev)
+	}
+	if ask == nil {
+		return nil
+	}
+	contract, creator := ask[attributeContractAddress], ask["creator"]
+	if contract == "" || creator == "" || ask["id"] == "" || (sender != "" && sender != creator) {
+		return nil
+	}
+	legs := transfersIn(log)
+	if len(legs) != 2 || legs[0].from != creator || legs[0].to != contract || legs[1].from != contract ||
+		legs[1].to == creator || legs[1].to == contract || len(legs[0].coins) != 1 || !coinsEqual(legs[0].coins, legs[1].coins) ||
+		!legs[0].coins.IsAllPositive() || namesAny(known, creator, legs[0].coins) {
+		return nil
+	}
+	return coinRows(CategoryExpense, legs[0].coins, creator, legs[1].to, triggerListingFee, contractDetail(contract, map[string]string{"ask_id": ask["id"]}))
+}
+
+// nftMovedTo reports the collection's transfer of the token to addr.
+func nftMovedTo(log *indexerTxTypes.LogMessage, collection, tokenID, addr string) bool {
+	for _, ev := range log.Events {
+		if ev.Type != eventWasm {
+			continue
+		}
+		a := attrMap(ev)
+		if a[attributeContractAddress] == collection && a[attrTokenID] == tokenID && a[attributeRecipient] == addr &&
+			(a[attributeAction] == actionTransferNFT || a[attributeAction] == "send_nft") {
+			return true
+		}
+	}
+	return false
+}
+
+// depositDetail is a bid deposit's detail, naming the bid price when the
+// coins paid differ from it.
+func depositDetail(detail func(string, ...string) string, id, price string) string {
+	if price == "" {
+		return detail(id)
+	}
+	return detail(id, "price", price)
+}
+
 // Triggers shared with the reserve auction rows.
 const (
 	flowTriggerAuctionBid    = "auction_bid"
@@ -248,22 +436,24 @@ func eventLegs(items []logItem, i int) (before, after []coinTransfer) {
 	return before, after
 }
 
-// bidDeposit is the bid price when the bidder's transfer to the marketplace
-// just before the bid event is exactly that price.
-func bidDeposit(attrs map[string]string, contract string, before []coinTransfer) (sdk.Coins, bool) {
+// bidDeposit is what the bidder paid the marketplace just before the bid
+// event: the escrow the bid holds. When it is not the bid price, the price
+// is returned for the row's detail, and the row still holds the coins paid,
+// so a later fill or refund releases the escrow instead of liquid coins.
+func bidDeposit(attrs map[string]string, contract string, before []coinTransfer) (sdk.Coins, string, bool) {
 	creator := attrs["creator"]
 	if creator == "" || attrs["id"] == "" {
-		return nil, false
-	}
-	price, err := sdk.ParseCoinsNormalized(attrs["price"])
-	if err != nil || len(price) != 1 || !price[0].IsPositive() {
-		return nil, false
+		return nil, "", false
 	}
 	paid := legsBetween(before, creator, contract)
-	if !coinsEqual(paid, price) {
-		return nil, false
+	if len(paid) != 1 || !paid[0].IsPositive() {
+		return nil, "", false
 	}
-	return price, true
+	price, err := sdk.ParseCoinsNormalized(attrs["price"])
+	if err != nil || !coinsEqual(paid, price) {
+		return paid, attrs["price"], true
+	}
+	return paid, "", true
 }
 
 func legsBetween(legs []coinTransfer, from, to string) sdk.Coins {

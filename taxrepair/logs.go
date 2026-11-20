@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -175,55 +173,26 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 
 // withAuthzWasmSupplement appends the wasm supplement rows of each contract
 // message inside a MsgExec, in inner message order, after every other row,
-// as the indexer writes them for the top-level message. Supplement rows
-// already in rows (an earlier repair) are dropped first, so a second replay
-// is a no-op. The stored log does not name the granter, so the rules that
-// need the signer do not run and only 20-byte wallets are the wallet side of
-// the bank fallback.
+// as the indexer writes them for the top-level message. The indexer runs
+// only the rules that need no signer on contract messages inside a MsgExec,
+// so the stored log gives the same rows. A message whose stored rows already
+// hold a supplement row other than a bank fallback was written by an indexer
+// that has the supplement and is left as it is. Bank fallback rows of an
+// earlier repair are dropped by their marker and written again, so a second
+// replay is a no-op and a replay after a rule change does not keep the old
+// fallback next to a new row for the same coins.
 func withAuthzWasmSupplement(rows []tax.TaxableEvent, log *txlog.LogMessage) []tax.TaxableEvent {
-	groups := map[int][]txlog.LogMessageEvent{}
-	var order []int
-	hasContract := map[int]bool{}
-	for _, e := range log.Events {
-		v, ok := attributes(e)["authz_msg_index"]
-		if !ok {
-			continue
-		}
-		i, err := strconv.Atoi(v)
-		if err != nil {
-			continue
-		}
-		if _, seen := groups[i]; !seen {
-			order = append(order, i)
-		}
-		groups[i] = append(groups[i], e)
-		if e.Type == "execute" {
-			hasContract[i] = true
-		}
-	}
-	sort.Ints(order)
-	var supplement []tax.TaxableEvent
-	for _, i := range order {
-		if hasContract[i] {
-			supplement = append(supplement, tax.WasmSupplementForLog(&txlog.LogMessage{Events: groups[i]}, "")...)
-		}
-	}
-	if len(supplement) == 0 {
-		return rows
-	}
-	pending := map[string]int{}
-	for _, e := range supplement {
-		pending[rowKey(e)]++
-	}
-	out := make([]tax.TaxableEvent, 0, len(rows)+len(supplement))
+	out := make([]tax.TaxableEvent, 0, len(rows))
 	for _, e := range rows {
-		if k := rowKey(e); pending[k] > 0 {
-			pending[k]--
-			continue
+		supplement, fallback := tax.SupplementRow(e)
+		if supplement && !fallback {
+			return rows
 		}
-		out = append(out, e)
+		if !fallback {
+			out = append(out, e)
+		}
 	}
-	return append(out, supplement...)
+	return append(out, tax.AuthzWasmSupplementForLog(log)...)
 }
 
 func rowKey(e tax.TaxableEvent) string {

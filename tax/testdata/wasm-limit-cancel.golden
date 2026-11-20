@@ -1,1 +1,1 @@
-protocol_withdrawal|500000|uatom||cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua|cosmos1zhnkfda794nszzdpcxlpp0z2ft4lat9fkwzj0f||limit_cancel|{"contract":"cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua","order_id":"49"}
+protocol_withdrawal|500000|uatom||cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua|cosmos1zhnkfda794nszzdpcxlpp0z2ft4lat9fkwzj0f||limit_cancel|{"contract":"cosmos1ayykza6gcpyxg08c80rjtyc7wekvvl0cswe9hlp7438e4tqjfzksngyyua","order_id":"49","refund_qty":"500000"}
