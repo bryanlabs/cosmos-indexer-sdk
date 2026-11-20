@@ -52,12 +52,7 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 				asset = r.Denom
 			}
 			denoms[asset] = r.Denom
-			if r.Direction == apiOut {
-				lots[asset], _ = takeRewardLots(lots[asset], r)
-			} else {
-				lots[asset] = append(lots[asset], moveLot(r))
-				sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
-			}
+			lots[asset] = moveRewardLots(lots[asset], r)
 			continue
 		}
 		if !r.isTaxable() || r.UserTag == TagInternalTransfer || r.UserTag == TagProtocolDeposit || r.UserTag == TagSpam {

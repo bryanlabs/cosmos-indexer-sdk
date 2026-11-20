@@ -11,7 +11,14 @@ import (
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 )
 
-const unknownClaimSemantics = "unknown_claim_semantics"
+const (
+	unknownClaimSemantics = "unknown_claim_semantics"
+	// withdrawMoveUnkeyed holds a withdraw-address move that names no stored
+	// message. The lot engines take a move's reward lot by message, so such a
+	// move cannot leave the delegator's lot; booking it on the receiving side
+	// would count the reward twice.
+	withdrawMoveUnkeyed = "withdraw_address_move_without_message"
+)
 
 // ReportReadiness covers the review and retained parser/decode evidence gates.
 // It does not certify archive coverage, prices, basis or off-chain history.
@@ -34,6 +41,9 @@ type ReportReadiness struct {
 func semanticReviewReason(row Row) string {
 	if isIBCRefund(row.RewardTrigger) {
 		return ibcRefundBasisRequired
+	}
+	if row.isRewardMove() && row.MessageID == 0 {
+		return withdrawMoveUnkeyed
 	}
 	var detail struct {
 		Required string `json:"review_required"`

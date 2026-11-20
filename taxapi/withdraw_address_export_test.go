@@ -191,3 +191,92 @@ func TestWithdrawAddressMoveTakesItsRewardLot(t *testing.T) {
 	require.Equal(t, "150", got[1].CostBasis.String())
 	require.Equal(t, "03/01/2025", got[1].DateAcquired)
 }
+
+// Rows of an earlier Hub chain carry no stored message (MessageID 0), so a
+// withdraw-address move there cannot name the reward lot it moves. It must
+// not leave the reward on both sides: the delegator keeps the one lot, the
+// receiver books none, and the row holds the report for review so no download
+// uses it. A move with its message is the control.
+func TestWithdrawAddressMoveWithoutMessageIsHeld(t *testing.T) {
+	const delegator, withdraw = "cosmos1delegator", "cosmos1withdraw"
+	paidAt := time.Date(2020, 3, 1, 12, 0, 0, 0, time.UTC)
+	soldAt := paidAt.AddDate(0, 2, 0)
+	asOf := soldAt.AddDate(0, 0, -1)
+	noPrice := func(string) (decimal.Decimal, bool) { return decimal.Zero, false }
+	rows := func(message uint) (reward, moveOut, moveIn Row) {
+		reward = Row{Time: paidAt, TxHash: "LEGACYREWARD", ChainID: hub3ChainID, MessageID: message, Category: apiReward, Direction: "in", Symbol: apiSymbolATOM, Denom: apiUatom, Amount: d(50), PriceUSD: d(10), ValueUSD: d(500), To: delegator, RewardTrigger: waClaimTrigger}
+		moveOut = Row{Time: paidAt, TxHash: "LEGACYREWARD", ChainID: hub3ChainID, MessageID: message, Category: apiTransfer, Direction: apiOut, Symbol: apiSymbolATOM, Denom: apiUatom, Amount: d(50), PriceUSD: d(10), ValueUSD: d(500), From: delegator, To: withdraw, RewardTrigger: tax.TriggerWithdrawAddress}
+		moveIn = moveOut
+		moveIn.Direction = "in"
+		return reward, moveOut, moveIn
+	}
+	sale := func(from string) Row {
+		return Row{Time: soldAt, TxHash: "LEGACYSALE", ChainID: hub3ChainID, Category: apiTransfer, Direction: apiOut, Symbol: apiSymbolATOM, Denom: apiUatom, Amount: d(50), PriceUSD: d(12), ValueUSD: d(600), From: from, To: flowTestExchange}
+	}
+	type side struct {
+		rows    func(reward, moveOut, moveIn Row) []Row
+		seller  string
+		holding string // quantity the lot engines hold before the sale
+		basis   string // Form 8949 basis of selling 50; "" when no lot is held
+	}
+	delegatorSide := func(reward, moveOut, _ Row) []Row { return []Row{moveOut, reward} }
+	receiverSide := func(_, _, moveIn Row) []Row { return []Row{moveIn} }
+	bothSides := func(reward, moveOut, moveIn Row) []Row { return []Row{moveIn, moveOut, reward} }
+	cases := []struct {
+		name    string
+		message uint
+		held    bool
+		side
+	}{
+		{"delegator side, no message", 0, true, side{delegatorSide, delegator, "50", "500"}},
+		{"receiver side, no message", 0, true, side{receiverSide, withdraw, "", ""}},
+		{"both wallets, no message", 0, true, side{bothSides, withdraw, "50", "500"}},
+		{"delegator side, with message", 7, false, side{delegatorSide, delegator, "", ""}},
+		{"receiver side, with message", 7, false, side{receiverSide, withdraw, "50", "500"}},
+		{"both wallets, with message", 7, false, side{bothSides, withdraw, "50", "500"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := tc.rows(rows(tc.message))
+			readiness := readinessForRows(in)
+			var b bytes.Buffer
+			err := WriteCSV(&b, apiKoinly, in)
+			_, reviewErr := applyReviewedRows(in, AssetDecisions{}, false)
+			if tc.held {
+				require.False(t, readiness.ExportReady)
+				moves := 0
+				for _, r := range in {
+					if r.isRewardMove() {
+						moves++
+					}
+				}
+				require.Equal(t, moves, readiness.PendingSemanticReviews)
+				require.Equal(t, []string{withdrawMoveUnkeyed}, readiness.ReviewRequired)
+				require.ErrorAs(t, err, &reportReadinessRequired{})
+				require.ErrorAs(t, reviewErr, &reportReadinessRequired{})
+			} else {
+				require.True(t, readiness.ExportReady)
+				require.NoError(t, err)
+				require.NoError(t, reviewErr)
+			}
+			// Never two lots for one reward: the engines hold it once at most.
+			pos := BuildPositions(in, asOf, noPrice)
+			if tc.holding == "" {
+				require.Empty(t, pos)
+			} else {
+				require.Len(t, pos, 1)
+				require.Equal(t, tc.holding, pos[0].Quantity.String())
+				require.Equal(t, 1, pos[0].Lots)
+			}
+			got := Build8949(append(in, sale(tc.seller)))
+			require.Len(t, got, 1)
+			if tc.basis == "" {
+				require.True(t, got[0].BasisUnknown)
+			} else {
+				require.False(t, got[0].BasisUnknown)
+				require.Equal(t, tc.basis, got[0].CostBasis.String())
+				require.Equal(t, "03/01/2020", got[0].DateAcquired)
+			}
+		})
+	}
+}

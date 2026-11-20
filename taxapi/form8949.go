@@ -78,6 +78,26 @@ func moveLot(r Row) lot {
 	return l
 }
 
+// moveRewardLots applies a withdraw-address move to the asset's lots: the
+// delegator side drops the reward lot of its message (takeRewardLots), and the
+// receiving side holds it at the reward's basis and receipt time. A move with
+// no message (MessageID 0, as on rows of an earlier Hub chain) cannot name its
+// reward lot, so it changes neither side: the delegator keeps the one lot and
+// the receiver books none. semanticReviewReason holds such a row for review,
+// so no download uses the result.
+func moveRewardLots(q []lot, r Row) []lot {
+	if r.MessageID == 0 {
+		return q
+	}
+	if r.Direction == apiOut {
+		kept, _ := takeRewardLots(q, r)
+		return kept
+	}
+	q = append(q, moveLot(r))
+	sort.SliceStable(q, func(i, j int) bool { return q[i].date.Before(q[j].date) })
+	return q
+}
+
 // basisUnknownFor reports whether an "in" event establishes a lot whose cost
 // basis we can actually stand behind. Rewards/commission are dominion-and-
 // control income at receipt (the FMV then IS the basis); swaps and NFT mints/
@@ -141,12 +161,7 @@ func Build8949(rows []Row) []Form8949Row {
 		// receipt time (INF-213).
 		if r.isRewardMove() {
 			asset := lotAsset(r)
-			if r.Direction == apiOut {
-				lots[asset], _ = takeRewardLots(lots[asset], r)
-			} else {
-				lots[asset] = append(lots[asset], moveLot(r))
-				sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
-			}
+			lots[asset] = moveRewardLots(lots[asset], r)
 			continue
 		}
 		// A Stargaze migration mint is record-only, but the NFT keeps the
