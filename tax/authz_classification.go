@@ -37,6 +37,9 @@ type classificationState struct {
 	// paid holds the delegator-to-withdraw-address transfers, which go after
 	// late.
 	paid []TaxableEvent
+	// refused names, per delegator with rewards, why no transfer was booked
+	// for its rewards: the payments in the message do not say where they went.
+	refused []string
 }
 
 func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificationState, depth int, path string) []TaxableEvent {

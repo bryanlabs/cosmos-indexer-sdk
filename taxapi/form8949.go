@@ -48,7 +48,31 @@ type lot struct {
 	cost         decimal.Decimal // USD per unit
 	date         time.Time
 	manual       bool
-	basisUnknown bool // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
+	basisUnknown bool   // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
+	msgID        uint   // the message a reward lot was booked in, 0 for any other lot
+	denom        string // the on-chain denom, which a withdraw-address move matches
+}
+
+// lotAsset is the fungible lot key Form 8949 uses for a row.
+func lotAsset(r Row) string {
+	asset := r.Symbol
+	if asset == "" {
+		asset = r.Denom
+	}
+	if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch && (r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride) {
+		asset = r.AssetIdentity.RawDenom
+	}
+	return asset
+}
+
+// moveLot is the lot a withdraw address receives from a reward move: the
+// reward's receipt-time value is its basis and the receipt its acquisition.
+func moveLot(r Row) lot {
+	l := lot{qty: r.Amount, cost: r.PriceUSD, date: r.Time, basisUnknown: r.PriceMissing, denom: r.Denom}
+	if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil && r.Amount.IsPositive() {
+		l.cost, l.date, l.basisUnknown, l.manual = r.ManualBasisUSD.DivRound(r.Amount, 64), *r.ManualAcquiredDate, false, true
+	}
+	return l
 }
 
 // basisUnknownFor reports whether an "in" event establishes a lot whose cost
@@ -88,7 +112,7 @@ func basisUnknownForRow(r Row) bool {
 func Build8949(rows []Row) []Form8949Row {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	sort.SliceStable(sorted, func(i, j int) bool { return lotsBefore(sorted[i], sorted[j]) })
 
 	lots := map[string][]lot{}    // asset -> FIFO lots (fungible)
 	nftLots := map[string][]lot{} // "<collection>/<token>" -> FIFO lots (qty always 1, cost in total USD)
@@ -96,6 +120,20 @@ func Build8949(rows []Row) []Form8949Row {
 
 	for _, r := range sorted {
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+			continue
+		}
+		// A reward paid to the withdraw address is no disposal: the delegator
+		// side drops exactly the reward lot of that message, with no 8949
+		// line, and the receiving side holds it at the reward's basis and
+		// receipt time (INF-213).
+		if r.isRewardMove() {
+			asset := lotAsset(r)
+			if r.Direction == apiOut {
+				lots[asset], _ = takeRewardLots(lots[asset], r)
+			} else {
+				lots[asset] = append(lots[asset], moveLot(r))
+				sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
+			}
 			continue
 		}
 		// A Stargaze migration mint is record-only, but the NFT keeps the
@@ -173,13 +211,7 @@ func Build8949(rows []Row) []Form8949Row {
 			continue
 		}
 
-		asset := r.Symbol
-		if asset == "" {
-			asset = r.Denom
-		}
-		if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch && (r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride) {
-			asset = r.AssetIdentity.RawDenom
-		}
+		asset := lotAsset(r)
 		switch {
 		case r.Direction == "in" && r.Category != apiFee:
 			// acquisition
@@ -191,10 +223,14 @@ func Build8949(rows []Row) []Form8949Row {
 				acquired = *r.ManualAcquiredDate
 				unknown = false
 			}
-			lots[asset] = append(lots[asset], lot{
+			l := lot{
 				qty: r.Amount, cost: cost, date: acquired,
-				basisUnknown: unknown, manual: r.ManualBasisUSD != nil,
-			})
+				basisUnknown: unknown, manual: r.ManualBasisUSD != nil, denom: r.Denom,
+			}
+			if r.Category == apiReward {
+				l.msgID = r.MessageID
+			}
+			lots[asset] = append(lots[asset], l)
 			sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
 
 		case r.Direction == apiOut:

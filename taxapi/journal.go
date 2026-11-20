@@ -76,7 +76,7 @@ const (
 func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	// Fee rows are loaded after event rows; a ledger wants strict date order.
 	rows := append([]Row(nil), input...)
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Time.Before(rows[j].Time) })
+	sort.SliceStable(rows, func(i, j int) bool { return lotsBefore(rows[i], rows[j]) })
 	var out []JournalLine
 	swapsByTx := map[string][]Row{}
 	for _, r := range rows {
@@ -232,11 +232,16 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			if in {
 				contra = acctTransfersIn
 			}
-			switch r.UserTag {
+			tag := r.UserTag
+			if r.isRewardMove() {
+				// The reward moves at its own value; it is not a disposal.
+				tag = TagInternalTransfer
+			}
+			switch tag {
 			case TagInternalTransfer:
 				contra = acctInternal
 			case TagIncome, TagAirdrop:
-				contra = acctOtherIncome + ": " + titleTrigger(r.UserTag)
+				contra = acctOtherIncome + ": " + titleTrigger(tag)
 			case TagPayment:
 				if in {
 					contra = acctOtherIncome + ": Payments Received"

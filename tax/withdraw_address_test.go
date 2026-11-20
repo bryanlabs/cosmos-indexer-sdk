@@ -1,17 +1,20 @@
 package tax
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
 	sdkmath "cosmossdk.io/math"
+	"github.com/DefiantLabs/cosmos-indexer/config"
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
 const (
@@ -132,24 +135,91 @@ func TestWithdrawAddressUnsetAddsNothing(t *testing.T) {
 	}
 }
 
-// What moves is capped per denom at the booked reward, so a distribution
-// payment that is not this delegator's reward never moves its coins, and a
-// denom with no reward moves nothing.
+// What moves is capped per denom at the booked reward and at what the one
+// other account was paid, and a denom with no reward moves nothing.
 func TestWithdrawAddressCappedAtBookedReward(t *testing.T) {
 	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
-	log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
+	moves := func(log *txlog.LogMessage) []TaxableEvent {
+		t.Helper()
+		out := classify(msg, log)
+		return out[len(withoutWithdrawAddress(out)):]
+	}
+	got := moves(&txlog.LogMessage{Events: []txlog.LogMessageEvent{
 		distTransfer(withdrawTo, "300uatom,9uosmo"),
-		distTransfer(withdrawToOther, "800uatom"),
+		distTransfer(withdrawTo, "800uatom"),
 		withdrawRewards(del, val, fixtureHalfMilliAtom),
-	}}
-	assertMovedLast(t, classify(msg, log), []TaxableEvent{
-		moved(del, withdrawTo, "300", fixtureNativeDenom, actionClaim),
-		moved(del, withdrawToOther, "200", fixtureNativeDenom, actionClaim),
-	})
+	}})
+	if !reflect.DeepEqual(got, []TaxableEvent{moved(del, withdrawTo, "500", fixtureNativeDenom, actionClaim)}) {
+		t.Fatalf("moves %+v", got)
+	}
+	got = moves(&txlog.LogMessage{Events: []txlog.LogMessageEvent{distTransfer(withdrawTo, "300uatom"), withdrawRewards(del, val, fixtureHalfMilliAtom)}})
+	if !reflect.DeepEqual(got, []TaxableEvent{moved(del, withdrawTo, "300", fixtureNativeDenom, actionClaim)}) {
+		t.Fatalf("moves %+v", got)
+	}
 	// No reward booked: nothing to move.
 	none := classify(msg, &txlog.LogMessage{Events: []txlog.LogMessageEvent{distTransfer(withdrawTo, fixtureHalfMilliAtom)}})
 	if len(none) != 0 {
 		t.Fatalf("moved coins with no reward: %+v", none)
+	}
+}
+
+// When the payments do not say where the reward went, nothing moves and the
+// refusal is counted: the module paid two other accounts, or paid the
+// delegator and another account. The reward rows stay as they were.
+func TestWithdrawAddressPairingRefusals(t *testing.T) {
+	msg := &disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: del, ValidatorAddress: val}
+	for _, tc := range []struct {
+		name, reason string
+		paid         []txlog.LogMessageEvent
+	}{
+		{"two recipients", WithdrawRefusedManyRecipients, []txlog.LogMessageEvent{distTransfer(withdrawTo, "300uatom"), distTransfer(withdrawToOther, "800uatom")}},
+		{"delegator and another", WithdrawRefusedPaidDelegator, []txlog.LogMessageEvent{distTransfer(del, "200uatom"), distTransfer(withdrawTo, "300uatom")}},
+		{"another then delegator", WithdrawRefusedPaidDelegator, []txlog.LogMessageEvent{distTransfer(withdrawTo, "300uatom"), distTransfer(del, "200uatom")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &txlog.LogMessage{Events: append(tc.paid, withdrawRewards(del, val, fixtureHalfMilliAtom))}
+			out := classify(msg, log)
+			if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "500" || out[0].ToAddr != del {
+				t.Fatalf("%+v", out)
+			}
+			if got := WithdrawAddressRefusals(msg, log); !reflect.DeepEqual(got, map[string]int{tc.reason: 1}) {
+				t.Fatalf("refusals %v", got)
+			}
+		})
+	}
+	// A plain payout, redirected or not, is no refusal.
+	for _, to := range []string{del, withdrawTo} {
+		log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{distTransfer(to, fixtureHalfMilliAtom), withdrawRewards(del, val, fixtureHalfMilliAtom)}}
+		if got := WithdrawAddressRefusals(msg, log); len(got) != 0 {
+			t.Fatalf("refusals %v", got)
+		}
+	}
+}
+
+// The operator's last undelegation removes the validator, and the module
+// sweeps its commission to the same withdraw address in the same message. Only
+// the booked reward moves, whichever payment comes first, and a removal with
+// no reward moves nothing.
+func TestWithdrawAddressValidatorRemovalCommission(t *testing.T) {
+	msg := &stakingtypes.MsgUndelegate{DelegatorAddress: del, ValidatorAddress: val, Amount: sdk.NewInt64Coin(fixtureNativeDenom, 1000)}
+	unbond := ev(eventUnbond, [2]string{attributeValidator, val}, milliAtom)
+	reward, commission := distTransfer(withdrawTo, "200uatom"), distTransfer(withdrawTo, "5000uatom")
+	for name, events := range map[string][]txlog.LogMessageEvent{
+		"reward first":     {reward, withdrawRewards(del, val, "200uatom"), unbond, commission},
+		"commission first": {commission, reward, withdrawRewards(del, val, "200uatom"), unbond},
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := classify(msg, &txlog.LogMessage{Events: events})
+			rewards := byCategory(out, string(CategoryReward))
+			if len(rewards) != 1 || rewards[0].Amount != "200" {
+				t.Fatalf("rewards %+v", out)
+			}
+			assertMovedLast(t, out, []TaxableEvent{moved(del, withdrawTo, "200", fixtureNativeDenom, "undelegate")})
+		})
+	}
+	out := classify(msg, &txlog.LogMessage{Events: []txlog.LogMessageEvent{withdrawRewards(del, val, "0stake"), unbond, commission}})
+	if len(withoutWithdrawAddress(out)) != len(out) {
+		t.Fatalf("moved commission with no reward: %+v", out)
 	}
 }
 
@@ -282,4 +352,73 @@ func TestWithdrawAddressArchiveFixtures(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The legacy LSM wrappers classify with the caller's state since the moves
+// were added. Their inner classifiers never raise an issue or queue a late
+// row, so the shared state changes only where a withdraw-address move goes:
+// after every row of the top-level message. Inside an Exec (depth 1), each
+// wrapper books exactly what its unwrapped message books on its own, and an
+// Exec sibling's issue stays that sibling's alone.
+func TestLegacyLSMWrappersShareStateOnlyForMoves(t *testing.T) {
+	i0, i1 := [2]string{attributeAuthzMsgIndex, "0"}, [2]string{attributeAuthzMsgIndex, "1"}
+	lsmEvents := func(extra ...[2]string) []txlog.LogMessageEvent {
+		return []txlog.LogMessageEvent{
+			distTransfer(withdrawTo, fixtureHalfMilliAtom, extra...),
+			withdrawRewards(del, val, fixtureHalfMilliAtom, extra...),
+			ev("tokenize_shares", append([][2]string{{attributeDelegator, del}, {attributeValidator, val}, milliAtom, {"share_record_id", "7"}}, extra...)...),
+		}
+	}
+	tokenize := MsgTokenizeShares{DelegatorAddress: del, ValidatorAddress: val}
+	redeem := legacyRedeem(t, val)
+	for name, tc := range map[string]struct{ wrapped, inner sdk.Msg }{
+		"tokenize":            {&LegacyMsgTokenizeShares{tokenize}, &tokenize},
+		"redeem":              {redeem, &redeem.MsgRedeemTokensForShares},
+		"transfer record":     {&LegacyMsgTransferTokenizeShareRecord{MsgTransferTokenizeShareRecord{TokenizeShareRecordID: 7, Sender: del, NewOwner: otherDelegator}}, &MsgTransferTokenizeShareRecord{TokenizeShareRecordID: 7, Sender: del, NewOwner: otherDelegator}},
+		"withdraw record":     {&LegacyMsgWithdrawTokenizeShareRecordReward{MsgWithdrawTokenizeShareRecordReward{OwnerAddress: del, RecordID: 7}}, &MsgWithdrawTokenizeShareRecordReward{OwnerAddress: del, RecordID: 7}},
+		"withdraw all record": {&LegacyMsgWithdrawAllTokenizeShareRecordReward{MsgWithdrawAllTokenizeShareRecordReward{OwnerAddress: del}}, &MsgWithdrawAllTokenizeShareRecordReward{OwnerAddress: del}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			log := &txlog.LogMessage{Events: lsmEvents()}
+			alone := classify(tc.inner, log)
+			state := &classificationState{}
+			inExec := classifyWithState(tc.wrapped, log, state, 1, "0")
+			if len(state.issues) != 0 || len(state.late) != 0 {
+				t.Fatalf("issues %v late %+v", state.issues, state.late)
+			}
+			if !reflect.DeepEqual(inExec, withoutWithdrawAddress(alone)) || !reflect.DeepEqual(state.paid, alone[len(withoutWithdrawAddress(alone)):]) {
+				t.Fatalf("in an Exec %+v queued %+v, alone %+v", inExec, state.paid, alone)
+			}
+			if top := classify(tc.wrapped, log); !reflect.DeepEqual(top, alone) {
+				t.Fatalf("top level %+v, alone %+v", top, alone)
+			}
+		})
+	}
+	// An Exec of a legacy tokenize and an IBC timeout whose refund the log
+	// cannot credit: one issue, the timeout's, exactly as when it runs alone
+	// in an Exec; the tokenize rows as on their own; the move last.
+	timeout := &chantypes.MsgTimeout{Packet: safetyPacket(t, fixtureNativeDenom)}
+	timeoutEvent := func(index [2]string) txlog.LogMessageEvent {
+		return ev("timeout", [2]string{testRefundReceiver, otherDelegator}, index)
+	}
+	exec := authz.NewMsgExec(sdk.AccAddress("grantee"), []sdk.Msg{&LegacyMsgTokenizeShares{tokenize}, timeout})
+	log := &txlog.LogMessage{Events: append(lsmEvents(i0), timeoutEvent(i1))}
+	data, err := (&Parser{ID: "lsm-depth"}).ParseMessage(&exec, log, config.IndexConfig{})
+	var incomplete *ClassificationIncompleteError
+	if !errors.As(err, &incomplete) || len(incomplete.Issues) != 1 {
+		t.Fatalf("issues %v", err)
+	}
+	timeoutOnly := authz.NewMsgExec(sdk.AccAddress("grantee"), []sdk.Msg{timeout})
+	_, aloneErr := (&Parser{ID: "lsm-depth"}).ParseMessage(&timeoutOnly, &txlog.LogMessage{Events: []txlog.LogMessageEvent{timeoutEvent(i0)}}, config.IndexConfig{})
+	var aloneIncomplete *ClassificationIncompleteError
+	if !errors.As(aloneErr, &aloneIncomplete) || len(aloneIncomplete.Issues) != 1 ||
+		strings.Replace(aloneIncomplete.Issues[0], "authz 0", "authz 1", 1) != incomplete.Issues[0] {
+		t.Fatalf("exec issues %q, timeout alone %v", incomplete.Issues, aloneErr)
+	}
+	out := (*data).([]TaxableEvent)
+	own := withoutWithdrawAddress(classify(&tokenize, &txlog.LogMessage{Events: lsmEvents()}))
+	if got := withoutWithdrawAddress(out); len(got) != len(own) || summary(got) != summary(own) {
+		t.Fatalf("exec rows %+v, tokenize alone %+v", got, own)
+	}
+	assertMovedLast(t, out, []TaxableEvent{moved(del, withdrawTo, "500", fixtureNativeDenom, "tokenize")})
 }

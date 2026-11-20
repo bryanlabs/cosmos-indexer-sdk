@@ -125,13 +125,15 @@ func tagsFromRequest(r *http.Request) (UserTags, error) {
 }
 
 // ApplyTags stamps UserTag on the rows a tag addresses. A denom-specific tag
-// wins over a transaction-wide one. Fees are never tagged.
+// wins over a transaction-wide one. Fees are never tagged, and neither is a
+// withdraw-address move: a tag on its reward transaction would otherwise turn
+// the move into income or a disposal, and the reward stays the delegator's.
 func ApplyTags(rows []Row, tags UserTags) []Row {
 	if len(tags) == 0 {
 		return rows
 	}
 	for i := range rows {
-		if rows[i].Category == apiFee {
+		if rows[i].Category == apiFee || rows[i].isRewardMove() {
 			continue
 		}
 		hash := strings.ToUpper(rows[i].TxHash)
@@ -181,9 +183,9 @@ func ctcTagType(r Row) (string, bool) {
 	switch r.UserTag {
 	case TagInternalTransfer:
 		if in {
-			return "transfer-in", true
+			return ctcTransferIn, true
 		}
-		return "transfer-out", true
+		return ctcTransferOut, true
 	case TagIncome:
 		if in {
 			return TagIncome, true

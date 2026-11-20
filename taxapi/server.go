@@ -470,6 +470,7 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
 		row.Detail = e.Detail
+		row.MessageID = e.MessageID
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
 		out = append(out, row)
 	}
