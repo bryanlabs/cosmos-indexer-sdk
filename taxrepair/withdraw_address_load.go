@@ -510,6 +510,10 @@ func runWaCheck(db *gorm.DB, parts []waLoadPart, explain bool) int {
 		start := time.Now()
 		var v waVerdict
 		err := db.Transaction(func(tx *gorm.DB) error {
+			var ro string
+			if err := tx.Raw("SHOW transaction_read_only").Scan(&ro).Error; err != nil || ro != "on" {
+				return fmt.Errorf("check transaction is not read only (%q, %v)", ro, err)
+			}
 			if err := tx.Exec("SET LOCAL statement_timeout = '900s'; SET LOCAL TimeZone = 'UTC'; SET LOCAL jit = off").Error; err != nil {
 				return err
 			}
