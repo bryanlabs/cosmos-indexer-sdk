@@ -394,6 +394,10 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	if events, err = s.withStreamExitLegs(chain, addr, events); err != nil {
 		return walletRows{}, err
 	}
+	phases.next("limit_lots")
+	if events, err = s.withLimitMakerLegs(chain, addr, events); err != nil {
+		return walletRows{}, err
+	}
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.

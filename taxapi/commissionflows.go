@@ -726,6 +726,9 @@ func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool)
 	if e.RewardTrigger == flowStreamSubscribe || e.RewardTrigger == flowStreamWithdraw || e.RewardTrigger == flowStreamRefund {
 		fe.Lot = flowStreamLot(e)
 	}
+	if e.RewardTrigger == tax.TriggerLimitOrder || e.RewardTrigger == tax.TriggerLimitCancel || (dir == apiOut && detailValue(e.Detail, "lot_basis") != "" && (e.RewardTrigger == tax.TriggerLimitFill || e.RewardTrigger == tax.TriggerLimitFee)) {
+		fe.Lot = flowLimitLot(e)
+	}
 	switch e.Category {
 	case flowCatRedelegate:
 		fe.SrcValidator = detailValue(e.Detail, "source_validator")

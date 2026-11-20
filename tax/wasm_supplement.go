@@ -148,7 +148,7 @@ func SupplementRow(e TaxableEvent) (supplement, fallback bool) {
 	}
 	switch e.RewardTrigger {
 	case TriggerStreamSubscribe, TriggerStreamWithdraw, TriggerStreamExit, TriggerStreamRefund, TriggerLPProvide, TriggerLPWithdraw,
-		TriggerLimitOrder, TriggerLimitFill, TriggerLimitCancel, triggerDenomCreationFee, triggerListingFee:
+		TriggerLimitOrder, TriggerLimitFill, TriggerLimitCancel, TriggerLimitFee, triggerDenomCreationFee, triggerListingFee:
 		return true, false
 	case flowTriggerAuctionBid, flowTriggerAuctionRefund, triggerBidFilled:
 		_, ok := d["bid_id"]

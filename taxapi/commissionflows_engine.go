@@ -710,6 +710,16 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 	if !amt.IsPositive() {
 		return nil
 	}
+	if (e.Trigger == tax.TriggerLimitFill || e.Trigger == tax.TriggerLimitFee) && e.Lot != "" && e.Dir == apiOut {
+		// The report pays a maker fill, and what the book kept of a closed
+		// buy order, from the order's lot.
+		class := flowSpent
+		if e.Category == apiSwap {
+			class = flowSwapped
+		}
+		t.each(w, func(r int, p *flowPools) { t.record(r, t.takeBid(w, r, p, e.Lot, amt), class, e.Category) })
+		return nil
+	}
 	in := e.Dir != apiOut
 	switch e.Category {
 	case apiCommission:
@@ -772,13 +782,13 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 			t.each(w, func(r int, p *flowPools) { p.liquid.add([]flowPart{{Amount: amt}}) })
 			return nil
 		}
-		if (e.Trigger == flowAuctionBid || e.Trigger == flowStreamSubscribe) && e.Lot != "" {
+		if (e.Trigger == flowAuctionBid || e.Trigger == flowStreamSubscribe || e.Trigger == tax.TriggerLimitOrder) && e.Lot != "" {
 			t.each(w, func(r int, p *flowPools) { p.bucket(p.bids, e.Lot, r).add(t.takeFrom(w, r, p.liquid, amt, true)) })
 			return nil
 		}
 		t.each(w, func(r int, p *flowPools) { p.locked.add(t.takeFrom(w, r, p.liquid, amt, true)) })
 	case flowCatProtocolWithdrawal, flowCatGovRefund:
-		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled || e.Trigger == flowStreamWithdraw || e.Trigger == flowStreamRefund) && e.Lot != "" {
+		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled || e.Trigger == flowStreamWithdraw || e.Trigger == flowStreamRefund || e.Trigger == tax.TriggerLimitCancel) && e.Lot != "" {
 			// A refund larger than the bid the trace saw returns the rest as
 			// other coins, as any other withdrawal does.
 			t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeBid(w, r, p, e.Lot, amt)) })
@@ -859,6 +869,15 @@ const (
 // flowStreamLot names the streamswap subscription a stream row is about:
 // the stream contract and the stream id. Each wallet's pools hold their
 // own lots, so the subscriber is not part of the name.
+// flowLimitLot keys a limit order's resting coins by contract and order.
+func flowLimitLot(e tax.TaxableEvent) string {
+	contract, id := detailValue(e.Detail, "contract"), detailValue(e.Detail, "order_id")
+	if contract == "" || id == "" {
+		return ""
+	}
+	return contract + "/order/" + id
+}
+
 func flowStreamLot(e tax.TaxableEvent) string {
 	contract, id := detailValue(e.Detail, "contract"), detailValue(e.Detail, "stream_id")
 	if contract == "" || id == "" {

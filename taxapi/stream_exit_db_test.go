@@ -27,7 +27,7 @@ func TestStreamExitLotFromEarlierPeriod(t *testing.T) {
 	for _, q := range []string{
 		"INSERT INTO blocks(id,chain_id,proposer_cons_address_id,height,time_stamp,tx_indexed) VALUES(2,1,1,25000000,'2025-03-01T00:00:00Z',true)",
 		"INSERT INTO txes(id,block_id,hash,code,memo) VALUES(2,2,'SUBTX',0,'')",
-		"INSERT INTO messages(id,tx_id,message_type_id,message_index) VALUES(2,2,1,0)",
+		secondMessageSQL,
 	} {
 		require.NoError(t, db.Exec(q).Error)
 	}

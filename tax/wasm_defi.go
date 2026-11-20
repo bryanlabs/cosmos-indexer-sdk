@@ -19,6 +19,7 @@ const (
 	TriggerLimitOrder      = "limit_order"
 	TriggerLimitFill       = "limit_fill"
 	TriggerLimitCancel     = "limit_cancel"
+	TriggerLimitFee        = "limit_fee"
 
 	streamExitCancelled = "exit_cancelled"
 
@@ -27,12 +28,20 @@ const (
 	triggerListingFee       = "listing_fee"
 	cw20DenomPrefix         = "cw20:"
 	detailShare             = "share"
+	detailOrderID           = "order_id"
+	detailSide              = "side"
+	detailOpenQty           = "open_qty"
+	detailPrice             = "price"
 	detailReviewRequired    = "review_required"
 	detailReviewReason      = "review_reason"
 
 	// ReviewStreamSpend marks a stream exit: the message names what the
 	// subscriber bought but not the coin it was paid with.
 	ReviewStreamSpend = "stream_spend_not_in_message"
+	// ReviewLimitMakerSpend marks what a resting limit order's owner received
+	// when another order filled it: the message names the payout but not the
+	// order it came from.
+	ReviewLimitMakerSpend = "limit_maker_spend_not_in_message"
 )
 
 // defiEvent is the one contract event a supplement rule reads: the wasm
@@ -213,19 +222,24 @@ func cw20Moved(log *indexerTxTypes.LogMessage, action, from, to, amount string) 
 }
 
 // limitOrderEvents records an order book limit order: the part matched at
-// once is a swap, the rest waits in the book as a deposit, and a cancel
-// returns what was left of it.
+// once is a swap, the rest waits in the book as a deposit keyed by contract
+// and order id, and a cancel returns what was left of it. Coins of the paid
+// denom the book sends back at once (a better price than the limit) only
+// shrink the deposit. A buy matched in full leaves nothing in the book, so
+// what the book kept of it (the taker fee and the fee reserve) is a fee.
+// The deposit names the side, the limit price and the base quantity left
+// open, which the report reads to pair later maker fills with the lot.
 func limitOrderEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	if sender == "" {
 		return nil
 	}
 	a, ok := defiEvent(log, func(a map[string]string) bool {
-		if a["order_id"] == "" {
+		if a[detailOrderID] == "" {
 			return false
 		}
 		switch a[attributeAction] {
 		case "place_limit":
-			return a["side"] != "" && a["matched_base"] != "" && a["matched_quote"] != ""
+			return a[detailSide] != "" && a["qty"] != "" && a[detailPrice] != "" && a["matched_base"] != "" && a["matched_quote"] != ""
 		case "cancel":
 			return a["refund_qty"] != ""
 		}
@@ -236,33 +250,93 @@ func limitOrderEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 	}
 	contract := a[attributeContractAddress]
 	legs := transfersIn(log)
-	detail := contractDetail(contract, map[string]string{"order_id": a["order_id"]})
 	back := legsBetween(legs, contract, sender)
 	if a[attributeAction] == "cancel" {
-		if back.Empty() || namesAny(known, sender, back) {
+		if len(back) != 1 || namesAny(known, sender, back) {
 			return nil
 		}
+		detail := contractDetail(contract, map[string]string{detailOrderID: a[detailOrderID], "refund_qty": a["refund_qty"]})
 		return coinRows(CategoryProtocolWithdrawal, back, contract, sender, TriggerLimitCancel, detail)
 	}
 	paid := legsBetween(legs, sender, contract)
 	if len(paid) != 1 || namesAny(known, sender, paid) || namesAny(known, sender, back) {
 		return nil
 	}
+	side := a[detailSide]
 	matched := a["matched_quote"]
-	if a["side"] == "sell" {
+	switch side {
+	case "sell":
 		matched = a["matched_base"]
-	}
-	spent, ok := sdkmath.NewIntFromString(matched)
-	if !ok || spent.IsNegative() || spent.GT(paid[0].Amount) {
+	case "buy":
+	default:
 		return nil
 	}
-	if spent.IsPositive() && back.Empty() {
+	qty, ok1 := sdkmath.NewIntFromString(a["qty"])
+	base, ok2 := sdkmath.NewIntFromString(a["matched_base"])
+	spent, ok3 := sdkmath.NewIntFromString(matched)
+	if !ok1 || !ok2 || !ok3 || spent.IsNegative() || base.IsNegative() || base.GT(qty) {
 		return nil
 	}
 	denom := paid[0].Denom
+	improved := back.AmountOf(denom)
+	got := back.Sub(sdk.NewCoin(denom, improved))
+	left := paid[0].Amount.Sub(spent).Sub(improved)
+	if left.IsNegative() || (spent.IsPositive() && got.Empty()) {
+		return nil
+	}
+	open := qty.Sub(base)
+	detail := contractDetail(contract, map[string]string{detailOrderID: a[detailOrderID]})
 	out := coinRows(CategorySwap, sdk.Coins{sdk.NewCoin(denom, spent)}, sender, contract, TriggerLimitFill, detail)
-	out = append(out, coinRows(CategoryProtocolDeposit, sdk.Coins{sdk.NewCoin(denom, paid[0].Amount.Sub(spent))}, sender, contract, TriggerLimitOrder, detail)...)
-	return append(out, coinRows(CategorySwap, back, contract, sender, TriggerLimitFill, detail)...)
+	if open.IsZero() {
+		if side == "sell" && left.IsPositive() {
+			return nil
+		}
+		out = append(out, coinRows(CategoryExpense, sdk.Coins{sdk.NewCoin(denom, left)}, sender, contract, TriggerLimitFee, detail)...)
+	} else {
+		lot := contractDetail(contract, map[string]string{detailOrderID: a[detailOrderID], detailSide: side, detailPrice: a[detailPrice], detailOpenQty: open.String()})
+		out = append(out, coinRows(CategoryProtocolDeposit, sdk.Coins{sdk.NewCoin(denom, left)}, sender, contract, TriggerLimitOrder, lot)...)
+	}
+	out = append(out, coinRows(CategorySwap, got, contract, sender, TriggerLimitFill, detail)...)
+	return append(out, limitMakerRows(legs, contract, sender, denom, spent)...)
+}
+
+// limitMakerRows records what the resting orders this order matched paid
+// their owners: the coins of the paid denom the book sent to other wallets
+// in the order it sent them, until they add up to what the order spent. A
+// fee the book takes in the same denom comes after them and is not a maker.
+// The maker's own order and price are not in the message, so each row asks
+// for review until the report pairs it with the maker's open order.
+func limitMakerRows(legs []coinTransfer, contract, sender, denom string, spent sdkmath.Int) []TaxableEvent {
+	if !spent.IsPositive() {
+		return nil
+	}
+	paid := map[string]sdkmath.Int{}
+	var makers []string
+	acc := sdkmath.ZeroInt()
+	for _, l := range legs {
+		amt := l.coins.AmountOf(denom)
+		if acc.Equal(spent) {
+			break
+		}
+		if l.from != contract || l.to == sender || l.to == contract || !amt.IsPositive() {
+			continue
+		}
+		if _, seen := paid[l.to]; !seen {
+			paid[l.to] = sdkmath.ZeroInt()
+			makers = append(makers, l.to)
+		}
+		paid[l.to] = paid[l.to].Add(amt)
+		acc = acc.Add(amt)
+	}
+	if !acc.Equal(spent) {
+		return nil
+	}
+	detail := contractDetail(contract, map[string]string{"maker": attributeTrue, detailReviewRequired: attributeTrue, detailReviewReason: ReviewLimitMakerSpend})
+	var out []TaxableEvent
+	for _, m := range makers {
+		out = append(out, coinRows(CategorySwap, sdk.Coins{sdk.NewCoin(denom, paid[m])}, contract, m, TriggerLimitFill, detail)...)
+	}
+	return out
 }
 
 func firstNonEmpty(v ...string) string {

@@ -160,7 +160,11 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.Category == TagIncome:
 			out = append(out, line(asset, true), line(acctProtocolIncome+": "+titleTrigger(r.RewardTrigger), false))
 		case r.Category == TagExpense:
-			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(asset, false))
+			paid := asset
+			if lotFunded(r) {
+				paid = acctInProtocol + ": " + r.Symbol
+			}
+			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(paid, false))
 		case r.Category == apiSwap:
 			key := swapKey(r)
 			if swapDone[key] {
@@ -326,9 +330,9 @@ func (s *Server) handleJournal(w http.ResponseWriter, r *http.Request) {
 	_ = WriteJournalCSV(w, lines)
 }
 
-// lotFunded reports a swap leg paid from coins the wallet had already moved
-// into a protocol (a streamswap subscription), so the journal takes it from
-// the protocol account the deposit debited.
+// lotFunded reports a swap leg or fee paid from coins the wallet had already
+// moved into a protocol (a streamswap subscription, a resting limit order),
+// so the journal takes it from the protocol account the deposit debited.
 func lotFunded(r Row) bool {
 	return r.Direction == apiOut && detailValue(r.Detail, "lot_basis") != ""
 }
