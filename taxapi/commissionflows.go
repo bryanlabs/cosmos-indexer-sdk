@@ -819,6 +819,17 @@ func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool)
 		}
 	}
 	if denom != native {
+		// A stream exit pays the purchase in the streamed denom; the
+		// subscription it spent is native coin waiting in the stream.
+		if e.RewardTrigger == flowStreamExit && e.ToAddr == addr && e.FromAddr != addr {
+			if lot := flowStreamLot(e); lot != "" {
+				return flowEvent{
+					Key:      flowKey{Time: e.Timestamp.UTC(), Height: e.BlockHeight, Message: e.MessageID, Sub: e.SubIndex},
+					Category: e.Category, Dir: "in", Amount: decimal.Zero,
+					From: e.FromAddr, To: e.ToAddr, Trigger: e.RewardTrigger, Detail: e.Detail, Lot: lot,
+				}, true
+			}
+		}
 		return flowEvent{}, false
 	}
 	v, err := decimal.NewFromString(amount)
@@ -846,6 +857,9 @@ func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool)
 	}
 	if e.RewardTrigger == flowAuctionBid || e.RewardTrigger == flowAuctionRefund || e.RewardTrigger == flowBidFilled || (e.Category == apiNFTSale && flowEscrowedBid(e.Detail)) {
 		fe.Lot = flowBidLot(e)
+	}
+	if e.RewardTrigger == flowStreamSubscribe || e.RewardTrigger == flowStreamWithdraw {
+		fe.Lot = flowStreamLot(e)
 	}
 	switch e.Category {
 	case flowCatRedelegate:

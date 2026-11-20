@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/DefiantLabs/cosmos-indexer/config"
@@ -168,5 +170,62 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 		out = append(out, rows...)
 	}
 	out = append(out, principal...)
-	return out, nil
+	return withAuthzWasmSupplement(out, log), nil
+}
+
+// withAuthzWasmSupplement appends the wasm supplement rows of each contract
+// message inside a MsgExec, in inner message order, after every other row,
+// as the indexer writes them for the top-level message. Supplement rows
+// already in rows (an earlier repair) are dropped first, so a second replay
+// is a no-op. The stored log does not name the granter, so the rules that
+// need the signer do not run and only 20-byte wallets are the wallet side of
+// the bank fallback.
+func withAuthzWasmSupplement(rows []tax.TaxableEvent, log *txlog.LogMessage) []tax.TaxableEvent {
+	groups := map[int][]txlog.LogMessageEvent{}
+	var order []int
+	hasContract := map[int]bool{}
+	for _, e := range log.Events {
+		v, ok := attributes(e)["authz_msg_index"]
+		if !ok {
+			continue
+		}
+		i, err := strconv.Atoi(v)
+		if err != nil {
+			continue
+		}
+		if _, seen := groups[i]; !seen {
+			order = append(order, i)
+		}
+		groups[i] = append(groups[i], e)
+		if e.Type == "execute" {
+			hasContract[i] = true
+		}
+	}
+	sort.Ints(order)
+	var supplement []tax.TaxableEvent
+	for _, i := range order {
+		if hasContract[i] {
+			supplement = append(supplement, tax.WasmSupplementForLog(&txlog.LogMessage{Events: groups[i]}, "")...)
+		}
+	}
+	if len(supplement) == 0 {
+		return rows
+	}
+	pending := map[string]int{}
+	for _, e := range supplement {
+		pending[rowKey(e)]++
+	}
+	out := make([]tax.TaxableEvent, 0, len(rows)+len(supplement))
+	for _, e := range rows {
+		if k := rowKey(e); pending[k] > 0 {
+			pending[k]--
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, supplement...)
+}
+
+func rowKey(e tax.TaxableEvent) string {
+	return strings.Join([]string{e.Category, e.Amount, e.Denom, e.Asset, e.FromAddr, e.ToAddr, e.ValidatorAddress, e.RewardTrigger, e.Detail}, "|")
 }

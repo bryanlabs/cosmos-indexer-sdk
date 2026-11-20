@@ -692,6 +692,20 @@ func markUnbonded(parts []flowPart) []flowPart {
 // outflows only leave w: nothing they carry belongs to this validator, and a
 // traced receiver already counted them as other coins.
 func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
+	if e.Trigger == flowStreamExit && e.Lot != "" {
+		// A finished stream spent everything its subscriber left in it on
+		// the tokens it paid out, which the row names in another denom.
+		t.each(w, func(r int, p *flowPools) {
+			b := p.bids[e.Lot]
+			if b == nil {
+				return
+			}
+			parts := t.takeFrom(w, r, b, b.total(), false)
+			delete(p.bids, e.Lot)
+			t.record(r, parts, flowSwapped, apiSwap)
+		})
+		return nil
+	}
 	amt := e.Amount
 	if !amt.IsPositive() {
 		return nil
@@ -758,13 +772,13 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 			t.each(w, func(r int, p *flowPools) { p.liquid.add([]flowPart{{Amount: amt}}) })
 			return nil
 		}
-		if e.Trigger == flowAuctionBid && e.Lot != "" {
+		if (e.Trigger == flowAuctionBid || e.Trigger == flowStreamSubscribe) && e.Lot != "" {
 			t.each(w, func(r int, p *flowPools) { p.bucket(p.bids, e.Lot, r).add(t.takeFrom(w, r, p.liquid, amt, true)) })
 			return nil
 		}
 		t.each(w, func(r int, p *flowPools) { p.locked.add(t.takeFrom(w, r, p.liquid, amt, true)) })
 	case flowCatProtocolWithdrawal, flowCatGovRefund:
-		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled) && e.Lot != "" {
+		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled || e.Trigger == flowStreamWithdraw) && e.Lot != "" {
 			// A refund larger than the bid the trace saw returns the rest as
 			// other coins, as any other withdrawal does.
 			t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeBid(w, r, p, e.Lot, amt)) })
@@ -835,7 +849,22 @@ const (
 	flowAuctionBid    = "auction_bid"
 	flowAuctionRefund = "auction_refund"
 	flowBidFilled     = "bid_filled"
+
+	flowStreamSubscribe = tax.TriggerStreamSubscribe
+	flowStreamWithdraw  = tax.TriggerStreamWithdraw
+	flowStreamExit      = tax.TriggerStreamExit
 )
+
+// flowStreamLot names the streamswap subscription a stream row is about:
+// the stream contract and the stream id. Each wallet's pools hold their
+// own lots, so the subscriber is not part of the name.
+func flowStreamLot(e tax.TaxableEvent) string {
+	contract, id := detailValue(e.Detail, "contract"), detailValue(e.Detail, "stream_id")
+	if contract == "" || id == "" {
+		return ""
+	}
+	return contract + "/stream/" + id
+}
 
 // takeBid removes amt from the bid on lot; past the bid it is coins of other
 // origin, as takeFrom counts any shortfall.

@@ -13,6 +13,8 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,6 +148,9 @@ func run() int {
 	to := flag.Uint("to-message-id", 0, "inclusive upper message ID (default current max)")
 	only := flag.String("categories", "", "optional comma-separated categories; replay only messages holding a stored row in one of them")
 	kinds := flag.String("message-types", "", "optional comma-separated message type URLs; replay only messages of those types")
+	idsFile := flag.String("message-ids-file", "", "optional file of message ids, one per line; replay only those messages")
+	readOnly := flag.Bool("read-only", false, "open the connection with default_transaction_read_only=on (plan only)")
+	keepSeqscan := flag.Bool("keep-seqscan", false, "leave enable_seqscan at the server default")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -153,7 +158,15 @@ func run() int {
 	if *apply && *path == "" {
 		fatal("--apply requires --backup")
 	}
-	db, err := dbpkg.PostgresDbConnect(env("DB_HOST"), envDefault("DB_PORT", "5432"), env("DB_NAME"), env("DB_USER"), os.Getenv("DB_PASS"), "silent")
+	if *apply && *readOnly {
+		fatal("--apply and --read-only conflict")
+	}
+	var runtime []string
+	if *readOnly {
+		// A connection parameter, so a reconnect is read-only too.
+		runtime = append(runtime, "default_transaction_read_only=on")
+	}
+	db, err := dbpkg.PostgresDbConnect(env("DB_HOST"), envDefault("DB_PORT", "5432"), env("DB_NAME"), env("DB_USER"), os.Getenv("DB_PASS"), "silent", runtime...)
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -168,7 +181,12 @@ func run() int {
 	// enable_seqscan=off keeps the planner on the (message_id,index) indexes
 	// for the per-batch event loads; with stale statistics it otherwise picks
 	// a sequential scan of the attributes table for every batch.
-	if err := db.Exec("SET statement_timeout='120s'; SET lock_timeout='3s'; SET enable_seqscan=off").Error; err != nil {
+	session := "SET statement_timeout='120s'; SET lock_timeout='3s'"
+	if !*keepSeqscan {
+		session += "; SET enable_seqscan=off"
+	}
+	lookups = *keepSeqscan
+	if err := db.Exec(session).Error; err != nil {
 		fatal(err.Error())
 	}
 	codec, err := repairCodec()
@@ -229,7 +247,17 @@ func run() int {
 		}
 		candidates = ids
 	}
-	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0
+	if *idsFile != "" {
+		ids, err := readIDs(*idsFile, *from, maxID)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if len(wallets) > 0 || len(categories) > 0 || len(types) > 0 {
+			ids = intersect(candidates, ids)
+		}
+		candidates = ids
+	}
+	restricted := len(wallets) > 0 || len(categories) > 0 || len(types) > 0 || *idsFile != ""
 	b, err := newBackup(*path)
 	if err != nil {
 		fatal(err.Error())
@@ -360,6 +388,29 @@ func typeIDs(db *gorm.DB, types []string, from, maxID uint) ([]uint, error) {
 	return ids, err
 }
 
+// readIDs reads the message ids in (from, maxID] from a file of one id per
+// line, sorted and without repeats.
+func readIDs(path string, from, maxID uint) ([]uint, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[uint]bool{}
+	var ids []uint
+	for _, line := range strings.Fields(string(raw)) {
+		v, err := strconv.ParseUint(line, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("message id %q: %w", line, err)
+		}
+		if id := uint(v); id > from && id <= maxID && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
+}
+
 // intersect keeps the ids present in both sorted lists.
 func intersect(a, b []uint) []uint {
 	var out []uint
@@ -388,9 +439,24 @@ func idArray(ids []uint) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
+// lookups makes every per-batch read walk its ids one index lookup at a
+// time, for a session that leaves the planner at its defaults.
+var lookups bool
+
 // load reads the next batch of replayable messages after last, only from
 // candidates when they are given.
 func load(db *gorm.DB, last, maxID uint, n int, candidates []uint) ([]row, error) {
+	if lookups && candidates != nil {
+		var rows []row
+		err := db.Raw(`SELECT m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash
+ FROM unnest(?::bigint[]) c(id)
+ CROSS JOIN LATERAL (SELECT * FROM messages WHERE id=c.id OFFSET 0) m
+ CROSS JOIN LATERAL (SELECT message_type FROM message_types WHERE id=m.message_type_id OFFSET 0) mt
+ CROSS JOIN LATERAL (SELECT hash,code,block_id FROM txes WHERE id=m.tx_id OFFSET 0) t
+ CROSS JOIN LATERAL (SELECT height,time_stamp FROM blocks WHERE id=t.block_id OFFSET 0) b
+ WHERE m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0 ORDER BY m.id LIMIT ?`, idArray(candidates), last, maxID, urls, n).Scan(&rows).Error
+		return rows, err
+	}
 	q := db.Table("messages m").Select("m.*,mt.message_type type,b.height,b.time_stamp stamp,t.hash").Joins("JOIN message_types mt ON mt.id=m.message_type_id JOIN txes t ON t.id=m.tx_id JOIN blocks b ON b.id=t.block_id").Where("m.id > ? AND m.id <= ? AND mt.message_type IN ? AND t.code=0", last, maxID, urls).Order("m.id").Limit(n)
 	if candidates != nil {
 		q = q.Where("m.id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(candidates))
@@ -402,7 +468,11 @@ func load(db *gorm.DB, last, maxID uint, n int, candidates []uint) ([]row, error
 
 func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 	var rows []tax.TaxableEvent
-	if err := db.Where("message_id IN ?", ids).Order("message_id,sub_index").Find(&rows).Error; err != nil {
+	q := db.Where("message_id IN ?", ids)
+	if lookups {
+		q = db.Where("id IN (SELECT te.id FROM unnest(?::bigint[]) c(id) CROSS JOIN LATERAL (SELECT id FROM taxable_events WHERE message_id=c.id OFFSET 0) te)", idArray(ids))
+	}
+	if err := q.Order("message_id,sub_index").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := map[uint][]tax.TaxableEvent{}
@@ -428,7 +498,18 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	// planner estimates enough events to merge join against the whole
 	// attribute index (measured 35 s for 500 messages, 0.35 s this way).
 	var attrs []eventRow
-	err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(ids)).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
+	if lookups {
+		err = db.Raw(`SELECT e.message_id,e.index,et.type,a.key,a.value,a.index attr_index
+ FROM unnest(?::bigint[]) c(id)
+ CROSS JOIN LATERAL (SELECT id,message_id,index,message_event_type_id FROM message_events WHERE message_id=c.id OFFSET 0) e
+ CROSS JOIN LATERAL (SELECT type FROM message_event_types WHERE id=e.message_event_type_id OFFSET 0) et
+ LEFT JOIN LATERAL (SELECT x.index,x.value,k.key FROM message_event_attributes x
+   LEFT JOIN LATERAL (SELECT key FROM message_event_attribute_keys WHERE id=x.message_event_attribute_key_id OFFSET 0) k ON true
+   WHERE x.message_event_id=e.id OFFSET 0) a ON true
+ ORDER BY e.message_id,e.index,a.index`, idArray(ids)).Scan(&attrs).Error
+	} else {
+		err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(ids)).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
+	}
 	if err != nil {
 		return nil, nil, err
 	}

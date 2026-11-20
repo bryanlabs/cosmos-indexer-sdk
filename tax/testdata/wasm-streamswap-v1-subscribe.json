@@ -1,0 +1,128 @@
+{
+ "message_id": 7475195,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "30961758",
+ "hash": "FDE28215D3124953866B3B4DDFCBD377A1A5C575F0CB2B5F9579906CAB76AF5C",
+ "timestamp": "2026-05-04T16:46:14Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos14xezwzqg22e2szw5uj6ypryz9fdjhg8x74fecj"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos14xezwzqg22e2szw5uj6ypryz9fdjhg8x74fecj"
+    },
+    {
+     "key": "amount",
+     "value": "10000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1r7x3grqza6nnyspzgw62cy0apjhnd4ppxxhan0mwas4lydmnwgwsefezlz"
+    },
+    {
+     "key": "amount",
+     "value": "10000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1r7x3grqza6nnyspzgw62cy0apjhnd4ppxxhan0mwas4lydmnwgwsefezlz"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos14xezwzqg22e2szw5uj6ypryz9fdjhg8x74fecj"
+    },
+    {
+     "key": "amount",
+     "value": "10000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1r7x3grqza6nnyspzgw62cy0apjhnd4ppxxhan0mwas4lydmnwgwsefezlz"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1r7x3grqza6nnyspzgw62cy0apjhnd4ppxxhan0mwas4lydmnwgwsefezlz"
+    },
+    {
+     "key": "action",
+     "value": "subscribe"
+    },
+    {
+     "key": "stream_id",
+     "value": "1"
+    },
+    {
+     "key": "buyer",
+     "value": "cosmos14xezwzqg22e2szw5uj6ypryz9fdjhg8x74fecj"
+    },
+    {
+     "key": "amount",
+     "value": "10000"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}
