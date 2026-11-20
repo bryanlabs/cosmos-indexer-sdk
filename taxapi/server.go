@@ -35,6 +35,15 @@ type Server struct {
 	db     *gorm.DB
 	oracle *Oracle
 	native NativeAsset
+	// Private trace readers may derive fee outcomes but never persist ledger data.
+	readOnlyLedger              bool
+	privateReadSnapshotTimeout  time.Duration
+	readSnapshotStarted         time.Time
+	commissionPrivateProfile    *CommissionPrivateProfile
+	privateProjectionSnapshot   string
+	privateProjectionReceipts   *commissionProjectionJournal
+	commissionSourceCorrections *CommissionSourceCorrections
+	sourceCorrectionReceipts    *commissionCorrectionJournal
 
 	attestOnce sync.Once
 	attest     *attestationCache
@@ -89,6 +98,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	mux.HandleFunc("GET /catalog", s.handleCatalog)
 	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
+	mux.HandleFunc("POST /tags/migrate", s.handleTagMigrate)
 	mux.HandleFunc("GET /journal", s.withPeriodCoverage(s.handleJournal))
 	mux.HandleFunc("GET /positions", s.withPeriodCoverage(s.handlePositions))
 	mux.HandleFunc("GET /validator-statement", s.withPeriodCoverage(s.handleValidatorStatement))
@@ -357,7 +367,8 @@ type feeRec struct {
 	Ts     time.Time
 	Hash   string
 	// ChainID is set on fees read from an earlier Hub chain.
-	ChainID string
+	ChainID       string
+	commissionKey *flowKey
 }
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),
@@ -381,16 +392,35 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 
 // loadWalletRows performs database work only. Pricing and shared Server caches
 // are deliberately used only after the read snapshot has been released.
-func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (walletRows, error) {
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (result walletRows, err error) {
+	phases := s.privateReadPhases([]string{addr}, start, end, "tax_events")
+	defer func() { err = phases.wrap(err) }()
 	var events []tax.TaxableEvent
-	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
+	if s.readOnlyLedger {
+		// Fence the indexed address set before applying the period. Otherwise
+		// PostgreSQL can build a bitmap over the entire multi-year time index
+		// and intersect it with the wallet, exhausting the snapshot deadline.
+		events = make([]tax.TaxableEvent, 0)
+		if err := s.db.Raw(privateWalletTaxEventsSQL, addr, addr, start, end, chainIDs(chain)).Scan(&events).Error; err != nil {
+			return walletRows{}, err
+		}
+	} else if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
 		Where("timestamp >= ? AND timestamp < ?", start, end).
-		Order("timestamp asc").
+		Order("timestamp asc, taxable_events.id asc").
 		Find(&events).Error; err != nil {
 		return walletRows{}, err
 	}
+	phases.next("legacy_correction")
 	reconcileIBCRefunds(events, refundPairs)
+	phases.next("stream_lots")
+	if events, err = s.withStreamExitLegs(chain, addr, events); err != nil {
+		return walletRows{}, err
+	}
+	phases.next("limit_lots")
+	if events, err = s.withLimitMakerLegs(chain, addr, events); err != nil {
+		return walletRows{}, err
+	}
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.
@@ -411,20 +441,12 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 		}
 	}
 
-	// Fees (generic SDK Fee table): a spend by the payer.
-	var fees []feeRec
-	if err := s.db.Table("fees").
-		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
-		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
-		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
-		Joins("JOIN txes ON txes.id = fees.tx_id").
-		Joins("JOIN blocks ON blocks.id = txes.block_id").
-		Joins("JOIN chains ON chains.id = blocks.chain_id").
-		Where("chains.chain_id IN ?", chainIDs(chain)).
-		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
-		Scan(&fees).Error; err != nil {
+	phases.next("fees")
+	fees, err := s.walletFees(chain, addr, start, end)
+	if err != nil {
 		return walletRows{}, err
 	}
+	phases.next("memos")
 	memos, err := s.eventMemos(events)
 	if err != nil {
 		return walletRows{}, err
@@ -432,6 +454,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	// Coins the chain moved at the start or end of a block, with no
 	// transaction: unbonding completions, deposit refunds and burns,
 	// community pool payouts.
+	phases.next("block_events")
 	blockRows, err := s.blockEventRows(chain, addr, start, end)
 	if err != nil {
 		return walletRows{}, err
@@ -478,6 +501,8 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
 		row.Detail = e.Detail
+		row.MessageID = e.MessageID
+		row.SubIndex = e.SubIndex
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
 		row.ChainID = rowChainID(input.stampChain, e.ChainID)
 		out = append(out, row)

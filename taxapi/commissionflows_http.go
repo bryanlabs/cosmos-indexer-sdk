@@ -33,7 +33,7 @@ var FlowClassNotes = map[string]string{ //nolint:gosec // class descriptions, no
 	flowSwapped:          "Swapped for another asset on the Hub.",
 	flowSpent:            "Paid to a contract or for an NFT on the Hub.",
 	flowTokenized:        "Turned into liquid staking share tokens, which the trace does not follow.",
-	flowBurned:           "Burned with a governance deposit.",
+	flowBurned:           "Burned with a governance deposit, or by a validator slash of the stake it was in (detail slash).",
 	flowCommunityPool:    "Given to the community pool.",
 	flowModule:           "Sent to another module account.",
 	flowContract:         "Sent to a contract or an interchain account, which the trace does not follow.",

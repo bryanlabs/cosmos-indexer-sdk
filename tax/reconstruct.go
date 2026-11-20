@@ -74,6 +74,12 @@ func ReconstructMsg(typeURL string, log *indexerTxTypes.LogMessage) (sdk.Msg, er
 	case typeURLExecuteContract:
 		// Every wasm rule reads events; the contract and funds are on them.
 		return &wasmtypes.MsgExecuteContract{Sender: sender}, nil
+	case typeURLInstantiateContract:
+		return &wasmtypes.MsgInstantiateContract{Sender: sender}, nil
+	case typeURLInstantiateContract2:
+		return &wasmtypes.MsgInstantiateContract2{Sender: sender}, nil
+	case typeURLMigrateContract:
+		return &wasmtypes.MsgMigrateContract{Sender: sender}, nil
 	case typeURLIBCTransfer:
 		for _, e := range log.Events {
 			if e.Type != "ibc_transfer" {
@@ -136,6 +142,9 @@ var ReplayableTypeURLs = []string{
 	TypeURLWithdrawTokenizeShareReward,
 	TypeURLWithdrawAllTokenizeShareReward,
 	typeURLExecuteContract,
+	typeURLInstantiateContract,
+	typeURLInstantiateContract2,
+	typeURLMigrateContract,
 	typeURLIBCTransfer,
 	typeURLIBCRecvPacket,
 	TypeURLV2RecvPacket,

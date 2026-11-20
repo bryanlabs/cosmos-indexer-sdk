@@ -1,0 +1,2 @@
+transfer|50000|uatom||cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k|cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt|||{"contract":"cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt","fallback":"bank"}
+transfer|500|uatom||cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt|cosmos1y79s8xdlajg3wv6g0ngpf042nf94dxfcaug26w|||{"contract":"cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt","fallback":"bank"}

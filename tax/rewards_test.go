@@ -94,8 +94,7 @@ func TestDelegatePrincipalMainnetIsNotReward(t *testing.T) {
 }
 
 func TestClaimMulticoinMainnetKeepsValidator(t *testing.T) {
-	wallet := "cosmos1ts4vwmfccwjv0vehlzd4x5rw5xzljjnhgm7gnz"
-	validator := "cosmosvaloper1n229vhepft6wnkt5tjpwmxdmcnfz55jv3vp77d"
+	wallet, validator := multicoinWallet, multicoinValidator
 	out := classify(&distribution.MsgWithdrawDelegatorReward{DelegatorAddress: wallet, ValidatorAddress: validator}, rewardFixture(t, "claim-multicoin"))
 	if len(out) != 2 {
 		t.Fatalf("want ATOM and USDC rewards: %+v", out)

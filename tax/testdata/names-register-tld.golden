@@ -1,0 +1,2 @@
+expense|2500000|uatom||cosmos130khfepsuqndsek8yg2qfcutgj6cdtdryky3a8|cosmos12sseygvx4ykhp0df70ndg82l7p9a7ld7l0n0pptwj7c2h726cc9sahh4hz||name_registration|{"contract":"cosmos12sseygvx4ykhp0df70ndg82l7p9a7ld7l0n0pptwj7c2h726cc9sahh4hz","name":"tcc","protocol":"atom.names"}
+transfer|2500000|uatom||cosmos12sseygvx4ykhp0df70ndg82l7p9a7ld7l0n0pptwj7c2h726cc9sahh4hz|cosmos15pw8rxee7xe29j0r40tysur4myqdrfl03wjssn|||{"contract":"cosmos12sseygvx4ykhp0df70ndg82l7p9a7ld7l0n0pptwj7c2h726cc9sahh4hz","fallback":"bank","name":"atom.names TLD manager","protocol":"atom.names"}

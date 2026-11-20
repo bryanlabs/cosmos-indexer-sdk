@@ -79,7 +79,7 @@ const (
 func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	// Fee rows are loaded after event rows; a ledger wants strict date order.
 	rows := append([]Row(nil), input...)
-	sort.SliceStable(rows, func(i, j int) bool { return rowBefore(rows[i], rows[j]) })
+	sort.SliceStable(rows, func(i, j int) bool { return lotsBefore(rows[i], rows[j]) })
 	var out []JournalLine
 	// Each row's lines carry its chain; stamped counts the lines done.
 	stamped, rowChain := 0, ""
@@ -172,7 +172,11 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.Category == TagIncome:
 			out = append(out, line(asset, true), line(acctProtocolIncome+": "+titleTrigger(r.RewardTrigger), false))
 		case r.Category == TagExpense:
-			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(asset, false))
+			paid := asset
+			if lotFunded(r) {
+				paid = acctInProtocol + ": " + r.Symbol
+			}
+			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(paid, false))
 		case r.Category == apiSwap:
 			key := swapKey(r)
 			if swapDone[key] {
@@ -184,6 +188,9 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			for _, leg := range legs {
 				lr := leg
 				legLine := JournalLine{Date: date, TxHash: lr.TxHash, EntryID: id, Account: acctDigitalAssets + ": " + lr.Symbol, Asset: lr.Symbol, Quantity: lr.Amount.String(), Category: apiSwap, Memo: memo}
+				if lotFunded(lr) {
+					legLine.Account = acctInProtocol + ": " + lr.Symbol
+				}
 				if !lr.PriceMissing {
 					if lr.Direction == "in" {
 						legLine.Debit = lr.ValueUSD.StringFixed(2)
@@ -244,11 +251,16 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			if in {
 				contra = acctTransfersIn
 			}
-			switch r.UserTag {
+			tag := r.UserTag
+			if r.isRewardMove() {
+				// The reward moves at its own value; it is not a disposal.
+				tag = TagInternalTransfer
+			}
+			switch tag {
 			case TagInternalTransfer:
 				contra = acctInternal
 			case TagIncome, TagAirdrop:
-				contra = acctOtherIncome + ": " + titleTrigger(r.UserTag)
+				contra = acctOtherIncome + ": " + titleTrigger(tag)
 			case TagPayment:
 				if in {
 					contra = acctOtherIncome + ": Payments Received"
@@ -346,4 +358,11 @@ func (s *Server) handleJournal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(apiContentType, apiCSVContentType)
 	w.Header().Set(apiContentDisposition, "attachment; filename=gl-journal.csv")
 	_ = WriteJournalCSV(w, lines)
+}
+
+// lotFunded reports a swap leg or fee paid from coins the wallet had already
+// moved into a protocol (a streamswap subscription, a resting limit order),
+// so the journal takes it from the protocol account the deposit debited.
+func lotFunded(r Row) bool {
+	return r.Direction == apiOut && detailValue(r.Detail, "lot_basis") != ""
 }

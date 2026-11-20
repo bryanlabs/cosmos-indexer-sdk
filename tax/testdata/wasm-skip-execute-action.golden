@@ -1,0 +1,2 @@
+transfer|500000|uatom||cosmos12r9rhjr9m34wlzzut0pq38p0rc8j6ztw2xdwgx|cosmos1clswlqlfm8gpn7n5wu0ypu0ugaj36urlhj7yz30hn7v7mkcm2tuqy9f8s5|||{"contract":"cosmos1clswlqlfm8gpn7n5wu0ypu0ugaj36urlhj7yz30hn7v7mkcm2tuqy9f8s5","fallback":"bank","name":"Skip Go entry point","protocol":"Skip Go"}
+transfer|276378|uatom||cosmos1clswlqlfm8gpn7n5wu0ypu0ugaj36urlhj7yz30hn7v7mkcm2tuqy9f8s5|cosmos1zp2ncsenr2erg4l757th0taugz4mt8vhlvcrzk|||{"contract":"cosmos1clswlqlfm8gpn7n5wu0ypu0ugaj36urlhj7yz30hn7v7mkcm2tuqy9f8s5","fallback":"bank","name":"Skip Go entry point","protocol":"Skip Go"}

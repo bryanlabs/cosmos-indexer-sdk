@@ -115,7 +115,8 @@ func parseLegacyFee(fee string) ([][2]string, error) {
 // rows. Every earlier chain ended before the next began, so this is ledger
 // order across the restarts; within an era the rows keep their stored order.
 func withLegacyRows(hub4 walletRows, events []tax.TaxableEvent, fees []feeRec) walletRows {
-	out := walletRows{Memos: hub4.Memos, stampChain: true}
+	out := hub4
+	out.stampChain = true
 	out.Events = append(append(make([]tax.TaxableEvent, 0, len(events)+len(hub4.Events)), events...), hub4.Events...)
 	out.Fees = append(append(make([]feeRec, 0, len(fees)+len(hub4.Fees)), fees...), hub4.Fees...)
 	return out

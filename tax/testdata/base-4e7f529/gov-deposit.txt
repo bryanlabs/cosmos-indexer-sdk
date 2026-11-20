@@ -1,0 +1,1 @@
+gov_deposit|450000000|uatom||cosmos1az7rk9kukju026t0mz8jlus924hj7kqrlqz0ye||||{"proposal_id":"1055"}

@@ -17,7 +17,8 @@ type walletRows struct {
 	Memos  map[string]string
 	// stampChain is true when earlier Hub chains are in reports; every row
 	// then names its chain.
-	stampChain bool
+	stampChain            bool
+	CommissionCorrections []flowEvent
 }
 
 type reportInput struct {
@@ -29,18 +30,46 @@ type reportInput struct {
 // mutexes). Only DB query methods may run on it. All pricing, review application
 // and rendering run on the original Server, preserving its configuration and
 // shared caches. No network calls or report-job writes belong in this callback.
+func (s *Server) readSnapshotContext() (context.Context, context.CancelFunc) {
+	timeout := readSnapshotTimeout
+	if s.readOnlyLedger && s.privateReadSnapshotTimeout > 0 {
+		timeout = s.privateReadSnapshotTimeout
+	}
+	return context.WithTimeout(s.db.Statement.Context, timeout)
+}
+
 func (s *Server) withReadSnapshot(fn func(*Server) error) error {
-	ctx, cancel := context.WithTimeout(s.db.Statement.Context, readSnapshotTimeout)
+	started := time.Now()
+	ctx, cancel := s.readSnapshotContext()
 	defer cancel()
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	var pendingCorrections *commissionCorrectionJournal
+	if s.commissionSourceCorrections != nil && s.sourceCorrectionReceipts != nil {
+		pendingCorrections = newCorrectionJournal()
+	}
+	var pending *commissionProjectionJournal
+	if s.commissionPrivateProfile != nil && s.privateProjectionReceipts != nil {
+		pending = &commissionProjectionJournal{rows: map[string]CommissionPrivateProjectionReceipt{}}
+	}
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// The driver caches prepared statements, and after five runs Postgres
 		// may switch to a generic plan that cannot see the period or the type
 		// ids; the readiness counts then went from 1s to over 20s.
 		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
 			return err
 		}
-		return fn(&Server{db: tx})
+		reader := &Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started, commissionPrivateProfile: s.commissionPrivateProfile, privateProjectionReceipts: pending, commissionSourceCorrections: s.commissionSourceCorrections, sourceCorrectionReceipts: pendingCorrections}
+		if err := reader.validatePrivateProjection(); err != nil {
+			return err
+		}
+		return fn(reader)
 	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err == nil && pending != nil {
+		s.privateProjectionReceipts.merge(pending)
+	}
+	if err == nil && pendingCorrections != nil {
+		s.sourceCorrectionReceipts.merge(pendingCorrections)
+	}
+	return err
 }
 
 func (s *Server) requireReportReady(chain string, addresses []string, start, end time.Time) error {
@@ -70,23 +99,32 @@ func (s *Server) readCurrentChainInput(chain string, addresses []string, start, 
 	return s.readWalletInput(chain, addresses, start, end, false, nil)
 }
 
-func (s *Server) readWalletInput(chain string, addresses []string, start, end time.Time, fingerprint bool, eras *legacyEraState) (reportInput, error) {
-	var input reportInput
+func (s *Server) readWalletInput(chain string, addresses []string, start, end time.Time, fingerprint bool, eras *legacyEraState) (input reportInput, err error) {
+	phases := s.privateReadPhases(addresses, start, end, "snapshot")
+	defer func() { err = phases.wrap(err) }()
 	// The era state is read before the snapshot opens: the reader facade
 	// holds only the database. The legacy schema is queried only when an
 	// earlier chain is in reports, so a role that cannot read it never aborts
 	// a report's transaction.
-	err := s.withReadSnapshot(func(reader *Server) error {
+	err = s.withReadSnapshot(func(reader *Server) error {
+		phases.next("readiness")
 		refundPairs, err := reader.reportReadiness(chain, addresses, start, end)
 		if err != nil {
 			return err
 		}
 		for _, addr := range addresses {
+			phases.next("wallet_rows")
 			rows, err := reader.loadWalletRows(chain, addr, start, end, refundPairs)
 			if err != nil {
 				return err
 			}
+			phases.next("native_source_corrections")
+			rows, err = reader.applyCommissionSourceCorrections(chain, addr, start, end, rows)
+			if err != nil {
+				return err
+			}
 			if eras.active() {
+				phases.next("legacy_rows")
 				events, fees, err := reader.legacyWalletRows(eras, addr, start, end)
 				if err != nil {
 					return err
@@ -96,10 +134,14 @@ func (s *Server) readWalletInput(chain string, addresses []string, start, end ti
 			input.Wallets = append(input.Wallets, rows)
 		}
 		if fingerprint {
+			phases.next("fingerprint")
 			var err error
 			input.Fingerprint, err = reader.reviewFingerprintInSnapshot(chain, addresses)
-			return err
+			if err != nil {
+				return err
+			}
 		}
+		phases.next("commit")
 		return nil
 	})
 	return input, err

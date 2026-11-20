@@ -4,6 +4,7 @@ go 1.26.10
 
 require (
 	github.com/CosmWasm/wasmd v0.40.0
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/DefiantLabs/probe v1.0.0
 	github.com/cometbft/cometbft v0.37.4
 	github.com/cosmos/cosmos-sdk v0.47.7

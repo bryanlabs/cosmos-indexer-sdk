@@ -23,6 +23,7 @@ package main
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -30,6 +31,7 @@ import (
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
+	"github.com/spf13/viper"
 	"gorm.io/gorm"
 )
 
@@ -38,6 +40,29 @@ func env(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func commissionRuntimeParams(flows bool, version string) []string {
+	if !flows {
+		return nil
+	}
+	params := []string{"jit=off"}
+	if version != "" {
+		// Private full-history bitmap reads benefit from page prefetch. This
+		// is a connection startup parameter, never a global database change.
+		params = append(params, "effective_io_concurrency=200")
+	}
+	return params
+}
+
+func validateCommissionReadTimeout(flows bool, version string, timeout time.Duration) error {
+	if timeout < 0 {
+		return fmt.Errorf("commission read snapshot timeout must not be negative")
+	}
+	if timeout != 0 && (!flows || strings.TrimSpace(version) == "") {
+		return fmt.Errorf("commission read snapshot timeout requires private versioned commission collection")
+	}
+	return nil
 }
 
 func main() {
@@ -57,16 +82,31 @@ func main() {
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
 	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
+	flowsVersion := flag.String("commission-output-version", "", "required immutable output version, leaves existing serving rows untouched")
+	flowsBuild := flag.String("commission-build", "", "required image digest or source build for this output version")
+	flowsAsOf := flag.String("commission-as-of", "", "required exclusive end date (YYYY-MM-DD UTC) for this output version")
+	flowsArchive := flag.String("commission-archive-config", "", "optional Secret-mounted probe.toml containing exact historical archive RPC")
+	flowsProfile := flag.String("commission-private-profile", "", "source-bound read-only private staging profile; never enables ordinary readiness")
+	flowsProfileSHA := flag.String("commission-private-profile-sha256", "", "exact immutable staging profile digest")
+	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
+	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
+	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
+	if (*flowsProfile != "" || *flowsProfileSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsProfileSHA == "") {
+		log.Fatal("private profile requires versioned commission collection and exact digest")
+	}
+	if (*flowsCorrections != "" || *flowsCorrectionsSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsCorrections == "" || *flowsCorrectionsSHA == "") {
+		log.Fatal("native source corrections require exact manifests and private versioned commission collection")
+	}
+	if err := validateCommissionReadTimeout(*flows, *flowsVersion, *flowsReadTimeout); err != nil {
+		log.Fatal(err)
+	}
 
 	// The commission trace runs thousands of small per-wallet queries whose
 	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
 	// of work. Session-only, so other jobs and the API keep their settings.
-	var runtime []string
-	if *flows {
-		runtime = append(runtime, "jit=off")
-	}
+	runtime := commissionRuntimeParams(*flows, *flowsVersion)
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
@@ -80,7 +120,21 @@ func main() {
 		log.Fatalf("db connect: %v", err)
 	}
 	if *flows {
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers)
+		var profile *taxapi.CommissionPrivateProfile
+		if *flowsProfile != "" || *flowsProfileSHA != "" {
+			profile, err = taxapi.LoadCommissionPrivateProfile(*flowsProfile, *flowsProfileSHA)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		var corrections *taxapi.CommissionSourceCorrections
+		if *flowsCorrections != "" {
+			corrections, err = taxapi.LoadCommissionSourceCorrections(*flowsCorrections, *flowsCorrectionsSHA)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections)
 		return
 	}
 	if *daysAppend {
@@ -158,7 +212,14 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections) {
+	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
+		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
+	}
+	asOf, err := time.Parse(time.DateOnly, asOfText)
+	if err != nil {
+		log.Fatalf("-commission-as-of: %v", err)
+	}
 	from, err := time.Parse(time.DateOnly, fromText)
 	if err != nil {
 		log.Fatalf("-commission-flows-from: %v", err)
@@ -175,7 +236,19 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
 			validators = append(validators, v)
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf); err != nil {
+	archiveRPC := ""
+	if archiveConfig != "" {
+		config := viper.New()
+		config.SetConfigFile(archiveConfig)
+		if err := config.ReadInConfig(); err != nil {
+			log.Fatal("cannot read commission archive configuration")
+		}
+		archiveRPC = config.GetString("probe.rpc")
+		if archiveRPC == "" {
+			log.Fatal("commission archive configuration has no RPC endpoint")
+		}
+	}
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
 }

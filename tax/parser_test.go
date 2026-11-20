@@ -89,8 +89,14 @@ func TestClassifyRewardRedirectedToWithdrawAddressMainnetFixture(t *testing.T) {
 		ev("withdraw_rewards", [2]string{attributeAmount, fixtureTransferWithFee}, [2]string{attributeValidator, "cosmosvaloper140kq2fts8ed9m73a6dch7sgdap6hnp2p95f92k"}, [2]string{attributeDelegator, delegator}),
 	}}
 	out := classify(msg, log)
-	if len(out) != 1 || out[0].Category != string(CategoryReward) || out[0].Amount != "627" || out[0].ToAddr != delegator {
+	if len(out) != 2 || out[0].Category != string(CategoryReward) || out[0].Amount != "627" || out[0].ToAddr != delegator {
 		t.Fatalf("mainnet redirected-reward fixture misclassified: %+v", out)
+	}
+	// The chain paid the withdraw address, so the coins move on from the
+	// delegator in a row after the reward.
+	if m := out[1]; m.Category != string(CategoryTransfer) || m.FromAddr != delegator || m.ToAddr != withdrawAddr || m.Amount != "627" ||
+		m.RewardTrigger != TriggerWithdrawAddress || m.Detail != `{"protocol":"distribution","reward_trigger":"claim"}` {
+		t.Fatalf("mainnet redirected reward should move to the withdraw address: %+v", m)
 	}
 }
 

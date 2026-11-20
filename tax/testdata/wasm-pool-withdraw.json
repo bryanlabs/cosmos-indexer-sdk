@@ -1,0 +1,263 @@
+{
+ "message_id": 23173,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "31755864",
+ "hash": "1D016E203CC973CF5B34609D2FA4388BBA4AF779E28AD9CF37C750178C1D7B5C",
+ "timestamp": "2026-06-26T11:23:06Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1dggq97c0rkfja4tr29tp397ndehzm5m6hcfznzg0gaq3ecm2tgdsku5756"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1dggq97c0rkfja4tr29tp397ndehzm5m6hcfznzg0gaq3ecm2tgdsku5756"
+    },
+    {
+     "key": "action",
+     "value": "send"
+    },
+    {
+     "key": "from",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "to",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "amount",
+     "value": "81978422023"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "action",
+     "value": "withdraw_liquidity"
+    },
+    {
+     "key": "refund_assets",
+     "value": "997921148uatom, 6889706122386ibc/0F8D3C0F081E126A4E275703DA67165DA5353C81F45E945140D0F961B9F7692A"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "withdrawn_share",
+     "value": "81978422023"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "997921148uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "997921148uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "997921148uatom"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "6889706122386ibc/0F8D3C0F081E126A4E275703DA67165DA5353C81F45E945140D0F961B9F7692A"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "6889706122386ibc/0F8D3C0F081E126A4E275703DA67165DA5353C81F45E945140D0F961B9F7692A"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "6889706122386ibc/0F8D3C0F081E126A4E275703DA67165DA5353C81F45E945140D0F961B9F7692A"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos1trx8j9dxmerqqp9mx9hxg0qfzaz4p5xlfzpect"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1dggq97c0rkfja4tr29tp397ndehzm5m6hcfznzg0gaq3ecm2tgdsku5756"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1dggq97c0rkfja4tr29tp397ndehzm5m6hcfznzg0gaq3ecm2tgdsku5756"
+    },
+    {
+     "key": "action",
+     "value": "burn"
+    },
+    {
+     "key": "amount",
+     "value": "81978422023"
+    },
+    {
+     "key": "from",
+     "value": "cosmos1ktvtng0237eha6d7umrxxptgs4qmcu4nv94nsdqr4s88dd3jq8qsu72afk"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  }
+ ]
+}

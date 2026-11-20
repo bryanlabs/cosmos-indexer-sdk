@@ -5,3 +5,4 @@ config.toml
 **/.env.*
 **/.venv
 **/node_modules
+taxapi/zz_ops818_*.go
