@@ -15,6 +15,7 @@ const (
 	TriggerStreamExit      = "stream_exit"
 	TriggerStreamRefund    = "stream_refund"
 	TriggerLPProvide       = "lp_provide"
+	actionMint             = "mint"
 	TriggerLPWithdraw      = "lp_withdraw"
 	TriggerLimitOrder      = "limit_order"
 	TriggerLimitFill       = "limit_fill"
@@ -143,7 +144,8 @@ func streamswapEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 // liquidityPoolEvents records a constant-product pool deposit or withdrawal
 // the way Gravity DEX pool movements and Inflow vault shares are recorded,
 // as swaps between the coins and the pool's cw20 shares: the coins put into
-// the pool for the shares it mints to the receiver, or the shares sent back
+// the pool for the shares it mints (a transfer follows when it mints them
+// to a receiver other than the sender), or the shares sent back
 // and burned for the coins the pool pays out. The shares are carried at the
 // cost of what was given for them. When the log does not show the shares
 // reaching the receiver (a pool that locks them), the coins are a deposit
@@ -172,14 +174,21 @@ func liquidityPoolEvents(log *indexerTxTypes.LogMessage, sender string, known []
 			return nil
 		}
 		receiver := firstNonEmpty(a["receiver"], sender)
-		token, ok := cw20Moved(log, "mint", "", receiver, a[detailShare])
+		token, ok := cw20Moved(log, actionMint, "", receiver, a[detailShare])
 		if !ok {
 			detail := contractDetail(contract, map[string]string{detailShare: a[detailShare], "pool": contract})
 			return coinRows(CategoryProtocolDeposit, coins, sender, contract, TriggerLPProvide, detail)
 		}
 		detail := contractDetail(contract, map[string]string{detailShare: a[detailShare], "pool_shares": token})
 		out := coinRows(CategorySwap, coins, sender, contract, TriggerLPProvide, detail)
-		return append(out, TaxableEvent{Category: string(CategorySwap), FromAddr: contract, ToAddr: receiver, Amount: a[detailShare], Denom: token, RewardTrigger: TriggerLPProvide, Detail: detail})
+		out = append(out, TaxableEvent{Category: string(CategorySwap), FromAddr: contract, ToAddr: sender, Amount: a[detailShare], Denom: token, RewardTrigger: TriggerLPProvide, Detail: detail})
+		if receiver != sender {
+			// The sender bought the shares and the pool minted them
+			// straight to another address: a swap to the sender, then the
+			// sender's transfer of the shares to the receiver.
+			out = append(out, TaxableEvent{Category: string(CategoryTransfer), FromAddr: sender, ToAddr: receiver, Amount: a[detailShare], Denom: token, RewardTrigger: TriggerLPProvide, Detail: detail})
+		}
+		return out
 	}
 	coins := legsBetween(legs, contract, sender)
 	if coins.Empty() || namesAny(known, sender, coins) {

@@ -167,3 +167,16 @@ func TestJournalLimitMakerFillPaysFromProtocol(t *testing.T) {
 	require.True(t, bal["Digital Assets in Protocol: USDC"].IsZero(), "%v", bal)
 	require.Equal(t, "800000", bal["Digital Assets: ATOM"].String(), "%v", bal)
 }
+
+// A stream exit's leg and a limit fill's legs in one message never share a
+// sub index.
+func TestReportLegSubIndexRangesApart(t *testing.T) {
+	for sub := 0; sub < 64; sub++ {
+		stream := streamLegBase - sub
+		for o := 0; o < 64; o++ {
+			for i := 0; i < 4; i++ {
+				require.NotEqual(t, stream, limitLegBase-(o*limitLegSpan+i))
+			}
+		}
+	}
+}

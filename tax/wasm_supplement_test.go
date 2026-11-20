@@ -606,3 +606,71 @@ func TestStreamswapExitCancelledRefunds(t *testing.T) {
 		t.Fatal("stream refund must count as a supplement row")
 	}
 }
+
+// A MsgCreateDenom signed directly writes a denom_creation_fee row with no
+// contract, which is not a supplement row; the fee a contract forwarded is.
+func TestSupplementRowDenomFeeNeedsContract(t *testing.T) {
+	direct := TaxableEvent{Category: string(CategoryExpense), RewardTrigger: triggerDenomCreationFee}
+	if supplement, _ := SupplementRow(direct); supplement {
+		t.Fatal("a direct MsgCreateDenom fee must not count as a supplement row")
+	}
+	forwarded := direct
+	forwarded.Detail = `{"contract":"c","denom":"factory/c/x"}`
+	if supplement, fallback := SupplementRow(forwarded); !supplement || fallback {
+		t.Fatal("a forwarded denom fee must count as a supplement row")
+	}
+}
+
+// A provide whose pool mints the shares to a receiver other than the sender
+// is a swap of the coins for the shares to the sender, then the sender's
+// transfer of the shares to the receiver.
+func TestLiquidityPoolProvideToOtherReceiver(t *testing.T) {
+	recv := testBech(t, "pool-receiver", 20)
+	msg, log := fixtureWith(t, "wasm-pool-provide", func(l *txlog.LogMessage) {
+		for i, e := range l.Events {
+			a := attrMap(e)
+			if e.Type != eventWasm {
+				continue
+			}
+			switch a[attributeAction] {
+			case "provide_liquidity":
+				setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, eventWasm, "receiver", recv)
+			case actionMint:
+				setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, eventWasm, "to", recv)
+			}
+		}
+	})
+	rows := parseFixtureMsg(t, msg, log)
+	if len(rows) < 2 {
+		t.Fatalf("rows: %s", summary(rows))
+	}
+	share, move := rows[len(rows)-2], rows[len(rows)-1]
+	if share.Category != string(CategorySwap) || share.ToAddr == recv || move.Category != string(CategoryTransfer) ||
+		move.FromAddr != share.ToAddr || move.ToAddr != recv || move.Amount != share.Amount || move.Denom != share.Denom {
+		t.Fatalf("provide to receiver: %s", summary(rows))
+	}
+}
+
+// An ask that matched a bid when it was set books its listing fee only on
+// an exact forward; a forward of another amount writes no fee row, and the
+// bid's escrow pays the sale either way.
+func TestSetAskMatchListingFeeExactForward(t *testing.T) {
+	msg, log := fixtureWith(t, "wasm-set-ask-match-collection-bid", func(*txlog.LogMessage) {})
+	if got := triggers(parseFixtureMsg(t, msg, log)); !strings.Contains(got, "expense:listing_fee:1000") || !strings.Contains(got, "protocol_withdrawal:bid_filled:4000000") {
+		t.Fatalf("set-ask-match: %s", got)
+	}
+	msg, log = fixtureWith(t, "wasm-set-ask-match-collection-bid", func(l *txlog.LogMessage) {
+		seen := 0
+		for i, e := range l.Events {
+			if e.Type == string(CategoryTransfer) {
+				if seen++; seen == 2 {
+					setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, string(CategoryTransfer), attributeAmount, "999uatom")
+				}
+			}
+		}
+	})
+	got := triggers(parseFixtureMsg(t, msg, log))
+	if strings.Contains(got, triggerListingFee) || !strings.Contains(got, "protocol_withdrawal:bid_filled:4000000") {
+		t.Fatalf("forward differs: %s", got)
+	}
+}

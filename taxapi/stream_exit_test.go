@@ -45,10 +45,13 @@ func TestStreamExitLegsFromLot(t *testing.T) {
 
 	// A spend past the lot, or no subscription at all, keeps the review.
 	over := withDetail(v1, strings.Replace(base, `"stream_id"`, `"spent":"25000000","stream_id"`, 1))
+	// 17 fits the 20 left after the withdrawal, not the 16 left once the
+	// exit's own refund comes back.
+	overRefund := withDetail(v1, strings.Replace(base, `"stream_id"`, `"spent":"17000000","stream_id"`, 1))
 	for name, c := range map[string]struct {
 		exit tax.TaxableEvent
 		lots []tax.TaxableEvent
-	}{"over": {over, []tax.TaxableEvent{sub, wd}}, "no lot": {v1, nil}, "other stream": {v1, []tax.TaxableEvent{withDetail(sub, `{"contract":"`+flowRowsMarket+`","stream_id":"3"}`)}}} {
+	}{"over": {over, []tax.TaxableEvent{sub, wd}}, "over net of refund": {overRefund, []tax.TaxableEvent{sub, wd, refund}}, "no lot": {v1, nil}, "other stream": {v1, []tax.TaxableEvent{withDetail(sub, `{"contract":"`+flowRowsMarket+`","stream_id":"3"}`)}}} {
 		got = streamExitLegs([]tax.TaxableEvent{c.exit}, flowRowsBuyer, c.lots)
 		require.Len(t, got, 1, name)
 		require.Equal(t, tax.ReviewStreamSpend, semanticReviewReason(Row{Detail: got[0].Detail}), name)
