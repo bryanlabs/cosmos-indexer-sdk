@@ -193,7 +193,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		// 1456c0b64ef4 counts its tokenize-share record's reward payouts: drift
 		// 0.12 ATOM on 7,514 ATOM, overdraw 0.000036, shares unchanged.
 		flowTokenizeRewardRoot("accel-withdraw-fix-1456c0b64ef4-20261118-fanout-v5", "1456c0b64ef40bd1073983d272a32eb28333805b6470a6903d4f776ec2eeb9fc"),
-		flowSlashRoot("accel-withdraw-fix-6381eb3d4d63-20261118-fanout-v3", "6381eb3d4d63ccfe34abfde32b00c5692b94fb1081ba8628fb55a32d9b822201"),
+		flowAllFixesRoot("accel-withdraw-fix-6381eb3d4d63-20261118-fanout-v7", "6381eb3d4d63ccfe34abfde32b00c5692b94fb1081ba8628fb55a32d9b822201"),
 		flowSlashRoot("accel-withdraw-fix-7745d8ffeac6-20261118-fanout-v3", "7745d8ffeac67f746b31f6cbdc249829bb77eb1708c12f798a9dd9bb45ba9ce1"),
 		flowSlashRoot("accel-withdraw-fix-17fa80ffb90c-20261118-fanout-v3", "17fa80ffb90c55459967e90d18555042a950e8b95b05f19ff2f922da458baa7e"),
 		flowSlashRoot("accel-withdraw-fix-2453c25e0fd9-20261118-fanout-v3", "2453c25e0fd99d77519b1f1ddc9805b827da1c1df87bc099d511a3626065633a"),
@@ -205,7 +205,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowAllFixesRoot("accel-withdraw-fix-f1afab0130fb-20261118-fanout-v7", "f1afab0130fb05642a485af36968c826238e912292f4616ac0658957fcfb28d1"),
 		flowSlashRoot("accel-withdraw-fix-a3e91bffa7c0-20261118-fanout-v3", "a3e91bffa7c05edeb6836f0d37d7bd8d8ed18788e8dd4af9b806caa5d7b2de71"),
 		flowSlashRoot("accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v3", "c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"),
-		flowSlashRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v3", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
+		flowAllFixesRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v7", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
 		flowAllFixesRoot("accel-withdraw-fix-8df708d2db2f-20261118-fanout-v7", "8df708d2db2f5583431b8f9ce8a6e3ba9ae7840e0f78b38366948a69c0d24716"),
 		// Self-bond rerun: its own self-bond had no ledger row, so the old trace kept the bond liquid; about 0.79 ATOM moves to ibc_out, 0.38 from restaked_own and 0.41 from held (66.0 pct class share).
 		flowAllFixesRoot("accel-withdraw-fix-1e6691e3985a-20261118-fanout-v7", "1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"),
@@ -255,7 +255,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowAllFixesRoot("accel-withdraw-fix-d5f91bf8d7b4-20261118-fanout-v7", "d5f91bf8d7b41fe125a39816d950a6d840bc9cc52b412eef07bee698f0b9e182"),
 		flowAllFixesRoot("accel-withdraw-fix-383d9fd329b2-20261118-fanout-v7", "383d9fd329b21ef289a8bc584e465325e26025d5b1dd35b74811bf1d831e4afe"),
 		flowAllFixesRoot("accel-withdraw-fix-d16f03fef762-20261118-fanout-v7", "d16f03fef76269e52ea1c39dc50847ccc561d1e89782366372bc13f936a0c525"),
-		flowClientTraceRoot("accel-withdraw-fix-e19812c884e7-20261118-fanout-v1", "e19812c884e754f7c64a4cc29e18fd0af0a0f06dd717d82edaa3800e4185b4a8"),
+		flowAllFixesRoot("accel-withdraw-fix-e19812c884e7-20261118-fanout-v7", "e19812c884e754f7c64a4cc29e18fd0af0a0f06dd717d82edaa3800e4185b4a8"),
 		flowAllFixesRoot("accel-withdraw-fix-e7790b332148-20261118-fanout-v7", "e7790b332148a7573e8bad81ee2a5242f491435aec72cdc72eaee7b25c298565"),
 		flowAllFixesRoot("accel-withdraw-fix-8a571bb0887f-20261118-fanout-v7", "8a571bb0887f0667fc25cac41c2d25c7d2c27a636f639d51f7f102b62969b172"),
 		flowAllFixesRoot("accel-withdraw-fix-ad49f408bd75-20261118-fanout-v7", "ad49f408bd756cae1952d8f85f04d4210a75a1b20797e03412fd8b95a23f4938"),
