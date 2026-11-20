@@ -22,6 +22,14 @@ JOIN chains scope_c ON scope_c.id = scope_b.chain_id
 WHERE address_events.reward_trigger IN ? AND scope_c.chain_id IN ?
 ORDER BY address_events.message_id, address_events.sub_index`
 
+// The legs the report adds take negative sub indexes in ranges of their
+// own, so a stream exit's leg and a limit fill's legs in one message never
+// share a key: stream legs from -1 down, limit legs from -2^30 down.
+const (
+	streamLegBase = -1
+	limitLegBase  = -(1 << 30)
+)
+
 // streamLotTriggers are the rows that put coins into a subscription or take
 // them back out.
 var streamLotTriggers = []string{tax.TriggerStreamSubscribe, tax.TriggerStreamWithdraw, tax.TriggerStreamRefund}
@@ -78,7 +86,7 @@ func streamExitLeg(exit tax.TaxableEvent, addr string, lots []tax.TaxableEvent) 
 		return tax.TaxableEvent{}, false
 	}
 	denom := ""
-	subscribed, before, all := sdkmath.ZeroInt(), sdkmath.ZeroInt(), sdkmath.ZeroInt()
+	subscribed, before, same, all := sdkmath.ZeroInt(), sdkmath.ZeroInt(), sdkmath.ZeroInt(), sdkmath.ZeroInt()
 	for _, r := range lots {
 		order := streamOrder(r, exit)
 		if flowStreamLot(r) != lot || order > 0 {
@@ -100,8 +108,11 @@ func streamExitLeg(exit tax.TaxableEvent, addr string, lots []tax.TaxableEvent) 
 				continue
 			}
 			all = all.Add(amt)
-			if order < 0 {
+			switch order {
+			case -1:
 				before = before.Add(amt)
+			case 0:
+				same = same.Add(amt)
 			}
 		}
 	}
@@ -111,7 +122,9 @@ func streamExitLeg(exit tax.TaxableEvent, addr string, lots []tax.TaxableEvent) 
 	spent, basis := subscribed.Sub(all), "remainder"
 	if v := detailValue(exit.Detail, "spent"); v != "" {
 		s, ok := sdkmath.NewIntFromString(v)
-		if !ok || s.GT(subscribed.Sub(before)) {
+		// The exit cannot spend what earlier withdrawals or its own
+		// message's refund took back out of the subscription.
+		if !ok || s.GT(subscribed.Sub(before).Sub(same)) {
 			return tax.TaxableEvent{}, false
 		}
 		spent, basis = s, "spent"
@@ -122,7 +135,7 @@ func streamExitLeg(exit tax.TaxableEvent, addr string, lots []tax.TaxableEvent) 
 	leg := exit
 	// The leg is not a stored row. A negative sub index keeps its
 	// message and sub index key apart from every stored row.
-	leg.ID, leg.SubIndex = 0, -1-exit.SubIndex
+	leg.ID, leg.SubIndex = 0, streamLegBase-exit.SubIndex
 	leg.Category = string(tax.CategorySwap)
 	leg.FromAddr, leg.ToAddr = addr, exit.FromAddr
 	leg.Amount, leg.Denom, leg.Asset = spent.String(), denom, ""

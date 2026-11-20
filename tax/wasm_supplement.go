@@ -148,8 +148,13 @@ func SupplementRow(e TaxableEvent) (supplement, fallback bool) {
 	}
 	switch e.RewardTrigger {
 	case TriggerStreamSubscribe, TriggerStreamWithdraw, TriggerStreamExit, TriggerStreamRefund, TriggerLPProvide, TriggerLPWithdraw,
-		TriggerLimitOrder, TriggerLimitFill, TriggerLimitCancel, TriggerLimitFee, triggerDenomCreationFee, triggerListingFee:
+		TriggerLimitOrder, TriggerLimitFill, TriggerLimitCancel, TriggerLimitFee, triggerListingFee:
 		return true, false
+	case triggerDenomCreationFee:
+		// A MsgCreateDenom signed directly writes the same trigger with no
+		// detail; only the fee a contract forwarded names its contract.
+		_, ok := d["contract"]
+		return ok, false
 	case flowTriggerAuctionBid, flowTriggerAuctionRefund, triggerBidFilled:
 		_, ok := d["bid_id"]
 		return ok, false

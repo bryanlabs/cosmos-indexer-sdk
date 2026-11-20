@@ -140,7 +140,7 @@ func limitMakerLegs(events []tax.TaxableEvent, addr string, rows []tax.TaxableEv
 			out = append(out, e)
 			for i, l := range o.legs {
 				leg := e
-				leg.ID, leg.SubIndex = 0, -1-(e.SubIndex*limitLegSpan+i)
+				leg.ID, leg.SubIndex = 0, limitLegBase-(e.SubIndex*limitLegSpan+i)
 				leg.Category, leg.RewardTrigger, leg.FromAddr, leg.ToAddr = l.Category, l.RewardTrigger, l.FromAddr, l.ToAddr
 				leg.Amount, leg.Denom, leg.Asset, leg.Detail = l.Amount, l.Denom, "", l.Detail
 				out = append(out, leg)
