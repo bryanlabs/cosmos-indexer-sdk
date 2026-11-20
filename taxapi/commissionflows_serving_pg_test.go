@@ -277,7 +277,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 187)
+	require.Len(t, seen, 200)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -301,7 +301,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 162)
+	require.Len(t, roots, 172)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s04-20261115-deadline-retry-v3", roots["6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"])
 	// The Cosmos Hub v29.1.0 upgrade stopped the earlier retries of these roots with stored errors, so the next version of each replaces it.
@@ -434,6 +434,19 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-802b450f0236-20261118-fanout-v1", roots["802b450f0236afca7078a0ce916d993557ed8d48131e801f7262c02da500a807"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-892530d89fce-20261118-fanout-v1", roots["892530d89fce820e8ce6005046a8a93340487899500d6f795c82d0080d11d3ff"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-e9dd7b1d8994-20261118-fanout-v1", roots["e9dd7b1d8994732d3ddf71250574ced87a7287b9032f76c9b6f5cfdcccc093e4"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-3dd844297fbd-20261118-fanout-v1", roots["3dd844297fbda1ffe59720f953e2168064237e3436b5d3a81936d275496ffecf"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-28c5d00f4530-20261118-fanout-v1", roots["28c5d00f45307b23be175cab0095c64c8ca2dd806e6895fe1cee42456948213e"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-2877ad667da5-20261118-fanout-v1", roots["2877ad667da5260e6188746799121924cb3fd1e13043450dad6192ec7387803a"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-651b835c3d53-20261118-fanout-v1", roots["651b835c3d5335dc4604c3e1ba8c43cf83b245160bd10a3e7d69d13f8f530a4e"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-1d5ce6cbe006-20261118-fanout-v1", roots["1d5ce6cbe00625e175aa953b41ae4efdab565c8bbdc0b65b3f4345653eac1172"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-274a1c06a584-20261118-fanout-v1", roots["274a1c06a584325f3d85da4a602930b04d10455e39edbd665ccffad5e1ddf7d9"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-47d139c1b3d1-20261118-fanout-v1", roots["47d139c1b3d180e45dec10d7511dbca4904142992c0bdb566cf4c92ae7997bec"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-607606f87da1-20261118-fanout-v1", roots["607606f87da17ce8a8581cda77daff29c9c325a011b63fafc4a30fbf29efaff5"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-b78785cb8f1b-20261118-fanout-v1", roots["b78785cb8f1bde3c896fb6a5c713955523ebe9f1420f911bd4b37fa793a69d23"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-7a0116649b34-20261118-fanout-v1", roots["7a0116649b342e025886d35634fad63ab8f11e2d33d0cc9c92e759c5f600fcce"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-173328c08451-20261118-fanout-v1", roots["173328c08451bcf4bacd8e374fd2d9a8efda54dafe9134ba3de9b16d74a9e251"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-dfca246c1569-20261118-fanout-v1", roots["dfca246c15690ca8f7a99d9263027ee7ab4e784cad9829d8dfe493f7997f1d3a"])
+	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-ae014b919dea-20261118-fanout-v1", roots["ae014b919dea62407563de2aba68a2eb8b267fb41d6d1ccc293833c93823e4bf"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-d29d6d635b9c-20261118-fanout-v1", roots["d29d6d635b9c4007dc01785d3a40e37966692f11206b4988c45b8dd07ab50589"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-91839f8b6913-20261118-fanout-v2", roots["91839f8b6913340a41e7915e84d50818dcadff35b8a7a04e3b367a4cb098fb3b"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-ff3cb6404c89-20261118-fanout-v1", roots["ff3cb6404c897214795e05fbf454959486d59fce45dec6d3c8b4b22b06eb5dc7"])
