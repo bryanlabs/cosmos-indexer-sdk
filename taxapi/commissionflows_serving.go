@@ -234,7 +234,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowClientTraceRoot("accel-withdraw-fix-5fa7cab34d20-20261118-fanout-v1", "5fa7cab34d20f2a77714dae2730dc0286ed77207a35099cf6d8128b08f375af1"),
 		// Self-bond rerun: its own self-bond had no ledger row, so the old trace counted the bond as liquid and matched the exchange transfers to it; all 2.41 ATOM moves from held to exchange_like under fifo, overdraw 2.8 to 0.000001.
 		flowSelfBondRoot("accel-withdraw-fix-b3bcdd688853-20261118-fanout-v5", "b3bcdd6888530414e97414c962742b3c4d8b56b02e6d80b152dafa9e5915a5d7"),
-		flowClientTraceRoot("accel-withdraw-fix-4fcff5fcb5a5-20261118-fanout-v1", "4fcff5fcb5a55ce3e56d6c89bd59739729a349559f0374be1ccb0b825e36747c"),
+		flowSelfBondRoot("accel-withdraw-fix-4fcff5fcb5a5-20261118-fanout-v5", "4fcff5fcb5a55ce3e56d6c89bd59739729a349559f0374be1ccb0b825e36747c"),
 		flowClientTraceRoot("accel-withdraw-fix-d3bfac7ecf84-20261118-fanout-v1", "d3bfac7ecf84f17408ba216adde4b3c6969adad03e14dacf0290d287d107fea5"),
 		flowClientTraceRoot("accel-withdraw-fix-95ceecf77830-20261118-fanout-v4", "95ceecf77830b8642cd1e669655f504c4d990eb528552e5b3a272c091b78428a"),
 		flowSlashRoot("accel-withdraw-fix-b03cdf1c7313-20261118-fanout-v1", "b03cdf1c7313b261dcf5e40862ed7ff148b7654aa5d8bb244d21e8d1beef365b"),
@@ -305,7 +305,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowClientTraceRoot("accel-withdraw-fix-173328c08451-20261118-fanout-v1", "173328c08451bcf4bacd8e374fd2d9a8efda54dafe9134ba3de9b16d74a9e251"),
 		flowClientTraceRoot("accel-withdraw-fix-dfca246c1569-20261118-fanout-v1", "dfca246c15690ca8f7a99d9263027ee7ab4e784cad9829d8dfe493f7997f1d3a"),
 		flowClientTraceRoot("accel-withdraw-fix-ae014b919dea-20261118-fanout-v1", "ae014b919dea62407563de2aba68a2eb8b267fb41d6d1ccc293833c93823e4bf"),
-		flowClientTraceRoot("accel-withdraw-fix-1612d799cdf1-20261118-fanout-v1", "1612d799cdf188ad113cc346bb3174ee8f415271053c3b1086cc30359a082a7c"),
+		flowSelfBondRoot("accel-withdraw-fix-1612d799cdf1-20261118-fanout-v5", "1612d799cdf188ad113cc346bb3174ee8f415271053c3b1086cc30359a082a7c"),
 		flowClientTraceRoot("accel-withdraw-fix-0f096f7c01aa-20261118-fanout-v1", "0f096f7c01aae3024742d20c10a4c26ef0cd5b2755899cc9141597b7cac034aa"),
 		flowClientTraceRoot("accel-withdraw-fix-e1d7823dd0ed-20261118-fanout-v1", "e1d7823dd0eda9921631776af4458732e0b07b3aa3717e15610016f9fcb2f79f"),
 		flowClientTraceRoot("accel-withdraw-fix-9a1fedaa6b14-20261118-fanout-v1", "9a1fedaa6b144abab91593ac4ef48c4d435a6fa8b1370a1cb3a54f900406f3bc"),
