@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,10 +45,14 @@ type mbPart struct {
 type mbVerdict struct {
 	Rows, Todo, Written                          int
 	Missing, Hash, Index, Type, Opaque, Conflict int
+	// Private counts rows in the transaction of the private commission
+	// profile's message, whose proof hashes the bytes and xmin of every
+	// message in that transaction.
+	Private int
 }
 
 func (v mbVerdict) failures() int {
-	return v.Missing + v.Hash + v.Index + v.Type + v.Opaque + v.Conflict
+	return v.Missing + v.Hash + v.Index + v.Type + v.Opaque + v.Conflict + v.Private
 }
 
 // parseMbPlanLine reads message id, message index, tx hash and hex tx bytes,
@@ -192,16 +197,18 @@ type mbStored struct {
 	MessageBytes []byte
 	Opaque       *bool
 	Hash         *string
+	PrivateTx    bool
 }
 
 // checkMbPart compares every row with what is stored now. It only reads.
 func checkMbPart(tx *gorm.DB, p mbPart) (mbVerdict, []mbRow, error) {
 	var stored []mbStored
-	err := tx.Raw(`SELECT u.id, m.id IS NOT NULL AS found, m.message_index, mt.message_type, m.message_bytes, m.opaque, t.hash
+	err := tx.Raw(`SELECT u.id, m.id IS NOT NULL AS found, m.message_index, mt.message_type, m.message_bytes, m.opaque, t.hash,
+ coalesce(m.tx_id = (SELECT pm.tx_id FROM messages pm WHERE pm.id = ?), false) AS private_tx
 FROM unnest(?::bigint[]) u(id)
 LEFT JOIN LATERAL (SELECT m.id, m.tx_id, m.message_type_id, m.message_index, m.message_bytes, m.opaque FROM messages m WHERE m.id = u.id OFFSET 0) m ON true
 LEFT JOIN LATERAL (SELECT mt.message_type FROM message_types mt WHERE mt.id = m.message_type_id OFFSET 0) mt ON true
-LEFT JOIN LATERAL (SELECT t.hash FROM txes t WHERE t.id = m.tx_id OFFSET 0) t ON true`, idArray(mbIDs(p.Rows))).Scan(&stored).Error
+LEFT JOIN LATERAL (SELECT t.hash FROM txes t WHERE t.id = m.tx_id OFFSET 0) t ON true`, privateProfileMessageID, idArray(mbIDs(p.Rows))).Scan(&stored).Error
 	if err != nil {
 		return mbVerdict{}, nil, err
 	}
@@ -220,6 +227,8 @@ LEFT JOIN LATERAL (SELECT t.hash FROM txes t WHERE t.id = m.tx_id OFFSET 0) t ON
 		switch {
 		case !s.Found:
 			v.Missing++
+		case s.PrivateTx:
+			v.Private++
 		case reason == "hash":
 			v.Hash++
 		case reason == "index":
@@ -238,6 +247,28 @@ LEFT JOIN LATERAL (SELECT t.hash FROM txes t WHERE t.id = m.tx_id OFFSET 0) t ON
 		}
 	}
 	return v, todo, nil
+}
+
+// createBackup creates the backup file, never over an existing one, and
+// syncs its directory so the file's entry survives a crash along with the
+// lines synced into it.
+func createBackup(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err == nil {
+		err = dir.Sync()
+		if cerr := dir.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("sync backup directory: %w", err)
+	}
+	return f, nil
 }
 
 // loadMbPart writes one part in its own transaction. Its messages rows are
@@ -354,7 +385,7 @@ func runMessageBodiesLoad(args []string) int {
 	}
 	var backup *os.File
 	if *apply {
-		if backup, err = os.OpenFile(*backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err != nil {
+		if backup, err = createBackup(*backupPath); err != nil {
 			fatal(err.Error())
 		}
 		defer backup.Close()
@@ -415,8 +446,8 @@ func checkMbParts(db *gorm.DB, parts []mbPart) (failed int, err error) {
 		if v.failures() != 0 {
 			failed++
 		}
-		fmt.Printf("part %d messages %d..%d sha256 %s: %d rows, %d to write, %d already written, refused missing %d hash %d index %d type %d opaque %d conflict %d, %.1fs\n",
-			p.N, p.First, p.Last, p.Sum, v.Rows, v.Todo, v.Written, v.Missing, v.Hash, v.Index, v.Type, v.Opaque, v.Conflict, time.Since(start).Seconds())
+		fmt.Printf("part %d messages %d..%d sha256 %s: %d rows, %d to write, %d already written, refused missing %d hash %d index %d type %d opaque %d conflict %d private %d, %.1fs\n",
+			p.N, p.First, p.Last, p.Sum, v.Rows, v.Todo, v.Written, v.Missing, v.Hash, v.Index, v.Type, v.Opaque, v.Conflict, v.Private, time.Since(start).Seconds())
 	}
 	return failed, nil
 }

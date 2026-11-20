@@ -159,11 +159,21 @@ func TestMessageBodiesLoad(t *testing.T) {
 	}
 
 	backupPath := filepath.Join(t.TempDir(), "backup.tsv")
-	backup, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	backup, err := createBackup(backupPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer backup.Close()
+	if info, err := os.Stat(backupPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode %v %v", info, err)
+	}
+	if again, err := createBackup(backupPath); err == nil || !errors.Is(err, os.ErrExist) {
+		_ = again.Close()
+		t.Fatalf("an existing backup was opened again: %v", err)
+	}
+	if _, err := createBackup(filepath.Join(t.TempDir(), "missing", "backup.tsv")); err == nil {
+		t.Fatal("a backup in a missing directory was created")
+	}
 	for _, p := range parts {
 		if _, n, err := loadMbPart(db, p, true, backup); err != nil || n != 1 {
 			t.Fatalf("apply part %d: %d %v", p.N, n, err)
@@ -366,5 +376,55 @@ func TestMessageBodiesLoadWaitsOnLocks(t *testing.T) {
 		if mbStoredBytes(t, db, 80) != nil {
 			t.Fatalf("written under a held %s lock", name)
 		}
+	}
+}
+
+// A row in the transaction of the private commission profile's message is
+// refused: that profile's proof hashes the bytes and xmin of every message
+// in the transaction, so writing any of them would break it.
+func TestMessageBodiesLoadRefusesPrivateProfileTx(t *testing.T) {
+	db := mbScratch(t)
+	raws := map[uint][]byte{}
+	for _, id := range []uint{76, 77} {
+		raws[id], _ = seedMbMessage(t, db, id)
+	}
+	plan := writeMbPlan(t, raws)
+	_, parts, err := readMessageBodiesPlan(plan, 1)
+	if err != nil || len(parts) != 2 {
+		t.Fatalf("parts %d %v", len(parts), err)
+	}
+	// Without the profile's message no row is private.
+	if v, _, err := checkMbPart(db, parts[0]); err != nil || v != (mbVerdict{Rows: 1, Todo: 1}) {
+		t.Fatalf("before the profile message: %+v %v", v, err)
+	}
+	if err := db.Exec("INSERT INTO messages VALUES(?, 76, 1, 2, NULL)", privateProfileMessageID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if v, _, err := checkMbPart(db, parts[0]); err != nil || v != (mbVerdict{Rows: 1, Private: 1}) {
+		t.Fatalf("message 76 shares the profile's tx: %+v %v", v, err)
+	}
+	if v, _, err := checkMbPart(db, parts[1]); err != nil || v != (mbVerdict{Rows: 1, Todo: 1}) {
+		t.Fatalf("message 77 is in another tx: %+v %v", v, err)
+	}
+	if failed, err := checkMbParts(db, parts); err == nil {
+		t.Fatalf("a check on a writable connection ran (%d failed)", failed)
+	}
+	_, both, err := readMessageBodiesPlan(plan, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := createBackup(filepath.Join(t.TempDir(), "backup.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	if _, n, err := loadMbPart(db, both[0], true, backup); err == nil || n != 0 || !strings.Contains(err.Error(), "Private:1") {
+		t.Fatalf("a part holding the profile's tx loaded: %d %v", n, err)
+	}
+	if mbStoredBytes(t, db, 76) != nil || mbStoredBytes(t, db, 77) != nil || mbStoredBytes(t, db, privateProfileMessageID) != nil {
+		t.Fatal("a refused part wrote bodies")
+	}
+	if _, n, err := loadMbPart(db, parts[1], true, backup); err != nil || n != 1 {
+		t.Fatalf("message 77 alone: %d %v", n, err)
 	}
 }
