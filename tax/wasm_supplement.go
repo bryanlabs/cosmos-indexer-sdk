@@ -40,22 +40,70 @@ const (
 
 // wasmSupplementEvents are the rows a contract message adds after every row
 // the known patterns wrote for it: marketplace bid escrow, top-level name
-// registration, a tokenfactory fee a contract forwards, and last the native
+// registration, a tokenfactory fee a contract forwards, streamswap
+// subscriptions, pool deposits and withdrawals, limit orders, and last the native
 // coin any wallet gained or lost that no row explains. They come after the
 // known rows so those keep their positions in the message.
 func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	if log == nil || len(log.Events) == 0 {
 		return nil
 	}
+	// A flattened log merges every event of a type into one, so the order
+	// of bank legs and contract events and the signer are lost. Only the
+	// order-free fallback runs there, and only for 20-byte wallets.
 	var out []TaxableEvent
-	out = append(out, marketplaceBidEvents(log, known)...)
+	if flattenedLog(log) {
+		return bankFallbackEvents(log, "", known)
+	}
+	out = append(out, marketplaceBidEvents(log, sender, known)...)
 	out = append(out, tldRegistrationEvents(log, sender, known)...)
 	out = append(out, forwardedDenomFeeEvents(log, sender, known)...)
+	out = append(out, streamswapEvents(log, sender, known)...)
+	out = append(out, liquidityPoolEvents(log, sender, known)...)
+	out = append(out, limitOrderEvents(log, sender, known)...)
 	all := make([]TaxableEvent, 0, len(known)+len(out))
 	all = append(all, known...)
 	all = append(all, out...)
 	out = append(out, bankFallbackEvents(log, sender, all)...)
 	return out
+}
+
+// WasmSupplementForLog is the supplement rows of one contract message's log
+// as wasmSupplementEvents writes them after that message's known rows. The
+// repair uses it for contract messages inside a MsgExec, whose granter the
+// stored log does not name, so it passes no sender.
+func WasmSupplementForLog(log *indexerTxTypes.LogMessage, sender string) []TaxableEvent {
+	if log == nil {
+		return nil
+	}
+	return wasmSupplementEvents(log, sender, wasmExecuteEvents(log, sender))
+}
+
+// flattenedLog reports a log in the pre-0.50 shape, where each event type
+// appears once with the attributes of every event of that type: one event
+// naming several contracts, a transfer event with several recipients or a
+// message event with several senders.
+func flattenedLog(log *indexerTxTypes.LogMessage) bool {
+	for _, ev := range log.Events {
+		counts := map[string]int{}
+		for _, a := range ev.Attributes {
+			counts[a.Key]++
+		}
+		if counts[attributeContractAddress] > 1 {
+			return true
+		}
+		switch ev.Type {
+		case string(CategoryTransfer):
+			if counts[attributeRecipient] > 1 {
+				return true
+			}
+		case eventMessage:
+			if counts[attributeSender] > 1 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // logItem is one bank leg or one marketplace event, in the order the chain
@@ -94,8 +142,10 @@ func logItems(log *indexerTxTypes.LogMessage) []logItem {
 // bank leg the message shows: a deposit is written only when the bidder's
 // transfer to the marketplace equals the bid price, and a release only when
 // the marketplace's payouts equal the sale price. Anything else is left to
-// the bank fallback.
-func marketplaceBidEvents(log *indexerTxTypes.LogMessage, known []TaxableEvent) []TaxableEvent {
+// the bank fallback. An accepted bid always releases the escrow at the sale
+// price, since the buyer's nft_sale row pays with it; payouts that do not add
+// up to the price are noted on the row.
+func marketplaceBidEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	items := logItems(log)
 	var out []TaxableEvent
 	for i, it := range items {
@@ -114,8 +164,12 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, known []TaxableEvent) 
 		if strings.Contains(it.event, attrCollection) {
 			sale = "collection_bid"
 		}
-		detail := func(id string) string {
-			return contractDetail(contract, map[string]string{"bid_id": id, attrCollection: it.attrs[attrCollection], attrTokenID: it.attrs[attrTokenID], "sale": sale})
+		detail := func(id string, extra ...string) string {
+			m := map[string]string{"bid_id": id, attrCollection: it.attrs[attrCollection], attrTokenID: it.attrs[attrTokenID], "sale": sale}
+			for k := 0; k+1 < len(extra); k += 2 {
+				m[extra[k]] = extra[k+1]
+			}
+			return contractDetail(contract, m)
 		}
 		switch it.event {
 		case eventSetBid, eventSetCollectionBid:
@@ -131,11 +185,14 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, known []TaxableEvent) 
 			out = append(out, coinRows(CategoryProtocolWithdrawal, refund, contract, it.attrs["creator"], flowTriggerAuctionRefund, detail(it.attrs["id"]))...)
 			out = append(out, coinRows(CategoryProtocolDeposit, dep, it.attrs["creator"], contract, flowTriggerAuctionBid, detail(it.attrs["id"]))...)
 		case eventRemoveBid, eventRemoveCollectionBid:
-			if it.attrs["id"] == "" {
+			// The event does not name the bidder; a bidder removing their
+			// own bid signs the message, and only the payout to them is the
+			// returned escrow. Any other payout is left to the bank fallback.
+			if it.attrs["id"] == "" || sender == "" {
 				continue
 			}
 			for _, leg := range after {
-				if leg.from == contract {
+				if leg.from == contract && leg.to == sender {
 					out = append(out, coinRows(CategoryProtocolWithdrawal, leg.coins, contract, leg.to, flowTriggerAuctionRefund, detail(it.attrs["id"]))...)
 				}
 			}
@@ -160,12 +217,13 @@ func marketplaceBidEvents(log *indexerTxTypes.LogMessage, known []TaxableEvent) 
 					paid = paid.Add(leg.coins.AmountOf(denom))
 				}
 			}
+			d := detail(id)
 			if !paid.Equal(price) {
-				continue
+				d = detail(id, "payouts", paid.String()+denom)
 			}
 			out = append(out, TaxableEvent{
 				Category: string(CategoryProtocolWithdrawal), FromAddr: contract, ToAddr: buyer,
-				Amount: price.String(), Denom: denom, RewardTrigger: triggerBidFilled, Detail: detail(id),
+				Amount: price.String(), Denom: denom, RewardTrigger: triggerBidFilled, Detail: d,
 			})
 		}
 	}
@@ -219,10 +277,12 @@ func legsBetween(legs []coinTransfer, from, to string) sdk.Coins {
 }
 
 // tldRegistrationEvents books an atom.names top-level domain registration
-// as the name_registration expense the registry's other purchases use.
+// as the name_registration expense the registry's other purchases use: what
+// the signer paid the TLD contract in the message, unless a row already
+// names that coin for the signer.
 func tldRegistrationEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	for _, e := range known {
-		if e.RewardTrigger == "name_registration" {
+		if e.RewardTrigger == triggerNameRegistration {
 			return nil
 		}
 	}
@@ -236,8 +296,11 @@ func tldRegistrationEvents(log *indexerTxTypes.LogMessage, sender string, known 
 		if a[attributeAction] != "register_tld" || contractKind(contract) != protocolNames || sender == "" {
 			continue
 		}
-		coins := coinsSpentBy(log, sender)
-		out = append(out, coinRows(CategoryExpense, coins, sender, contract, "name_registration", contractDetail(contract, map[string]string{"name": a["tld"]}))...)
+		coins := legsBetween(transfersIn(log), sender, contract)
+		if coins.Empty() || namesAny(known, sender, coins) {
+			return nil
+		}
+		out = append(out, coinRows(CategoryExpense, coins, sender, contract, triggerNameRegistration, contractDetail(contract, map[string]string{"name": a["tld"]}))...)
 		break
 	}
 	return out
@@ -271,7 +334,7 @@ func forwardedDenomFeeEvents(log *indexerTxTypes.LogMessage, sender string, know
 		if fee.Empty() || !coinsEqual(fee, l.coins) || namesAny(known, sender, fee) {
 			continue
 		}
-		out = append(out, coinRows(CategoryExpense, fee, sender, distributionModuleAddress, "denom_creation_fee", contractDetail(l.from, map[string]string{"denom": denom}))...)
+		out = append(out, coinRows(CategoryExpense, fee, sender, distributionModuleAddress, triggerDenomCreationFee, contractDetail(l.from, map[string]string{"denom": denom}))...)
 		delete(creators, l.from)
 	}
 	return out
@@ -294,7 +357,7 @@ func namesAny(rows []TaxableEvent, addr string, coins sdk.Coins) bool {
 // paid it most. Contracts that ran in the message, module accounts and IBC
 // escrow accounts are never the wallet side, and a 32-byte address is the
 // wallet side only as the signer. Fee legs never reach a message's events,
-// and a leg to the fee collector is skipped in case one does.
+// and a leg to a fee collector is skipped in case one does.
 func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	excluded := fallbackExcluded(log)
 	wallet := func(addr string) bool {
@@ -326,7 +389,7 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 	legs := transfersIn(log)
 	for pos, l := range legs {
 		amt := l.coins.AmountOf(fixtureNativeDenom)
-		if !amt.IsPositive() || l.from == feeCollectorAddress || l.to == feeCollectorAddress || l.from == l.to {
+		if !amt.IsPositive() || feeCollectors[l.from] || feeCollectors[l.to] || l.from == l.to {
 			continue
 		}
 		for _, side := range []string{l.from, l.to} {
@@ -366,9 +429,10 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 			from, to, cp = addr, f.to, f.to
 			amt = f.net.Neg()
 		}
-		// A counterparty that is itself a wallet gets its own row, so this
-		// row names the contract instead and no wallet sees the coin twice.
-		if _, ok := flows[cp]; ok {
+		// A counterparty that is itself a wallet gets its own row, or is
+		// already named by one, so this row names the contract instead and
+		// no wallet sees the coin twice.
+		if _, ok := flows[cp]; ok || (named[cp] && wallet(cp)) {
 			if from == cp {
 				from = top
 			} else {
@@ -388,8 +452,8 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 	return out
 }
 
-// feeCollectorAddress is the x/auth fee collector module account.
-var feeCollectorAddress = moduleAddress("fee_collector")
+// feeCollectors are the module accounts transaction fees are paid to.
+var feeCollectors = map[string]bool{moduleAddress("fee_collector"): true, moduleAddress("feemarket-fee-collector"): true}
 
 // fallbackModules are the module accounts that can appear in a contract
 // message's bank legs. None is ever a wallet.
@@ -424,10 +488,12 @@ func fallbackExcluded(log *indexerTxTypes.LogMessage) map[string]bool {
 		out[m] = true
 	}
 	for _, ev := range log.Events {
-		a := attrMap(ev)
-		if c := a[attributeContractAddress]; c != "" {
-			out[c] = true
+		for _, at := range ev.Attributes {
+			if at.Key == attributeContractAddress && at.Value != "" {
+				out[at.Value] = true
+			}
 		}
+		a := attrMap(ev)
 		if ev.Type == "send_packet" {
 			if ch := a["packet_src_channel"]; ch != "" {
 				port := a["packet_src_port"]

@@ -163,11 +163,51 @@ func TestMarketplaceBidPriceMismatchFallsBack(t *testing.T) {
 	if got := triggers(parseFixtureMsg(t, msg, log)); got != "transfer::158000" {
 		t.Fatalf("mismatched update-collection-bid: %s", got)
 	}
-	msg, log = fixtureWith(t, "marketplace-accept-bid", func(l *txlog.LogMessage) { setAttr(l, eventFinalizeSale, "price", "10000001") })
-	for _, e := range parseFixtureMsg(t, msg, log) {
-		if e.RewardTrigger == triggerBidFilled {
-			t.Fatal("bid_filled written although payouts do not equal the price")
+}
+
+// An accepted bid releases the escrow at the sale price even when the
+// marketplace's payouts do not add up to it (a burned or module-routed fee,
+// a leg the log split), so the buyer's sale is paid from the bid and the
+// escrow never stays open. The payouts are noted on the row.
+func TestMarketplaceAcceptBidPayoutMismatchStillFills(t *testing.T) {
+	fill := func(rows []TaxableEvent) TaxableEvent {
+		t.Helper()
+		var out []TaxableEvent
+		for _, e := range rows {
+			if e.RewardTrigger == triggerBidFilled {
+				out = append(out, e)
+			}
 		}
+		if len(out) != 1 {
+			t.Fatalf("want one bid_filled: %s", summary(rows))
+		}
+		return out[0]
+	}
+	base := fill(replayFixture(t, "marketplace-accept-bid"))
+	if strings.Contains(base.Detail, "payouts") {
+		t.Fatalf("matching payouts noted: %s", base.Detail)
+	}
+	msg, log := fixtureWith(t, "marketplace-accept-bid", func(l *txlog.LogMessage) { setAttr(l, eventFinalizeSale, "price", "10000001") })
+	got := fill(parseFixtureMsg(t, msg, log))
+	if got.Amount != "10000001" || got.ToAddr != base.ToAddr || !strings.Contains(got.Detail, `"payouts":"10000000uatom"`) {
+		t.Fatalf("mismatched price fill: %s", summary([]TaxableEvent{got}))
+	}
+	// The marketplace's last payout leg is missing, as when a fee is burned.
+	msg, log = fixtureWith(t, "marketplace-accept-bid", func(l *txlog.LogMessage) {
+		last := -1
+		for i, e := range l.Events {
+			if e.Type == eventFinalizeSale {
+				last = -2
+			}
+			if last != -1 && e.Type == string(CategoryTransfer) && attrMap(e)[attributeSender] == base.FromAddr {
+				last = i
+			}
+		}
+		l.Events = append(l.Events[:last], l.Events[last+1:]...)
+	})
+	got = fill(parseFixtureMsg(t, msg, log))
+	if got.Amount != base.Amount || !strings.Contains(got.Detail, `"payouts":`) {
+		t.Fatalf("missing leg fill: %s", summary([]TaxableEvent{got}))
 	}
 }
 
@@ -210,7 +250,7 @@ func TestWasmFallbackNeverSeesTheFee(t *testing.T) {
 	}
 	events := []cometAbciTypes.Event{
 		{Type: "coin_spent", Attributes: []cometAbciTypes.EventAttribute{attr("spender", signer), attr("amount", "5000uatom")}},
-		{Type: string(CategoryTransfer), Attributes: []cometAbciTypes.EventAttribute{attr("recipient", feeCollectorAddress), attr("sender", signer), attr("amount", "5000uatom")}},
+		{Type: string(CategoryTransfer), Attributes: []cometAbciTypes.EventAttribute{attr("recipient", moduleAddress("fee_collector")), attr("sender", signer), attr("amount", "5000uatom")}},
 		{Type: "tx", Attributes: []cometAbciTypes.EventAttribute{attr("fee", "5000uatom"), attr("fee_payer", signer)}},
 		{Type: "message", Attributes: []cometAbciTypes.EventAttribute{attr("action", "/cosmwasm.wasm.v1.MsgExecuteContract"), attr("sender", signer), attr("msg_index", "0")}},
 		{Type: string(CategoryTransfer), Attributes: []cometAbciTypes.EventAttribute{attr("recipient", contract), attr("sender", signer), attr("amount", "7000uatom"), attr("msg_index", "0")}},
@@ -224,10 +264,12 @@ func TestWasmFallbackNeverSeesTheFee(t *testing.T) {
 	if got := triggers(parseExecute(t, signer, log)); got != "transfer::7000" {
 		t.Fatalf("fee reached the fallback: %s", got)
 	}
-	// A leg to the fee collector inside a message is skipped all the same.
-	log = executeLog(contract, transferEv(signer, contract, "7000uatom"), transferEv(signer, feeCollectorAddress, "5000uatom"))
-	if got := triggers(parseExecute(t, signer, log)); got != "transfer::7000" {
-		t.Fatalf("fee collector leg counted: %s", got)
+	// A leg to either fee collector inside a message is skipped all the same.
+	for _, collector := range []string{"fee_collector", "feemarket-fee-collector"} {
+		log = executeLog(contract, transferEv(signer, contract, "7000uatom"), transferEv(signer, moduleAddress(collector), "5000uatom"))
+		if got := triggers(parseExecute(t, signer, log)); got != "transfer::7000" {
+			t.Fatalf("%s leg counted: %s", collector, got)
+		}
 	}
 }
 
@@ -300,7 +342,179 @@ func TestFallbackModuleAddresses(t *testing.T) {
 	if moduleAddress("distribution") != distributionModuleAddress {
 		t.Fatal("module address derivation")
 	}
-	if feeCollectorAddress != "cosmos17xpfvakm2amg962yls6f84z3kell8c5lserqta" {
+	if !feeCollectors["cosmos17xpfvakm2amg962yls6f84z3kell8c5lserqta"] || len(feeCollectors) != 2 {
 		t.Fatal("fee collector address")
+	}
+}
+
+// flatten merges every event of a type into one, in first-seen order, the
+// way pre-0.50 logs stored a message's events.
+func flatten(log *txlog.LogMessage) *txlog.LogMessage {
+	var order []string
+	merged := map[string]*txlog.LogMessageEvent{}
+	for _, e := range log.Events {
+		m := merged[e.Type]
+		if m == nil {
+			m = &txlog.LogMessageEvent{Type: e.Type}
+			merged[e.Type] = m
+			order = append(order, e.Type)
+		}
+		m.Attributes = append(m.Attributes, e.Attributes...)
+	}
+	out := &txlog.LogMessage{}
+	for _, t := range order {
+		out.Events = append(out.Events, *merged[t])
+	}
+	return out
+}
+
+// A flattened log loses the order of bank legs and contract events and can
+// list a contract as a message sender, so it gets no marketplace, TLD or
+// denom fee rows, and its fallback rows name only 20-byte wallets, never a
+// contract that ran.
+func TestWasmSupplementFlattenedLog(t *testing.T) {
+	flattened := 0
+	for _, n := range []string{"marketplace-set-bid", "marketplace-accept-bid", "marketplace-update-collection-bid", "marketplace-remove-bid", "names-register-tld", "wasm-launchpad-create-denom", "wasm-instantiate-create-denom", "wasm-dao-proposal-payout"} {
+		typ, log := protocolFixture(t, n)
+		if flattenedLog(log) {
+			t.Fatalf("%s: unflattened fixture detected as flattened", n)
+		}
+		flat := flatten(log)
+		msg, err := ReconstructMsg(typ, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := &classificationState{}
+		classifyWithState(msg, flat, state, 1, "")
+		late := state.late
+		if !flattenedLog(flat) {
+			// One contract, one leg and one sender: merging changed
+			// nothing the rules read, so the rows are the same.
+			orig := &classificationState{}
+			classifyWithState(msg, log, orig, 1, "")
+			if summary(late) != summary(orig.late) {
+				t.Fatalf("%s: undetected flattening changed the rows", n)
+			}
+			continue
+		}
+		flattened++
+		contracts := fallbackExcluded(log)
+		for _, e := range late {
+			switch e.RewardTrigger {
+			case flowTriggerAuctionBid, flowTriggerAuctionRefund, triggerBidFilled, triggerNameRegistration, triggerDenomCreationFee:
+				t.Fatalf("%s: flattened log wrote %s", n, e.RewardTrigger)
+			}
+			if !strings.Contains(e.Detail, `"fallback":"bank"`) {
+				t.Fatalf("%s: non-fallback supplement row %s", n, summary([]TaxableEvent{e}))
+			}
+			for _, a := range []string{e.FromAddr, e.ToAddr} {
+				if contracts[a] && a != firstContract(log) && !excludedContract(log, a) {
+					t.Fatalf("%s: module named", n)
+				}
+				_, bz, _ := bech32.DecodeAndConvert(a)
+				if !contracts[a] && len(bz) != 20 {
+					t.Fatalf("%s: non-wallet %d-byte side in %s", n, len(bz), summary([]TaxableEvent{e}))
+				}
+			}
+		}
+	}
+	if flattened < 5 {
+		t.Fatalf("only %d fixtures flattened", flattened)
+	}
+}
+
+// The TLD registration expense is what the signer paid the TLD contract,
+// and is not written when the payment went elsewhere or a row already names
+// it.
+func TestTLDRegistrationNegative(t *testing.T) {
+	got := replayFixture(t, "names-register-tld")
+	if got[0].RewardTrigger != triggerNameRegistration {
+		t.Fatalf("fixture: %s", summary(got))
+	}
+	tld, signer := got[0].ToAddr, got[0].FromAddr
+	elsewhere := testBech(t, "elsewhere", 32)
+	msg, log := fixtureWith(t, "names-register-tld", func(l *txlog.LogMessage) {
+		for i, e := range l.Events {
+			a := attrMap(e)
+			if e.Type == string(CategoryTransfer) && a[attributeSender] == signer && a[attributeRecipient] == tld {
+				setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, string(CategoryTransfer), attributeRecipient, elsewhere)
+			}
+		}
+	})
+	for _, e := range parseFixtureMsg(t, msg, log) {
+		if e.RewardTrigger == triggerNameRegistration {
+			t.Fatalf("payment to another contract booked as registration: %s", summary([]TaxableEvent{e}))
+		}
+	}
+	// A known row naming the signer's ATOM keeps the rule out.
+	known := []TaxableEvent{{Category: string(CategoryTransfer), FromAddr: signer, ToAddr: tld, Amount: "2500000", Denom: fixtureNativeDenom}}
+	_, log = protocolFixture(t, "names-register-tld")
+	if rows := tldRegistrationEvents(log, signer, known); len(rows) != 0 {
+		t.Fatalf("duplicate registration: %s", summary(rows))
+	}
+}
+
+// The denom creation fee is written only when the creating contract forwards
+// exactly what the signer paid it to the distribution module.
+func TestForwardedDenomFeeNegative(t *testing.T) {
+	got := replayFixture(t, "wasm-launchpad-create-denom")
+	if got[0].RewardTrigger != triggerDenomCreationFee {
+		t.Fatalf("fixture: %s", summary(got))
+	}
+	cases := map[string]func(*txlog.LogMessage){
+		"forward differs": func(l *txlog.LogMessage) {
+			for i, e := range l.Events {
+				if e.Type == string(CategoryTransfer) && attrMap(e)[attributeRecipient] == distributionModuleAddress {
+					setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, string(CategoryTransfer), attributeAmount, "9000000uatom")
+				}
+			}
+		},
+		"not to distribution": func(l *txlog.LogMessage) {
+			for i, e := range l.Events {
+				if e.Type == string(CategoryTransfer) && attrMap(e)[attributeRecipient] == distributionModuleAddress {
+					setAttr(&txlog.LogMessage{Events: l.Events[i : i+1]}, string(CategoryTransfer), attributeRecipient, testBech(t, "treasury", 20))
+				}
+			}
+		},
+		"forwarder created no denom": func(l *txlog.LogMessage) {
+			setAttr(l, "create_denom", "creator", testBech(t, "other-creator", 32))
+		},
+	}
+	for name, edit := range cases {
+		msg, log := fixtureWith(t, "wasm-launchpad-create-denom", edit)
+		for _, e := range parseFixtureMsg(t, msg, log) {
+			if e.RewardTrigger == triggerDenomCreationFee {
+				t.Fatalf("%s: fee written: %s", name, summary([]TaxableEvent{e}))
+			}
+		}
+	}
+}
+
+// The rows the known patterns write are exactly what the parser at 4e7f529
+// wrote for every fixture (testdata/base-4e7f529, dumped from that commit),
+// so the supplement only ever adds rows after them.
+func TestKnownRowsEqualBaseParser(t *testing.T) {
+	names, err := os.ReadDir("testdata/base-4e7f529")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) < 60 {
+		t.Fatalf("only %d base dumps", len(names))
+	}
+	for _, f := range names {
+		n := strings.TrimSuffix(f.Name(), ".txt")
+		want, err := os.ReadFile("testdata/base-4e7f529/" + f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		typ, log := protocolFixture(t, n)
+		msg, err := ReconstructMsg(typ, log)
+		if err != nil {
+			t.Fatalf("%s: %v", n, err)
+		}
+		known := classifyWithState(msg, log, &classificationState{}, 1, "")
+		if got := summary(known); got != string(want) {
+			t.Fatalf("%s: known rows differ from the 4e7f529 parser\ngot:\n%s\nwant:\n%s", n, got, want)
+		}
 	}
 }

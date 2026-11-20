@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"slices"
 	"testing"
 	"time"
@@ -8,6 +9,7 @@ import (
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/stretchr/testify/require"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 )
@@ -67,4 +69,47 @@ func TestRepairCodecDecodesLegacyTokenizeShareRewards(t *testing.T) {
 			t.Fatalf("%s is not replayable", u)
 		}
 	}
+}
+
+func authzEvent(typ string, kv ...string) txlog.LogMessageEvent {
+	e := txlog.LogMessageEvent{Type: typ}
+	for i := 0; i+1 < len(kv); i += 2 {
+		e.Attributes = append(e.Attributes, txlog.Attribute{Key: kv[i], Value: kv[i+1]})
+	}
+	return e
+}
+
+// A contract message inside a MsgExec gets the supplement rows the indexer
+// writes for it, after every other row, and a second replay is a no-op.
+func TestAuthzWasmSupplementAppendedOnce(t *testing.T) {
+	contract := sdk.AccAddress(bytes.Repeat([]byte{7}, 32)).String()
+	wallet := sdk.AccAddress(bytes.Repeat([]byte{9}, 20)).String()
+	log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
+		authzEvent("message", "action", "/cosmos.authz.v1beta1.MsgExec", "msg_index", "0"),
+		authzEvent("execute", "_contract_address", contract, "authz_msg_index", "0", "msg_index", "0"),
+		authzEvent("wasm", "_contract_address", contract, "action", "payout", "authz_msg_index", "0", "msg_index", "0"),
+		authzEvent("transfer", "recipient", wallet, "sender", contract, "amount", "5000000uatom", "authz_msg_index", "0", "msg_index", "0"),
+	}}
+	old := []tax.TaxableEvent{{Category: "transfer", Amount: "1", Denom: "uatom", FromAddr: wallet, ToAddr: contract}}
+	got, err := authzFromStoredLog(log, old)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.Equal(t, old[0].Amount, got[0].Amount)
+	require.Equal(t, "5000000", got[1].Amount)
+	require.Equal(t, contract, got[1].FromAddr)
+	require.Equal(t, wallet, got[1].ToAddr)
+	require.Contains(t, got[1].Detail, `"fallback":"bank"`)
+
+	again, err := authzFromStoredLog(log, got)
+	require.NoError(t, err)
+	require.Equal(t, len(got), len(again))
+	for i := range got {
+		require.Equal(t, rowKey(got[i]), rowKey(again[i]))
+	}
+
+	// Events of the MsgExec itself, with no inner index, add nothing.
+	plain := &txlog.LogMessage{Events: log.Events[:1]}
+	got, err = authzFromStoredLog(plain, old)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
 }

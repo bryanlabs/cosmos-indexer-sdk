@@ -1,0 +1,1 @@
+income|1170613673|ibc/0FAD9288E24D86A0F919A2EF537C689DF574F393E5AF0660F08115573AB0F692||cosmos19fprlcmzt2axrukx3xacsdpykv40nrdsv9l7jgnfrpwukgteu3zq3t2q9f|cosmos1ste347f0ke7jx7flqwe6l3yvhjce54kmstwts6||dao_rewards|{"contract":"cosmos19fprlcmzt2axrukx3xacsdpykv40nrdsv9l7jgnfrpwukgteu3zq3t2q9f","distribution_id":"1","name":"DAO rewards distributor","protocol":"DAO DAO"}
