@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -44,7 +45,8 @@ const (
 	waAlreadyExact    = "already_exact"
 	waAlreadyMoves    = "already_moves_equal"
 	waAlreadyMismatch = "already_mismatch"
-	waNoBody          = "no_body" // authz without stored bytes: the parser cannot rerun it
+	waNoBody          = "no_body"        // authz without stored bytes: the parser cannot rerun it
+	waRecoveredBody   = "recovered_body" // counted with its class: planned from archive bytes
 	waParseError      = "parse_error"
 	waFailedTx        = "failed_tx"
 	waPrivate         = "private_profile"
@@ -91,6 +93,7 @@ func runWithdrawAddressPlan(args []string) int {
 	idsFile := fs.String("message-ids-file", "", "file of target message ids, one per line")
 	out := fs.String("out", "", "new plan file (TSV), never overwritten")
 	batch := fs.Int("batch", 200, "messages per read batch")
+	bodiesFile := fs.String("bodies", "", "optional TSV of message id and hex MsgExec bytes recovered from hash-checked archive txs, used only where no bytes are stored")
 	_ = fs.Parse(args)
 	if *idsFile == "" || *out == "" || *batch < 1 || *batch > 2000 {
 		fatal("withdraw-address-plan needs --message-ids-file, --out and a batch of 1 to 2000")
@@ -98,6 +101,12 @@ func runWithdrawAddressPlan(args []string) int {
 	ids, err := readMessageIDs(*idsFile)
 	if err != nil {
 		fatal(err.Error())
+	}
+	var bodies map[uint][]byte
+	if *bodiesFile != "" {
+		if bodies, err = readWaBodies(*bodiesFile); err != nil {
+			fatal(err.Error())
+		}
 	}
 	// default_transaction_read_only is a connection parameter, so every
 	// reconnect is read-only too.
@@ -127,7 +136,7 @@ func runWithdrawAddressPlan(args []string) int {
 	classes := map[string]int{}
 	for start := 0; start < len(ids); start += *batch {
 		end := min(start+*batch, len(ids))
-		plans, counts, err := planWithdrawAddressBatch(db, codec, ids[start:end])
+		plans, counts, err := planWithdrawAddressBatch(db, codec, ids[start:end], bodies)
 		if err != nil {
 			fatal(err.Error())
 		}
@@ -152,6 +161,31 @@ func runWithdrawAddressPlan(args []string) int {
 	}
 	fmt.Println(jsonClasses(classes))
 	return 0
+}
+
+// readWaBodies reads message id and hex bytes lines.
+func readWaBodies(path string) (map[uint][]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[uint][]byte{}
+	for n, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		id, body, ok := strings.Cut(line, "\t")
+		v, err := strconv.ParseUint(id, 10, 64)
+		if !ok || err != nil {
+			return nil, fmt.Errorf("bodies line %d: want message id, tab, hex bytes", n+1)
+		}
+		raw, err := hex.DecodeString(strings.TrimSpace(body))
+		if err != nil || len(raw) == 0 {
+			return nil, fmt.Errorf("bodies line %d: bad hex", n+1)
+		}
+		if _, dup := out[uint(v)]; dup {
+			return nil, fmt.Errorf("bodies line %d: message %d twice", n+1, v)
+		}
+		out[uint(v)] = raw
+	}
+	return out, nil
 }
 
 func jsonClasses(m map[string]int) string { b, _ := json.Marshal(m); return string(b) }
@@ -249,7 +283,10 @@ CROSS JOIN LATERAL (SELECT count(*) AS n, coalesce(max(te.sub_index), -1) AS max
 	return byID, logs, stored, fingers, nil
 }
 
-func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []uint) ([]waPlanRow, map[string]int, error) {
+// planWithdrawAddressBatch plans one batch. bodies, when given, supplies
+// MsgExec bytes for messages stored without any; such a message is planned
+// only when the parser reproduces every row already stored for it.
+func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []uint, bodies map[uint][]byte) ([]waPlanRow, map[string]int, error) {
 	msgs, logs, stored, fingers, err := waLoad(db, ids)
 	if err != nil {
 		return nil, nil, err
@@ -261,8 +298,15 @@ func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []u
 		if !ok {
 			return nil, nil, fmt.Errorf("message %d not found", id)
 		}
+		recovered := false
+		if b := bodies[id]; len(m.MessageBytes) == 0 && len(b) != 0 && m.Type == typeURLAuthzExec {
+			m.MessageBytes, recovered = b, true
+		}
 		class, rows, refused := planWithdrawAddressMessage(codec, m, logs[id], stored[id])
 		counts[class]++
+		if recovered {
+			counts[waRecoveredBody+"_"+class]++
+		}
 		// A message can move one delegator's reward and refuse another's
 		// (an authz Exec for several granters): count refused delegators too.
 		for reason, n := range refused {

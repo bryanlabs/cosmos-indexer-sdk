@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +11,9 @@ import (
 	"time"
 
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
+	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	"github.com/cosmos/cosmos-sdk/x/authz"
+	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	"gorm.io/gorm"
 )
 
@@ -100,7 +105,7 @@ func writeWaPlan(t *testing.T, db *gorm.DB, ids []uint) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, counts, err := planWithdrawAddressBatch(db, codec, ids)
+	plans, counts, err := planWithdrawAddressBatch(db, codec, ids, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,8 +366,69 @@ func TestRepairReplayKeepsWithdrawAddressMoves(t *testing.T) {
 	}
 	// The planner now finds both messages already moved, exactly as the
 	// parser books them, and plans nothing.
-	planned, counts, err := planWithdrawAddressBatch(db, codec, []uint{40, 41})
+	planned, counts, err := planWithdrawAddressBatch(db, codec, []uint{40, 41}, nil)
 	if err != nil || len(planned) != 0 || counts[waAlreadyExact] != 2 {
 		t.Fatalf("plan after the replay: %d rows %v %v", len(planned), counts, err)
+	}
+}
+
+// An authz Exec stored without bytes plans as no_body; with hash-checked
+// archive bytes it plans exactly when the parser reproduces its stored rows,
+// and is counted as recovered.
+func TestWithdrawAddressPlanRecoveredBodies(t *testing.T) {
+	db := waLoadScratch(t)
+	seedWaMessage(t, db, 50, waLoadWithdraw)
+	seedWaMessage(t, db, 51, waLoadWithdraw)
+	if err := db.Exec("INSERT INTO message_types VALUES(2, ?)", typeURLAuthzExec).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE messages SET message_type_id = 2 WHERE id IN (50, 51)").Error; err != nil {
+		t.Fatal(err)
+	}
+	codec, err := repairCodec()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(delegator string) []byte {
+		inner, err := codectypes.NewAnyWithValue(&disttypes.MsgWithdrawDelegatorReward{DelegatorAddress: delegator, ValidatorAddress: waValidator})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := (&authz.MsgExec{Grantee: waLoadWithdraw, Msgs: []*codectypes.Any{inner}}).Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	_, counts, err := planWithdrawAddressBatch(db, codec, []uint{50, 51}, nil)
+	if err != nil || counts[waNoBody] != 2 {
+		t.Fatalf("without bodies %v %v", counts, err)
+	}
+	// 51's body names another delegator, so its stored reward row is not
+	// reproduced and nothing is planned for it.
+	bodies := map[uint][]byte{50: exec(waLoadDelegator), 51: exec(waLoadWithdraw)}
+	plans, counts, err := planWithdrawAddressBatch(db, codec, []uint{50, 51}, bodies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[waExact] != 1 || counts[waRecoveredBody+"_"+waExact] != 1 || counts[waRecoveredBody+"_"+waNoBody] != 0 ||
+		len(plans) != 1 || plans[0].MessageID != 50 || plans[0].SubIndex != 1 || plans[0].FromAddr != waLoadDelegator || plans[0].ToAddr != waLoadWithdraw {
+		t.Fatalf("with bodies %v %+v", counts, plans)
+	}
+	path := filepath.Join(t.TempDir(), "bodies.tsv")
+	if err := os.WriteFile(path, []byte("50\t"+hex.EncodeToString(bodies[50])+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	read, err := readWaBodies(path)
+	if err != nil || !bytes.Equal(read[50], bodies[50]) || len(read) != 1 {
+		t.Fatalf("read %v", err)
+	}
+	for _, bad := range []string{"50\tzz\n", "x\t00\n", "50\t00\n50\t00\n"} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readWaBodies(path); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
 	}
 }
