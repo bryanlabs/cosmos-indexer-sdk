@@ -13,14 +13,20 @@ const (
 	TriggerStreamSubscribe = "stream_subscribe"
 	TriggerStreamWithdraw  = "stream_withdraw"
 	TriggerStreamExit      = "stream_exit"
+	TriggerStreamRefund    = "stream_refund"
 	TriggerLPProvide       = "lp_provide"
 	TriggerLPWithdraw      = "lp_withdraw"
 	TriggerLimitOrder      = "limit_order"
 	TriggerLimitFill       = "limit_fill"
 	TriggerLimitCancel     = "limit_cancel"
 
+	streamExitCancelled = "exit_cancelled"
+
 	triggerNameRegistration = "name_registration"
 	triggerDenomCreationFee = "denom_creation_fee"
+	triggerListingFee       = "listing_fee"
+	cw20DenomPrefix         = "cw20:"
+	detailShare             = "share"
 	detailReviewRequired    = "review_required"
 	detailReviewReason      = "review_reason"
 
@@ -63,7 +69,7 @@ func streamswapEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 			return false
 		}
 		switch a[attributeAction] {
-		case "subscribe", "subscribe_pending", liquidityKindWithdraw, "withdraw_pending", "exit_stream":
+		case "subscribe", "subscribe_pending", liquidityKindWithdraw, "withdraw_pending", "exit_stream", streamExitCancelled:
 			return true
 		}
 		return false
@@ -87,6 +93,14 @@ func streamswapEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 			return nil
 		}
 		return coinRows(CategoryProtocolWithdrawal, coins, contract, sender, TriggerStreamWithdraw, contractDetail(contract, detail))
+	case streamExitCancelled:
+		// A cancelled stream, or one that missed its threshold, spent
+		// nothing: the subscriber takes the whole subscription back.
+		coins := legsBetween(legs, contract, sender)
+		if len(coins) != 1 || namesAny(known, sender, coins) {
+			return nil
+		}
+		return coinRows(CategoryProtocolWithdrawal, coins, contract, sender, TriggerStreamRefund, contractDetail(contract, detail))
 	}
 	paid := legsBetween(legs, contract, sender)
 	if paid.Empty() || namesAny(known, sender, paid) {
@@ -118,9 +132,13 @@ func streamswapEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 }
 
 // liquidityPoolEvents records a constant-product pool deposit or withdrawal
-// the way Gravity DEX pool movements are recorded, as swaps: the coins the
-// signer put into the pool for its pool shares, or the coins the pool paid
-// the signer for burned shares.
+// the way Gravity DEX pool movements and Inflow vault shares are recorded,
+// as swaps between the coins and the pool's cw20 shares: the coins put into
+// the pool for the shares it mints to the receiver, or the shares sent back
+// and burned for the coins the pool pays out. The shares are carried at the
+// cost of what was given for them. When the log does not show the shares
+// reaching the receiver (a pool that locks them), the coins are a deposit
+// the wallet still owns in that pool, and a withdrawal brings them back.
 func liquidityPoolEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	if sender == "" {
 		return nil
@@ -128,7 +146,7 @@ func liquidityPoolEvents(log *indexerTxTypes.LogMessage, sender string, known []
 	a, ok := defiEvent(log, func(a map[string]string) bool {
 		switch a[attributeAction] {
 		case "provide_liquidity":
-			return a["share"] != ""
+			return a[detailShare] != ""
 		case "withdraw_liquidity":
 			return a["withdrawn_share"] != ""
 		}
@@ -139,19 +157,59 @@ func liquidityPoolEvents(log *indexerTxTypes.LogMessage, sender string, known []
 	}
 	contract := a[attributeContractAddress]
 	legs := transfersIn(log)
-	detail := contractDetail(contract, map[string]string{"share": firstNonEmpty(a["share"], a["withdrawn_share"])})
 	if a[attributeAction] == "provide_liquidity" {
 		coins := legsBetween(legs, sender, contract)
 		if coins.Empty() || namesAny(known, sender, coins) {
 			return nil
 		}
-		return coinRows(CategorySwap, coins, sender, contract, TriggerLPProvide, detail)
+		receiver := firstNonEmpty(a["receiver"], sender)
+		token, ok := cw20Moved(log, "mint", "", receiver, a[detailShare])
+		if !ok {
+			detail := contractDetail(contract, map[string]string{detailShare: a[detailShare], "pool": contract})
+			return coinRows(CategoryProtocolDeposit, coins, sender, contract, TriggerLPProvide, detail)
+		}
+		detail := contractDetail(contract, map[string]string{detailShare: a[detailShare], "pool_shares": token})
+		out := coinRows(CategorySwap, coins, sender, contract, TriggerLPProvide, detail)
+		return append(out, TaxableEvent{Category: string(CategorySwap), FromAddr: contract, ToAddr: receiver, Amount: a[detailShare], Denom: token, RewardTrigger: TriggerLPProvide, Detail: detail})
 	}
 	coins := legsBetween(legs, contract, sender)
 	if coins.Empty() || namesAny(known, sender, coins) {
 		return nil
 	}
-	return coinRows(CategorySwap, coins, contract, sender, TriggerLPWithdraw, detail)
+	share := a["withdrawn_share"]
+	token, sent := cw20Moved(log, "send", sender, contract, share)
+	if burned, ok := cw20Moved(log, "burn", "", "", share); !sent || !ok || burned != token {
+		detail := contractDetail(contract, map[string]string{detailShare: share, "pool": contract})
+		return coinRows(CategoryProtocolWithdrawal, coins, contract, sender, TriggerLPWithdraw, detail)
+	}
+	detail := contractDetail(contract, map[string]string{detailShare: share, "pool_shares": token})
+	out := []TaxableEvent{{Category: string(CategorySwap), FromAddr: sender, ToAddr: contract, Amount: share, Denom: token, RewardTrigger: TriggerLPWithdraw, Detail: detail}}
+	return append(out, coinRows(CategorySwap, coins, contract, sender, TriggerLPWithdraw, detail)...)
+}
+
+// cw20Moved finds the one cw20 event of the action for exactly amount, from
+// and to the addresses given (an empty one is not checked), and returns its
+// token as a cw20: denom.
+func cw20Moved(log *indexerTxTypes.LogMessage, action, from, to, amount string) (string, bool) {
+	if amt, ok := sdkmath.NewIntFromString(amount); !ok || !amt.IsPositive() {
+		return "", false
+	}
+	found := ""
+	for _, ev := range log.Events {
+		if ev.Type != eventWasm {
+			continue
+		}
+		a := attrMap(ev)
+		if a[attributeAction] != action || a[attributeAmount] != amount || a[attributeContractAddress] == "" ||
+			(from != "" && a["from"] != from) || (to != "" && a["to"] != to) {
+			continue
+		}
+		if found != "" {
+			return "", false
+		}
+		found = cw20DenomPrefix + a[attributeContractAddress]
+	}
+	return found, found != ""
 }
 
 // limitOrderEvents records an order book limit order: the part matched at

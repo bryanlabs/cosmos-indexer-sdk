@@ -270,7 +270,7 @@ func nftTransferEvents(log *indexerTxTypes.LogMessage, sold map[string]bool, min
 		}
 		asset := a[attributeContractAddress] + "/" + a["token_id"]
 		switch action {
-		case "transfer_nft", "send_nft":
+		case actionTransferNFT, "send_nft":
 			if sold[asset] || minted[asset] {
 				continue
 			}
@@ -930,7 +930,7 @@ func ics721ReceiveEvents(log *indexerTxTypes.LogMessage, data nftPacketData) []T
 		switch a[attributeAction] {
 		case "mint":
 			to = a["owner"]
-		case "transfer_nft":
+		case actionTransferNFT:
 			to = a[attributeRecipient]
 		default:
 			continue

@@ -479,9 +479,17 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 }
 
 // wasmEvents is a contract message's known-pattern rows. Its supplement rows
-// wait in state until the top-level message is done.
+// wait in state until the top-level message is done. A contract message
+// inside a MsgExec gets the supplement the stored log alone gives, with no
+// signer, so the repair, which never sees the granter, writes the same rows.
 func wasmEvents(log *indexerTxTypes.LogMessage, sender string, state *classificationState) []TaxableEvent {
 	known := wasmExecuteEvents(log, sender)
+	if state.authz > 0 {
+		if !state.unsplitAuthz {
+			state.late = append(state.late, WasmSupplementForLog(log, "")...)
+		}
+		return known
+	}
 	state.late = append(state.late, wasmSupplementEvents(log, sender, known)...)
 	return known
 }
