@@ -365,6 +365,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSelfBondRoot("accel-withdraw-fix-b9ecc59cfc02-20261118-fanout-v1", "b9ecc59cfc02e29fcf76366fbafd10b9aab131541474dbb1cb137af46acce3c1"),
 		flowSelfBondRoot("accel-withdraw-fix-4edb7be0f345-20261118-fanout-v1", "4edb7be0f345546c77f2037c549db6bc90490670785f0d531f6191d92d7d1b50"),
 		flowClientTraceRoot("accel-withdraw-fix-4237d016eff9-20261118-fanout-v1", "4237d016eff9f444ac44a928b6fbb92af51023fd0796e3e06b59fda674380996"),
+		flowClientTraceRoot("accel-withdraw-fix-a70de707d95f-20261118-fanout-v4", "a70de707d95fcb186b95515fa66770eff0b58c54a98ad281139d345ba953e2a0"),
 		flowSlashRoot("accel-withdraw-fix-1af3d755b507-20261118-fanout-v1", "1af3d755b5076aaae9cc46334b7f319e4d67159c92b8b46472f3bf4f3c00643d"),
 		flowSlashRoot("accel-withdraw-fix-67c999d116ef-20261118-fanout-v1", "67c999d116efad9e0f4bb723dbfccc9361424d5fb291f1385850b7a73885caeb"),
 		flowSlashRoot("accel-withdraw-fix-a1cccb7ecdaa-20261118-fanout-v1", "a1cccb7ecdaaa393785ca8490635b8275f67b90166d3f2711c8dfba60d576d15"),
