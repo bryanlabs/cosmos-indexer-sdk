@@ -104,6 +104,7 @@ func Triggers() []TriggerInfo {
 		{"ics721_in", "nft_transfer", "An NFT received from another chain over the ICS721 bridge."},
 		{TriggerStargazeMigration, "nft_transfer", "An NFT Stargaze minted on Cosmos Hub to the holder who already owned it on Stargaze (March 2026 migration). Not a purchase: its cost basis and acquired date are the original Stargaze purchase."},
 		{TriggerCommunityPoolSpend, string(CategoryIncome), "A community pool payout made by a passed governance proposal at the end of a block."},
+		{TriggerWithdrawAddress, string(CategoryTransfer), "A delegator's reward paid by the chain to the withdraw address the delegator set: the reward row books the income to the delegator, and this row moves the coins on to the address that received them. Detail names the reward's own trigger."},
 		{TriggerBlockWithdrawal, string(CategoryReward), "A staking reward the chain withdrew for the delegator at the start or end of a block, outside any transaction."},
 		{TriggerConsumerRewardDenomFee, string(CategoryExpense), "The community pool fee for registering a consumer chain reward denom (ICS v1 to v3)."},
 		{TriggerGravityDEXSwap, string(CategorySwap), "A Gravity DEX swap order settled at the end of its block: the offer coin plus the swap fee out, the demand coin in."},

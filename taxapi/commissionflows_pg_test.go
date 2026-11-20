@@ -563,3 +563,25 @@ func TestFlowShareRecordPayoutsPostgres(t *testing.T) {
 	_, sent := paid[6]
 	require.False(t, sent)
 }
+
+// Withdraw-address moves are not payments to a receiver: they add nobody to a
+// wallet's fan-out and no sender to a deposit-style count.
+func TestCommissionFlowWithdrawAddressMovesPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	const delegator = "cosmos1delegatorwide"
+	for _, sql := range []string{
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + delegator + "', 'cosmos1payee'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,5) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp, reward_trigger) VALUES ('transfer', '7', 'uatom', '" + delegator + "', 'cosmos1withdrawaddr', '2025-02-02T00:00:00Z', '" + tax.TriggerWithdrawAddress + "')",
+		"INSERT INTO txes VALUES (900, 5, 'W', 0, 'acct900001')",
+		"INSERT INTO messages VALUES (900, 900)",
+		"INSERT INTO taxable_events (message_id, category, amount, denom, from_addr, to_addr, timestamp, reward_trigger) VALUES (900, 'transfer', '7', 'uatom', 'cosmos1anotherdelegator', '" + flowPGDeposit + "', '2025-03-01T00:00:00Z', '" + tax.TriggerWithdrawAddress + "')",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	n, err := s.fanoutReceivers(delegator, flowPGWindowStart, flowPGWindowEnd, 100)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	senders, err := s.memoDepositSenders(flowPGDeposit)
+	require.NoError(t, err)
+	require.Equal(t, 120, senders)
+}

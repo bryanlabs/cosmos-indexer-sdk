@@ -36,11 +36,27 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			sorted = append(sorted, r)
 		}
 	}
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	sort.SliceStable(sorted, func(i, j int) bool { return lotsBefore(sorted[i], sorted[j]) })
 	lots := map[string][]lot{}
 	denoms := map[string]string{}
 	for _, r := range sorted {
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+			continue
+		}
+		// A reward move takes exactly the reward lot to the withdraw address
+		// at its basis and receipt time, as in Form 8949.
+		if r.isRewardMove() {
+			asset := r.Symbol
+			if asset == "" {
+				asset = r.Denom
+			}
+			denoms[asset] = r.Denom
+			if r.Direction == apiOut {
+				lots[asset], _ = takeRewardLots(lots[asset], r)
+			} else {
+				lots[asset] = append(lots[asset], moveLot(r))
+				sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
+			}
 			continue
 		}
 		if !r.isTaxable() || r.UserTag == TagInternalTransfer || r.UserTag == TagProtocolDeposit || r.UserTag == TagSpam {
@@ -60,7 +76,11 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil && r.Amount.IsPositive() {
 				cost, acquired, unknown = r.ManualBasisUSD.DivRound(r.Amount, 64), *r.ManualAcquiredDate, false
 			}
-			lots[asset] = append(lots[asset], lot{qty: r.Amount, cost: cost, date: acquired, basisUnknown: unknown})
+			l := lot{qty: r.Amount, cost: cost, date: acquired, basisUnknown: unknown, denom: r.Denom}
+			if r.Category == apiReward {
+				l.msgID = r.MessageID
+			}
+			lots[asset] = append(lots[asset], l)
 		case r.Direction == apiOut:
 			remaining := r.Amount
 			for remaining.IsPositive() && len(lots[asset]) > 0 {
