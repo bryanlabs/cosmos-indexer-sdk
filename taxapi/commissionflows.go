@@ -662,6 +662,12 @@ WHERE me.message_id IN ? AND a1.value = ?`, chunk, addr).Scan(&part).Error; err 
 //     row only when the chain credited it (flowReturnCredits). Longer traces
 //     are vouchers on this chain, not native coin.
 func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool) {
+	// The paying leg the report adds to a stream exit is the subscription
+	// lot, which the exit itself swaps here; reading it too would spend the
+	// coins twice.
+	if e.RewardTrigger == flowStreamExit && e.FromAddr == addr && e.ToAddr != addr {
+		return flowEvent{}, false
+	}
 	// A tokenize row names the delegator as From and the share-record owner
 	// as To. Only the delegator's native stake leaves its pool. Receiving the
 	// record does not spend the recipient's stake or credit liquid ATOM.
@@ -717,7 +723,7 @@ func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool)
 	if e.RewardTrigger == flowAuctionBid || e.RewardTrigger == flowAuctionRefund || e.RewardTrigger == flowBidFilled || (e.Category == apiNFTSale && flowEscrowedBid(e.Detail)) {
 		fe.Lot = flowBidLot(e)
 	}
-	if e.RewardTrigger == flowStreamSubscribe || e.RewardTrigger == flowStreamWithdraw {
+	if e.RewardTrigger == flowStreamSubscribe || e.RewardTrigger == flowStreamWithdraw || e.RewardTrigger == flowStreamRefund {
 		fe.Lot = flowStreamLot(e)
 	}
 	switch e.Category {

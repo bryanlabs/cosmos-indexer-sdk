@@ -778,7 +778,7 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 		}
 		t.each(w, func(r int, p *flowPools) { p.locked.add(t.takeFrom(w, r, p.liquid, amt, true)) })
 	case flowCatProtocolWithdrawal, flowCatGovRefund:
-		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled || e.Trigger == flowStreamWithdraw) && e.Lot != "" {
+		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled || e.Trigger == flowStreamWithdraw || e.Trigger == flowStreamRefund) && e.Lot != "" {
 			// A refund larger than the bid the trace saw returns the rest as
 			// other coins, as any other withdrawal does.
 			t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeBid(w, r, p, e.Lot, amt)) })
@@ -853,6 +853,7 @@ const (
 	flowStreamSubscribe = tax.TriggerStreamSubscribe
 	flowStreamWithdraw  = tax.TriggerStreamWithdraw
 	flowStreamExit      = tax.TriggerStreamExit
+	flowStreamRefund    = tax.TriggerStreamRefund
 )
 
 // flowStreamLot names the streamswap subscription a stream row is about:

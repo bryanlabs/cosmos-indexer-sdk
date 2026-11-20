@@ -172,6 +172,9 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			for _, leg := range legs {
 				lr := leg
 				legLine := JournalLine{Date: date, TxHash: lr.TxHash, EntryID: id, Account: acctDigitalAssets + ": " + lr.Symbol, Asset: lr.Symbol, Quantity: lr.Amount.String(), Category: apiSwap, Memo: memo}
+				if lotFunded(lr) {
+					legLine.Account = acctInProtocol + ": " + lr.Symbol
+				}
 				if !lr.PriceMissing {
 					if lr.Direction == "in" {
 						legLine.Debit = lr.ValueUSD.StringFixed(2)
@@ -321,4 +324,11 @@ func (s *Server) handleJournal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(apiContentType, apiCSVContentType)
 	w.Header().Set(apiContentDisposition, "attachment; filename=gl-journal.csv")
 	_ = WriteJournalCSV(w, lines)
+}
+
+// lotFunded reports a swap leg paid from coins the wallet had already moved
+// into a protocol (a streamswap subscription), so the journal takes it from
+// the protocol account the deposit debited.
+func lotFunded(r Row) bool {
+	return r.Direction == apiOut && detailValue(r.Detail, "lot_basis") != ""
 }

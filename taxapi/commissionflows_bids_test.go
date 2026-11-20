@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -263,4 +264,64 @@ func TestFlowRowsLimitOrderDepositAndCancel(t *testing.T) {
 	}
 	require.Equal(t, "5000000", fate(tr, flowRuleFIFO, "2025-01", flowSwapped, apiSwap, false))
 	require.Equal(t, "15000000", fate(tr, flowRuleFIFO, "2025-01", flowHeld, "", false))
+}
+
+// A listed NFT bought at its asking price keeps the escrow release as a
+// record-only nft_transfer next to the nft_sale. The buyer pays the price
+// once, the seller is credited what the chain paid, and the transfer moves
+// no coin and is no disposal.
+func TestFlowRowsAcceptAskTransferAndSale(t *testing.T) {
+	rows := goldenRows(t, "wasm-accept-ask-other-market", 2)
+	require.Equal(t, apiNFTTransfer, rows[0].Category)
+	require.Equal(t, apiNFTSale, rows[1].Category)
+	require.Equal(t, rows[0].Asset, rows[1].Asset)
+	require.False(t, Row{Category: rows[0].Category}.isTaxable())
+	seller, buyer := rows[1].FromAddr, rows[1].ToAddr
+
+	l := newFakeFlowLedger()
+	var events []flowEvent
+	for _, e := range rows {
+		if e.FromAddr != buyer && e.ToAddr != buyer {
+			continue
+		}
+		if fe, ok := flowEventFromRow(e, buyer, "uatom"); ok {
+			events = append(events, fe)
+		}
+	}
+	require.Len(t, events, 1, "only the sale moves the buyer's coin")
+	l.rows[buyer] = events
+	l.commission(flowAt(1, 0), buyer, 30000000)
+	tr := runFlowTest(t, l, buyer)
+	require.Equal(t, "10000000", tr.Wallets[buyer].simulated().String())
+	require.Equal(t, "20000000", fate(tr, flowRuleFIFO, "2025-01", flowSpent, apiNFTSale, false))
+
+	events = nil
+	for _, e := range rows {
+		if e.FromAddr != seller && e.ToAddr != seller {
+			continue
+		}
+		if fe, ok := flowEventFromRow(e, seller, "uatom"); ok {
+			events = append(events, fe)
+		}
+	}
+	require.Len(t, events, 1)
+	events = netSaleProceeds(events, seller, map[uint]decimal.Decimal{events[0].Key.Message: decimal.NewFromInt(19600000)})
+	require.Equal(t, "19600000", events[0].Amount.String())
+}
+
+// A bid escrowed at a leg that differs from its event price is filled from
+// that escrow, never from the bidder's liquid coins a second time.
+func TestFlowRowsBidPriceMismatchFillsFromEscrow(t *testing.T) {
+	bid := marketBid(3, 2, "15000000", "b5")
+	bid.Detail = strings.TrimSuffix(bid.Detail, "}") + `,"price":"14000000uatom"}`
+	l := bidLedger(t, append([]tax.TaxableEvent{bid}, marketFill(5, 5, "15000000", "b5")...))
+	l.commission(flowAt(1, 0), flowRowsBuyer, 15000000)
+	tr := runFlowTest(t, l, flowRowsBuyer)
+	w := tr.Wallets[flowRowsBuyer]
+	require.Equal(t, "0", w.simulated().String())
+	for r := 0; r < flowRules; r++ {
+		require.Empty(t, w.pools[r].bids, flowRuleNames[r])
+		require.True(t, w.Overdraw[r].IsZero(), flowRuleNames[r])
+	}
+	require.Equal(t, "15000000", fate(tr, flowRuleFIFO, "2025-01", flowSpent, apiNFTSale, false))
 }
