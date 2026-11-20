@@ -2,9 +2,11 @@ package taxapi
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -159,13 +161,35 @@ func waitTaggedPreview(t *testing.T, s *Server, wallet string, tags UserTags) st
 	return ""
 }
 
-// GET /tags/migrate reads the stored message index, returns the row keys,
+const tagMigratePath = "/tags/migrate"
+
+func postMigrate(t *testing.T, s *Server, wallet, tags, scopes string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"chain":"` + apiMainnet + `","addresses":["` + wallet + `"],"start":"` + apiTestPeriodStart + `","end":"` + apiTestPeriodEnd + `","tags":` + tags + `}`
+	req := httptest.NewRequest(http.MethodPost, tagMigratePath, strings.NewReader(body))
+	if scopes != "" {
+		req.Header.Set(TagScopesHeader, scopes)
+	}
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+// POST /tags/migrate reads the stored message index, returns the row keys,
 // and the preview under them is the preview under the old tags.
 func TestTagMigrateEndpoint(t *testing.T) {
 	s, db, wallet, _ := assetReviewFixture(t)
 	require.NoError(t, db.Exec("UPDATE messages SET message_index = 3 WHERE id = 1").Error)
 
-	rr := callTags(t, s, "/tags/migrate", wallet, UserTags{"scamtx": TagSpam, "OTHERTX": TagGift})
+	tags := `{"scamtx":"spam","OTHERTX":"gift"}`
+	// Migration is a POST and needs tax:write.
+	rr := callTags(t, s, tagMigratePath, wallet, UserTags{"scamtx": TagSpam})
+	require.Equal(t, 405, rr.Code, rr.Body.String())
+	for _, scopes := range []string{"", "tax:read", "tax:writer", "tax:read tax:admin"} {
+		rr = postMigrate(t, s, wallet, tags, scopes)
+		require.Equal(t, 403, rr.Code, scopes)
+	}
+	rr = postMigrate(t, s, wallet, tags, "tax:read, tax:write")
 	require.Equal(t, 200, rr.Code, rr.Body.String())
 	var got struct {
 		Tags      UserTags     `json:"tags"`
@@ -190,6 +214,13 @@ func TestTagMigrateEndpoint(t *testing.T) {
 	stale := csvRecords(t, waitTaggedPreview(t, s, wallet, UserTags{"SCAMTX#0#0": TagSpam}))
 	require.Empty(t, stale[1][col])
 
-	rr = callTags(t, s, "/tags/migrate", wallet, UserTags{"SCAMTX#x#0": TagSpam})
-	require.Equal(t, 400, rr.Code, rr.Body.String())
+	for _, bad := range []string{`{"SCAMTX#x#0":"spam"}`, `{"SCAMTX":"nonsense"}`, `[]`} {
+		rr = postMigrate(t, s, wallet, bad, TagWriteScope)
+		require.Equal(t, 400, rr.Code, bad)
+	}
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, tagMigratePath, strings.NewReader(`{"addresses":["`+wallet+`"],"tags":{},"extra":1}`))
+	req.Header.Set(TagScopesHeader, TagWriteScope)
+	s.Handler().ServeHTTP(rr, req)
+	require.Equal(t, 400, rr.Code, "unknown fields are refused")
 }

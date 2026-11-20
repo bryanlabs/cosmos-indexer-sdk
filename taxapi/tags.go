@@ -273,30 +273,72 @@ func MigrateUserTags(rows []Row, tags UserTags) (UserTags, TagMigration, error) 
 	return out, m, nil
 }
 
+// TagWriteScope is the scope a caller needs to migrate tags. The tax service
+// is reached only through the website, which checks the caller's session or
+// API key and forwards the scopes it holds in TagScopesHeader.
+const (
+	TagWriteScope     = "tax:write"
+	TagScopesHeader   = "X-Tax-Caller-Scopes"
+	maxTagMigrateBody = 8 << 20
+)
+
+func callerHasScope(r *http.Request, scope string) bool {
+	for _, h := range r.Header.Values(TagScopesHeader) {
+		for _, s := range strings.FieldsFunc(h, func(c rune) bool { return c == ',' || c == ' ' }) {
+			if s == scope {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // handleTagMigrate returns a report's tags with its transaction and asset
 // keys rewritten as row keys (MigrateUserTags), for the caller to store in
-// place of the old ones: GET /tags/migrate?chain=&addresses=&start=&end=&tags=
+// place of the old ones. It changes what a saved report keeps, so it is a
+// POST and needs tax:write:
+//
+//	POST /tags/migrate
+//	{"chain": "", "addresses": ["..."], "start": "", "end": "", "tags": {...}}
+//
 // It reads the same rows the report does, without asset decisions, which
-// never add or remove a row.
+// never add or remove a row. Nothing is stored here.
 func (s *Server) handleTagMigrate(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	addrParam := q.Get(apiAddresses)
-	if addrParam == "" {
-		addrParam = q.Get(apiAddress)
+	if !callerHasScope(r, TagWriteScope) {
+		http.Error(w, "tag migration needs the tax:write scope", http.StatusForbidden)
+		return
 	}
-	addresses := splitNonEmpty(addrParam, ",")
+	var body struct {
+		Chain     string          `json:"chain"`
+		Addresses []string        `json:"addresses"`
+		Start     string          `json:"start"`
+		End       string          `json:"end"`
+		Tags      json.RawMessage `json:"tags"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTagMigrateBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, apiInvalidJSONBody, http.StatusBadRequest)
+		return
+	}
+	var addresses []string
+	for _, a := range body.Addresses {
+		if a = strings.TrimSpace(a); a != "" {
+			addresses = append(addresses, a)
+		}
+	}
 	if len(addresses) == 0 {
 		http.Error(w, "addresses required", http.StatusBadRequest)
 		return
 	}
-	tags, err := tagsFromRequest(r)
+	tags, err := ParseUserTags(string(body.Tags))
 	if err != nil {
-		writeTaxError(w, err)
+		writeTaxError(w, assetReviewInputError{err})
 		return
 	}
-	chain := chainParam(q.Get(apiChain))
-	start := dateParam(q.Get(apiStart), time.Time{})
-	end := dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
+	chain := chainParam(body.Chain)
+	start := dateParam(body.Start, time.Time{})
+	end := dateParam(body.End, nowUTC().AddDate(0, 0, 1))
 	rows, err := s.reviewedRows(chain, addresses, start, end, nil, true)
 	if err == nil {
 		err = s.loadMessageIndexes(rows)
