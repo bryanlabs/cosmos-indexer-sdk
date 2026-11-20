@@ -29,29 +29,37 @@ func limitCancelRow(day int, id, refundQty, amount, denom string) tax.TaxableEve
 
 // A resting buy order filled later by another wallet's sell: the base the
 // maker received is a swap paid from the order's quote at its own price, and
-// the fee reserve the book keeps once nothing is left open is a fee.
+// the fee reserve the order paid goes into that swap's cost, since it paid
+// for this trade. The fill that closes the order spends all it still holds.
 func TestLimitMakerFillPaysFromOrder(t *testing.T) {
 	dep := limitDeposit(3, "48", "buy", "2082676512967", "500000", "1043941", limitQuote)
 	fill := limitFill(9, 2, "500000", "uatom")
 	got := limitMakerLegs([]tax.TaxableEvent{fill}, flowRowsBuyer, []tax.TaxableEvent{dep, fill})
-	require.Len(t, got, 3)
+	require.Len(t, got, 2)
 	require.Equal(t, "", semanticReviewReason(Row{Detail: got[0].Detail}))
 	require.Equal(t, "48", detailValue(got[0].Detail, "order_id"))
-	leg, fee := got[1], got[2]
+	leg := got[1]
 	require.Equal(t, string(tax.CategorySwap), leg.Category)
 	require.Equal(t, tax.TriggerLimitFill, leg.RewardTrigger)
 	require.Equal(t, flowRowsBuyer, leg.FromAddr)
 	require.Equal(t, flowRowsMarket, leg.ToAddr)
-	require.Equal(t, "1041338", leg.Amount)
+	require.Equal(t, "1043941", leg.Amount)
 	require.Equal(t, limitQuote, leg.Denom)
 	require.Equal(t, limitBasisMakerFill, detailValue(leg.Detail, "lot_basis"))
 	require.Equal(t, fill.MessageID, leg.MessageID)
 	require.Negative(t, leg.SubIndex)
-	require.Equal(t, string(tax.CategoryExpense), fee.Category)
-	require.Equal(t, tax.TriggerLimitFee, fee.RewardTrigger)
-	require.Equal(t, "2603", fee.Amount)
-	require.Equal(t, limitBasisFeeReserve, detailValue(fee.Detail, "lot_basis"))
-	require.NotEqual(t, leg.SubIndex, fee.SubIndex)
+
+	// Two fills split the reserve by the quantity each filled: 200000 at the
+	// limit price (416535) plus 2/5 of the 2603 reserve (1041), then the
+	// closing fill spends the rest.
+	first, second := limitFill(9, 2, "200000", "uatom"), limitFill(10, 4, "300000", "uatom")
+	got = limitMakerLegs([]tax.TaxableEvent{first, second}, flowRowsBuyer, []tax.TaxableEvent{dep, first, second})
+	require.Len(t, got, 4)
+	require.Equal(t, "417576", got[1].Amount)
+	require.Equal(t, "626365", got[3].Amount)
+	for _, e := range got {
+		require.NotEqual(t, string(tax.CategoryExpense), e.Category)
+	}
 }
 
 // A sell order partly filled by a later buy and then cancelled: the fill
@@ -73,15 +81,18 @@ func TestLimitCancelAfterPartialMakerFill(t *testing.T) {
 	require.Len(t, got, 1)
 	require.Equal(t, reviewLimitLot, semanticReviewReason(Row{Detail: got[0].Detail}))
 
-	// A buy cancelled after a partial fill gives up its fee reserve.
+	// A buy cancelled after a partial fill: the fill spends its share of
+	// the fee reserve (2000 of 5000), and the cancel gives up the reserve
+	// of the cancelled quantity, which no trade paid for, as a fee.
 	buy := limitDeposit(3, "79", "buy", "2000000000000", "1000000", "2005000", limitQuote)
 	bfill := limitFill(5, 2, "400000", "uatom")
 	bcancel := limitCancelRow(7, "79", "600000", "1200000", limitQuote)
 	got = limitMakerLegs([]tax.TaxableEvent{bfill, bcancel}, flowRowsBuyer, []tax.TaxableEvent{buy, bfill, bcancel})
 	require.Len(t, got, 4)
-	require.Equal(t, "800000", got[1].Amount)
+	require.Equal(t, "802000", got[1].Amount)
 	require.Equal(t, string(tax.CategoryExpense), got[3].Category)
-	require.Equal(t, "5000", got[3].Amount)
+	require.Equal(t, tax.TriggerLimitFee, got[3].RewardTrigger)
+	require.Equal(t, "3000", got[3].Amount)
 }
 
 // One payout can fill several of the wallet's orders: the best price goes
@@ -130,18 +141,20 @@ func TestFlowRowsLimitMakerFillSpendsLot(t *testing.T) {
 	require.Equal(t, "10000000", fate(tr, flowRuleFIFO, "2025-01", flowSwapped, apiSwap, false))
 }
 
-// The journal pays the maker fill and the kept reserve from the protocol
-// account the order moved the quote into, so that account closes at zero.
+// The journal pays the maker fill and the reserve a cancel gave up from the
+// protocol account the order moved the quote into, so that account closes
+// at zero.
 func TestJournalLimitMakerFillPaysFromProtocol(t *testing.T) {
 	rows := []Row{
-		protoRow(TagProtocolDeposit, apiOut, "USDC", 1043941, 0.000001, "D1"),
-		protoRow(apiSwap, "in", apiSymbolATOM, 500000, 0.000002, "F1"),
-		protoRow(apiSwap, apiOut, "USDC", 1041338, 0.000001, "F1"),
-		protoRow(TagExpense, apiOut, "USDC", 2603, 0.000001, "F1"),
+		protoRow(TagProtocolDeposit, apiOut, "USDC", 2005000, 1, "D1"),
+		protoRow(apiSwap, "in", apiSymbolATOM, 400000, 2, "F1"),
+		protoRow(apiSwap, apiOut, "USDC", 802000, 1, "F1"),
+		protoRow(string(tax.CategoryProtocolWithdrawal), "in", "USDC", 1200000, 1, "C1"),
+		protoRow(TagExpense, apiOut, "USDC", 3000, 1, "C1"),
 	}
 	rows[2].Detail = `{"lot_basis":"maker_fill"}`
-	rows[3].Detail = `{"lot_basis":"fee_reserve"}`
-	rows[3].RewardTrigger = tax.TriggerLimitFee
+	rows[4].Detail = `{"lot_basis":"fee_reserve"}`
+	rows[4].RewardTrigger = tax.TriggerLimitFee
 	for i := range rows {
 		rows[i].Time = rows[0].Time.Add(time.Duration(i) * time.Hour)
 	}
@@ -152,5 +165,5 @@ func TestJournalLimitMakerFillPaysFromProtocol(t *testing.T) {
 		bal[l.Account] = bal[l.Account].Add(d).Sub(c)
 	}
 	require.True(t, bal["Digital Assets in Protocol: USDC"].IsZero(), "%v", bal)
-	require.Equal(t, "1", bal["Digital Assets: ATOM"].String(), "%v", bal)
+	require.Equal(t, "800000", bal["Digital Assets: ATOM"].String(), "%v", bal)
 }

@@ -72,7 +72,11 @@ func limitCancel(e tax.TaxableEvent, addr string) bool {
 type limitLot struct {
 	contract, id, side, denom string
 	price, open, held         sdkmath.Int
-	seq                       int
+	// placed is the open quantity the deposit was for, filled how much of
+	// it later orders filled, and reserve what the deposit held beyond
+	// placed at the limit price: the fee reserve of a buy.
+	placed, filled, reserve sdkmath.Int
+	seq                     int
 }
 
 type limitRowKey struct {
@@ -95,9 +99,12 @@ type limitOutcome struct {
 // matching order spent, so it fills the wallet's open orders of the other
 // coin in the book's priority, best price first and then oldest: a buy
 // order releases the quote its filled base cost at its price, a sell order
-// the base whose price is the quote paid. The fill is then a swap paid from
-// those lots, and a buy order with nothing left open, or a cancel, turns
-// what the book kept of the lot into a fee. A fill the wallet's open orders
+// the base whose price is the quote paid. A buy order's fill also spends
+// the filled quantity's share of the order's fee reserve, since that fee
+// paid for this trade, and the fill that closes the order spends all it
+// still holds. The fill is then a swap paid from those lots. A cancel turns
+// the reserve of the cancelled quantity, which no trade paid for, into a
+// fee. A fill the wallet's open orders
 // do not cover, or a cancel whose refunded quantity is not what the replay
 // left open, keeps or gets a review flag and adds no legs.
 func limitMakerLegs(events []tax.TaxableEvent, addr string, rows []tax.TaxableEvent) []tax.TaxableEvent {
@@ -169,6 +176,13 @@ func newLimitLot(r tax.TaxableEvent, seq int) (*limitLot, bool) {
 	if l.id == "" || (l.side != limitBuy && l.side != limitSell) || !ok1 || !ok2 || !ok3 || !l.price.IsPositive() || !l.open.IsPositive() || l.held.IsNegative() {
 		return nil, false
 	}
+	l.placed, l.filled, l.reserve = l.open, sdkmath.ZeroInt(), sdkmath.ZeroInt()
+	if l.side == limitBuy {
+		l.reserve = l.held.Sub(l.open.Mul(l.price).Quo(limitPriceScale))
+		if l.reserve.IsNegative() {
+			return nil, false
+		}
+	}
 	return l, true
 }
 
@@ -205,7 +219,10 @@ func fillLimitLots(fill tax.TaxableEvent, lots map[string]*limitLot) limitOutcom
 		var take, pay, release sdkmath.Int
 		if l.side == limitBuy {
 			take = sdkmath.MinInt(rem, l.open)
-			pay, release = take, take.Mul(l.price).Quo(limitPriceScale)
+			pay, release = take, take.Mul(l.price).Quo(limitPriceScale).Add(l.reserveShare(take))
+			if take.Equal(l.open) {
+				release = l.held
+			}
 		} else {
 			full := l.open.Mul(l.price).Quo(limitPriceScale)
 			if rem.GTE(full) {
@@ -231,17 +248,25 @@ func fillLimitLots(fill tax.TaxableEvent, lots map[string]*limitLot) limitOutcom
 	o := limitOutcome{ok: true}
 	for _, st := range steps {
 		l := st.l
-		l.open, l.held = l.open.Sub(st.take), l.held.Sub(st.release)
+		l.open, l.held, l.filled = l.open.Sub(st.take), l.held.Sub(st.release), l.filled.Add(st.take)
 		o.orders = append(o.orders, l.id)
 		o.legs = append(o.legs, limitLeg(fill.ToAddr, l, tax.CategorySwap, st.release, limitBasisMakerFill))
 		if l.open.IsZero() {
-			if l.held.IsPositive() && l.side == limitBuy {
-				o.legs = append(o.legs, limitLeg(fill.ToAddr, l, tax.CategoryExpense, l.held, limitBasisFeeReserve))
-			}
 			delete(lots, l.contract+"/"+l.id)
 		}
 	}
 	return o
+}
+
+// reserveShare is the part of a buy order's fee reserve that a fill of take
+// more base spends: the reserve in proportion to the quantity filled so far,
+// less what earlier fills spent, so the shares add up without drift.
+func (l *limitLot) reserveShare(take sdkmath.Int) sdkmath.Int {
+	if !l.reserve.IsPositive() {
+		return sdkmath.ZeroInt()
+	}
+	upto := func(q sdkmath.Int) sdkmath.Int { return l.reserve.Mul(q).Quo(l.placed) }
+	return upto(l.filled.Add(take)).Sub(upto(l.filled))
 }
 
 func cancelLimitLot(c tax.TaxableEvent, lots map[string]*limitLot) limitOutcome {

@@ -86,7 +86,7 @@ func Triggers() []TriggerInfo {
 		{TriggerLPWithdraw, string(CategorySwap), "Coins a contract liquidity pool paid out for burned pool shares."},
 		{TriggerLimitOrder, string(CategoryProtocolDeposit), "The part of a limit order left waiting in an order book contract."},
 		{TriggerLimitFill, string(CategorySwap), "A limit order matched by the order book: the part matched when it was placed, and what a resting order's owner received when a later order filled it."},
-		{TriggerLimitFee, string(CategoryExpense), "What an order book kept of a buy order once nothing of it was left in the book (filled or cancelled): the taker fee and the fee reserve it does not return."},
+		{TriggerLimitFee, string(CategoryExpense), "The fee reserve an order book keeps of a buy order cancelled before it was filled: the reserve of the cancelled quantity, which no trade paid for."},
 		{TriggerLimitCancel, string(CategoryProtocolWithdrawal), "What was left of a cancelled limit order, returned by the order book contract."},
 		{"hydro_lock", string(CategoryProtocolDeposit), "ATOM or liquid staking tokens locked in Hydro."},
 		{"hydro_unlock", string(CategoryProtocolWithdrawal), "A Hydro lock released."},
