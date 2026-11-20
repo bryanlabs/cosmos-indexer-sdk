@@ -177,7 +177,8 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowSlashRoot("accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v3", "c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"),
 		flowSlashRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v3", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
 		flowSlashRoot("accel-withdraw-fix-8df708d2db2f-20261118-fanout-v3", "8df708d2db2f5583431b8f9ce8a6e3ba9ae7840e0f78b38366948a69c0d24716"),
-		flowSlashRoot("accel-withdraw-fix-1e6691e3985a-20261118-fanout-v3", "1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"),
+		// Self-bond rerun: its own self-bond had no ledger row, so the old trace kept the bond liquid; about 0.79 ATOM moves to ibc_out, 0.38 from restaked_own and 0.41 from held (66.0 pct class share).
+		flowSelfBondRoot("accel-withdraw-fix-1e6691e3985a-20261118-fanout-v5", "1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"),
 		flowSlashRoot("accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v3", "fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"),
 		flowSlashRoot("accel-withdraw-fix-7f2f32dfb1d5-20261118-fanout-v3", "7f2f32dfb1d5d391d70b85d967e90ae248d7aa4dd109656f633a893c98febea6"),
 		flowSlashRoot("accel-withdraw-fix-75f92cb68a7f-20261118-fanout-v3", "75f92cb68a7f639c979be19a1d7ca4b7ce6ad63a2341562f3c966f82c7ab920d"),
@@ -229,7 +230,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowClientTraceRoot("accel-withdraw-fix-8a571bb0887f-20261118-fanout-v1", "8a571bb0887f0667fc25cac41c2d25c7d2c27a636f639d51f7f102b62969b172"),
 		flowClientTraceRoot("accel-withdraw-fix-ad49f408bd75-20261118-fanout-v1", "ad49f408bd756cae1952d8f85f04d4210a75a1b20797e03412fd8b95a23f4938"),
 		flowClientTraceRoot("accel-withdraw-fix-1f92328f06d6-20261118-fanout-v1", "1f92328f06d661012c9b0196cac76bb8168b1370009fc5ffe934dd63659d0b61"),
-		flowClientTraceRoot("accel-withdraw-fix-3e3481ef24f7-20261118-fanout-v1", "3e3481ef24f791529e1ff1bf325d48d3ecccf38248bc9ef24ca623890e0d4b45"),
+		flowSelfBondRoot("accel-withdraw-fix-3e3481ef24f7-20261118-fanout-v5", "3e3481ef24f791529e1ff1bf325d48d3ecccf38248bc9ef24ca623890e0d4b45"),
 		flowClientTraceRoot("accel-withdraw-fix-a149b3077b86-20261118-fanout-v1", "a149b3077b86222dfc773827c1c37a42c4755339a0c1520d344aa4615385cd38"),
 		flowClientTraceRoot("accel-withdraw-fix-5fa7cab34d20-20261118-fanout-v1", "5fa7cab34d20f2a77714dae2730dc0286ed77207a35099cf6d8128b08f375af1"),
 		// Self-bond rerun: its own self-bond had no ledger row, so the old trace counted the bond as liquid and matched the exchange transfers to it; all 2.41 ATOM moves from held to exchange_like under fifo, overdraw 2.8 to 0.000001.
@@ -349,6 +350,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		// Zero-commission root: the served row has no commission either; its 6.81 ATOM drift came from an nft_sale credited at the gross price, which this build fixes.
 		flowSelfBondRoot("accel-withdraw-fix-c926dfa85984-20261118-fanout-v5", "c926dfa85984a9d27733ce7d6a60004a24b3a6855a2a93d837b8e87a453d4a7d"),
 		flowSelfBondRoot("accel-withdraw-fix-31c3561573d9-20261118-fanout-v1", "31c3561573d9829e2f337f69a707c40c5f936176352c5c6a7ebfe191ff96c185"),
+		flowSelfBondRoot("accel-withdraw-fix-dc3a8dc3b69e-20261118-fanout-v1", "dc3a8dc3b69ed7ae16b967171f25c42d3add8f3f262d4520b7dfbaadcb8d321c"),
 		flowSlashRoot("accel-withdraw-fix-1af3d755b507-20261118-fanout-v1", "1af3d755b5076aaae9cc46334b7f319e4d67159c92b8b46472f3bf4f3c00643d"),
 		flowSlashRoot("accel-withdraw-fix-67c999d116ef-20261118-fanout-v1", "67c999d116efad9e0f4bb723dbfccc9361424d5fb291f1385850b7a73885caeb"),
 		flowSlashRoot("accel-withdraw-fix-a1cccb7ecdaa-20261118-fanout-v1", "a1cccb7ecdaaa393785ca8490635b8275f67b90166d3f2711c8dfba60d576d15"),
