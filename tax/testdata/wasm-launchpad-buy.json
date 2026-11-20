@@ -1,0 +1,238 @@
+{
+ "message_id": 6377022,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "31650623",
+ "hash": "0D529DF131536099BC3D6F10E5940980CCD2D9BAC0EFC349ABDAF8BABADBE20C",
+ "timestamp": "2026-06-19T11:45:06Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k"
+    },
+    {
+     "key": "amount",
+     "value": "50000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "amount",
+     "value": "50000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k"
+    },
+    {
+     "key": "amount",
+     "value": "50000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "action",
+     "value": "buy"
+    },
+    {
+     "key": "buyer",
+     "value": "cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k"
+    },
+    {
+     "key": "amount",
+     "value": "2940591100"
+    },
+    {
+     "key": "denom",
+     "value": "factory/cosmos1a6mwphfzdsxaa78fqwan9v93zgae46j4vzge6guqguredfmd9djsdme6fy/mia"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "amount",
+     "value": "2940591100factory/cosmos1a6mwphfzdsxaa78fqwan9v93zgae46j4vzge6guqguredfmd9djsdme6fy/mia"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k"
+    },
+    {
+     "key": "amount",
+     "value": "2940591100factory/cosmos1a6mwphfzdsxaa78fqwan9v93zgae46j4vzge6guqguredfmd9djsdme6fy/mia"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1awhjz6yg705jt0kz0rveswef9m52266sxnmf2k"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "amount",
+     "value": "2940591100factory/cosmos1a6mwphfzdsxaa78fqwan9v93zgae46j4vzge6guqguredfmd9djsdme6fy/mia"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "amount",
+     "value": "500uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1y79s8xdlajg3wv6g0ngpf042nf94dxfcaug26w"
+    },
+    {
+     "key": "amount",
+     "value": "500uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1y79s8xdlajg3wv6g0ngpf042nf94dxfcaug26w"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1r20daspwt5xct6xyp2gkmt55nssl5val9yyqxxhx9fv749vu54xqt57kvt"
+    },
+    {
+     "key": "amount",
+     "value": "500uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

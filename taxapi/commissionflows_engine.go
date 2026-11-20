@@ -138,8 +138,12 @@ type flowEvent struct {
 	SrcValidator string
 	Trigger      string
 	Detail       string
-	// Lot names the NFT a reserve auction bid, refund or settlement is for.
+	// Lot names the NFT a reserve auction bid, refund or settlement is for,
+	// or the marketplace bid a deposit, refund or fill is for.
 	Lot string
+	// PaidFromBid says an nft_sale was paid with the buyer's marketplace bid
+	// escrow (payFilledBids).
+	PaidFromBid bool
 	// Fraction is the share of the validator's bonded tokens a slash burned,
 	// and DoubleSign says it punished a double sign rather than downtime.
 	Fraction   decimal.Decimal
@@ -760,7 +764,7 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 		}
 		t.each(w, func(r int, p *flowPools) { p.locked.add(t.takeFrom(w, r, p.liquid, amt, true)) })
 	case flowCatProtocolWithdrawal, flowCatGovRefund:
-		if e.Trigger == flowAuctionRefund && e.Lot != "" {
+		if (e.Trigger == flowAuctionRefund || e.Trigger == flowBidFilled) && e.Lot != "" {
 			// A refund larger than the bid the trace saw returns the rest as
 			// other coins, as any other withdrawal does.
 			t.each(w, func(r int, p *flowPools) { p.liquid.add(t.takeBid(w, r, p, e.Lot, amt)) })
@@ -783,13 +787,14 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 			t.each(w, func(r int, p *flowPools) { p.liquid.add([]flowPart{{Amount: amt}}) })
 			return nil
 		}
-		if !flowEscrowedBid(e.Detail) {
+		if !flowEscrowedBid(e.Detail) && !e.PaidFromBid {
 			t.each(w, func(r int, p *flowPools) { t.record(r, t.takeFrom(w, r, p.liquid, amt, true), flowSpent, e.Category) })
 			return nil
 		}
-		// A reserve auction's winner pays with the bid it escrowed for that
-		// NFT, so the price leaves that bid. A buy-now escrows nothing and
-		// pays from the wallet.
+		// A reserve auction's winner and the buyer on an accepted
+		// marketplace bid pay with the bid they escrowed, so the price
+		// leaves that bid. A buy-now escrows nothing and pays from the
+		// wallet.
 		t.each(w, func(r int, p *flowPools) {
 			b := p.bids[e.Lot]
 			fromBid := decimal.Zero
@@ -824,10 +829,12 @@ func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
 	return nil
 }
 
-// Reward triggers the parser gives auction bids and outbid refunds.
+// Reward triggers the parser gives auction and marketplace bids, their
+// refunds and an accepted marketplace bid.
 const (
 	flowAuctionBid    = "auction_bid"
 	flowAuctionRefund = "auction_refund"
+	flowBidFilled     = "bid_filled"
 )
 
 // takeBid removes amt from the bid on lot; past the bid it is coins of other
@@ -840,12 +847,16 @@ func (t *flowTrace) takeBid(w *flowWallet, r int, p *flowPools, lot string, amt 
 	return parts
 }
 
-// flowBidLot names the NFT an auction row is about: the contract plus the
-// collection and token, from the bid's detail or the sale's asset.
+// flowBidLot names the bid an escrow row is about: a marketplace bid by its
+// id, a reserve auction bid by the contract plus the collection and token,
+// from the bid's detail or the sale's asset.
 func flowBidLot(e tax.TaxableEvent) string {
 	contract := detailValue(e.Detail, "contract")
 	if contract == "" {
 		return ""
+	}
+	if id := detailValue(e.Detail, "bid_id"); id != "" {
+		return contract + "/bid/" + id
 	}
 	if e.Category == apiNFTSale {
 		if e.Asset == "" {

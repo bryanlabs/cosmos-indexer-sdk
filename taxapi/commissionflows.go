@@ -371,6 +371,7 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 		return nil, err
 	}
 	out = netSaleProceeds(out, addr, proceeds)
+	out = payFilledBids(out, addr)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key.before(out[j].Key) })
 	return out, nil
 }
@@ -702,7 +703,7 @@ func flowEventFromRow(e tax.TaxableEvent, addr, native string) (flowEvent, bool)
 		Category: e.Category, Dir: dir, Amount: v,
 		From: e.FromAddr, To: e.ToAddr, Validator: e.ValidatorAddress, Trigger: e.RewardTrigger, Detail: e.Detail,
 	}
-	if e.RewardTrigger == flowAuctionBid || e.RewardTrigger == flowAuctionRefund || (e.Category == apiNFTSale && flowEscrowedBid(e.Detail)) {
+	if e.RewardTrigger == flowAuctionBid || e.RewardTrigger == flowAuctionRefund || e.RewardTrigger == flowBidFilled || (e.Category == apiNFTSale && flowEscrowedBid(e.Detail)) {
 		fe.Lot = flowBidLot(e)
 	}
 	switch e.Category {

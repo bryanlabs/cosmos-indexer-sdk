@@ -89,3 +89,37 @@ func netSaleProceeds(events []flowEvent, addr string, credited map[uint]decimal.
 	}
 	return events
 }
+
+// payFilledBids pays each NFT addr bought by accepting its marketplace bid
+// with that bid. The parser records the fill as the bid's escrow released to
+// the buyer (bid_filled) next to the nft_sale the buyer paid. The coins
+// never pass through the wallet, so the sale takes them from the bid and the
+// release is dropped. A release with no matching purchase in its message
+// stays a plain return of the escrow.
+func payFilledBids(events []flowEvent, addr string) []flowEvent {
+	used := map[int]bool{}
+	drop := map[int]bool{}
+	for i, f := range events {
+		if f.Trigger != flowBidFilled || f.Lot == "" || f.To != addr {
+			continue
+		}
+		for j, s := range events {
+			if used[j] || s.Category != apiNFTSale || s.Dir != apiOut || s.To != addr || s.Key.Message != f.Key.Message || !s.Amount.Equal(f.Amount) {
+				continue
+			}
+			events[j].Lot, events[j].PaidFromBid = f.Lot, true
+			used[j], drop[i] = true, true
+			break
+		}
+	}
+	if len(drop) == 0 {
+		return events
+	}
+	out := events[:0:0]
+	for i, e := range events {
+		if !drop[i] {
+			out = append(out, e)
+		}
+	}
+	return out
+}

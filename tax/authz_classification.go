@@ -31,6 +31,9 @@ func (e *ClassificationIncompleteError) Error() string {
 type classificationState struct {
 	issues []string
 	inners int
+	// late holds rows that go after every other row of the top-level
+	// message.
+	late []TaxableEvent
 }
 
 func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificationState, depth int, path string) []TaxableEvent {

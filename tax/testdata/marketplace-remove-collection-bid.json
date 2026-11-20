@@ -1,0 +1,120 @@
+{
+ "message_id": 1092564,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "32458022",
+ "hash": "3159DA0129BA2557140FC1E7C6A5CFA91AAC79D5D077605A6045A0D4E879364E",
+ "timestamp": "2026-08-11T23:16:16Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1yqaazqkcrar4t493ejreg55xdq4f3zcme5svhr"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "wasm-remove-collection-bid",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "id",
+     "value": "5d2fdfb1f03d2d7952010363db99baaf390f19301c5bfda906642058f1068c9b"
+    },
+    {
+     "key": "collection",
+     "value": "cosmos1l5am8d2fk8d5qj0vf649nh7nhm9tae0ss3wy47hzac9xw7t8f3yqq5efck"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "amount",
+     "value": "5000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1yqaazqkcrar4t493ejreg55xdq4f3zcme5svhr"
+    },
+    {
+     "key": "amount",
+     "value": "5000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1yqaazqkcrar4t493ejreg55xdq4f3zcme5svhr"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "amount",
+     "value": "5000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  }
+ ]
+}

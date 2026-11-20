@@ -233,11 +233,11 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// Instantiating or migrating a contract runs contract code that can sell,
 	// mint or distribute just like an execute.
 	case *wasmtypes.MsgInstantiateContract:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 	case *wasmtypes.MsgInstantiateContract2:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 	case *wasmtypes.MsgMigrateContract:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 
 	// Governance deposits are refundable, so record-only.
 	case *govv1.MsgDeposit:
@@ -298,7 +298,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress, "")...)
 
 	case *authz.MsgExec:
-		return classifyAuthz(m, log, state, depth, path)
+		events = classifyAuthz(m, log, state, depth, path)
 
 	case *transfertypes.MsgTransfer:
 		trigger, detail := ibcMemoIntent(m.Memo)
@@ -321,7 +321,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// Beyond sales, the Hub's contracts run auctions, vaults, voting locks,
 	// reward distributors, raffles and name services; see protocols.go.
 	case *wasmtypes.MsgExecuteContract:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 
 	// A tokenfactory mint credits the recipient with newly created coins, which
 	// is an acquisition for them. Cosmos Hub's observed traffic is STARS
@@ -469,7 +469,21 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, skipForwardEvents(log)...)
 	}
 
+	// Supplement rows of contract messages go after every other row of the
+	// top-level message, so adding them never moves an existing row.
+	if depth == 0 && len(state.late) != 0 {
+		events = append(events, state.late...)
+		state.late = nil
+	}
 	return events
+}
+
+// wasmEvents is a contract message's known-pattern rows. Its supplement rows
+// wait in state until the top-level message is done.
+func wasmEvents(log *indexerTxTypes.LogMessage, sender string, state *classificationState) []TaxableEvent {
+	known := wasmExecuteEvents(log, sender)
+	state.late = append(state.late, wasmSupplementEvents(log, sender, known)...)
+	return known
 }
 
 func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message, _ []parsers.MessageEventWithAttributes, cfg config.IndexConfig) error {
