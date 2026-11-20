@@ -225,10 +225,13 @@ func cw20Moved(log *indexerTxTypes.LogMessage, action, from, to, amount string) 
 // once is a swap, the rest waits in the book as a deposit keyed by contract
 // and order id, and a cancel returns what was left of it. Coins of the paid
 // denom the book sends back at once (a better price than the limit) only
-// shrink the deposit. A buy matched in full leaves nothing in the book, so
-// what the book kept of it (the taker fee and the fee reserve) is a fee.
-// The deposit names the side, the limit price and the base quantity left
-// open, which the report reads to pair later maker fills with the lot.
+// shrink the deposit. A trading fee belongs to the trade it paid for: what
+// the book kept of a buy beyond its matched quote (the taker fee and the
+// fee reserve of the matched part) is part of the swap's cost, as a sell's
+// fee already is of its net quote. A buy's deposit is the open quantity at
+// the limit price plus that quantity's share of the reserve the order
+// paid. The deposit names the side, the limit price and the base quantity
+// left open, which the report reads to pair later maker fills with the lot.
 func limitOrderEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	if sender == "" {
 		return nil
@@ -285,19 +288,40 @@ func limitOrderEvents(log *indexerTxTypes.LogMessage, sender string, known []Tax
 		return nil
 	}
 	open := qty.Sub(base)
-	detail := contractDetail(contract, map[string]string{detailOrderID: a[detailOrderID]})
-	out := coinRows(CategorySwap, sdk.Coins{sdk.NewCoin(denom, spent)}, sender, contract, TriggerLimitFill, detail)
-	if open.IsZero() {
-		if side == "sell" && left.IsPositive() {
+	deposit := left
+	if side == "buy" {
+		var ok bool
+		if deposit, ok = limitBuyDeposit(paid[0].Amount, qty, open, a[detailPrice]); !ok || deposit.GT(left) {
 			return nil
 		}
-		out = append(out, coinRows(CategoryExpense, sdk.Coins{sdk.NewCoin(denom, left)}, sender, contract, TriggerLimitFee, detail)...)
-	} else {
+	} else if open.IsZero() && left.IsPositive() {
+		return nil
+	}
+	cost := spent.Add(left).Sub(deposit)
+	detail := contractDetail(contract, map[string]string{detailOrderID: a[detailOrderID]})
+	out := coinRows(CategorySwap, sdk.Coins{sdk.NewCoin(denom, cost)}, sender, contract, TriggerLimitFill, detail)
+	if open.IsPositive() {
 		lot := contractDetail(contract, map[string]string{detailOrderID: a[detailOrderID], detailSide: side, detailPrice: a[detailPrice], detailOpenQty: open.String()})
-		out = append(out, coinRows(CategoryProtocolDeposit, sdk.Coins{sdk.NewCoin(denom, left)}, sender, contract, TriggerLimitOrder, lot)...)
+		out = append(out, coinRows(CategoryProtocolDeposit, sdk.Coins{sdk.NewCoin(denom, deposit)}, sender, contract, TriggerLimitOrder, lot)...)
 	}
 	out = append(out, coinRows(CategorySwap, got, contract, sender, TriggerLimitFill, detail)...)
 	return append(out, limitMakerRows(legs, contract, sender, denom, spent)...)
+}
+
+// limitBuyDeposit is what a buy order leaves in the book for its open base
+// quantity: that quantity at the limit price, plus its share of the reserve
+// the order paid beyond its whole quantity at the limit price.
+func limitBuyDeposit(paid, qty, open sdkmath.Int, price string) (sdkmath.Int, bool) {
+	p, ok := sdkmath.NewIntFromString(price)
+	if !ok || !p.IsPositive() || !qty.IsPositive() {
+		return sdkmath.Int{}, false
+	}
+	scale := sdkmath.NewIntWithDecimal(1, 12)
+	reserve := paid.Sub(qty.Mul(p).Quo(scale))
+	if reserve.IsNegative() {
+		return sdkmath.Int{}, false
+	}
+	return open.Mul(p).Quo(scale).Add(reserve.Mul(open).Quo(qty)), true
 }
 
 // limitMakerRows records what the resting orders this order matched paid
