@@ -36,6 +36,16 @@ func waClaimLog(recipient string) *txlog.LogMessage {
 	}}
 }
 
+// waSplitLog is a claim log whose reward the module paid in two parts.
+func waSplitLog(first, second string) *txlog.LogMessage {
+	return &txlog.LogMessage{Events: []txlog.LogMessageEvent{
+		waEvent("message", "action", waClaimURL, "sender", waDelegator, "module", "distribution"),
+		waEvent("transfer", "recipient", first, "sender", waDistribution, "amount", "300uatom"),
+		waEvent("transfer", "recipient", second, "sender", waDistribution, "amount", "327uatom"),
+		waEvent("withdraw_rewards", "amount", "627uatom", "validator", waValidator, "delegator", waDelegator),
+	}}
+}
+
 func waStored(id uint) []tax.TaxableEvent {
 	return []tax.TaxableEvent{{ID: 900, MessageID: id, SubIndex: 0, Category: categoryReward, Amount: "627", Denom: waDenom, ToAddr: waDelegator, ValidatorAddress: waValidator, RewardTrigger: waClaim}}
 }
@@ -47,7 +57,7 @@ func TestWithdrawAddressPlanAppendsParserMoves(t *testing.T) {
 	}
 	stamp := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
 	m := waMessage{ID: 50, Type: waClaimURL, Height: 24000000, Stamp: stamp, Hash: "HASH"}
-	class, rows := planWithdrawAddressMessage(codec, m, waClaimLog(waWithdraw), waStored(50))
+	class, rows, _ := planWithdrawAddressMessage(codec, m, waClaimLog(waWithdraw), waStored(50))
 	if class != waExact || len(rows) != 1 {
 		t.Fatalf("class %s rows %d", class, len(rows))
 	}
@@ -82,7 +92,7 @@ func TestWithdrawAddressPlanClasses(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := waMessage{ID: 51, Type: waClaimURL}
-	_, planned := planWithdrawAddressMessage(codec, m, waClaimLog(waWithdraw), waStored(51))
+	_, planned, _ := planWithdrawAddressMessage(codec, m, waClaimLog(waWithdraw), waStored(51))
 	if len(planned) != 1 {
 		t.Fatal("plan")
 	}
@@ -116,8 +126,10 @@ func TestWithdrawAddressPlanClasses(t *testing.T) {
 		{"failed tx", waMessage{ID: 51, Type: waClaimURL, Code: 5}, waClaimLog(waWithdraw), waStored(51), waFailedTx, 0},
 		{"authz without bytes", waMessage{ID: 51, Type: typeURLAuthzExec}, waClaimLog(waWithdraw), waStored(51), waNoBody, 0},
 		{"no stored log", m, nil, waStored(51), waParseError, 0},
+		{"paid two other accounts", m, waSplitLog(waWithdraw, "cosmos1second"), waStored(51), waRefusedMany, 0},
+		{"paid the delegator and another", m, waSplitLog(waDelegator, waWithdraw), waStored(51), waRefusedSelf, 0},
 	} {
-		class, rows := planWithdrawAddressMessage(codec, c.m, c.log, c.stored)
+		class, rows, _ := planWithdrawAddressMessage(codec, c.m, c.log, c.stored)
 		if class != c.class || len(rows) != c.rows {
 			t.Errorf("%s: class %s rows %d, want %s %d", c.name, class, len(rows), c.class, c.rows)
 		}

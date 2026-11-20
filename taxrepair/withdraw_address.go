@@ -32,7 +32,12 @@ const (
 	waRewardsEqual = "rewards_equal" // other stored rows differ, the booked rewards the moves are capped at do not
 	waRewardsDrift = "rewards_drift" // the stored rewards differ from the parser's: no plan
 	waNoMoves      = "no_moves"      // the parser adds nothing (LSM payouts, commission, nothing redirected)
-	waAlready      = "already"       // the message already holds withdraw_address rows (and cannot be reparsed)
+	// The parser refuses to pair: the module paid more than one other
+	// account, or the delegator and another account, so where the reward
+	// went is a guess. Nothing moves; the counts say how many.
+	waRefusedMany = "refused_many_recipients"
+	waRefusedSelf = "refused_paid_delegator"
+	waAlready     = "already" // the message already holds withdraw_address rows (and cannot be reparsed)
 	// A message that already holds the moves is reparsed to check them: the
 	// whole fresh parse equals the stored rows, only the moves do (the other
 	// rows predate a parser change), or the moves differ.
@@ -256,8 +261,13 @@ func planWithdrawAddressBatch(db *gorm.DB, codec codectypes.AnyUnpacker, ids []u
 		if !ok {
 			return nil, nil, fmt.Errorf("message %d not found", id)
 		}
-		class, rows := planWithdrawAddressMessage(codec, m, logs[id], stored[id])
+		class, rows, refused := planWithdrawAddressMessage(codec, m, logs[id], stored[id])
 		counts[class]++
+		// A message can move one delegator's reward and refuse another's
+		// (an authz Exec for several granters): count refused delegators too.
+		for reason, n := range refused {
+			counts["refused_delegators_"+reason] += n
+		}
 		for _, r := range rows {
 			out = append(out, waPlanRow{TaxableEvent: r, Class: class, Trigger: waTrigger(r), StoredRows: fingers[id].N, StoredFinger: fingers[id].Finger, MessageTypeID: m.MessageTypeID})
 		}
@@ -277,14 +287,14 @@ func waTrigger(e tax.TaxableEvent) string {
 // planWithdrawAddressMessage runs the production parser on the stored
 // message and returns the withdraw_address rows it appends after the rows
 // already stored, numbered from the next free sub_index.
-func planWithdrawAddressMessage(codec codectypes.AnyUnpacker, m waMessage, log *txlog.LogMessage, stored []tax.TaxableEvent) (string, []tax.TaxableEvent) {
+func planWithdrawAddressMessage(codec codectypes.AnyUnpacker, m waMessage, log *txlog.LogMessage, stored []tax.TaxableEvent) (string, []tax.TaxableEvent, map[string]int) {
 	switch {
 	case m.ID == privateProfileMessageID:
-		return waPrivate, nil
+		return waPrivate, nil, nil
 	case m.Code != 0:
-		return waFailedTx, nil
+		return waFailedTx, nil, nil
 	case log == nil:
-		return waParseError, nil
+		return waParseError, nil, nil
 	}
 	already := false
 	for _, r := range stored {
@@ -294,7 +304,7 @@ func planWithdrawAddressMessage(codec codectypes.AnyUnpacker, m waMessage, log *
 	}
 	for i, r := range stored {
 		if r.SubIndex != i && !already {
-			return waGap, nil
+			return waGap, nil, nil
 		}
 	}
 	var msg sdk.Msg
@@ -303,50 +313,57 @@ func planWithdrawAddressMessage(codec codectypes.AnyUnpacker, m waMessage, log *
 	case len(m.MessageBytes) != 0:
 		err = codec.UnpackAny(&codectypes.Any{TypeUrl: m.Type, Value: m.MessageBytes}, &msg)
 	case m.Type == typeURLAuthzExec && already:
-		return waAlready, nil
+		return waAlready, nil, nil
 	case m.Type == typeURLAuthzExec:
-		return waNoBody, nil
+		return waNoBody, nil, nil
 	default:
 		msg, err = tax.ReconstructMsg(m.Type, log)
 	}
 	if err != nil && already {
-		return waAlready, nil
+		return waAlready, nil, nil
 	}
 	if err != nil {
-		return waParseError, nil
+		return waParseError, nil, nil
 	}
 	fresh, err := parse(msg, log)
 	if err != nil && already {
-		return waAlready, nil
+		return waAlready, nil, nil
 	}
 	if err != nil {
-		return waParseError, nil
+		return waParseError, nil, nil
 	}
 	// The parser appends the moves last; anything after them is a parser
 	// change this plan was not written for.
 	base, moves, ok := splitMoves(fresh)
 	if !ok {
-		return waParseError, nil
+		return waParseError, nil, nil
 	}
 	if already {
 		_, storedMoves, ok := splitMoves(stored)
 		switch {
 		case !ok:
-			return waAlreadyMismatch, nil
+			return waAlreadyMismatch, nil, nil
 		case sameContent(fresh, stored):
-			return waAlreadyExact, nil
+			return waAlreadyExact, nil, nil
 		case sameContent(moves, storedMoves):
-			return waAlreadyMoves, nil
+			return waAlreadyMoves, nil, nil
 		}
-		return waAlreadyMismatch, nil
+		return waAlreadyMismatch, nil, nil
 	}
+	refused := tax.WithdrawAddressRefusals(msg, log)
 	if len(moves) == 0 {
-		return waNoMoves, nil
+		switch {
+		case refused[tax.WithdrawRefusedManyRecipients] != 0:
+			return waRefusedMany, nil, refused
+		case refused[tax.WithdrawRefusedPaidDelegator] != 0:
+			return waRefusedSelf, nil, refused
+		}
+		return waNoMoves, nil, nil
 	}
 	class := waExact
 	if !sameContent(base, stored) {
 		if !sameRewards(base, stored) {
-			return waRewardsDrift, nil
+			return waRewardsDrift, nil, refused
 		}
 		class = waRewardsEqual
 	}
@@ -359,7 +376,7 @@ func planWithdrawAddressMessage(codec codectypes.AnyUnpacker, m waMessage, log *
 		moves[i].Timestamp = m.Stamp
 		moves[i].TxHash = m.Hash
 	}
-	return class, moves
+	return class, moves, refused
 }
 
 func isMove(e tax.TaxableEvent) bool {
