@@ -58,8 +58,11 @@ func (s *Server) RunCommissionCaptureCandidate(parent context.Context, target Co
 		return err
 	}
 	defer stop()
-	reader := *s
-	reader.db = s.db.WithContext(ctx)
+	// A database-only facade, as withReadSnapshot uses: the per-root reads
+	// (reuseCommissionFlowVersion, ResolveCommissionCapture and
+	// ReadCommissionFlowPayload) use only db, and copying the Server would
+	// copy its locks.
+	reader := &Server{db: s.db.WithContext(ctx)}
 	failed := 0
 	for _, v := range roots {
 		if err := ctx.Err(); err != nil {

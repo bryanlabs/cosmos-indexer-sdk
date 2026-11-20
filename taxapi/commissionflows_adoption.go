@@ -40,9 +40,9 @@ func (s *Server) ResolveCommissionCapture(target CommissionFlowBuildOptions, sou
 	}
 	ctx, cancel := context.WithTimeout(s.db.Statement.Context, 60*time.Second)
 	defer cancel()
-	scoped := *s
-	scoped.db = s.db.WithContext(ctx)
-	s = &scoped
+	// A database-only facade: the reads below (and ReadCommissionFlowPayload)
+	// use only db, and copying the Server would copy its locks.
+	s = &Server{db: s.db.WithContext(ctx)}
 	seen := map[string]bool{target.Version: true}
 	for _, version := range sources {
 		if version == "" || seen[version] {
