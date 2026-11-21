@@ -117,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /staking/inflation", s.handleStakingInflation)
 	mux.HandleFunc("GET /staking/validator-income", s.handleValidatorIncome)
 	mux.HandleFunc("GET /staking/validator-income/break-even", s.handleValidatorBreakEven)
+	mux.HandleFunc("GET /staking/where-atom-goes", s.handleWhereAtomGoes)
 	mux.HandleFunc("GET /address-labels", s.handleAddressLabels)
 	mux.HandleFunc("GET /validators", s.handleValidatorList)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
