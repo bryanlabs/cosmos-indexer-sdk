@@ -42,6 +42,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
 			{apiPath: "/balance", apiPurpose: "Current balance, or with date= the holdings at the end of that UTC day rebuilt from indexed events (409 with the reason when the index cannot rebuild it exactly)."},
 			{apiPath: "/balance-statement", apiPurpose: "Quarter-end and year-end holdings for a wallet (year=) or listed dates (dates=), JSON or format=csv, each date with its own status."},
 			{apiPath: "/delegator-report", apiPurpose: "Embeddable per-delegator summary for a validator's website."},
+			{apiPath: "/staking/inflation", apiPurpose: "ATOM minted per day, month or year from every block's mint event, where it went, and stated, paid and real staking APR, with the proposals that changed them."},
 			{apiPath: "/index-coverage", apiPurpose: "Which blocks are indexed, per calendar year: block range, indexed and expected counts, fully covered dates and gaps. Reports for a period that is not fully indexed carry an X-Index-Coverage warning."},
 			{apiPath: "/coverage-statement", apiPurpose: "The coverage statement every report and export carries (also index_coverage.statement and X-Coverage-Statement): chains and heights read, indexed-through height and time, and known open items. JSON, or format=text."},
 		},
