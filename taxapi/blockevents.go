@@ -92,19 +92,45 @@ func (s *Server) blockEventRows(chain, addr string, start, end time.Time) ([]tax
 			blockIDs = append(blockIDs, l.BlockID)
 		}
 	}
-	var attrs []blockEventAttrRow
-	if err := s.db.Table("block_events be").
-		Select("be.id AS event_id, be.block_id, be.lifecycle_position, b.height, b.time_stamp, t.type, k.key, a.value").
-		Joins("JOIN blocks b ON b.id = be.block_id").
-		Joins("JOIN block_event_types t ON t.id = be.block_event_type_id").
-		Joins("LEFT JOIN block_event_attributes a ON a.block_event_id = be.id").
-		Joins("LEFT JOIN block_event_attribute_keys k ON k.id = a.block_event_attribute_key_id").
-		Where("be.block_id IN ?", blockIDs).
-		Order("be.block_id, be.lifecycle_position, be.index, a.index").
-		Scan(&attrs).Error; err != nil {
+	attrs, err := s.blockLifecycleAttrs(blockIDs)
+	if err != nil {
 		return nil, err
 	}
 	return classifyBlockAttrs(attrs, seen, addr, deposits), nil
+}
+
+// blockLifecycleAttrs reads every block event attribute of the blocks ids, in
+// block, lifecycle, event and attribute order. A wallet can name more blocks
+// than one statement may bind, so the ids are read in ascending chunks, which
+// concatenate to the order one read of every id returns.
+func (s *Server) blockLifecycleAttrs(ids []uint) ([]blockEventAttrRow, error) {
+	seen := make(map[uint]bool, len(ids))
+	blockIDs := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			blockIDs = append(blockIDs, id)
+		}
+	}
+	sort.Slice(blockIDs, func(i, j int) bool { return blockIDs[i] < blockIDs[j] })
+	var attrs []blockEventAttrRow
+	err := inChunks(blockIDs, func(chunk []uint) error {
+		var part []blockEventAttrRow
+		if err := s.db.Table("block_events be").
+			Select("be.id AS event_id, be.block_id, be.lifecycle_position, b.height, b.time_stamp, t.type, k.key, a.value").
+			Joins("JOIN blocks b ON b.id = be.block_id").
+			Joins("JOIN block_event_types t ON t.id = be.block_event_type_id").
+			Joins("LEFT JOIN block_event_attributes a ON a.block_event_id = be.id").
+			Joins("LEFT JOIN block_event_attribute_keys k ON k.id = a.block_event_attribute_key_id").
+			Where("be.block_id IN ?", chunk).
+			Order("be.block_id, be.lifecycle_position, be.index, a.index").
+			Scan(&part).Error; err != nil {
+			return err
+		}
+		attrs = append(attrs, part...)
+		return nil
+	})
+	return attrs, err
 }
 
 // classifyBlockAttrs groups ordered attribute rows into lifecycles and

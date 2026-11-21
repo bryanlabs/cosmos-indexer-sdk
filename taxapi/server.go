@@ -402,20 +402,25 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.
 	var legacyIDs []uint
+	legacySeen := map[uint]bool{}
 	for _, event := range events {
-		if event.Category == apiReward && event.RewardTrigger == "" {
+		if event.Category == apiReward && event.RewardTrigger == "" && !legacySeen[event.MessageID] {
+			legacySeen[event.MessageID] = true
 			legacyIDs = append(legacyIDs, event.MessageID)
 		}
 	}
-	if len(legacyIDs) > 0 {
-		var legacyCount int64
-		if err := s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
-			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, replayedMessageTypes).Count(&legacyCount).Error; err != nil {
-			return walletRows{}, err
-		}
+	var legacyCount int64
+	if err := inChunks(legacyIDs, func(chunk []uint) error {
 		if legacyCount > 0 {
-			return walletRows{}, errAwaitingCorrection
+			return nil
 		}
+		return s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
+			Where("m.id IN ? AND mt.message_type IN ?", chunk, replayedMessageTypes).Count(&legacyCount).Error
+	}); err != nil {
+		return walletRows{}, err
+	}
+	if legacyCount > 0 {
+		return walletRows{}, errAwaitingCorrection
 	}
 
 	phases.next("fees")
