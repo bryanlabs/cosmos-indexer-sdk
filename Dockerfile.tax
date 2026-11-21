@@ -6,6 +6,7 @@
 #   taxledger  - extends the balance ledger scan from the archive block cache (one-off Jobs)
 #   taxstatement - fills, refreshes and checks the validator statement summary (Job and CronJobs)
 #   taxcoverage  - keeps the /coverage rollup current (CronJob)
+#   taxstaking   - seeds and extends the /tax/staking day tables from our node (CronJob)
 #
 # Both are pure-Go static binaries (CGO off): wasmvm is only an indirect dep and is
 # never invoked, so no muslc/wasmvm static-lib dance is needed.
@@ -25,6 +26,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxledger ./taxledger && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstatement ./taxstatement && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxcoverage ./taxcoverage && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstaking ./taxstaking && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxcommissionexport ./taxcommissionexport
 
 FROM build AS test
@@ -49,6 +51,7 @@ COPY --from=build /out/taxwatch /usr/local/bin/taxwatch
 COPY --from=build /out/taxledger /usr/local/bin/taxledger
 COPY --from=build /out/taxstatement /usr/local/bin/taxstatement
 COPY --from=build /out/taxcoverage /usr/local/bin/taxcoverage
+COPY --from=build /out/taxstaking /usr/local/bin/taxstaking
 COPY --from=build /out/taxcommissionexport /usr/local/bin/taxcommissionexport
 USER tax
 # Default entrypoint is the API; the indexer Deployment overrides command.

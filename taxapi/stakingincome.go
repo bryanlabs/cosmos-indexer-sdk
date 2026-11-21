@@ -22,7 +22,8 @@ import (
 // break-even (INF-748 option 2). Built from the commission and rewards events
 // every cosmoshub-4 block emits for every bonded validator, so validators that
 // never withdrew are counted. The file is produced by the same extraction as
-// the inflation view and embedded until the daily job writes it to Postgres.
+// the inflation view and embedded here; once the taxstaking Job has seeded and
+// extended the staking tables, the API serves them instead (stakingtables.go).
 
 //go:embed stakingdata/validator_income.json.gz
 var validatorIncomeGz []byte
@@ -40,17 +41,19 @@ type incomeFile struct {
 	ExchangeRun     []int  `json:"exchange_run"`
 	// Withdrawn holds, per day from first_day, the commission and rewards
 	// withdrawn by successful transactions, in uatom.
-	Withdrawn  [][2]int64 `json:"withdrawn"`
-	Validators []struct {
-		Operator string `json:"operator"`
-		// Commission is the validator's commission credited per day from
-		// FirstDay, in whole uatom. Each day is the change in the floor of the
-		// running total, so any run of days sums to within 1 uatom of the exact
-		// figure.
-		FirstDay   string           `json:"first_day"`
-		Commission []int64          `json:"commission"`
-		Rewards    map[string]int64 `json:"rewards_monthly"`
-	} `json:"validators"`
+	Withdrawn  [][2]int64            `json:"withdrawn"`
+	Validators []incomeFileValidator `json:"validators"`
+}
+
+type incomeFileValidator struct {
+	Operator string `json:"operator"`
+	// Commission is the validator's commission credited per day from
+	// FirstDay, in whole uatom. Each day is the change in the floor of the
+	// running total, so any run of days sums to within 1 uatom of the exact
+	// figure.
+	FirstDay   string           `json:"first_day"`
+	Commission []int64          `json:"commission"`
+	Rewards    map[string]int64 `json:"rewards_monthly"`
 }
 
 type incomeValidator struct {
@@ -93,6 +96,11 @@ func parseIncome(gz []byte) (*incomeData, error) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return nil, err
 	}
+	return buildIncome(f)
+}
+
+// buildIncome indexes an income file by day and checks it fits its days.
+func buildIncome(f incomeFile) (*incomeData, error) {
 	first, err := time.Parse(time.DateOnly, f.FirstDay)
 	if err != nil {
 		return nil, err
@@ -436,14 +444,9 @@ var breakEvenMethod = map[string]string{
 }
 
 func (s *Server) handleValidatorIncome(w http.ResponseWriter, r *http.Request) {
-	d, err := loadIncome()
+	infl, d, err := s.stakingSets(r.Context())
 	if err != nil {
 		http.Error(w, "validator income data unavailable", http.StatusInternalServerError)
-		return
-	}
-	infl, err := loadInflation()
-	if err != nil {
-		http.Error(w, "inflation data unavailable", http.StatusInternalServerError)
 		return
 	}
 	q := r.URL.Query()
@@ -520,14 +523,9 @@ type breakEvenPoint struct {
 }
 
 func (s *Server) handleValidatorBreakEven(w http.ResponseWriter, r *http.Request) {
-	d, err := loadIncome()
+	infl, d, err := s.stakingSets(r.Context())
 	if err != nil {
 		http.Error(w, "validator income data unavailable", http.StatusInternalServerError)
-		return
-	}
-	infl, err := loadInflation()
-	if err != nil {
-		http.Error(w, "inflation data unavailable", http.StatusInternalServerError)
 		return
 	}
 	q := r.URL.Query()

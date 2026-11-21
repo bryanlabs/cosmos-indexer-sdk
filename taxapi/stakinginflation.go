@@ -15,8 +15,9 @@ import (
 // GET /staking/inflation: how much new ATOM the Hub minted, where it went, and
 // what staking paid against it, by day, month or year. Built from the mint
 // event of every cosmoshub-4 block (INF-748). The daily file is produced by
-// the extraction under cluster/apps/cosmos-tax-sdk-backfill and embedded here
-// until the daily job writes it to Postgres.
+// the extraction under cluster/apps/cosmos-tax-sdk-backfill and embedded here.
+// Once the taxstaking Job has seeded and extended the staking tables, the API
+// serves them instead (stakingtables.go).
 
 //go:embed stakingdata/inflation_daily.json
 var inflationDailyJSON []byte
@@ -154,21 +155,29 @@ func parseInflation(raw []byte) (*inflationData, error) {
 		if day.BondedAvg, err = flt(r, "bonded_ratio_avg"); err != nil {
 			return nil, err
 		}
-		dayStart, err := time.Parse(time.DateOnly, day.Date)
-		if err != nil {
+		if day.Seconds, err = inflationDaySeconds(day.Date, first); err != nil {
 			return nil, err
 		}
-		start := dayStart
-		if first.After(start) {
-			start = first
-		}
-		day.Seconds = dayStart.Add(24 * time.Hour).Sub(start).Seconds()
 		d.Days = append(d.Days, day)
 	}
 	if len(d.Days) == 0 {
 		return nil, fmt.Errorf("inflation file has no days")
 	}
 	return d, nil
+}
+
+// inflationDaySeconds is how much of the UTC day the chain ran: the whole day,
+// or from the first block on the chain's first day.
+func inflationDaySeconds(date string, first time.Time) (float64, error) {
+	dayStart, err := time.Parse(time.DateOnly, date)
+	if err != nil {
+		return 0, err
+	}
+	start := dayStart
+	if first.After(start) {
+		start = first
+	}
+	return dayStart.Add(24 * time.Hour).Sub(start).Seconds(), nil
 }
 
 // inflationChange is one governance decision that moved issuance or its split.
@@ -379,7 +388,7 @@ var inflationMethod = map[string]string{
 }
 
 func (s *Server) handleStakingInflation(w http.ResponseWriter, r *http.Request) {
-	data, err := loadInflation()
+	data, err := s.stakingInflation(r.Context())
 	if err != nil {
 		http.Error(w, "inflation data unavailable", http.StatusInternalServerError)
 		return
