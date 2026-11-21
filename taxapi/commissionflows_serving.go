@@ -191,8 +191,8 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowAllFixesRoot("accel-withdraw-fix-5ddd3d9c5bcb-20261118-fanout-v1", "5ddd3d9c5bcb5ba1dc12461d702f5acf923b470e49be328ab7c2e6fab813428f"),
 		flowAllFixesRoot("accel-withdraw-fix-c367934baa77-20261118-fanout-v1", "c367934baa77ab0ce85a84cbd4ec158dfcfdac3f0df7e6efdbf5d02eaff5938b"),
 		flowAllFixesRoot("accel-withdraw-fix-52836aab8ac6-20261118-fanout-v7", "52836aab8ac6250910ea4e77539c7ef6ef8fa98050b057271b80919434a13e42"),
-		flowSlashRoot("accel-withdraw-fix-0a11a4c00904-20261118-fanout-v3", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
-		flowSlashRoot("accel-withdraw-fix-d2d7b3c161a2-20261118-fanout-v3", "d2d7b3c161a280621a0b05189e3746f1d785eab94cc4de6096a76a621c80d2b5"),
+		flowAllFixesRoot("accel-withdraw-fix-0a11a4c00904-20261118-fanout-v7", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
+		flowAllFixesRoot("accel-withdraw-fix-d2d7b3c161a2-20261118-fanout-v7", "d2d7b3c161a280621a0b05189e3746f1d785eab94cc4de6096a76a621c80d2b5"),
 		flowAllFixesRoot("accel-withdraw-fix-001308de5051-20261118-fanout-v7", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
 		flowAllFixesRoot("accel-withdraw-fix-ab12977c1a21-20261118-fanout-v7", "ab12977c1a2135f7aeea69534171ee3c2bec9a03f3650cbf5dff76caefb19345"),
 		flowAllFixesRoot("accel-withdraw-fix-a5b85d99e09a-20261118-fanout-v7", "a5b85d99e09a1b9844bbb4209119b7b1d730b83b37c8e45bae11e21c09428965"),
@@ -213,7 +213,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		// A labelled drift row: its rerun drifts 237 ATOM, and the row it replaces drifted 208,278 ATOM.
 		flowAllFixesRoot("accel-withdraw-fix-f1afab0130fb-20261118-fanout-v7", "f1afab0130fb05642a485af36968c826238e912292f4616ac0658957fcfb28d1"),
 		flowAllFixesRoot("accel-withdraw-fix-a3e91bffa7c0-20261118-fanout-v7", "a3e91bffa7c05edeb6836f0d37d7bd8d8ed18788e8dd4af9b806caa5d7b2de71"),
-		flowSlashRoot("accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v3", "c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"),
+		flowAllFixesRoot("accel-withdraw-fix-c07d4e7c6b6e-20261118-fanout-v7", "c07d4e7c6b6e288cc7c23111d04eca5c50872c5b58fdb9b5f2ec67ae2093cdad"),
 		flowAllFixesRoot("accel-withdraw-fix-d2c321cc8c4e-20261118-fanout-v7", "d2c321cc8c4ec629077ecc8e006f372bc361c918ef0fcb540372fd347746cbcc"),
 		flowAllFixesRoot("accel-withdraw-fix-8df708d2db2f-20261118-fanout-v7", "8df708d2db2f5583431b8f9ce8a6e3ba9ae7840e0f78b38366948a69c0d24716"),
 		// Self-bond rerun: its own self-bond had no ledger row, so the old trace kept the bond liquid; about 0.79 ATOM moves to ibc_out, 0.38 from restaked_own and 0.41 from held (66.0 pct class share).
