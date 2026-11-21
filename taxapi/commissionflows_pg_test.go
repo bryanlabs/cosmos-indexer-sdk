@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/DefiantLabs/cosmos-indexer/tax"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -193,6 +195,12 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	validators, err := s.commissionValidators(apiMainnet)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{flowPGValidator, flowPGOther}, validators, "testnet-only validators are not traced on the Hub")
+	first, err := s.commissionFirstWithdrawals(apiMainnet)
+	require.NoError(t, err)
+	require.ElementsMatch(t, validators, slices.Collect(maps.Keys(first)), "the expected list is the same validators, with their first withdrawal")
+	for _, at := range first {
+		require.False(t, at.IsZero())
+	}
 
 	op := operatorAccount(flowPGValidator)
 	require.NoError(t, s.db.Create(&AddressLabel{Chain: apiMainnet, Address: op, Name: "Named Exchange", Kind: labelExchange, Source: "manual", CreatedAt: nowUTC()}).Error)
@@ -387,11 +395,15 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 	require.Equal(t, "2.8", hub.Months[1].Withdrawn.String())
 	require.NoError(t, s.db.Where("validator = ?", "cosmosvaloper1untraced").Delete(&CommissionFlowRun{}).Error)
 
+	// A validator that first withdrew after the served as_of is not expected
+	// of a trace that ends before it.
 	flowPGExpect(s, chain, flowPGValidator, flowPGOther)
+	s.flowExp[chain].first["cosmosvaloper1later"] = flowPGWindowEnd.AddDate(1, 0, 0)
 	hub = CommissionFlowsHub{}
 	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
 	require.True(t, hub.Complete)
 	require.Equal(t, 2, hub.Traced)
+	require.Equal(t, 2, hub.Expected)
 	require.Equal(t, "2.8", hub.Months[1].Withdrawn.String())
 	require.Equal(t, 0, hub.Unreconciled.Validators)
 
@@ -436,11 +448,11 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 }
 
 func flowPGExpect(s *Server, chain string, validators ...string) {
-	set := map[string]bool{}
+	first := map[string]time.Time{}
 	for _, v := range validators {
-		set[v] = true
+		first[v] = flowPGWindowStart
 	}
-	s.flowExp = map[string]*flowExpected{chain: {set: set, at: time.Now()}}
+	s.flowExp = map[string]*flowExpected{chain: {first: first, at: time.Now()}}
 }
 
 // A returning one-hop ATOM row counts only when its message credited the

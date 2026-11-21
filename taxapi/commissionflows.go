@@ -1130,6 +1130,27 @@ func (s *Server) commissionValidators(chain string) ([]string, error) {
 	return out, nil
 }
 
+// commissionFirstWithdrawals maps every validator that ever withdrew
+// commission on chain to its first withdrawal.
+func (s *Server) commissionFirstWithdrawals(chain string) (map[string]time.Time, error) {
+	var rows []struct {
+		Validator string
+		FirstAt   time.Time
+	}
+	err := s.scopedTaxEvents(chain).
+		Select("taxable_events.validator_address AS validator, MIN(taxable_events.timestamp) AS first_at").
+		Where("taxable_events.category = ? AND taxable_events.validator_address <> ''", apiCommission).
+		Group("taxable_events.validator_address").Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]time.Time, len(rows))
+	for _, r := range rows {
+		out[r.Validator] = r.FirstAt
+	}
+	return out, nil
+}
+
 // BuildCommissionFlows traces every validator's commission (or those named)
 // from from through the end of yesterday and stores the result.
 func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.Time, only []string, workers int, logf func(string, ...any), options ...CommissionFlowBuildOptions) error {

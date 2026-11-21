@@ -421,16 +421,18 @@ var flowHubLeftOut = []string{flowStatusError, flowStatusDrift}
 const flowExpectedTTL = 6 * time.Hour
 
 type flowExpected struct {
-	set     map[string]bool
+	// first is each validator's first commission withdrawal.
+	first   map[string]time.Time
 	at      time.Time
 	loading bool
 }
 
 // flowExpectedValidators returns the validators the daily trace covers on
-// chain, and false until that list has been read once. Reading it takes tens
+// chain with their first withdrawal, and false until that list has been read
+// once. Reading it takes tens
 // of seconds, so it never runs on the request path: a missing or stale list
 // is refreshed in the background and the last one is served meanwhile.
-func (s *Server) flowExpectedValidators(chain string) (map[string]bool, bool) {
+func (s *Server) flowExpectedValidators(chain string) (map[string]time.Time, bool) {
 	s.flowExpMu.Lock()
 	defer s.flowExpMu.Unlock()
 	if s.flowExp == nil {
@@ -441,12 +443,26 @@ func (s *Server) flowExpectedValidators(chain string) (map[string]bool, bool) {
 		e = &flowExpected{}
 		s.flowExp[chain] = e
 	}
-	if !e.loading && (e.set == nil || time.Since(e.at) > flowExpectedTTL) {
+	if !e.loading && (e.first == nil || time.Since(e.at) > flowExpectedTTL) {
 		e.loading = true
 		// A failed read leaves the list unknown and the next request retries.
 		go func() { _ = s.refreshFlowExpected(chain) }()
 	}
-	return e.set, e.set != nil
+	return e.first, e.first != nil
+}
+
+// flowExpectedBy is the validators whose first withdrawal falls before asOf,
+// the exclusive end of a trace: one that first withdrew later cannot be in a
+// trace that stops at asOf, so it is not counted as missing from it. A zero
+// asOf (nothing traced yet) bounds nothing.
+func flowExpectedBy(first map[string]time.Time, asOf time.Time) map[string]bool {
+	out := make(map[string]bool, len(first))
+	for v, at := range first {
+		if asOf.IsZero() || at.Before(asOf) {
+			out[v] = true
+		}
+	}
+	return out
 }
 
 // WarmCommissionFlows starts reading chain's expected validator list at
@@ -456,7 +472,7 @@ func (s *Server) WarmCommissionFlows(chain string) {
 }
 
 func (s *Server) refreshFlowExpected(chain string) error {
-	validators, err := s.commissionValidators(chain)
+	first, err := s.commissionFirstWithdrawals(chain)
 	s.flowExpMu.Lock()
 	defer s.flowExpMu.Unlock()
 	if s.flowExp == nil {
@@ -471,11 +487,7 @@ func (s *Server) refreshFlowExpected(chain string) error {
 	if err != nil {
 		return err
 	}
-	set := make(map[string]bool, len(validators))
-	for _, v := range validators {
-		set[v] = true
-	}
-	e.set, e.at = set, time.Now()
+	e.first, e.at = first, time.Now()
 	return nil
 }
 
@@ -488,7 +500,7 @@ type CommissionFlowsHub struct {
 	Validators int            `json:"validators"`
 	Statuses   map[string]int `json:"statuses"`
 	// Traced of Expected validators have a stored run. Expected is every
-	// validator that ever withdrew commission, the set the daily trace
+	// validator that withdrew commission before AsOf, the set the daily trace
 	// covers; until that list is read the endpoint answers 503. Months and Total stay
 	// empty until Complete: a partial set is not a Hub figure.
 	Traced       int               `json:"traced"`
@@ -508,8 +520,8 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 	chain := chainParam(q.Get(apiChain))
 	rule := flowRuleParam(q.Get("rule"))
 	start, end := flowMonthParam(q.Get(apiStart)), flowMonthParam(q.Get(apiEnd))
-	expected, known := s.flowExpectedValidators(chain)
-	if !known || len(expected) == 0 {
+	first, known := s.flowExpectedValidators(chain)
+	if !known || len(first) == 0 {
 		// Until the list is read there is no true coverage figure to give,
 		// so the answer is "try again shortly" rather than 0 of 0.
 		w.Header().Set("Retry-After", "60")
@@ -545,14 +557,17 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 	unreconciled := decimal.Zero
 	var asOf time.Time
 	for _, sv := range served {
+		if sv.Run.AsOf.After(asOf) {
+			asOf = sv.Run.AsOf
+		}
+	}
+	expected := flowExpectedBy(first, asOf)
+	for _, sv := range served {
 		run := sv.Run
 		out.Validators++
 		out.Statuses[run.Status]++
 		if expected[run.Validator] {
 			out.Traced++
-		}
-		if run.AsOf.After(asOf) {
-			asOf = run.AsOf
 		}
 		if run.Status == flowStatusError {
 			continue
