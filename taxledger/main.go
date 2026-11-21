@@ -91,6 +91,9 @@ func main() {
 	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
 	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
 	flowsMaxHops := flag.Int("commission-max-hops", 0, "private versioned runs only: wallets followed past the receiving wallets (0 keeps the default 3); the version must name it, e.g. -hops5")
+	flowsLabels := flag.String("commission-label-file", "", "private versioned runs only: an immutable label file whose digest the version names (-labels<first 12>)")
+	flowsLabelsSHA := flag.String("commission-label-file-sha256", "", "exact digest of --commission-label-file")
+	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
@@ -108,6 +111,9 @@ func main() {
 	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
 	// of work. Session-only, so other jobs and the API keep their settings.
 	runtime := commissionRuntimeParams(*flows, *flowsVersion)
+	if *deriveLabels != "" {
+		runtime = append(runtime, "default_transaction_read_only=on")
+	}
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
@@ -119,6 +125,10 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
+	}
+	if *deriveLabels != "" {
+		deriveFollowLabels(db, *chain, *flowsFrom, *flowsAsOf, *deriveLabels)
+		return
 	}
 	if *flows {
 		var profile *taxapi.CommissionPrivateProfile
@@ -135,7 +145,17 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, *flowsMaxHops)
+		var labels *taxapi.CommissionLabelFile
+		if *flowsLabels != "" || *flowsLabelsSHA != "" {
+			if *flowsProfile == "" {
+				log.Fatal("a label file requires private versioned commission collection")
+			}
+			labels, err = taxapi.LoadCommissionLabelFile(*flowsLabels, *flowsLabelsSHA, *chain)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, *flowsMaxHops)
 		return
 	}
 	if *daysAppend {
@@ -213,7 +233,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, maxHops int) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops int) {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -249,7 +269,28 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 			log.Fatal("commission archive configuration has no RPC endpoint")
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections, MaxHops: maxHops}); err != nil {
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
+}
+
+// deriveFollowLabels writes the deposit-follow label file and its digest.
+func deriveFollowLabels(db *gorm.DB, chain, fromText, asOfText, out string) {
+	from, err := time.Parse(time.DateOnly, fromText)
+	if err != nil {
+		log.Fatalf("-commission-flows-from: %v", err)
+	}
+	asOf, err := time.Parse(time.DateOnly, asOfText)
+	if err != nil {
+		log.Fatalf("-commission-as-of: %v", err)
+	}
+	lf, err := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset).DeriveDepositFollowLabels(chain, from, asOf)
+	if err != nil {
+		log.Fatalf("derive labels: %v", err)
+	}
+	digest, err := taxapi.WriteCommissionLabelFile(out, lf)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("label file %s: %d labels, %d unfollowed, %d profiles, sha256 %s", out, len(lf.Labels), len(lf.Unfollowed), len(lf.Profiles), digest)
 }

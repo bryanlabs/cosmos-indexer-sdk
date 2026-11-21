@@ -42,7 +42,23 @@ const (
 	labelModule            = "module"
 	labelIBCEscrow         = "ibc_escrow"
 	labelValidatorOperator = "validator_operator"
+	// Kinds from the derived and published label set (OPS-849). Each stops
+	// a trace in its own class; none counts as an exchange.
+	labelInterchainAccount = "interchain_account"
+	labelGrantRecipient    = "grant_recipient"
+	labelBridgeEscrow      = "bridge_escrow"
+	labelBridgeContract    = "bridge_contract"
+	labelDexPool           = "dex_pool"
+	labelContract          = "contract"
 )
+
+// labelKindsKnown are the kinds labelStop has a class for. A run refuses a
+// label of any other kind rather than guess its fate.
+var labelKindsKnown = map[string]bool{
+	labelExchange: true, labelExchangeLike: true, labelModule: true, labelIBCEscrow: true, labelValidatorOperator: true,
+	labelInterchainAccount: true, labelGrantRecipient: true, labelBridgeEscrow: true, labelBridgeContract: true, labelDexPool: true, labelContract: true,
+	labelBusyWallet: true,
+}
 
 // IBCChannel maps a Hub channel to the chain on its other end, read from the
 // channel's client state on the node.
@@ -325,9 +341,11 @@ type dbFlowLoader struct {
 	bonds   map[string][]flowEvent
 	private bool
 	// maxHops is the run's hop limit; zero means flowMaxHops.
-	maxHops  int
-	archive  *flowArchive
-	progress func(commissionFlowProgress)
+	maxHops int
+	// labelFile is the digest of the private label file this run added.
+	labelFile string
+	archive   *flowArchive
+	progress  func(commissionFlowProgress)
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -993,8 +1011,20 @@ func labelStop(lab AddressLabel) flowStop {
 		return flowStop{Class: flowIBCOut, Detail: lab.Name}
 	case lab.Kind == labelExchangeLike:
 		return flowStop{Class: flowExchangeLike, Detail: lab.Source}
-	default:
+	case lab.Kind == labelExchange:
 		return flowStop{Class: flowExchange, Detail: lab.Name}
+	case lab.Kind == labelInterchainAccount:
+		return flowStop{Class: flowInterchainAccount, Detail: lab.Name}
+	case lab.Kind == labelGrantRecipient:
+		return flowStop{Class: flowGrantRecipient, Detail: lab.Name}
+	case lab.Kind == labelBridgeEscrow, lab.Kind == labelBridgeContract:
+		return flowStop{Class: flowBridge, Detail: lab.Name}
+	case lab.Kind == labelDexPool:
+		return flowStop{Class: flowDexPool, Detail: lab.Name}
+	case lab.Kind == labelContract:
+		return flowStop{Class: flowContract, Detail: lab.Name}
+	default:
+		panic(fmt.Sprintf("label kind %q has no stop class", lab.Kind))
 	}
 }
 
@@ -1034,7 +1064,7 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 	if n >= flowMemoMinSenders {
 		lab := AddressLabel{
 			Chain: l.chain, Address: addr, Name: "deposit-style address", Kind: labelExchangeLike, Source: flowMemoHeuristic,
-			Evidence: fmt.Sprintf("%d distinct senders with deposit-style memos in a sample of %d receipts", n, flowMemoSample), CreatedAt: nowUTC(),
+			Evidence: fmt.Sprintf("inferred; conditions met: memo-deposit; %d distinct senders with deposit-style memos in a sample of %d receipts", n, flowMemoSample), CreatedAt: nowUTC(),
 		}
 		if !l.private {
 			if err := l.s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&lab).Error; err != nil {
@@ -1070,7 +1100,7 @@ func (l *dbFlowLoader) busy(addr string, rows int64, start, end time.Time) (flow
 	if sweepExchange(examined, deposits) {
 		lab := AddressLabel{
 			Chain: l.chain, Address: addr, Name: "deposit-sweep wallet", Kind: labelExchangeLike, Source: flowSweepHeuristic,
-			Evidence: fmt.Sprintf("more than %d ledger rows; %s", ledgerHeavyRows, sweep), CreatedAt: nowUTC(),
+			Evidence: fmt.Sprintf("inferred; conditions met: deposit-sweep; more than %d ledger rows; %s", ledgerHeavyRows, sweep), CreatedAt: nowUTC(),
 		}
 		if !l.private {
 			if err := l.s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&lab).Error; err != nil {
@@ -1367,6 +1397,22 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 			loader.labels[l.Address] = l
 		}
 	}
+	for _, l := range loader.labels {
+		if !labelKindsKnown[l.Kind] {
+			return fmt.Errorf("label kind %q has no stop class", l.Kind)
+		}
+	}
+	if len(options) == 1 && options[0].Labels != nil {
+		if options[0].Labels.Chain != chain {
+			return fmt.Errorf("label file is for another chain")
+		}
+		loader.labelFile = options[0].Labels.digest
+		for _, l := range options[0].Labels.Labels {
+			if _, exists := loader.labels[l.Address]; !exists {
+				loader.labels[l.Address] = l
+			}
+		}
+	}
 	if workers < 1 {
 		workers = 1
 	}
@@ -1563,6 +1609,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	evidence.Wallets = walletEvidence
 	if loader.private {
 		evidence.MaxHops = loader.maxHops
+		evidence.LabelFile = loader.labelFile
 		evidence.Stops = commissionFlowStopEvidence(tr.Stops)
 	}
 	if loader.archive != nil {

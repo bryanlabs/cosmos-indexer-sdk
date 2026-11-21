@@ -61,6 +61,9 @@ type CommissionFlowBuildOptions struct {
 	// MaxHops overrides flowMaxHops. A version traced at another limit names
 	// it ("-hops5"), so its rows are never mixed with another limit's.
 	MaxHops int
+	// Labels adds a private label file's labels for this run. A version that
+	// uses one names its digest ("-labels<first 12>").
+	Labels *CommissionLabelFile
 }
 
 func (o CommissionFlowBuildOptions) profileSHA() string {
@@ -100,6 +103,12 @@ func (o CommissionFlowBuildOptions) validate() error {
 	}
 	if o.MaxHops < 0 || o.MaxHops > flowMaxHopsCeiling {
 		return fmt.Errorf("commission hop limit must be between 1 and %d", flowMaxHopsCeiling)
+	}
+	if o.Labels == nil && strings.Contains(o.Version, "-labels") {
+		return fmt.Errorf("label-named generation requires its exact label file")
+	}
+	if o.Labels != nil && (o.PrivateProfile == nil || !correctionHash(o.Labels.digest) || !strings.Contains(o.Version, "-labels"+o.Labels.digest[:12])) {
+		return fmt.Errorf("a label file requires a private generation whose version names it")
 	}
 	if o.MaxHops == 0 && strings.Contains(o.Version, "-hops") {
 		return fmt.Errorf("hop-named generation requires its hop limit")
@@ -177,6 +186,8 @@ type CommissionFlowEvidence struct {
 	SourceCorrectionProfile *CommissionSourceCorrectionProfileEvidence `json:",omitempty"`
 	// MaxHops is the hop limit the trace ran at, when not the default.
 	MaxHops int `json:",omitempty"`
+	// LabelFile is the digest of the private label file the run added.
+	LabelFile string `json:",omitempty"`
 	// Stops names, for every amount that left the traced wallets to a stop,
 	// the wallet it stopped at, its class and the hop it left from.
 	Stops []CommissionFlowStopEvidence `json:",omitempty"`
