@@ -21,7 +21,14 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `denom:<raw>` or `policy:spam`, groups per token and the reason glossary in
   `reviewreasons.go`; see `taxapi/ASSET-REVIEW.md`), `balances.go` (`/balance` = live
   node read via `NODE_REST_API`, persisted to `balance_snapshots`), `form8949.go`,
-  `form990t.go` (reports/forms).
+  `form990t.go` (reports/forms), `stakinginflation.go` (`GET
+  /staking/inflation`, INF-748: ATOM minted per day, month or year from every
+  cosmoshub-4 block's mint event, where it went, supply, stated vs actual
+  inflation and stated, paid, after-commission and real APR; serves the
+  embedded `stakingdata/inflation_daily.json`, built from raw block results by
+  `scripts/staking-inflation/` (extract, merge with its checks, export; README
+  there); replace the file and rebuild to extend it until the daily job writes
+  a table).
 - Methodology v8 surfaces (2026-10-15): `tax/catalog.go` (everything the
   indexer watches, served as `GET /catalog`; the website renders it as
   `/tax/coverage`, so a new category, contract or tag belongs here first),
