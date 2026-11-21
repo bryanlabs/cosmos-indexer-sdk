@@ -207,7 +207,7 @@ type CoverageRollupOptions struct {
 	// rebuilds each run (default 1).
 	Rolling int
 	// TeMargin re-reads this many taxable_events ids below the last frontier
-	// for changes committed late (default 200000).
+	// for changes committed late (default 20000).
 	TeMargin int64
 	// RecentChecks recounts the rows of this many full chunks below the last
 	// one each run (default 4).
@@ -237,7 +237,7 @@ func (o *CoverageRollupOptions) defaults() {
 		o.Rolling = 1
 	}
 	if o.TeMargin <= 0 {
-		o.TeMargin = 200_000
+		o.TeMargin = 20_000
 	}
 	if o.RecentChecks <= 0 {
 		o.RecentChecks = 4
@@ -385,12 +385,27 @@ func (r *rollupRun) run() error {
 func (r *rollupRun) markDirty(st rollupState, teTop int64) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if st.MessagesThrough > 0 && st.TeThrough < teTop {
-			from := max(st.TeThrough-r.opts.TeMargin, 0)
+			// Ids past the last frontier are new: their chunks are rebuilt.
 			res := tx.Exec(`UPDATE tax_coverage_rollup_chunks c SET dirty = true
 WHERE c.source = 1 AND NOT c.dirty AND c.chunk_lo IN (
  SELECT DISTINCT (te.message_id / @size) * @size FROM taxable_events te
  WHERE te.id >= @from AND te.id < @top AND te.message_id IS NOT NULL AND te.message_id < @through)`,
-				map[string]any{"size": st.MessageChunk, "from": from, "top": teTop, "through": st.MessagesThrough})
+				map[string]any{"size": st.MessageChunk, "from": st.TeThrough, "top": teTop, "through": st.MessagesThrough})
+			if res.Error != nil {
+				return res.Error
+			}
+			r.res.Dirtied += int(res.RowsAffected)
+		}
+		if st.MessagesThrough > 0 && st.TeThrough > 0 {
+			// Ids just below it were read last run unless they committed late,
+			// so their chunks are rebuilt only when the classified count moved.
+			// Rebuilding them every run kept a run from reaching the frontier.
+			res := tx.Exec(`UPDATE tax_coverage_rollup_chunks c SET dirty = true
+WHERE c.source = 1 AND NOT c.dirty AND c.chunk_lo IN (
+ SELECT DISTINCT (te.message_id / @size) * @size FROM taxable_events te
+ WHERE te.id >= @from AND te.id < @to AND te.message_id IS NOT NULL AND te.message_id < @through)
+ AND c.te_messages <> (SELECT count(DISTINCT te.message_id) FROM taxable_events te WHERE te.message_id >= c.chunk_lo AND te.message_id < c.chunk_hi)`,
+				map[string]any{"size": st.MessageChunk, "from": max(st.TeThrough-r.opts.TeMargin, 0), "to": st.TeThrough, "through": st.MessagesThrough})
 			if res.Error != nil {
 				return res.Error
 			}

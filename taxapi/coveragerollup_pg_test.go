@@ -206,6 +206,16 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, res.Dirtied, 1)
 	compare("new event on old message", true)
+	// With nothing changed, a run rebuilds nothing (ids just below the
+	// frontier are re-read but their chunks have not moved).
+	idle := opts
+	idle.Rolling = -1
+	res, err = RefreshCoverageRollup(ctx, db, idle)
+	require.NoError(t, err)
+	require.Equal(t, 0, res.Dirtied)
+	require.Equal(t, 0, res.Rebuilt)
+	var oldTE int64
+	require.NoError(t, db.Raw("SELECT id FROM taxable_events WHERE message_id = ?", oldMsg).Scan(&oldTE).Error)
 
 	// The only taxable event of an old message deleted: the fingerprint
 	// pass finds the chunk.
@@ -218,6 +228,14 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	require.GreaterOrEqual(t, res.Dirtied, 1)
 	require.Positive(t, res.Fingerprinted)
 	compare("deleted event", true)
+
+	// A taxable event committed late, with an id below the frontier: the
+	// re-read finds the chunk's classified count moved.
+	require.NoError(t, db.Exec("INSERT INTO taxable_events (id, message_id, sub_index) VALUES (?, ?, 0)", oldTE, oldMsg).Error)
+	res, err = RefreshCoverageRollup(ctx, db, idle)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Dirtied)
+	compare("late taxable event", true)
 
 	// A late commit below the frontier: a recent chunk's row count moved.
 	var maxMsg int64
