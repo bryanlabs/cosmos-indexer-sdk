@@ -1,9 +1,11 @@
 package taxapi
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,8 +30,13 @@ type CoverageStatement struct {
 	RecordOnlyMessageTypes []string `json:"record_only_message_types"`
 	// UnreviewedMessageTypes counts indexed message types the tax layer has no
 	// decision for; reports that touch one are held back.
-	UnreviewedMessageTypes int      `json:"unreviewed_message_types"`
-	OpenItems              []string `json:"open_items"`
+	UnreviewedMessageTypes int `json:"unreviewed_message_types"`
+	// TransactionsScanned and MessagesScanned count the cosmoshub-4
+	// transactions and messages indexed in the period, from the coverage
+	// rollup; null when they could not be counted quickly.
+	TransactionsScanned *int64   `json:"transactions_scanned"`
+	MessagesScanned     *int64   `json:"messages_scanned"`
+	OpenItems           []string `json:"open_items"`
 	// Text is the statement as printed on documents, one item per line.
 	Text string `json:"text"`
 	// Summary is the statement as one ASCII line, as in X-Coverage-Statement.
@@ -162,6 +169,14 @@ func (s *Server) coverageStatement(snap *IndexCoverage, period PeriodCoverage) *
 			StartTime: e.StartTime, EndTime: e.EndTime, Status: e.Status, InReports: e.InReports,
 		})
 	}
+	if period.hasRange {
+		ctx, cancel := context.WithTimeout(context.Background(), statementScanTimeout)
+		if c, err := s.covRollup.periodCounts(ctx, apiMainnet, period.from, period.to); err == nil {
+			tx, msgs := c.Transactions, c.Messages
+			st.TransactionsScanned, st.MessagesScanned = &tx, &msgs
+		}
+		cancel()
+	}
 	st.OpenItems = statementOpenItems(st, period)
 	st.Text = statementText(st, period)
 	st.Summary = statementHeader(st)
@@ -231,6 +246,9 @@ func statementText(st *CoverageStatement, period PeriodCoverage) string {
 	if period.Start != "" || period.End != "" {
 		fmt.Fprintf(&b, "Period: %s to %s, %s.\n", orUnbounded(period.Start), orUnbounded(period.End), periodWord(period))
 	}
+	if period.hasRange {
+		b.WriteString(statementScanLine(st) + "\n")
+	}
 	for _, c := range st.Chains {
 		read := "read by reports"
 		if !c.InReports {
@@ -247,6 +265,34 @@ func statementText(st *CoverageStatement, period PeriodCoverage) string {
 		b.WriteString("- " + item + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// statementScanLine states how many transactions the index holds for the
+// period, which is what the statement's coverage claims rest on.
+func statementScanLine(st *CoverageStatement) string {
+	if st.TransactionsScanned == nil || st.MessagesScanned == nil {
+		return "Transactions scanned: not counted when this was generated."
+	}
+	return fmt.Sprintf("Transactions scanned: %s %s transactions (%s messages) indexed in the period.",
+		groupDigits(*st.TransactionsScanned), apiHubChainID, groupDigits(*st.MessagesScanned))
+}
+
+// groupDigits writes n with comma thousands separators.
+func groupDigits(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	neg := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(s, "-")
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
 }
 
 func statementDay(t *time.Time) string {

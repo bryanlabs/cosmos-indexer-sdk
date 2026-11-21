@@ -74,10 +74,14 @@ type Server struct {
 	// the schema they are read from, for tests.
 	legacy       *legacyEraCache
 	legacySchema string
+
+	// covRollup reads the coverage rollup on the root database handle;
+	// nil counts /coverage live and leaves scan counts off statements.
+	covRollup *coverageRollup
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
-	return &Server{db: db, oracle: oracle, native: native}
+	return &Server{db: db, oracle: oracle, native: native, covRollup: newCoverageRollup(db)}
 }
 
 func (s *Server) Handler() http.Handler {

@@ -71,7 +71,7 @@ func (s *Server) withReadSnapshotTimeout(timeout time.Duration, fn func(*Server)
 		if err := tx.Exec("SET LOCAL plan_cache_mode = force_custom_plan").Error; err != nil {
 			return err
 		}
-		reader := &Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started, commissionPrivateProfile: s.commissionPrivateProfile, privateProjectionReceipts: pending, commissionSourceCorrections: s.commissionSourceCorrections, sourceCorrectionReceipts: pendingCorrections}
+		reader := &Server{db: tx, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, readSnapshotStarted: started, commissionPrivateProfile: s.commissionPrivateProfile, privateProjectionReceipts: pending, commissionSourceCorrections: s.commissionSourceCorrections, sourceCorrectionReceipts: pendingCorrections, covRollup: s.covRollup}
 		if err := reader.validatePrivateProjection(); err != nil {
 			return err
 		}

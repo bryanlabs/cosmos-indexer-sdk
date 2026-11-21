@@ -222,6 +222,10 @@ type PeriodCoverage struct {
 	Note string `json:"note,omitempty"`
 	// Statement is the coverage statement every report and export carries.
 	Statement *CoverageStatement `json:"statement,omitempty"`
+
+	// from and to are the requested period, for the statement's scan counts.
+	from, to time.Time
+	hasRange bool
 }
 
 // PeriodYearCoverage is one year the period touches that is not fully
@@ -916,6 +920,7 @@ func (s *Server) periodCoverage(start, end time.Time) PeriodCoverage {
 	if snap != nil {
 		p = snap.Period(start, end)
 	}
+	p.from, p.to, p.hasRange = start, end, true
 	p.Statement = s.coverageStatement(snap, p)
 	return p
 }
@@ -978,7 +983,9 @@ func (s *Server) handleIndexCoverage(w http.ResponseWriter, r *http.Request) {
 		}{snap, eras})
 		return
 	}
-	period := snap.Period(dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
+	start, end := dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
+	period := snap.Period(start, end)
+	period.from, period.to, period.hasRange = start, end, true
 	period.Statement = s.coverageStatement(snap, period)
 	writeJSON(w, struct {
 		*IndexCoverage

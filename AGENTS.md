@@ -114,6 +114,22 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   Preserve the 12M live-row default and all coverage gates. Real-copy proofs
   are opt-in, use newly retained schemas and never rewrite the preserved base.
   DELETE-shaped fixture proofs must roll back.
+- `taxapi/coveragerollup.go`, `taxcoverage/` - `GET /coverage` sums a
+  rollup instead of counting every message in the period (the old query took
+  4 to 7 minutes and up to 10 GB of temp over all history). Three additive
+  tables (`tax_coverage_rollup*`, DDL in `CoverageRollupDDL`, created once by
+  the owner) hold message counts and classified counts by UTC day, chain,
+  type and id chunk, plus transaction counts by day. Only the `taxcoverage`
+  CronJob writes them: it extends to the frontier, rebuilds chunks touched by
+  new or changed taxable events, recounts the recent chunks, fingerprints
+  every chunk's classified count to catch deletes, and rebuilds the oldest
+  chunk each run. The API reads them in one read-only snapshot, recounts
+  partial days and the unbuilt tail live, caches by frontier and shares one
+  query among identical requests. It falls back to the original live query
+  only when the rollup is missing, unreadable or more than 1.5M ids behind.
+  The coverage statement adds "Transactions scanned" from the same rollup
+  (rollup only, 10 s cap, "not counted" otherwise).
+  `coveragerollup_pg_test.go` pins rolled counts to the live query.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message
