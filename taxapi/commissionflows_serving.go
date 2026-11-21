@@ -169,6 +169,15 @@ func flowLSMClientTraceRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// flowLSMAllFixesRoot is an all-fixes rerun of a validator whose served row
+// came from the LSM reward retry, so it keeps that retry's profile and
+// version prefix.
+func flowLSMAllFixesRoot(suffix, root string) commissionServingSource {
+	r := flowLSMRoot(suffix, root)
+	r.Build = flowAllFixesBuild
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
@@ -446,7 +455,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowCorrectedRoot("accel-later-s03-20261115-deadline-retry-v2", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
 		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v3", "5187c6ad32a6209ebd2f8b36e2f78b95950a96e046c474db04ca64b8c981f885"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v3", "6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"),
-		flowLSMClientTraceRoot("accel-withdraw-fix-bc0089661f77-20261118-fanout-v4", "bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"),
+		flowLSMAllFixesRoot("accel-withdraw-fix-bc0089661f77-20261118-fanout-v7", "bc0089661f770388eeb5acd70a947bbc9c47ab0808b6fda90df95ff57800f15a"),
 		flowLSMRoot("accel-four-s06-20261115-lsm-retry-v9", "85f6d8206eebe56d592d5c82aa2978a04e7edf1ad6fcfb8165e6b15020298fd6"),
 		flowCorrected("accel-four-s01-20261115-v1"),
 		flowCorrected("accel-four-s02-20261115-v1"),
