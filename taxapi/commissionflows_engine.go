@@ -454,6 +454,7 @@ type flowTrace struct {
 	started                     time.Time
 	progressSequence            int
 	appliedQueuedEvents         int
+	frontier                    time.Time
 	closingReadCompletedWallets int
 	discoveryComplete           bool
 
@@ -532,6 +533,7 @@ func (t *flowTrace) run(group []string) error {
 	}
 	for t.queue.Len() > 0 {
 		q := heap.Pop(&t.queue).(flowQueued)
+		t.frontier = q.key.Time
 		if err := t.apply(q.wallet, q.event, true); err != nil {
 			return err
 		}

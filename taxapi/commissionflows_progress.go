@@ -19,7 +19,11 @@ type commissionFlowProgress struct {
 	JobHeaderCacheReuses   int64 `json:"job_header_cache_reuses"`
 	PendingEvents          int   `json:"pending_events"`
 	AppliedQueuedEvents    int   `json:"applied_queued_events"`
-	DiscoveryComplete      bool  `json:"discovery_complete"`
+	// How far through [From, AsOf) the applied events have reached, by block
+	// time; -1 before the first. Later months hold more wallets, so it runs
+	// ahead of the work done.
+	EventTimeFraction float64 `json:"event_time_fraction"`
+	DiscoveryComplete bool    `json:"discovery_complete"`
 	// -1 means unknown, including every phase before discovery completes.
 	ClosingRemaining int `json:"closing_remaining"`
 }
@@ -36,6 +40,10 @@ func (t *flowTrace) reportProgress(phase, _ string, closingRemaining int) {
 		ClosingReadCompletedWallets: t.closingReadCompletedWallets,
 		PendingEvents:               t.queue.Len(), AppliedQueuedEvents: t.appliedQueuedEvents,
 		DiscoveryComplete: t.discoveryComplete, ClosingRemaining: closingRemaining,
+		EventTimeFraction: -1,
+	}
+	if span := t.AsOf.Sub(t.From); !t.frontier.IsZero() && span > 0 {
+		p.EventTimeFraction = float64(t.frontier.Sub(t.From)) / float64(span)
 	}
 	t.progress(p)
 }
