@@ -52,6 +52,20 @@ type CoverageReport struct {
 	// CountedFrom says how far the coverage rollup was built when it was
 	// summed; null when counted live.
 	CountedFrom *CoverageRollupInfo `json:"counted_from,omitempty"`
+	// Status is "counted", or "pending" while the coverage rollup does not
+	// cover the period yet; a pending report counts nothing and Note says so.
+	Status string `json:"status"`
+	Note   string `json:"note,omitempty"`
+}
+
+// coveragePendingNote is what a pending /coverage report says in place of counts.
+const coveragePendingNote = "Message counts for this period are still being built, so this file does not count or classify messages yet. Request it again later for the counts; the rest of the evidence does not depend on it."
+
+// pendingCoverage is the /coverage answer while the rollup cannot cover the period.
+func pendingCoverage(start, end time.Time) *CoverageReport {
+	rep := summarizeCoverage(nil, start, end)
+	rep.Status, rep.Note = "pending", coveragePendingNote
+	return rep
 }
 
 // typeCount is one row of the reconciliation query: a message type and how many
@@ -65,7 +79,8 @@ type typeCount struct {
 // coverage counts messages by type over [start,end) by summing the coverage
 // rollup (coveragerollup.go). It never counts every message live: that scan
 // wrote up to 86 GB of temp files. Until the rollup covers the period it
-// returns errCoverageRollupUnavailable, which /coverage answers with 503.
+// returns errCoverageRollupUnavailable, which /coverage answers with a
+// pending report (the evidence bundle needs a 200 to be built).
 func (s *Server) coverage(chain string, start, end time.Time) (*CoverageReport, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), coverageRollupTimeout+10*time.Second)
 	defer cancel()
@@ -78,6 +93,7 @@ func (s *Server) coverage(chain string, start, end time.Time) (*CoverageReport, 
 		return nil, err
 	}
 	report := summarizeCoverage(counts.Types, start, end)
+	report.Status = "counted"
 	report.ParserErrors, report.DecodeErrors = readiness.ParserErrors, readiness.DecodeErrors
 	report.OpaqueMessages = readiness.OpaqueMessages
 	report.UnreviewedMessages = readiness.UnreviewedMessages
