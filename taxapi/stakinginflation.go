@@ -241,6 +241,18 @@ func atomString(u *big.Int) string {
 	return s
 }
 
+// feesToStakers is what validators were credited beyond new ATOM. The chain
+// sends the sub-uatom remainders of each block's split to the community pool,
+// so in a period with almost no fees the difference can dip a fraction of an
+// ATOM below zero; that is rounding, not negative fees, and is shown as zero.
+func feesToStakers(rewards, stakers *big.Int) *big.Int {
+	f := new(big.Int).Sub(rewards, stakers)
+	if f.Sign() < 0 {
+		return f.SetInt64(0)
+	}
+	return f
+}
+
 func ratio(a, b *big.Int) float64 {
 	if b.Sign() == 0 {
 		return 0
@@ -294,7 +306,7 @@ func summarize(period string, days []inflationDay, next *inflationDay) inflation
 		ToValidatorsCommission: atomString(commission),
 		ToDelegators:           atomString(new(big.Int).Sub(stakers, commission)),
 		SupplyStart:            atomString(supply),
-		FeeShare:               atomString(new(big.Int).Sub(rewards, stakers)),
+		FeeShare:               atomString(feesToStakers(rewards, stakers)),
 	}
 	if next != nil {
 		row.SupplyEnd = atomString(next.SupplyStart)
@@ -356,7 +368,7 @@ var inflationMethod = map[string]string{
 	"community_pool":       "The community tax share of new ATOM, at the rate in force at each block. A change passed by governance applies from the block after the vote closed.",
 	"stakers":              "New ATOM left after the community tax, paid to bonded validators by voting power. Validators keep their commission rate from it and the rest accrues to their delegators.",
 	"commission":           "The commission part of what stakers received, in the same proportion the chain's commission events show for the period. Delegators' part is the rest.",
-	"fees_to_stakers":      "Transaction fees paid to stakers on top of new ATOM, net of the fractions of a uatom the chain sends to the community pool when it divides each block's rewards. It can be a tiny negative amount when fees are close to zero.",
+	"fees_to_stakers":      "Transaction fees paid to stakers on top of new ATOM, net of the fractions of a uatom the chain sends to the community pool when it divides each block's rewards. When fees are close to zero those remainders can exceed them by a fraction of an ATOM, and the figure is shown as zero.",
 	"bonded_ratio":         "Share of all ATOM that is staked, as reported in each block's mint event, averaged over the period's blocks.",
 	"apr_stated":           "What staking pays if the stated inflation rate were the real one: stated inflation times (1 minus community tax), divided by the staked share.",
 	"apr_paid":             "What staking actually paid before validator commission: rewards the chain credited to validators in the period (new ATOM plus fees), divided by the ATOM staked on average over the period, scaled to a year.",
