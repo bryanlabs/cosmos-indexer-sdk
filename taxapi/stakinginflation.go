@@ -272,12 +272,14 @@ func summarize(period string, days []inflationDay, next *inflationDay) inflation
 	rewards := sum(func(d inflationDay) *big.Int { return d.RewardsEvents })
 	commissionEvents := sum(func(d inflationDay) *big.Int { return d.CommissionEvents })
 	var blocks int64
-	var secs, inflW, bondW float64
+	var secs, inflW, bondW, stakedSecs float64
 	for _, d := range days {
 		blocks += d.Blocks
 		secs += d.Seconds
 		inflW += d.InflationAvg * float64(d.Blocks)
 		bondW += d.BondedAvg * float64(d.Blocks)
+		supplyF, _ := new(big.Float).SetInt(d.SupplyStart).Float64()
+		stakedSecs += d.BondedAvg * supplyF * d.Seconds
 	}
 	first, last := days[0], days[len(days)-1]
 	year, _ := time.Parse(time.DateOnly, first.Date)
@@ -309,7 +311,10 @@ func summarize(period string, days []inflationDay, next *inflationDay) inflation
 	row.InflationActual = round6(actual)
 	row.BondedRatio = round6(bonded)
 	row.AprStated = round6(row.InflationStated * (1 - tax) / bonded)
-	paid := ratio(rewards, supply) * scale / bonded
+	// Rewards over the ATOM staked on average across the period (each day's
+	// staked share of that day's supply, weighted by time), scaled to a year.
+	rewardsF, _ := new(big.Float).SetInt(rewards).Float64()
+	paid := rewardsF * yearSecs / stakedSecs
 	row.AprPaid = round6(paid)
 	row.AprAfterCommission = round6(paid * (1 - commShare))
 	row.AprReal = round6((1+paid)/(1+actual) - 1)
@@ -354,7 +359,7 @@ var inflationMethod = map[string]string{
 	"fees_to_stakers":      "Transaction fees paid to stakers on top of new ATOM, net of the fractions of a uatom the chain sends to the community pool when it divides each block's rewards. It can be a tiny negative amount when fees are close to zero.",
 	"bonded_ratio":         "Share of all ATOM that is staked, as reported in each block's mint event, averaged over the period's blocks.",
 	"apr_stated":           "What staking pays if the stated inflation rate were the real one: stated inflation times (1 minus community tax), divided by the staked share.",
-	"apr_paid":             "What staking actually paid before validator commission: rewards the chain credited to validators in the period (new ATOM plus fees), divided by the ATOM staked, scaled to a year.",
+	"apr_paid":             "What staking actually paid before validator commission: rewards the chain credited to validators in the period (new ATOM plus fees), divided by the ATOM staked on average over the period, scaled to a year.",
 	"apr_after_commission": "Paid APR after the average validator commission in the period. A delegator's own rate depends on their validator's commission.",
 	"apr_real":             "Paid APR adjusted for the new ATOM everyone else received: (1 + paid APR) / (1 + actual inflation) minus 1. Holding ATOM without staking loses about the actual inflation rate in share of supply.",
 	"periods":              "Days are UTC. The first day starts at the chain's first block (2021-02-18 12:23:53 UTC). Rates for a partial period are scaled to its calendar year.",

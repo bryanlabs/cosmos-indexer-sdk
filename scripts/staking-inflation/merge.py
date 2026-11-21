@@ -106,7 +106,7 @@ def main():
             'date': k, 'first_height': start, 'last_height': end, 'blocks': d['blocks'],
             'minted_uatom': d['minted'],
             'community_pool_uatom': int(pool.to_integral_value(ROUND_HALF_EVEN)),
-            'stakers_uatom': int(to_stakers.to_integral_value(ROUND_HALF_EVEN)),
+            'stakers_uatom': d['minted'] - int(pool.to_integral_value(ROUND_HALF_EVEN)),
             'commission_uatom': int((to_stakers * com_share).to_integral_value(ROUND_HALF_EVEN)),
             'rewards_events_uatom': int(d['rewards']),
             'commission_events_uatom': int(d['commission']),
@@ -142,10 +142,15 @@ if __name__ == '__main__':
 def export(merged_path, out_path, as_of):
     """The compact file the API embeds: one array per UTC day."""
     m = json.load(open(merged_path))
+    rep = m['report']
+    # Never export a file that would claim coverage it does not have.
+    if rep['gaps'] or rep['overlaps'] or rep['problem_count'] or rep['heights_covered'] != rep['heights_expected']:
+        raise SystemExit('refusing export: gaps %s overlaps %s problems %d' % (rep['gaps'][:3], rep['overlaps'][:3], rep['problem_count']))
+    if sum(r['blocks'] for r in m['rows']) != rep['heights_expected']:
+        raise SystemExit('refusing export: day block counts do not add up to the height range')
     cols = ['date', 'first_height', 'last_height', 'blocks', 'minted_uatom', 'community_pool_uatom',
             'stakers_uatom', 'commission_uatom', 'rewards_events_uatom', 'commission_events_uatom',
             'supply_start_uatom', 'inflation_param_avg', 'bonded_ratio_avg', 'community_tax_start']
-    rep = m['report']
     doc = {
         'chain': 'cosmoshub-4', 'as_of': as_of, 'first_block_time': m['first_block_time'],
         'first_height': rep['first_height'], 'last_height': rep['last_height'],
