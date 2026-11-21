@@ -69,12 +69,24 @@ func TestReadSnapshotDeadlinePrivateOnly(t *testing.T) {
 			}
 			s := &Server{db: &gorm.DB{Statement: &gorm.Statement{Context: parent}}, readOnlyLedger: tc.private, privateReadSnapshotTimeout: tc.override}
 			began := time.Now()
-			ctx, cancel := s.readSnapshotContext()
+			ctx, cancel := s.readSnapshotContext(0)
 			defer cancel()
 			deadline, ok := ctx.Deadline()
 			require.True(t, ok)
 			require.InDelta(t, tc.want.Seconds(), deadline.Sub(began).Seconds(), 0.1)
 		})
+	}
+}
+
+func TestReadSnapshotDeadlineReportJob(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		s := &Server{db: &gorm.DB{Statement: &gorm.Statement{Context: context.Background()}}, readOnlyLedger: private, privateReadSnapshotTimeout: time.Minute}
+		began := time.Now()
+		ctx, cancel := s.readSnapshotContext(reportJobReadSnapshotTimeout)
+		deadline, ok := ctx.Deadline()
+		cancel()
+		require.True(t, ok)
+		require.InDelta(t, reportJobReadSnapshotTimeout.Seconds(), deadline.Sub(began).Seconds(), 0.1)
 	}
 }
 

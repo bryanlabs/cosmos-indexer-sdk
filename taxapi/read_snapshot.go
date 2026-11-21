@@ -11,6 +11,11 @@ import (
 
 const readSnapshotTimeout = 30 * time.Second
 
+// reportJobReadSnapshotTimeout bounds the snapshots of a background report
+// job. The page polls the job, so no request waits on it, and a busy wallet's
+// full-history fingerprint alone took 18s on the live database.
+const reportJobReadSnapshotTimeout = 3 * time.Minute
+
 type walletRows struct {
 	Events []tax.TaxableEvent
 	Fees   []feeRec
@@ -30,17 +35,25 @@ type reportInput struct {
 // mutexes). Only DB query methods may run on it. All pricing, review application
 // and rendering run on the original Server, preserving its configuration and
 // shared caches. No network calls or report-job writes belong in this callback.
-func (s *Server) readSnapshotContext() (context.Context, context.CancelFunc) {
+func (s *Server) readSnapshotContext(override time.Duration) (context.Context, context.CancelFunc) {
 	timeout := readSnapshotTimeout
-	if s.readOnlyLedger && s.privateReadSnapshotTimeout > 0 {
+	if override > 0 {
+		timeout = override
+	} else if s.readOnlyLedger && s.privateReadSnapshotTimeout > 0 {
 		timeout = s.privateReadSnapshotTimeout
 	}
 	return context.WithTimeout(s.db.Statement.Context, timeout)
 }
 
 func (s *Server) withReadSnapshot(fn func(*Server) error) error {
+	return s.withReadSnapshotTimeout(0, fn)
+}
+
+// withReadSnapshotTimeout is withReadSnapshot with its own deadline; zero
+// keeps the default.
+func (s *Server) withReadSnapshotTimeout(timeout time.Duration, fn func(*Server) error) error {
 	started := time.Now()
-	ctx, cancel := s.readSnapshotContext()
+	ctx, cancel := s.readSnapshotContext(timeout)
 	defer cancel()
 	var pendingCorrections *commissionCorrectionJournal
 	if s.commissionSourceCorrections != nil && s.sourceCorrectionReceipts != nil {
@@ -90,23 +103,28 @@ func (s *Server) reportReadiness(chain string, addresses []string, start, end ti
 // cache evidence all belong to the same PostgreSQL MVCC snapshot. Materialize
 // before pricing so external services cannot prolong a database transaction.
 func (s *Server) readReportInput(chain string, addresses []string, start, end time.Time, fingerprint bool) (reportInput, error) {
-	return s.readWalletInput(chain, addresses, start, end, fingerprint, s.legacyEras(chain))
+	return s.readWalletInput(chain, addresses, start, end, fingerprint, s.legacyEras(chain), 0)
+}
+
+// readReportJobInput is readReportInput for a background report job.
+func (s *Server) readReportJobInput(chain string, addresses []string, start, end time.Time) (reportInput, error) {
+	return s.readWalletInput(chain, addresses, start, end, true, s.legacyEras(chain), reportJobReadSnapshotTimeout)
 }
 
 // readCurrentChainInput is readReportInput on cosmoshub-4 alone, for
 // readers keyed by cosmoshub-4 heights (commission flows).
 func (s *Server) readCurrentChainInput(chain string, addresses []string, start, end time.Time) (reportInput, error) {
-	return s.readWalletInput(chain, addresses, start, end, false, nil)
+	return s.readWalletInput(chain, addresses, start, end, false, nil, 0)
 }
 
-func (s *Server) readWalletInput(chain string, addresses []string, start, end time.Time, fingerprint bool, eras *legacyEraState) (input reportInput, err error) {
+func (s *Server) readWalletInput(chain string, addresses []string, start, end time.Time, fingerprint bool, eras *legacyEraState, timeout time.Duration) (input reportInput, err error) {
 	phases := s.privateReadPhases(addresses, start, end, "snapshot")
 	defer func() { err = phases.wrap(err) }()
 	// The era state is read before the snapshot opens: the reader facade
 	// holds only the database. The legacy schema is queried only when an
 	// earlier chain is in reports, so a role that cannot read it never aborts
 	// a report's transaction.
-	err = s.withReadSnapshot(func(reader *Server) error {
+	err = s.withReadSnapshotTimeout(timeout, func(reader *Server) error {
 		phases.next("readiness")
 		refundPairs, err := reader.reportReadiness(chain, addresses, start, end)
 		if err != nil {

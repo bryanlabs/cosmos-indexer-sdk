@@ -186,7 +186,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 func (s *Server) computeReportJob(key, chain string, addresses []string, start, end time.Time, format string, decisions AssetDecisions, tags UserTags) {
 	defer inFlight.Delete(key)
 	computedThrough := nowUTC()
-	input, err := s.readReportInput(chain, addresses, start, end, true)
+	input, err := s.readReportJobInput(chain, addresses, start, end)
 	if err != nil {
 		s.failReportJob(key, err)
 		return
@@ -209,7 +209,7 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 	}
 
 	var after string
-	err = s.withReadSnapshot(func(reader *Server) error {
+	err = s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
 		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
 			return err
 		}
