@@ -45,6 +45,7 @@ var FlowClassNotes = map[string]string{ //nolint:gosec // class descriptions, no
 	flowBusyWallet:        "Sent to a wallet with too much activity to trace (an exchange, a bridge or a service, most likely).",
 	flowWideDistributor:   "Sent to, or paid out by, a wallet that sent ATOM to more than " + flowFanoutText + " different wallets during the trace window, such as an exchange hot wallet or a reward or airdrop distributor. The trace stops there, so value reaching it is shown as one amount rather than followed to each recipient. Inferred, not confirmed.",
 	flowUnresolved:        "The trace could not read the receiving wallet's history.",
+	flowBlockSpend:        "Spent by the chain at the start or end of a block with no receiver the indexer could classify; the detail names the block event. Under review.",
 }
 
 // flowFanoutText is the wide distributor threshold as the page writes it.

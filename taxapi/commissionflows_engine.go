@@ -72,6 +72,7 @@ const (
 	flowBusyWallet        = "busy_wallet"
 	flowWideDistributor   = "wide_distributor"
 	flowUnresolved        = "unresolved"
+	flowBlockSpend        = "block_spend"
 	flowOriginOther       = ""
 	flowDust              = "0.000001"
 	flowProRataPrecision  = 12
@@ -1005,6 +1006,13 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 			}
 		}
 	}
+	if stop.Class == "" && e.To == "" && flowUnclassifiedBlockSpend(e) {
+		// The chain spent these coins at the start or end of a block with no
+		// receiver the parser could classify, and the parser marked the row
+		// for review. They end there, named by the block event type. Any
+		// other row without a receiver still fails a strict trace.
+		stop = flowStop{Class: flowBlockSpend, Detail: detailValue(e.Detail, "event_type")}
+	}
 	if stop.Class == "" {
 		var err error
 		if stop, err = t.stopFor(e.To); err != nil {
@@ -1043,6 +1051,12 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 		dst.pools[r].liquid.add(parts[r])
 	}
 	return nil
+}
+
+// flowUnclassifiedBlockSpend reports a block event spend the parser could not
+// pair with a receiver (tax.ReviewUnclassifiedBlockMovement).
+func flowUnclassifiedBlockSpend(e flowEvent) bool {
+	return detailValue(e.Detail, "source") == "block_event" && detailValue(e.Detail, "review_reason") == tax.ReviewUnclassifiedBlockMovement
 }
 
 func (t *flowTrace) stopFor(addr string) (flowStop, error) {
