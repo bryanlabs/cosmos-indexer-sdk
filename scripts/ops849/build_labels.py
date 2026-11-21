@@ -26,7 +26,7 @@ def add(chain, address, name, kind, source, evidence, rule, basis, ref, license_
         r["tags"] = sorted(set(r["tags"]) | set(tags) | {kind})
         r["evidence"] += "; " + evidence
         if kind == "bridge_escrow":
-            r["name"], r["ref"], r["rule"] = name, r["ref"] + "; " + ref, r["rule"] + "+" + rule
+            r["kind"], r["name"], r["ref"], r["rule"] = kind, name, r["ref"] + "; " + ref, r["rule"] + "+" + rule
             r["license"] = r["license"] + "; " + license_
         if basis == "published" or r["basis"] == "published":
             r["basis_detail"] = "derived and published"
