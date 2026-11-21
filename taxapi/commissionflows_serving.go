@@ -209,12 +209,12 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowAllFixesRoot("accel-withdraw-fix-8df708d2db2f-20261118-fanout-v7", "8df708d2db2f5583431b8f9ce8a6e3ba9ae7840e0f78b38366948a69c0d24716"),
 		// Self-bond rerun: its own self-bond had no ledger row, so the old trace kept the bond liquid; about 0.79 ATOM moves to ibc_out, 0.38 from restaked_own and 0.41 from held (66.0 pct class share).
 		flowAllFixesRoot("accel-withdraw-fix-1e6691e3985a-20261118-fanout-v7", "1e6691e3985a8f008990dbebf047b578651e022a4f608e7f48b939f571d4e3ab"),
-		flowSlashRoot("accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v3", "fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"),
+		flowAllFixesRoot("accel-withdraw-fix-fda70bc2ca4c-20261118-fanout-v7", "fda70bc2ca4ce5311f719f17a2e26c8339c2e727ce3ad9309ecf27f8c039e02b"),
 		flowAllFixesRoot("accel-withdraw-fix-7f2f32dfb1d5-20261118-fanout-v7", "7f2f32dfb1d5d391d70b85d967e90ae248d7aa4dd109656f633a893c98febea6"),
 		flowAllFixesRoot("accel-withdraw-fix-75f92cb68a7f-20261118-fanout-v7", "75f92cb68a7f639c979be19a1d7ca4b7ce6ad63a2341562f3c966f82c7ab920d"),
 		flowSlashRoot("accel-withdraw-fix-f467f62240db-20261118-fanout-v3", "f467f62240db0faad0c3394d0f0be34ec1ed8a1310d287c04cd46b648525b571"),
 		// Its rows are over the inline limit and served from verified chunks.
-		flowClientTraceRoot("accel-withdraw-fix-b970df6089e6-20261118-fanout-v4", "b970df6089e634f8cd9c6b5a4fff54656cb34cbb9d0cf568611e963d313dccdb"),
+		flowAllFixesRoot("accel-withdraw-fix-b970df6089e6-20261118-fanout-v7", "b970df6089e634f8cd9c6b5a4fff54656cb34cbb9d0cf568611e963d313dccdb"),
 		flowSlashRoot("accel-withdraw-fix-bf9b46882519-20261118-fanout-v3", "bf9b46882519b68cecbc4399741d4c85064fcbfa3fd555333dda5525f12f0a93"),
 		flowWithdrawFixRoot("accel-withdraw-fix-007bd61b16ac-20261118-fanout-v1", "007bd61b16ac3792987956d92c01c689478dac00d39979d0e8acb010a07c50b3"),
 		flowAllFixesRoot("accel-withdraw-fix-0da7be31faa8-20261118-fanout-v7", "0da7be31faa899b2a6ed0dcfb7fcdec0b2811c102eebbfc106027bab2f54d46c"),
@@ -382,7 +382,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 		flowAllFixesRoot("accel-withdraw-fix-dc3a8dc3b69e-20261118-fanout-v7", "dc3a8dc3b69ed7ae16b967171f25c42d3add8f3f262d4520b7dfbaadcb8d321c"),
 		flowSelfBondRoot("accel-withdraw-fix-b9ecc59cfc02-20261118-fanout-v1", "b9ecc59cfc02e29fcf76366fbafd10b9aab131541474dbb1cb137af46acce3c1"),
 		flowSelfBondRoot("accel-withdraw-fix-4edb7be0f345-20261118-fanout-v1", "4edb7be0f345546c77f2037c549db6bc90490670785f0d531f6191d92d7d1b50"),
-		flowClientTraceRoot("accel-withdraw-fix-4237d016eff9-20261118-fanout-v1", "4237d016eff9f444ac44a928b6fbb92af51023fd0796e3e06b59fda674380996"),
+		flowAllFixesRoot("accel-withdraw-fix-4237d016eff9-20261118-fanout-v7", "4237d016eff9f444ac44a928b6fbb92af51023fd0796e3e06b59fda674380996"),
 		flowClientTraceRoot("accel-withdraw-fix-a70de707d95f-20261118-fanout-v4", "a70de707d95fcb186b95515fa66770eff0b58c54a98ad281139d345ba953e2a0"),
 		flowSlashRoot("accel-withdraw-fix-1af3d755b507-20261118-fanout-v1", "1af3d755b5076aaae9cc46334b7f319e4d67159c92b8b46472f3bf4f3c00643d"),
 		flowSlashRoot("accel-withdraw-fix-67c999d116ef-20261118-fanout-v1", "67c999d116efad9e0f4bb723dbfccc9361424d5fb291f1385850b7a73885caeb"),
@@ -440,7 +440,7 @@ var defaultCommissionServingSources = map[string][]commissionServingSource{
 			return r
 		}(),
 		flowCorrectedRoot("accel-four-s05-20261115-deadline-retry-v4", "ab12977c1a2135f7aeea69534171ee3c2bec9a03f3650cbf5dff76caefb19345"),
-		flowSlashRoot("accel-withdraw-fix-290eefd100eb-20261118-fanout-v1", "290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"),
+		flowAllFixesRoot("accel-withdraw-fix-290eefd100eb-20261118-fanout-v7", "290eefd100eb62044e1da01618881c70ac9aa783672b9547415766c16bcf06ff"),
 		flowCorrectedRoot("accel-four-s04-20261115-deadline-retry-v4", "0a11a4c0090436746a12555ec8f07a503c467e849bccf9ef550a8e2985f2b5ab"),
 		flowCorrectedRoot("accel-later-s02-20261115-deadline-retry-v3", "50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"),
 		flowCorrectedRoot("accel-later-s03-20261115-deadline-retry-v2", "001308de505138aa91ea460b148382f1dd7b6528a4a307e6333dff716f08a7ae"),
