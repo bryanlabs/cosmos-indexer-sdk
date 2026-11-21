@@ -43,6 +43,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
 			{apiPath: "/balance-statement", apiPurpose: "Quarter-end and year-end holdings for a wallet (year=) or listed dates (dates=), JSON or format=csv, each date with its own status."},
 			{apiPath: "/delegator-report", apiPurpose: "Embeddable per-delegator summary for a validator's website."},
 			{apiPath: "/index-coverage", apiPurpose: "Which blocks are indexed, per calendar year: block range, indexed and expected counts, fully covered dates and gaps. Reports for a period that is not fully indexed carry an X-Index-Coverage warning."},
+			{apiPath: "/coverage-statement", apiPurpose: "The coverage statement every report and export carries (also index_coverage.statement and X-Coverage-Statement): chains and heights read, indexed-through height and time, and known open items. JSON, or format=text."},
 		},
 		"gaia_releases":    tax.GaiaReleases,
 		"upcoming_changes": tax.UpcomingChainChanges,

@@ -50,6 +50,7 @@ type Server struct {
 
 	indexCovMu      sync.RWMutex
 	coverageScanner *indexCoverageScanner
+	stmtCache       statementCache
 
 	ledgerCov ledgerCoverage
 
@@ -91,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /990t", s.withPeriodCoverage(s.handle990T))
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	mux.HandleFunc("GET /index-coverage", s.handleIndexCoverage)
+	mux.HandleFunc("GET /coverage-statement", s.handleCoverageStatement)
 	mux.HandleFunc("GET /balance", s.handleBalance)
 	mux.HandleFunc("GET /balance-statement", s.handleBalanceStatement)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)

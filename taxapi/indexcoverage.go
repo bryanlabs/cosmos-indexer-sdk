@@ -220,6 +220,8 @@ type PeriodCoverage struct {
 	// Note is information that does not make the period incomplete, such as
 	// the days before genesis.
 	Note string `json:"note,omitempty"`
+	// Statement is the coverage statement every report and export carries.
+	Statement *CoverageStatement `json:"statement,omitempty"`
 }
 
 // PeriodYearCoverage is one year the period touches that is not fully
@@ -910,10 +912,12 @@ func unknownPeriodCoverage() PeriodCoverage {
 // periodCoverage evaluates [start, end) against the current snapshot.
 func (s *Server) periodCoverage(start, end time.Time) PeriodCoverage {
 	snap := s.coverageSnapshot()
-	if snap == nil {
-		return unknownPeriodCoverage()
+	p := unknownPeriodCoverage()
+	if snap != nil {
+		p = snap.Period(start, end)
 	}
-	return snap.Period(start, end)
+	p.Statement = s.coverageStatement(snap, p)
+	return p
 }
 
 func (s *Server) indexCoverage() *indexCoverageScanner {
@@ -975,6 +979,7 @@ func (s *Server) handleIndexCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	period := snap.Period(dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
+	period.Statement = s.coverageStatement(snap, period)
 	writeJSON(w, struct {
 		*IndexCoverage
 		Eras   []EraCoverage  `json:"eras"`
@@ -1013,7 +1018,10 @@ func setPeriodCoverageHeaders(w http.ResponseWriter, p PeriodCoverage) {
 	if p.Note != "" {
 		w.Header().Set(headerIndexCoverageNote, asciiHeader(p.Note))
 	}
-	exposed := headerIndexCoverage + ", " + headerIndexCoverageWarning + ", " + headerIndexCoverageYears + ", " + headerIndexCoverageNote
+	if p.Statement != nil {
+		w.Header().Set(headerCoverageStatement, p.Statement.Summary)
+	}
+	exposed := headerIndexCoverage + ", " + headerIndexCoverageWarning + ", " + headerIndexCoverageYears + ", " + headerIndexCoverageNote + ", " + headerCoverageStatement
 	w.Header().Set("Access-Control-Expose-Headers", exposed)
 }
 
