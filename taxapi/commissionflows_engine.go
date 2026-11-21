@@ -34,8 +34,12 @@ const (
 var flowRuleNames = [flowRules]string{"fifo", "pro_rata"}
 
 // flowMaxHops is how many wallets past the receiving wallets the tracer
-// follows. Coins leaving a wallet at this depth end as beyond_hops.
-const flowMaxHops = 3
+// follows by default. Coins leaving a wallet at the limit end as beyond_hops.
+// A private run may set another limit (flowMaxHopsCeiling at most).
+const (
+	flowMaxHops        = 3
+	flowMaxHopsCeiling = 20
+)
 
 // Fate classes. A terminal class is recorded when coins leave the traced
 // wallets; the others describe where coins sit at the as-of date.
@@ -457,6 +461,13 @@ type flowTrace struct {
 	Fates      map[FlowFateKey]decimal.Decimal
 	Commission map[string]decimal.Decimal
 	Unresolved []string
+	// maxHops is the hop limit; zero means flowMaxHops.
+	maxHops int
+	// Stops sums, per rule, the commission each transfer out of the traced
+	// wallets carried to a stop (a labelled wallet, a busy wallet, the hop
+	// limit), keyed by both ends, so every amount that ends untraced names
+	// the wallet it stopped at.
+	Stops map[FlowStopKey]decimal.Decimal
 	// slashList is every validator slash in [From, AsOf).
 	slashList []flowEvent
 }
@@ -465,8 +476,41 @@ func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flow
 	return &flowTrace{
 		Validator: validator, From: from, AsOf: asOf, load: load, started: time.Now(),
 		Wallets: map[string]*flowWallet{}, stops: map[string]flowStop{}, sources: map[string]flowStop{}, attempted: map[string]bool{},
-		Fates: map[FlowFateKey]decimal.Decimal{}, Commission: map[string]decimal.Decimal{},
+		Fates: map[FlowFateKey]decimal.Decimal{}, Commission: map[string]decimal.Decimal{}, Stops: map[FlowStopKey]decimal.Decimal{},
 	}
+}
+
+func (t *flowTrace) hopLimit() int {
+	if t.maxHops > 0 {
+		return t.maxHops
+	}
+	return flowMaxHops
+}
+
+// FlowStopKey is where a transfer left the traced wallets: the sending
+// wallet and its hop, the receiver, and the fate the receiver gave it.
+type FlowStopKey struct {
+	Rule   int
+	Class  string
+	Detail string
+	From   string
+	To     string
+	Hop    int
+}
+
+// recordStop adds the commission parts carry to the stop from w to "to".
+func (t *flowTrace) recordStop(r int, parts []flowPart, w *flowWallet, to string, stop flowStop) {
+	amount := decimal.Zero
+	for _, x := range parts {
+		if x.Origin != flowOriginOther && x.Amount.IsPositive() {
+			amount = amount.Add(x.Amount)
+		}
+	}
+	if !amount.IsPositive() {
+		return
+	}
+	k := FlowStopKey{Rule: r, Class: stop.Class, Detail: stop.Detail, From: w.Addr, To: to, Hop: w.Hop}
+	t.Stops[k] = t.Stops[k].Add(amount)
 }
 
 // run traces from the receiving wallets (hop 0) over [From, AsOf).
@@ -963,7 +1007,7 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 			return err
 		}
 	}
-	if stop.Class == "" && w.Hop >= flowMaxHops {
+	if stop.Class == "" && w.Hop >= t.hopLimit() {
 		stop = flowStop{Class: flowBeyondHops}
 	}
 	if stop.Class != "" {
@@ -971,6 +1015,7 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 			return fmt.Errorf("commission destination is unresolved")
 		}
 		for r := 0; r < flowRules; r++ {
+			t.recordStop(r, parts[r], w, e.To, stop)
 			t.record(r, parts[r], stop.Class, stop.Detail)
 		}
 		return nil
@@ -983,6 +1028,7 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 		t.Unresolved = append(t.Unresolved, e.To)
 		delete(t.Wallets, e.To)
 		for r := 0; r < flowRules; r++ {
+			t.recordStop(r, parts[r], w, e.To, flowStop{Class: flowUnresolved})
 			t.record(r, parts[r], flowUnresolved, "")
 		}
 		t.stops[e.To] = flowStop{Class: flowUnresolved}

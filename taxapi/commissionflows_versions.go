@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
@@ -57,6 +58,9 @@ type CommissionFlowBuildOptions struct {
 	ReadSnapshotTimeout time.Duration
 	PrivateProfile      *CommissionPrivateProfile
 	SourceCorrections   *CommissionSourceCorrections
+	// MaxHops overrides flowMaxHops. A version traced at another limit names
+	// it ("-hops5"), so its rows are never mixed with another limit's.
+	MaxHops int
 }
 
 func (o CommissionFlowBuildOptions) profileSHA() string {
@@ -93,6 +97,15 @@ func (o CommissionFlowBuildOptions) validate() error {
 	}
 	if !o.AsOf.Equal(flowDay(o.AsOf)) {
 		return fmt.Errorf("commission as-of must be midnight UTC")
+	}
+	if o.MaxHops < 0 || o.MaxHops > flowMaxHopsCeiling {
+		return fmt.Errorf("commission hop limit must be between 1 and %d", flowMaxHopsCeiling)
+	}
+	if o.MaxHops == 0 && strings.Contains(o.Version, "-hops") {
+		return fmt.Errorf("hop-named generation requires its hop limit")
+	}
+	if o.MaxHops != 0 && !strings.Contains(o.Version, fmt.Sprintf("-hops%d", o.MaxHops)+"-") && !strings.HasSuffix(o.Version, fmt.Sprintf("-hops%d", o.MaxHops)) {
+		return fmt.Errorf("a hop limit other than the default requires its own version naming it")
 	}
 	return nil
 }
@@ -162,6 +175,51 @@ type CommissionFlowEvidence struct {
 	PrivateProfile          *CommissionPrivateProfileEvidence          `json:",omitempty"`
 	SourceCorrectionReads   []CommissionSourceCorrectionReceipt        `json:",omitempty"`
 	SourceCorrectionProfile *CommissionSourceCorrectionProfileEvidence `json:",omitempty"`
+	// MaxHops is the hop limit the trace ran at, when not the default.
+	MaxHops int `json:",omitempty"`
+	// Stops names, for every amount that left the traced wallets to a stop,
+	// the wallet it stopped at, its class and the hop it left from.
+	Stops []CommissionFlowStopEvidence `json:",omitempty"`
+}
+
+// CommissionFlowStopEvidence is one FlowStopKey of a private trace.
+type CommissionFlowStopEvidence struct {
+	Rule       string
+	Class      string
+	Detail     string `json:",omitempty"`
+	From       string
+	To         string
+	Hop        int
+	AmountBase string
+}
+
+func commissionFlowStopEvidence(stops map[FlowStopKey]decimal.Decimal) []CommissionFlowStopEvidence {
+	out := make([]CommissionFlowStopEvidence, 0, len(stops))
+	for k, v := range stops {
+		if v.IsPositive() {
+			out = append(out, CommissionFlowStopEvidence{Rule: flowRuleNames[k.Rule], Class: k.Class, Detail: k.Detail, From: k.From, To: k.To, Hop: k.Hop, AmountBase: v.String()})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Rule != b.Rule {
+			return a.Rule < b.Rule
+		}
+		if a.Class != b.Class {
+			return a.Class < b.Class
+		}
+		if a.To != b.To {
+			return a.To < b.To
+		}
+		if a.From != b.From {
+			return a.From < b.From
+		}
+		if a.Detail != b.Detail {
+			return a.Detail < b.Detail
+		}
+		return a.Hop < b.Hop
+	})
+	return out
 }
 
 func (e *CommissionFlowEvidence) retainReadFailure(err error, order []*flowWallet) {

@@ -90,6 +90,7 @@ func main() {
 	flowsProfileSHA := flag.String("commission-private-profile-sha256", "", "exact immutable staging profile digest")
 	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
 	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
+	flowsMaxHops := flag.Int("commission-max-hops", 0, "private versioned runs only: wallets followed past the receiving wallets (0 keeps the default 3); the version must name it, e.g. -hops5")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
@@ -134,7 +135,7 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections)
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, *flowsMaxHops)
 		return
 	}
 	if *daysAppend {
@@ -212,7 +213,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, maxHops int) {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -248,7 +249,7 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 			log.Fatal("commission archive configuration has no RPC endpoint")
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections}); err != nil {
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections, MaxHops: maxHops}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
 }

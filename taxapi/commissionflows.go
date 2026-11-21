@@ -188,6 +188,29 @@ const (
 	labelWideDistributor   = "wide_distributor"
 )
 
+// Deposit-sweep rule: an exchange's hot wallet collects from deposit
+// addresses, one per customer, each of which forwards what it receives to the
+// hot wallet and does nothing else. A busy wallet whose sampled senders are
+// mostly such pass-through wallets is labelled exchange-like. Measured
+// 2026-11-21 on the busiest unlabelled receivers: 160 to 184 of 200 senders
+// pass through for the clearest hot wallets, 7 of 200 for a wallet that is
+// not one. Busy wallets that fail it and the wide distributor rule stay
+// busy_wallet, with what was measured kept in the trace's evidence.
+const (
+	flowSweepHeuristic = "heuristic:deposit-sweep/v2"
+	flowSweepSample    = 3000
+	flowSweepSenders   = 200
+	flowSweepPerSender = 200
+	// A pass-through wallet sent on at least this share of what other
+	// wallets sent it in the window, and never more.
+	flowSweepForwardMin = "0.9"
+	// At least this many senders, and at least half of those examined,
+	// must pass through.
+	flowSweepMinDeposits = 20
+	labelBusyWallet      = "busy_wallet"
+	flowBusyMeasured     = "measured:busy-wallet/v1"
+)
+
 var flowMemoShape = regexp.MustCompile(`^[0-9A-Za-z_-]+$`)
 
 func depositMemo(memo string) bool {
@@ -208,6 +231,48 @@ SELECT count(*) FROM (
 		AND timestamp >= ? AND timestamp < ? AND coalesce(reward_trigger, '') <> ?
 	LIMIT ?) receivers`, addr, apiTransfer, s.native.Denom, addr, start, end, tax.TriggerWithdrawAddress, limit+1).Scan(&n).Error
 	return n, err
+}
+
+// sweepDepositSenders samples the distinct wallets that sent addr the native
+// coin in [start, end) and counts those that pass through to it: in bounded
+// reads of their window, every movement they made is a transfer to addr, and
+// it carried between flowSweepForwardMin and all of what other wallets sent
+// them.
+func (s *Server) sweepDepositSenders(addr string, start, end time.Time) (examined, deposits int, err error) {
+	var row struct {
+		Examined int
+		Deposits int
+	}
+	err = s.db.Raw(`
+WITH senders AS (
+	SELECT DISTINCT from_addr FROM (
+		SELECT from_addr FROM taxable_events
+		WHERE to_addr = @addr AND category || '' = @transfer AND denom = @denom AND from_addr <> '' AND from_addr <> @addr
+			AND timestamp >= @start AND timestamp < @end AND coalesce(reward_trigger, '') <> @withdraw
+		LIMIT @sample) r
+	LIMIT @senders),
+moves AS (
+	SELECT s.from_addr,
+		coalesce(sum(o.amount::numeric) FILTER (WHERE o.category = @transfer AND o.to_addr = @addr), 0) AS swept,
+		count(*) FILTER (WHERE NOT (o.category = @transfer AND o.to_addr = @addr)) AS other
+	FROM senders s
+	CROSS JOIN LATERAL (
+		SELECT category, to_addr, amount FROM taxable_events
+		WHERE from_addr = s.from_addr AND denom = @denom AND timestamp >= @start AND timestamp < @end
+		LIMIT @per) o
+	GROUP BY s.from_addr),
+funded AS (
+	SELECT m.swept, (
+		SELECT coalesce(sum(i.amount::numeric), 0) FROM (
+			SELECT amount FROM taxable_events
+			WHERE to_addr = m.from_addr AND denom = @denom AND from_addr <> @addr AND timestamp >= @start AND timestamp < @end
+			LIMIT @per) i) AS received
+	FROM moves m WHERE m.other = 0)
+SELECT (SELECT count(*) FROM senders) AS examined,
+	(SELECT count(*) FROM funded WHERE received > 0 AND swept >= received * CAST(@forward AS numeric) AND swept <= received) AS deposits`,
+		map[string]any{"addr": addr, "transfer": apiTransfer, "denom": s.native.Denom, "start": start, "end": end, "withdraw": tax.TriggerWithdrawAddress,
+			"sample": flowSweepSample, "senders": flowSweepSenders, "per": flowSweepPerSender, "forward": flowSweepForwardMin}).Scan(&row).Error
+	return row.Examined, row.Deposits, err
 }
 
 // memoDepositSenders counts the distinct senders that paid addr with a
@@ -257,8 +322,10 @@ type dbFlowLoader struct {
 	// slashed caches the window's validator slashes, by window.
 	slashed map[[2]time.Time][]flowEvent
 	// bonds caches the chain's self-bonds, by operator account.
-	bonds    map[string][]flowEvent
-	private  bool
+	bonds   map[string][]flowEvent
+	private bool
+	// maxHops is the run's hop limit; zero means flowMaxHops.
+	maxHops  int
 	archive  *flowArchive
 	progress func(commissionFlowProgress)
 }
@@ -984,11 +1051,58 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 		return flowStop{}, err
 	}
 	if rows > ledgerHeavyRows {
-		return flowStop{Class: flowBusyWallet}, nil
+		return l.busy(addr, rows, start, end)
 	}
 	// Last, so labels and the busy cutoff keep their fates; it also applies
 	// to validator operator accounts.
 	return l.distributor(addr, start, end)
+}
+
+// busy is the stop for a wallet too active to trace: exchange-like when its
+// senders are deposit addresses, a wide distributor when it pays out to a
+// crowd, otherwise busy_wallet with the measurements kept as evidence.
+func (l *dbFlowLoader) busy(addr string, rows int64, start, end time.Time) (flowStop, error) {
+	examined, deposits, err := l.s.sweepDepositSenders(addr, start, end)
+	if err != nil {
+		return flowStop{}, err
+	}
+	sweep := fmt.Sprintf("%d of %d sampled senders from %s to %s pass through to it", deposits, examined, start.Format(apiDateLayout), end.Format(apiDateLayout))
+	if sweepExchange(examined, deposits) {
+		lab := AddressLabel{
+			Chain: l.chain, Address: addr, Name: "deposit-sweep wallet", Kind: labelExchangeLike, Source: flowSweepHeuristic,
+			Evidence: fmt.Sprintf("more than %d ledger rows; %s", ledgerHeavyRows, sweep), CreatedAt: nowUTC(),
+		}
+		if !l.private {
+			if err := l.s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&lab).Error; err != nil {
+				return flowStop{}, err
+			}
+		}
+		l.mu.Lock()
+		l.labels[addr] = lab
+		l.mu.Unlock()
+		return flowStop{Class: flowExchangeLike, Detail: flowSweepHeuristic}, nil
+	}
+	stop, err := l.distributor(addr, start, end)
+	if err != nil || stop.Class != "" {
+		return stop, err
+	}
+	lab := AddressLabel{
+		Chain: l.chain, Address: addr, Name: "busy wallet", Kind: labelBusyWallet, Source: flowBusyMeasured,
+		Evidence: fmt.Sprintf("%d ledger rows or more; %s; sent to at most %d wallets", rows, sweep, flowFanoutMaxReceivers), CreatedAt: nowUTC(),
+	}
+	l.mu.Lock()
+	if l.wide == nil {
+		l.wide = map[string]AddressLabel{}
+	}
+	if _, seen := l.wide[addr]; !seen {
+		l.wide[addr] = lab
+	}
+	l.mu.Unlock()
+	return flowStop{Class: flowBusyWallet}, nil
+}
+
+func sweepExchange(examined, deposits int) bool {
+	return deposits >= flowSweepMinDeposits && 2*deposits >= examined
 }
 
 // distributor is the wide distributor stop for addr over [start, end).
@@ -1218,6 +1332,9 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		}
 	}
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
+	if len(options) == 1 {
+		loader.maxHops = options[0].MaxHops
+	}
 	var progressSink *commissionProgressSink
 	if root := os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"); loader.private && root != "" {
 		progressSink, err = newCommissionProgressSink(root, validators, 5*time.Second)
@@ -1325,6 +1442,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	}
 	run := CommissionFlowRun{Chain: chain, Validator: validator, FromDay: from, AsOf: asOf.AddDate(0, 0, -1), ComputedAt: nowUTC(), Overdraw: "{}", Commission: "{}", Untracked: "{}", DriftBase: "0"}
 	tr := newFlowTrace(validator, from, asOf, loader)
+	tr.maxHops = loader.maxHops
 	tr.strict = loader.private
 	if loader.private {
 		tr.progress = loader.progress
@@ -1443,6 +1561,10 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	}
 	evidence := loader.evidence()
 	evidence.Wallets = walletEvidence
+	if loader.private {
+		evidence.MaxHops = loader.maxHops
+		evidence.Stops = commissionFlowStopEvidence(tr.Stops)
+	}
 	if loader.archive != nil {
 		evidence.Archive = loader.archive.evidence(tr.attempted)
 	}
