@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
+	"golang.org/x/sync/errgroup"
 )
 
 // Deposit-follow rule: an exchange sweeps what its deposit-style (memo)
@@ -32,6 +35,8 @@ const (
 	// distributors pay crowds too.
 	flowPayoutReceivers = 1000
 	pgQueryCanceled     = "57014"
+	// flowFollowProfileWorkers measures this many candidates at once.
+	flowFollowProfileWorkers = 4
 )
 
 // ExchangeProfile is what the exchange-like conditions measured on one
@@ -259,20 +264,40 @@ GROUP BY to_addr, category`, dep, s.native.Denom, from, asOf, flowFollowSample).
 			fed[top.to] = append(fed[top.to], feed{deposit: dep, amount: top.amount, total: total, transfers: top.n})
 		}
 	}
+	type candidate struct {
+		addr  string
+		fedBy int
+	}
+	var candidates []candidate
 	for _, dep := range deposits {
-		p, err := s.exchangeProfile(dep, 0, from, asOf)
-		if err != nil {
-			return nil, err
-		}
-		out.Profiles = append(out.Profiles, p)
+		candidates = append(candidates, candidate{addr: dep})
+	}
+	for to, feeds := range fed {
+		candidates = append(candidates, candidate{addr: to, fedBy: len(feeds)})
+	}
+	profiles := make([]ExchangeProfile, len(candidates))
+	var g errgroup.Group
+	g.SetLimit(flowFollowProfileWorkers)
+	var done atomic.Int64
+	for i, c := range candidates {
+		g.Go(func() error {
+			p, err := s.exchangeProfile(c.addr, c.fedBy, from, asOf)
+			profiles[i] = p
+			log.Printf("deposit-follow: profile %d of %d measured, unmeasured %v", done.Add(1), len(candidates), p.Unmeasured)
+			return err
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	out.Profiles = profiles
+	byAddr := map[string]ExchangeProfile{}
+	for _, p := range profiles {
+		byAddr[p.Address] = p
 	}
 	now := nowUTC()
 	for to, feeds := range fed {
-		p, err := s.exchangeProfile(to, len(feeds), from, asOf)
-		if err != nil {
-			return nil, err
-		}
-		out.Profiles = append(out.Profiles, p)
+		p := byAddr[to]
 		var parts []string
 		for _, f := range feeds {
 			parts = append(parts, fmt.Sprintf("%s of %s from %s in %d transfers", f.amount, f.total, f.deposit, f.transfers))
