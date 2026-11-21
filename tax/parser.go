@@ -36,9 +36,9 @@ import (
 // the same parser instance under each.
 var MessageTypeURLs = []string{
 	"/cosmos.staking.v1beta1.MsgCreateValidator",
-	"/cosmos.distribution.v1beta1.MsgFundCommunityPool",
-	"/cosmos.vesting.v1beta1.MsgCreateVestingAccount",
-	"/cosmos.vesting.v1beta1.MsgCreatePermanentLockedAccount",
+	typeURLFundCommunityPool,
+	typeURLCreateVestingAccount,
+	typeURLCreatePermanentLockedAccount,
 	"/cosmos.vesting.v1beta1.MsgCreatePeriodicVestingAccount",
 	"/cosmwasm.wasm.v1.MsgInstantiateContract",
 	"/cosmwasm.wasm.v1.MsgInstantiateContract2",

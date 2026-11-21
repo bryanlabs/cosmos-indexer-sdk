@@ -8,6 +8,7 @@ import (
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	vestingtypes "github.com/cosmos/cosmos-sdk/x/auth/vesting/types"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	govv1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1"
 	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
@@ -117,6 +118,27 @@ func ReconstructMsg(typeURL string, log *indexerTxTypes.LogMessage) (sdk.Msg, er
 		return nil, fmt.Errorf("stored MsgRecvPacket has no recv_packet event")
 	case TypeURLV2RecvPacket:
 		return &MsgRecvPacketV2{}, nil
+	case typeURLFundCommunityPool:
+		to, coins, err := soleTransfer(log, sender)
+		if err != nil {
+			return nil, err
+		}
+		if to != distributionModuleAddress {
+			return nil, fmt.Errorf("community pool funding does not pay the distribution module")
+		}
+		return &disttypes.MsgFundCommunityPool{Depositor: sender, Amount: coins}, nil
+	case typeURLCreateVestingAccount:
+		to, coins, err := soleTransfer(log, sender)
+		if err != nil {
+			return nil, err
+		}
+		return &vestingtypes.MsgCreateVestingAccount{FromAddress: sender, ToAddress: to, Amount: coins}, nil
+	case typeURLCreatePermanentLockedAccount:
+		to, coins, err := soleTransfer(log, sender)
+		if err != nil {
+			return nil, err
+		}
+		return &vestingtypes.MsgCreatePermanentLockedAccount{FromAddress: sender, ToAddress: to, Amount: coins}, nil
 	}
 	if strings.HasPrefix(typeURL, "/cosmos.authz.") {
 		return nil, fmt.Errorf("authz needs the original transaction body")
@@ -148,6 +170,25 @@ var ReplayableTypeURLs = []string{
 	typeURLIBCTransfer,
 	typeURLIBCRecvPacket,
 	TypeURLV2RecvPacket,
+	typeURLFundCommunityPool,
+	typeURLCreateVestingAccount,
+	typeURLCreatePermanentLockedAccount,
+}
+
+// soleTransfer reads the one bank transfer a community pool funding or a
+// vesting account creation makes: the signer pays the whole amount to the
+// pool or the new account, and the message body is not stored. Anything other
+// than exactly one non-empty transfer from the signer is refused rather than
+// guessed.
+func soleTransfer(log *indexerTxTypes.LogMessage, sender string) (string, sdk.Coins, error) {
+	if sender == "" {
+		return "", nil, fmt.Errorf("stored message has no action/sender event")
+	}
+	runs := transferRuns(log, sender)
+	if len(runs) != 1 || runs[0].recipient == "" || runs[0].coins.Empty() || !runs[0].coins.IsValid() {
+		return "", nil, fmt.Errorf("stored message does not hold exactly one transfer from its signer")
+	}
+	return runs[0].recipient, runs[0].coins, nil
 }
 
 // StakingPrincipalFromLog exposes the staking principal rule for replay tools

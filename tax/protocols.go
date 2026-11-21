@@ -710,11 +710,17 @@ func redeemedTokens(log *indexerTxTypes.LogMessage, who string) string {
 // govDepositEvents records a proposal deposit. Deposits are refunded when a
 // proposal passes or fails normally and burned on a veto, so the deposit
 // itself is record-only and the refund arrives later as a bank transfer.
+//
+// Some v1beta1 logs carry proposal_deposit with an empty amount. The coins,
+// when any moved, are then on the depositor's transfer to the gov module in
+// the same message, so that transfer is the fallback. When it is empty too
+// the deposit was zero and nothing is recorded.
 func govDepositEvents(log *indexerTxTypes.LogMessage, depositor string) []TaxableEvent {
 	var out []TaxableEvent
 	if log == nil {
 		return out
 	}
+	fellBack := false
 	for _, ev := range log.Events {
 		if ev.Type != "proposal_deposit" {
 			continue
@@ -728,7 +734,17 @@ func govDepositEvents(log *indexerTxTypes.LogMessage, depositor string) []Taxabl
 		if err != nil || who == "" {
 			continue
 		}
+		// Only an event that names the amount key with an empty value falls
+		// back, once per message. SDK 0.50 adds a second proposal_deposit
+		// carrying only voting_period_start, which is not a deposit.
+		if amount, named := a[attributeAmount]; named && amount == "" && !fellBack {
+			fellBack = true
+			coins = transfersFromSender(log, who)[govModuleAddress]
+		}
 		for _, c := range coins {
+			if !c.IsPositive() {
+				continue
+			}
 			out = append(out, TaxableEvent{Category: string(CategoryGovDeposit), FromAddr: who, Amount: c.Amount.String(), Denom: c.Denom, Detail: detailJSON(map[string]string{attributeProposalID: a[attributeProposalID]})})
 		}
 	}
