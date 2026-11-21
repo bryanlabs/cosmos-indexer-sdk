@@ -536,7 +536,7 @@ func TestCommissionServingLSMRetriesBindRewardFreeManifest(t *testing.T) {
 		}
 		lsm++
 		if strings.Contains(src.Version, "-accel-withdraw-fix-") {
-			require.Equal(t, flowClientTraceBuild, src.Build, src.Version)
+			require.Equal(t, flowAllFixesBuild, src.Build, src.Version)
 		} else {
 			require.Equal(t, flowLSMBuild, src.Build, src.Version)
 		}

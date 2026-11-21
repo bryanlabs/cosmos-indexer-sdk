@@ -160,15 +160,6 @@ func flowAllFixesRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
-// flowLSMClientTraceRoot is a client-trace rerun of a validator whose served
-// row came from the LSM reward retry, so it keeps that retry's profile and
-// version prefix.
-func flowLSMClientTraceRoot(suffix, root string) commissionServingSource {
-	r := flowLSMRoot(suffix, root)
-	r.Build = flowClientTraceBuild
-	return r
-}
-
 // flowLSMAllFixesRoot is an all-fixes rerun of a validator whose served row
 // came from the LSM reward retry, so it keeps that retry's profile and
 // version prefix.
