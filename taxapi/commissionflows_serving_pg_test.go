@@ -277,7 +277,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 		require.NotEmpty(t, src.Build)
 		require.NotEmpty(t, src.Profile)
 	}
-	require.Len(t, seen, 254)
+	require.Len(t, seen, 255)
 	require.Empty(t, defaultCommissionServingSources[apiTestnet])
 }
 
@@ -287,7 +287,7 @@ func TestDefaultCommissionServingSources(t *testing.T) {
 func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	roots := map[string]string{}
 	for _, src := range defaultCommissionServingSources[apiMainnet] {
-		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild && src.Build != flowWithdrawFixBuild && src.Build != flowSlashBuild && src.Build != flowClientTraceBuild && src.Build != flowSelfBondBuild && src.Build != flowTokenizeRewardBuild && src.Build != flowAllFixesBuild {
+		if !strings.Contains(src.Version, "-retry-") && src.Build != flowGiantBuild && src.Build != flowWithdrawFixBuild && src.Build != flowSlashBuild && src.Build != flowClientTraceBuild && src.Build != flowSelfBondBuild && src.Build != flowTokenizeRewardBuild && src.Build != flowAllFixesBuild && src.Build != flowMemoChunksBuild {
 			require.Empty(t, src.Root, src.Version)
 			continue
 		}
@@ -301,7 +301,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 		}
 		roots[src.Root] = src.Version
 	}
-	require.Len(t, roots, 221)
+	require.Len(t, roots, 222)
 	require.Equal(t, flowCorrectedPrefix+"accel-later-s02-20261115-deadline-retry-v3", roots["50c56a74de37966c61278d7381538fe0d8fa3746d87eadae5d633a471f017de1"])
 	require.Equal(t, flowCorrectedPrefix+"accel-four-s04-20261115-deadline-retry-v3", roots["6e79e2a8e3e5b77e7d96bc45c28592f36610c3992d54bb6e828ad44e375f1302"])
 	// The Cosmos Hub v29.1.0 upgrade stopped the earlier retries of these roots with stored errors, so the next version of each replaces it.
@@ -513,6 +513,7 @@ func TestCommissionServingRetriesPinOneRootEach(t *testing.T) {
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-ed329a6a4108-20261118-fanout-v1", roots["ed329a6a41088912b52d8d74d524b852d6990bbb039b93ceda82f349ed3155c6"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-131a106eafdd-20261118-fanout-v1", roots["131a106eafddf1bb1a3228ebbbe88803d3024c87e82bf2d80d27af58e563eb5c"])
 	require.Equal(t, flowCorrectedPrefix+"accel-withdraw-fix-c367934baa77-20261118-fanout-v1", roots["c367934baa77ab0ce85a84cbd4ec158dfcfdac3f0df7e6efdbf5d02eaff5938b"])
+	require.Equal(t, flowCorrectedPrefix+"accel-four-s01-r120-20261121-fanout-v5", roots["9f4579e9c0c9fb0db26d6fb06961a2765fdc1c43bb5171b4a831fc84a82ce814"])
 }
 
 // The LSM reward retries bind the reward-free corrections manifest: the

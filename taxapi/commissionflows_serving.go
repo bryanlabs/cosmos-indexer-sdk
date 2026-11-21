@@ -169,12 +169,24 @@ func flowLSMAllFixesRoot(suffix, root string) commissionServingSource {
 	return r
 }
 
+// The memo-chunks reruns run the all-fixes trace (sdk cb34569) with archive read
+// retries and bind lists split into chunks under the 65535-parameter limit (sdk
+// 7dd949b), for validators too large for one query. They book the same rows.
+const flowMemoChunksBuild = "sha256:c6474cd2dd26710739ae240ef68f93cab54afb81a7d61fe3e307108f16f69b65"
+
+func flowMemoChunksRoot(suffix, root string) commissionServingSource {
+	r := flowCorrectedRoot(suffix, root)
+	r.Build = flowMemoChunksBuild
+	return r
+}
+
 // defaultCommissionServingSources is in priority order: registered retries
 // first, then the corrected shards, then the two source collections the
 // shards adopt from. A validator is served from the first collection that
 // holds an accepted result for it.
 var defaultCommissionServingSources = map[string][]commissionServingSource{
 	apiMainnet: {
+		flowMemoChunksRoot("accel-four-s01-r120-20261121-fanout-v5", "9f4579e9c0c9fb0db26d6fb06961a2765fdc1c43bb5171b4a831fc84a82ce814"),
 		flowAllFixesRoot("accel-withdraw-fix-131a106eafdd-20261118-fanout-v1", "131a106eafddf1bb1a3228ebbbe88803d3024c87e82bf2d80d27af58e563eb5c"),
 		flowAllFixesRoot("accel-withdraw-fix-ed329a6a4108-20261118-fanout-v1", "ed329a6a41088912b52d8d74d524b852d6990bbb039b93ceda82f349ed3155c6"),
 		flowAllFixesRoot("accel-withdraw-fix-cb45206dc2fe-20261118-fanout-v1", "cb45206dc2fe6ff60090ef898765e02de8ae1242cd158b19c466694b84829b8d"),
