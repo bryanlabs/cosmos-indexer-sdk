@@ -429,7 +429,7 @@ var incomeMethod = map[string]string{
 	"validators":                  "Validators that were bonded and paid rewards at any point in the period. A validator that joined or left during the period is counted with what it earned while bonded.",
 	"per_validator":               "The spread of commission earned per validator in the period: 10th, 25th, 50th (median), 75th and 90th percentile. Validators at zero commission are included at zero.",
 	"by_stake":                    "Validators grouped by rank in the period's rewards, which the chain pays in proportion to voting power, so the rank is the validator's average stake rank over the period. No validator is named.",
-	"exchange_run":                "Validators operated by an exchange, as their own group, so moving their commission into their own exchange wallets is not read as selling. The rule is given in exchange_run_rule. When it is empty the set has not been classified yet and no group is shown.",
+	"exchange_run":                "Validators operated by an exchange, shown as their own group so their figures are read apart from independent operators. The rule is given in exchange_run_rule. When it is empty the set has not been classified yet and no group is shown.",
 	"accuracy":                    "Hub-wide totals are exact to the uatom. Per-validator figures are kept in whole uatom per day and are within 1 uatom of the exact amount for any period.",
 	"scope":                       "cosmoshub-4 only, from its first block (2021-02-18).",
 }
