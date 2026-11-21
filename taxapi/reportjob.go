@@ -126,7 +126,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 	var found, stale bool
 	// Cache rows, gates and their complete evidence digest are accepted from a
 	// single snapshot, not a gate-before-fingerprint race on the live pool.
-	err = s.withReadSnapshot(func(reader *Server) error {
+	err = s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
 		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
 			return err
 		}

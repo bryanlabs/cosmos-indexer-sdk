@@ -11,9 +11,10 @@ import (
 
 const readSnapshotTimeout = 30 * time.Second
 
-// reportJobReadSnapshotTimeout bounds the snapshots of a background report
-// job. The page polls the job, so no request waits on it, and a busy wallet's
-// full-history fingerprint alone took 18s on the live database.
+// reportJobReadSnapshotTimeout bounds the snapshots that read a wallet's
+// full-history review fingerprint for a report: the background build, and the
+// check that a finished report still matches before it is served. A busy
+// wallet's fingerprint alone took 18s on the live database.
 const reportJobReadSnapshotTimeout = 3 * time.Minute
 
 type walletRows struct {
