@@ -79,19 +79,39 @@ func (s *Server) incompleteIBCRefunds(chain string, addresses []string) ([]tax.T
 // table (2.6 billion rows) and one wallet's readiness passed the 60 s private
 // read deadline; the fenced read returns the same rows in under a second.
 func (s *Server) incompleteRefundEventLogs(ids []uint) (map[uint]*txlog.LogMessage, error) {
-	var attrs []struct {
+	type eventAttr struct {
 		MessageID uint
 		EventID   uint
 		Type      string
 		Key       string
 		Value     string
 	}
-	if err := s.db.Table("message_events me").
-		Select("me.message_id, me.id AS event_id, et.type, k.key, a.value").
-		Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
-		Joins("JOIN LATERAL (SELECT message_event_attribute_key_id, value, index FROM message_event_attributes WHERE message_event_id=me.id OFFSET 0) a ON true").
-		Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
-		Where("me.message_id IN ?", ids).Order("me.message_id, me.index, a.index").Scan(&attrs).Error; err != nil {
+	// Every row of a message is in that message's chunk, in order, and the
+	// logs are keyed by message, so chunking leaves them unchanged. A repeated
+	// id is dropped, as IN would, so no message is read twice.
+	seen := make(map[uint]bool, len(ids))
+	unique := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	ids = unique
+	var attrs []eventAttr
+	if err := inChunks(ids, func(chunk []uint) error {
+		var part []eventAttr
+		if err := s.db.Table("message_events me").
+			Select("me.message_id, me.id AS event_id, et.type, k.key, a.value").
+			Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
+			Joins("JOIN LATERAL (SELECT message_event_attribute_key_id, value, index FROM message_event_attributes WHERE message_event_id=me.id OFFSET 0) a ON true").
+			Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
+			Where("me.message_id IN ?", chunk).Order("me.message_id, me.index, a.index").Scan(&part).Error; err != nil {
+			return err
+		}
+		attrs = append(attrs, part...)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	logs := map[uint]*txlog.LogMessage{}

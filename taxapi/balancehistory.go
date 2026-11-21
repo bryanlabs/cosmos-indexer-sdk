@@ -693,8 +693,24 @@ AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id 
 		Scan(&redelMsgs).Error; err != nil {
 		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
 	}
-	var redelRows []ledgerAttrRow
-	if len(redelMsgs) > 0 {
+	redelRows, err := s.redelegationRows(redelMsgs)
+	if err != nil {
+		return nil, 0, err
+	}
+	redelegations, unattributed := attributeRedelegations(redelRows, addr)
+	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
+	return append(events, redelegations...), unattributed, nil
+}
+
+// redelegationRows reads the redelegate, withdraw_rewards and message events
+// of the messages msgs, in height, message, event and attribute order. The
+// messages are read in chunks, since a wallet can name more than one
+// statement may bind. Each message's rows come whole from one chunk, so a
+// stable sort by height and message restores the order of a single read.
+func (s *Server) redelegationRows(msgs []uint64) ([]ledgerAttrRow, error) {
+	var rows []ledgerAttrRow
+	if err := inChunks(msgs, func(chunk []uint64) error {
+		var part []ledgerAttrRow
 		if err := s.db.Raw(`
 SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
 FROM message_events me
@@ -706,14 +722,22 @@ JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
 WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message')
 ORDER BY b.height, me.message_id, me.index, a.index`,
-			map[string]any{"msgs": redelMsgs}).
-			Scan(&redelRows).Error; err != nil {
-			return nil, 0, fmt.Errorf("redelegation events: %w", err)
+			map[string]any{"msgs": chunk}).
+			Scan(&part).Error; err != nil {
+			return fmt.Errorf("redelegation events: %w", err)
 		}
+		rows = append(rows, part...)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	redelegations, unattributed := attributeRedelegations(redelRows, addr)
-	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
-	return append(events, redelegations...), unattributed, nil
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Height != rows[j].Height {
+			return rows[i].Height < rows[j].Height
+		}
+		return rows[i].MessageID < rows[j].MessageID
+	})
+	return rows, nil
 }
 
 // attributeRedelegations gives the wallet its redelegate events. Gaia never
