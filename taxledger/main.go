@@ -113,7 +113,7 @@ func main() {
 	// of work. Session-only, so other jobs and the API keep their settings.
 	runtime := commissionRuntimeParams(*flows, *flowsVersion)
 	if *deriveLabels != "" {
-		runtime = append(runtime, "default_transaction_read_only=on", fmt.Sprintf("statement_timeout=%d", deriveTimeout.Milliseconds()))
+		runtime = append(runtime, "default_transaction_read_only=on", fmt.Sprintf("statement_timeout=%d", deriveTimeout.Milliseconds()), "plan_cache_mode=force_custom_plan")
 	}
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
