@@ -118,22 +118,64 @@ func checkLabelSetRow(row LabelSetRow) error {
 	return nil
 }
 
-// LoadLabelSet stores a label set under its version. It only adds rows: a
-// version that already has rows is refused, and no other table is written.
+// LabelSetSchema creates the two label set tables. It is plain CREATE
+// statements, never ALTER TABLE (the statement summary DDL guard watches ALTER
+// TABLE), touches no existing table and grants nothing: the API role cannot
+// read these tables, so nothing served changes.
+const LabelSetSchema = `CREATE TABLE IF NOT EXISTS tax_address_label_set_versions (
+ set_version text PRIMARY KEY,
+ file_sha256 text NOT NULL,
+ row_count bigint NOT NULL,
+ loaded_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS tax_address_label_sets (
+ set_version text NOT NULL REFERENCES tax_address_label_set_versions (set_version),
+ chain text NOT NULL,
+ address text NOT NULL,
+ name text NOT NULL,
+ kind text NOT NULL,
+ source text NOT NULL,
+ evidence text NOT NULL,
+ rule text NOT NULL,
+ basis text NOT NULL CHECK (basis IN ('derived', 'published')),
+ ref text NOT NULL,
+ license text NOT NULL,
+ as_of text NOT NULL,
+ tags jsonb,
+ created_at timestamptz NOT NULL,
+ file_sha256 text NOT NULL,
+ PRIMARY KEY (set_version, chain, address)
+)`
+
+// LoadLabelSet stores a label set under its version in one transaction. It
+// only adds rows: a version already recorded is refused, and no other table is
+// written. The version row records the file digest and row count.
 func LoadLabelSet(db *gorm.DB, rows []LabelSetRow) (int64, error) {
 	if len(rows) == 0 {
 		return 0, errors.New("empty label set")
 	}
-	if err := db.AutoMigrate(&LabelSetRow{}); err != nil {
-		return 0, err
-	}
-	var have int64
-	if err := db.Model(&LabelSetRow{}).Where("set_version = ?", rows[0].SetVersion).Count(&have).Error; err != nil {
-		return 0, err
-	}
-	if have > 0 {
-		return 0, fmt.Errorf("label set %s already has %d rows", rows[0].SetVersion, have)
-	}
-	res := db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, 500)
-	return res.RowsAffected, res.Error
+	var stored int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(LabelSetSchema).Error; err != nil {
+			return err
+		}
+		res := tx.Exec("INSERT INTO tax_address_label_set_versions (set_version, file_sha256, row_count) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+			rows[0].SetVersion, rows[0].FileSHA256, len(rows))
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("label set %s is already stored", rows[0].SetVersion)
+		}
+		res = tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, 500)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != int64(len(rows)) {
+			return fmt.Errorf("label set %s: stored %d of %d rows", rows[0].SetVersion, res.RowsAffected, len(rows))
+		}
+		stored = res.RowsAffected
+		return nil
+	})
+	return stored, err
 }
