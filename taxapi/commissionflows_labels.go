@@ -3,6 +3,7 @@ package taxapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
 )
 
@@ -29,6 +31,7 @@ const (
 	// profile but never labels a wallet alone, since reward and airdrop
 	// distributors pay crowds too.
 	flowPayoutReceivers = 1000
+	pgQueryCanceled     = "57014"
 )
 
 // ExchangeProfile is what the exchange-like conditions measured on one
@@ -42,6 +45,9 @@ type ExchangeProfile struct {
 	FedBy        int
 	Receivers    int
 	Met          []string
+	// Unmeasured names conditions whose query ran past the derivation's
+	// statement limit; they count as not met.
+	Unmeasured []string `json:",omitempty"`
 }
 
 func (p *ExchangeProfile) evaluate() {
@@ -75,17 +81,29 @@ func (p ExchangeProfile) String() string {
 		strings.Join(p.Met, ", "), p.MemoSenders, flowMemoMinSenders, p.SweepPass, p.SweepExamine, p.FedBy, p.Receivers, flowPayoutReceivers)
 }
 
-// profile measures every condition on addr over [from, asOf).
+// exchangeProfile measures every condition on addr over [from, asOf). A
+// measurement cancelled by the statement limit is recorded as unmeasured.
 func (s *Server) exchangeProfile(addr string, fedBy int, from, asOf time.Time) (ExchangeProfile, error) {
 	p := ExchangeProfile{Address: addr, FedBy: fedBy}
+	measure := func(name string, err error) error {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgQueryCanceled {
+			p.Unmeasured = append(p.Unmeasured, name)
+			return nil
+		}
+		return err
+	}
 	var err error
-	if p.MemoSenders, err = s.memoDepositSenders(addr); err != nil {
+	p.MemoSenders, err = s.memoDepositSenders(addr)
+	if err = measure("memo-deposit", err); err != nil {
 		return p, err
 	}
-	if p.SweepExamine, p.SweepPass, err = s.sweepDepositSenders(addr, from, asOf); err != nil {
+	p.SweepExamine, p.SweepPass, err = s.sweepDepositSenders(addr, from, asOf)
+	if err = measure("deposit-sweep", err); err != nil {
 		return p, err
 	}
-	if p.Receivers, err = s.fanoutReceivers(addr, from, asOf, flowPayoutReceivers*100); err != nil {
+	p.Receivers, err = s.fanoutReceivers(addr, from, asOf, flowPayoutReceivers*100)
+	if err = measure("wide-payout", err); err != nil {
 		return p, err
 	}
 	p.evaluate()
