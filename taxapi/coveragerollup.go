@@ -400,11 +400,17 @@ WHERE c.source = 1 AND NOT c.dirty AND c.chunk_lo IN (
 			// Ids just below it were read last run unless they committed late,
 			// so their chunks are rebuilt only when the classified count moved.
 			// Rebuilding them every run kept a run from reaching the frontier.
-			res := tx.Exec(`UPDATE tax_coverage_rollup_chunks c SET dirty = true
-WHERE c.source = 1 AND NOT c.dirty AND c.chunk_lo IN (
- SELECT DISTINCT (te.message_id / @size) * @size FROM taxable_events te
- WHERE te.id >= @from AND te.id < @to AND te.message_id IS NOT NULL AND te.message_id < @through)
- AND c.te_messages <> (SELECT count(DISTINCT te.message_id) FROM taxable_events te WHERE te.message_id >= c.chunk_lo AND te.message_id < c.chunk_hi)`,
+			// The candidates are collected first: as one filter, Postgres
+			// counted every chunk's events (minutes per run) before the join.
+			res := tx.Exec(`WITH cand AS MATERIALIZED (
+ SELECT c.chunk_lo, c.chunk_hi, c.te_messages FROM tax_coverage_rollup_chunks c
+ WHERE c.source = 1 AND NOT c.dirty AND c.chunk_lo IN (
+  SELECT DISTINCT (te.message_id / @size) * @size FROM taxable_events te
+  WHERE te.id >= @from AND te.id < @to AND te.message_id IS NOT NULL AND te.message_id < @through)),
+moved AS MATERIALIZED (
+ SELECT cand.chunk_lo FROM cand
+ WHERE cand.te_messages <> (SELECT count(DISTINCT te.message_id) FROM taxable_events te WHERE te.message_id >= cand.chunk_lo AND te.message_id < cand.chunk_hi))
+UPDATE tax_coverage_rollup_chunks c SET dirty = true FROM moved WHERE c.source = 1 AND c.chunk_lo = moved.chunk_lo`,
 				map[string]any{"size": st.MessageChunk, "from": max(st.TeThrough-r.opts.TeMargin, 0), "to": st.TeThrough, "through": st.MessagesThrough})
 			if res.Error != nil {
 				return res.Error
