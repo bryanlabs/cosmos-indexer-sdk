@@ -5,6 +5,7 @@ import argparse, base64, bisect, gzip, http.client, json, os, re, sys, time, zli
 from decimal import Decimal
 from multiprocessing import Pool
 
+BY_VALIDATOR = False
 KNOWN = {b'amount', b'bonded_ratio', b'inflation', b'annual_provisions', b'validator', b'mode',
          b'proposal_id', b'proposal_result', b'proposal_log'}
 DEC = json.JSONDecoder()
@@ -80,6 +81,7 @@ def parse(raw, height):
     mint = None
     rew = com = Decimal(0)
     props = []
+    per_val = {}
     for ev in begin:
         t = ev.get('type')
         if t == 'mint':
@@ -89,14 +91,20 @@ def parse(raw, height):
         elif t == 'rewards' or t == 'commission':
             m = UATOM.search(attr(ev, 'amount') or '')
             if m:
+                v = Decimal(m.group(1))
                 if t == 'rewards':
-                    rew += Decimal(m.group(1))
+                    rew += v
                 else:
-                    com += Decimal(m.group(1))
+                    com += v
+                if BY_VALIDATOR:
+                    pv = per_val.setdefault(attr(ev, 'validator') or '?', [Decimal(0), Decimal(0)])
+                    pv[0 if t == 'rewards' else 1] += v
     for ev in end:
         if ev.get('type') == 'active_proposal':
             a = attrs(ev)
             props.append((a.get('proposal_id'), a.get('proposal_result')))
+    if BY_VALIDATOR:
+        return mint, rew, com, props, per_val
     return mint, rew, com, props
 
 
@@ -147,8 +155,9 @@ BOUNDS = None
 SRC = None
 
 
-def init(bounds_path, kind, root):
-    global BOUNDS, SRC
+def init(bounds_path, kind, root, by_validator=False):
+    global BOUNDS, SRC, BY_VALIDATOR
+    BY_VALIDATOR = by_validator
     d = json.load(open(bounds_path))
     BOUNDS = ([h for _, h in d['days']], [k for k, _ in d['days']])
     SRC = Src(kind, root)
@@ -164,7 +173,8 @@ def run_unit(u):
             missing.append(h)
             continue
         try:
-            mint, rew, com, props = parse(raw, h)
+            parsed = parse(raw, h)
+            mint, rew, com, props = parsed[:4]
         except Exception as e:
             bad.append([h, str(e)[:120]])
             continue
@@ -175,6 +185,12 @@ def run_unit(u):
         d['commission'] += com
         for p in props:
             d['proposals'].append([h, p[0], p[1]])
+        if BY_VALIDATOR:
+            vals = d.setdefault('validators', {})
+            for v, (vr, vc) in parsed[4].items():
+                t = vals.setdefault(v, [Decimal(0), Decimal(0)])
+                t[0] += vr
+                t[1] += vc
         if mint is None:
             nomint.append(h)
             continue
@@ -189,6 +205,8 @@ def run_unit(u):
     for d in days.values():
         d['rewards'] = str(d['rewards'])
         d['commission'] = str(d['commission'])
+        if 'validators' in d:
+            d['validators'] = {v: [str(a), str(b)] for v, (a, b) in d['validators'].items()}
     return {'unit': u[0], 'start': u[1], 'end': u[2], 'days': days, 'missing': missing,
             'no_mint': nomint, 'bad': bad, 'secs': round(time.time() - t0, 1)}
 
@@ -203,6 +221,7 @@ def main():
     ap.add_argument('--unit', type=int, default=10000)
     ap.add_argument('--procs', type=int, default=8)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--by-validator', action='store_true', help='also keep rewards and commission per validator per day')
     a = ap.parse_args()
     done = set()
     if os.path.exists(a.out):
@@ -218,7 +237,7 @@ def main():
         h = e + 1
     print(json.dumps({'units': len(units), 'skipped': len(done)}), flush=True)
     n = 0
-    with Pool(a.procs, initializer=init, initargs=(a.bounds, a.source, a.root)) as p, open(a.out, 'a') as out:
+    with Pool(a.procs, initializer=init, initargs=(a.bounds, a.source, a.root, a.by_validator)) as p, open(a.out, 'a') as out:
         for r in p.imap_unordered(run_unit, units):
             out.write(json.dumps(r) + '\n')
             out.flush()
