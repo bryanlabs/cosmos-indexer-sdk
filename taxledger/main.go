@@ -91,6 +91,8 @@ func main() {
 	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
 	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
+	labelSet := flag.String("label-set", "", "JSONL label set to store under its version in tax_address_label_sets (additive, never read by traces)")
+	labelSetSHA := flag.String("label-set-sha256", "", "required sha256 of the --label-set file")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
 	if (*flowsProfile != "" || *flowsProfileSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsProfileSHA == "") {
@@ -118,6 +120,10 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
+	}
+	if *labelSet != "" {
+		loadLabelSet(db, *labelSet, *labelSetSHA)
+		return
 	}
 	if *flows {
 		var profile *taxapi.CommissionPrivateProfile
@@ -251,4 +257,25 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
+}
+
+// loadLabelSet stores a checked label set file whose digest matches.
+func loadLabelSet(db *gorm.DB, path, want string) {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer f.Close()
+	rows, sum, err := taxapi.ReadLabelSet(f)
+	if err != nil {
+		log.Fatalf("label set: %v", err)
+	}
+	if want == "" || sum != want {
+		log.Fatalf("label set: file sha256 %s does not match --label-set-sha256 %q", sum, want)
+	}
+	n, err := taxapi.LoadLabelSet(db, rows)
+	if err != nil {
+		log.Fatalf("label set: %v", err)
+	}
+	log.Printf("label set %s: stored %d of %d rows", rows[0].SetVersion, n, len(rows))
 }
