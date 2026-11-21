@@ -2,8 +2,6 @@ package taxapi
 
 import (
 	"context"
-	"errors"
-	"log"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
@@ -64,75 +62,30 @@ type typeCount struct {
 	Classified  int64
 }
 
-// coverage counts messages by type over [start,end) and summarizes them. It
-// sums the coverage rollup when that is built (coveragerollup.go) and runs
-// the live query otherwise; both give the same counts.
+// coverage counts messages by type over [start,end) by summing the coverage
+// rollup (coveragerollup.go). It never counts every message live: that scan
+// wrote up to 86 GB of temp files. Until the rollup covers the period it
+// returns errCoverageRollupUnavailable, which /coverage answers with 503.
 func (s *Server) coverage(chain string, start, end time.Time) (*CoverageReport, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), coverageRollupTimeout+10*time.Second)
 	defer cancel()
-	var rows []typeCount
-	var scan *periodScanCounts
 	counts, err := s.covRollup.periodCounts(ctx, chain, start, end)
-	switch {
-	case err == nil:
-		rows, scan = counts.Types, counts
-	case !errors.Is(err, errCoverageRollupUnavailable):
-		// A failed read of a built rollup is not a reason to start the
-		// full live count, which writes gigabytes of temp files.
+	if err != nil {
 		return nil, err
-	default:
-		if s.covRollup != nil {
-			log.Printf("coverage %s..%s: counted live, rollup not used: %v", start.Format(apiDateLayout), end.Format(apiDateLayout), err)
-		}
-		if rows, err = s.liveCoverageRows(ctx, chain, start, end); err != nil {
-			return nil, err
-		}
 	}
 	readiness, err := s.classificationReadiness(chain, nil, start, end)
 	if err != nil {
 		return nil, err
 	}
-	report := summarizeCoverage(rows, start, end)
+	report := summarizeCoverage(counts.Types, start, end)
 	report.ParserErrors, report.DecodeErrors = readiness.ParserErrors, readiness.DecodeErrors
 	report.OpaqueMessages = readiness.OpaqueMessages
 	report.UnreviewedMessages = readiness.UnreviewedMessages
 	report.ParserDecodeComplete = readiness.ParserDecodeComplete
-	if scan != nil {
-		n := scan.Transactions
-		info := scan.Rollup
-		report.TransactionsScanned, report.CountedFrom = &n, &info
-	}
+	n := counts.Transactions
+	info := counts.Rollup
+	report.TransactionsScanned, report.CountedFrom = &n, &info
 	return report, nil
-}
-
-// liveCoverageRows is the original reconciliation query over every message in
-// the period. Identical requests in flight share one run.
-func (s *Server) liveCoverageRows(ctx context.Context, chain string, start, end time.Time) ([]typeCount, error) {
-	run := func() (any, error) {
-		var rows []typeCount
-		err := s.db.Table("messages").
-			Select("message_types.message_type AS message_type, COUNT(DISTINCT messages.id) AS total, COUNT(DISTINCT taxable_events.message_id) AS classified").
-			Joins("JOIN message_types ON message_types.id = messages.message_type_id").
-			Joins("JOIN txes ON txes.id = messages.tx_id").
-			Joins("JOIN blocks ON blocks.id = txes.block_id").
-			Joins("JOIN chains ON chains.id = blocks.chain_id").
-			Where("chains.chain_id IN ?", chainIDs(chain)).
-			Joins("LEFT JOIN taxable_events ON taxable_events.message_id = messages.id").
-			Where("blocks.time_stamp >= ? AND blocks.time_stamp < ?", start, end).
-			Group("message_types.message_type").
-			Order("total DESC").
-			Scan(&rows).Error
-		return rows, err
-	}
-	if s.covRollup == nil {
-		v, err := run()
-		return v.([]typeCount), err
-	}
-	v, err := s.covRollup.flight.do(context.Background(), "live|"+chain+"|"+start.UTC().Format(time.RFC3339Nano)+"|"+end.UTC().Format(time.RFC3339Nano), run)
-	if err != nil {
-		return nil, err
-	}
-	return v.([]typeCount), nil
 }
 
 // summarizeCoverage turns raw per-type counts into the reconciliation report,
