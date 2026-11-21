@@ -94,6 +94,7 @@ func main() {
 	flowsLabels := flag.String("commission-label-file", "", "private versioned runs only: an immutable label file whose digest the version names (-labels<first 12>)")
 	flowsLabelsSHA := flag.String("commission-label-file-sha256", "", "exact digest of --commission-label-file")
 	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
+	deriveTimeout := flag.Duration("commission-derive-statement-timeout", 2*time.Minute, "read only: per-query limit while deriving labels; a condition whose query hits it is recorded unmeasured")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
@@ -112,7 +113,7 @@ func main() {
 	// of work. Session-only, so other jobs and the API keep their settings.
 	runtime := commissionRuntimeParams(*flows, *flowsVersion)
 	if *deriveLabels != "" {
-		runtime = append(runtime, "default_transaction_read_only=on", "statement_timeout=120000")
+		runtime = append(runtime, "default_transaction_read_only=on", fmt.Sprintf("statement_timeout=%d", deriveTimeout.Milliseconds()))
 	}
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
