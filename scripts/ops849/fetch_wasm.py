@@ -11,7 +11,7 @@ rr = itertools.cycle(bases)
 lock = threading.Lock()
 
 
-def get(path, tries=6):
+def get(path, tries=int(os.environ.get("OPS849_TRIES", "12"))):
     err = None
     for i in range(tries):
         with lock:
@@ -22,7 +22,7 @@ def get(path, tries=6):
                 return json.load(r)
         except Exception as e:  # retry on another endpoint
             err = e
-            time.sleep(1 + i * 2)
+            time.sleep(min(60, 2 ** i))
     raise RuntimeError(f"{path}: {err}")
 
 
@@ -48,7 +48,7 @@ def contracts_of(code):
 
 
 addrs = []
-with concurrent.futures.ThreadPoolExecutor(4 * len(bases)) as ex:
+with concurrent.futures.ThreadPoolExecutor(int(os.environ.get("OPS849_PER_ENDPOINT", "4")) * len(bases)) as ex:
     for code, cs in ex.map(contracts_of, codes):
         addrs += [(code, a) for a in cs]
 print(chain, "contracts", len(addrs), flush=True)
@@ -74,7 +74,7 @@ def info(ca):
 
 
 n = 0
-with open(out, "a") as f, concurrent.futures.ThreadPoolExecutor(4 * len(bases)) as ex:
+with open(out, "a") as f, concurrent.futures.ThreadPoolExecutor(int(os.environ.get("OPS849_PER_ENDPOINT", "4")) * len(bases)) as ex:
     for row in ex.map(info, todo):
         f.write(json.dumps(row) + "\n")
         n += 1
