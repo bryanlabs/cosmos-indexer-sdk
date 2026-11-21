@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -116,11 +117,18 @@ func TestFlightGroupSharesOneCall(t *testing.T) {
 	}
 }
 
-func TestCoverageWithoutRollupIs503(t *testing.T) {
+func TestCoverageWithoutRollupIsPending(t *testing.T) {
 	s := &Server{}
 	w := httptest.NewRecorder()
 	s.handleCoverage(w, httptest.NewRequest("GET", "/coverage?start=2026-10-01&end=2026-11-01", nil))
-	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") == "" {
+	if w.Code != http.StatusOK || w.Header().Get("Retry-After") == "" {
 		t.Fatalf("got %d, Retry-After %q", w.Code, w.Header().Get("Retry-After"))
+	}
+	var rep CoverageReport
+	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != "pending" || !strings.Contains(rep.Note, "still being built") || rep.TotalMessages != 0 || rep.Start != "2026-10-01" {
+		t.Fatalf("pending report: %+v", rep)
 	}
 }
