@@ -101,4 +101,26 @@ func TestFlowProgressQueuedEventCounts(t *testing.T) {
 	require.Equal(t, 1000, applied[0].AppliedQueuedEvents)
 	require.Equal(t, 1, applied[0].PendingEvents)
 	require.False(t, applied[0].DiscoveryComplete)
+	span := tr.AsOf.Sub(tr.From)
+	require.InDelta(t, float64(flowAt(1, 999).Time.Sub(tr.From))/float64(span), applied[0].EventTimeFraction, 1e-9)
+}
+
+func TestFlowProgressEventTimeFraction(t *testing.T) {
+	l := newFakeFlowLedger()
+	l.commission(flowAt(1, 0), flowTestReceiver, 100)
+	l.send(flowAt(30, 0), flowTestReceiver, "cosmos1downstream", 60)
+	l.send(flowAt(60, 0), "cosmos1downstream", flowTestExchange, 50)
+	tr := newFlowTrace(flowTestValidator, flowTestStart, flowTestStart.AddDate(0, 3, 0), l)
+	var updates []commissionFlowProgress
+	tr.progress = func(p commissionFlowProgress) { updates = append(updates, p) }
+	require.NoError(t, tr.run([]string{flowTestReceiver}))
+	require.Equal(t, -1.0, updates[0].EventTimeFraction, "no event applied yet")
+	prev := -1.0
+	for _, p := range updates {
+		require.GreaterOrEqual(t, p.EventTimeFraction, prev)
+		require.Less(t, p.EventTimeFraction, 1.0)
+		prev = p.EventTimeFraction
+	}
+	span := tr.AsOf.Sub(tr.From)
+	require.InDelta(t, float64(flowAt(60, 0).Time.Sub(tr.From))/float64(span), updates[len(updates)-1].EventTimeFraction, 1e-9)
 }

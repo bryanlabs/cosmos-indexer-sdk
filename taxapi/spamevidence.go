@@ -26,15 +26,23 @@ func (s *Server) eventMemos(events []tax.TaxableEvent) (map[string]string, error
 	if len(hashes) == 0 {
 		return out, nil
 	}
-	var rows []struct {
-		Hash string
-		Memo string
-	}
-	if err := s.db.Table("txes").Select("hash,memo").Where("hash IN ?", hashes).Scan(&rows).Error; err != nil {
+	// A busy wallet can name more distinct transactions than one statement
+	// may bind, so the hashes are read in chunks into the same map.
+	err := inChunks(hashes, func(chunk []string) error {
+		var rows []struct {
+			Hash string
+			Memo string
+		}
+		if err := s.db.Table("txes").Select("hash,memo").Where("hash IN ?", chunk).Scan(&rows).Error; err != nil {
+			return err
+		}
+		for _, r := range rows {
+			out[r.Hash] = r.Memo
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
-	}
-	for _, r := range rows {
-		out[r.Hash] = r.Memo
 	}
 	return out, nil
 }
