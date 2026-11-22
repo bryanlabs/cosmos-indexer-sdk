@@ -147,7 +147,7 @@ func TestTokenizeShareRewardAmbiguousRecordStaysUnattributed(t *testing.T) {
 // Transfers that add up to more than the settled total cannot all be reward,
 // so none of them is used.
 func TestTokenizeShareRewardOverAttributionKeepsTotal(t *testing.T) {
-	events := recordWithdrawal(lsmTestRecordA, lsmTestValoperA, "9uatom")
+	events := recordWithdrawal(lsmTestRecordA, lsmTestValoperA, nineAtom)
 	events = append(events, ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, lsmTestOwner}, [2]string{attributeAmount, "4uatom"}))
 	requireLSMRows(t, tokenizeShareRewardEvents(&indexerTxTypes.LogMessage{Events: events}, lsmTestOwner, ""), map[[2]string]string{
 		{"", fixtureNativeDenom}: "4",
@@ -259,7 +259,7 @@ const lsmSettledAmount = "1544uatom"
 
 func TestLegacyRedeemRecordPaysWithdrawAddress(t *testing.T) {
 	record := lsmRecordAccount("26746")
-	payee, withdrawn := "cosmos1lsmpayee", "9uatom"
+	payee, withdrawn := "cosmos1lsmpayee", nineAtom
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
 			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, withdrawn},
@@ -300,12 +300,12 @@ func TestLegacyRedeemOwnWithdrawAddressKeepsRedeemer(t *testing.T) {
 	payee := "cosmos1lsmpayee"
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
-			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "9uatom"},
+			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, nineAtom},
 			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, lsmSettledAmount},
 			[2]string{attributeRecipient, payee}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "3uatom"},
 		),
 		ev("withdraw_rewards",
-			[2]string{attributeAmount, "9uatom"}, [2]string{attributeValidator, lsmTestValoperA},
+			[2]string{attributeAmount, nineAtom}, [2]string{attributeValidator, lsmTestValoperA},
 			[2]string{attributeAmount, "3uatom"}, [2]string{attributeValidator, lsmTestValoperA},
 		),
 		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, lsmSettledAmount}),
@@ -369,7 +369,7 @@ func TestLegacyRedeemOtherAccountKeepsReward(t *testing.T) {
 }
 
 func TestRedeemModernOwnRewardUnchanged(t *testing.T) {
-	reward := "9uatom"
+	reward := nineAtom
 	events := recordWithdrawal(lsmTestRecordA, lsmTestValoperA, reward)
 	events = append(events,
 		ev(string(CategoryTransfer), [2]string{attributeRecipient, lsmTestOwner}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, reward}),
