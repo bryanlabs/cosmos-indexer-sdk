@@ -17,6 +17,8 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -718,8 +720,8 @@ AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id 
 	return append(events, redelegations...), unattributed, nil
 }
 
-// redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards
-// and message events of the messages msgs, in height, message, event and attribute order. The
+// redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards,
+// message and transfer events of the messages msgs, in height, message, event and attribute order. The
 // messages are read in chunks, since a wallet can name more than one
 // statement may bind. Each message's rows come whole from one chunk, so a
 // stable sort by height and message restores the order of a single read.
@@ -736,7 +738,7 @@ JOIN txes x ON x.id = m.tx_id
 {{BLOCK}}
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message') {{OWN}}`, rel)+`) u
+WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message', 'transfer') {{OWN}}`, rel)+`) u
 ORDER BY height, message_id, event_index, attr_index`,
 			withParams(rp, map[string]any{"msgs": chunk})).
 			Scan(&part).Error; err != nil {
@@ -810,6 +812,7 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		if !delegators[addr] {
 			continue
 		}
+		paid := unbondPaid(events)
 		withdrawn := map[string]map[string]bool{}
 		for _, ev := range events {
 			switch ev.Type {
@@ -850,6 +853,9 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 					if owner != addr {
 						continue
 					}
+					if ev.Type == "unbond" && paid != "" {
+						rec["amount"] = paid
+					}
 					for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "new_shares", "completion_time"} {
 						if v, ok := rec[k]; ok {
 							attrs = append(attrs, ledgerAttr{Key: k, Value: v})
@@ -864,6 +870,42 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		}
 	}
 	return out, unattributed
+}
+
+// unbondPaid is the tokens a message's one undelegation moved into the
+// unbonding pool, or "" when that is not certain. Before Gaia v15 the unbond
+// event names the amount the delegator asked for; the unbonding entry holds
+// the tokens its shares were worth, rounded down, which can be less. The
+// bonded pool's transfer to the not-bonded pool in the same message carries
+// that amount, when the validator is bonded and the message holds one
+// undelegation and one such transfer. Gaia v15 and later name the paid amount
+// on the event itself.
+func unbondPaid(events []ledgerEvent) string {
+	bonded, notBonded := moduleAccount(stakingtypes.BondedPoolName), moduleAccount(stakingtypes.NotBondedPoolName)
+	unbonds, transfers := 0, []string{}
+	for _, ev := range events {
+		for _, rec := range ev.records() {
+			switch {
+			case ev.Type == "unbond":
+				unbonds++
+			case ev.Type == "transfer" && rec["sender"] == bonded && rec["recipient"] == notBonded && rec["amount"] != "":
+				transfers = append(transfers, rec["amount"])
+			}
+		}
+	}
+	if unbonds != 1 || len(transfers) != 1 || bonded == "" || notBonded == "" {
+		return ""
+	}
+	return transfers[0]
+}
+
+// moduleAccount is a module's account address, or "" when it cannot be formed.
+func moduleAccount(name string) string {
+	a, err := sdk.Bech32ifyAddressBytes(sdk.GetConfig().GetBech32AccountAddrPrefix(), authtypes.NewModuleAddress(name))
+	if err != nil {
+		return ""
+	}
+	return a
 }
 
 // stakingMessageSenders is the delegators a staking message event names. The

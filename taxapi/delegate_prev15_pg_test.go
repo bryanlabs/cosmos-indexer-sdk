@@ -61,16 +61,18 @@ func TestPreV15DelegateAndUnbondReadPostgres(t *testing.T) {
 			hDelegate, hUnbond, hOther, hNamed),
 		fmt.Sprintf("INSERT INTO txes VALUES (1,%d,'D1',0),(2,%d,'U1',0),(3,%d,'O1',0),(4,%d,'N1',0)", hDelegate, hUnbond, hOther, hNamed),
 		"INSERT INTO messages VALUES (1,1),(2,2),(3,3),(4,4)",
-		"INSERT INTO message_event_types VALUES (1,'coin_spent'),(2,'coin_received'),(3,'message'),(4,'delegate'),(5,'unbond'),(6,'withdraw_rewards')",
-		"INSERT INTO message_event_attribute_keys VALUES (1,'spender'),(2,'receiver'),(3,'amount'),(4,'sender'),(5,'module'),(6,'validator'),(7,'new_shares'),(8,'completion_time'),(9,'delegator')",
+		"INSERT INTO message_event_types VALUES (1,'coin_spent'),(2,'coin_received'),(3,'message'),(4,'delegate'),(5,'unbond'),(6,'withdraw_rewards'),(7,'transfer')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'spender'),(2,'receiver'),(3,'amount'),(4,'sender'),(5,'module'),(6,'validator'),(7,'new_shares'),(8,'completion_time'),(9,'delegator'),(10,'recipient')",
 		// w delegates 1000: it spends the coins, and the delegate event
 		// names no delegator.
 		"INSERT INTO message_events VALUES (10,1,1,0),(11,1,3,1),(12,1,4,2)",
 		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (10,1,'%[1]s',0),(10,3,'1000uatom',1),(11,5,'staking',0),(11,4,'%[1]s',1),(12,6,'%[2]s',0),(12,3,'1000uatom',1),(12,7,'1000.000000000000000000',2)", w, val),
 		// w unbonds 400 and is paid its rewards. SDK 0.42 to 0.45 merge the
 		// message events: the distribution module's sender for the payout
-		// comes before the staking delegator.
-		"INSERT INTO message_events VALUES (20,2,6,0),(21,2,3,1),(22,2,5,2)",
+		// comes before the staking delegator. The event names the 400 asked
+		// for; the bonded pool moved the 399 the shares were worth.
+		"INSERT INTO message_events VALUES (20,2,6,0),(21,2,3,1),(22,2,5,2),(23,2,7,3)",
+		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (23,10,'%s',0),(23,4,'%s',1),(23,3,'399uatom',2)", moduleAccount("not_bonded_tokens_pool"), moduleAccount("bonded_tokens_pool")),
 		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (20,6,'%[2]s',0),(20,3,'7uatom',1),(21,4,'%[3]s',0),(21,5,'staking',1),(21,4,'%[1]s',2),(22,6,'%[2]s',0),(22,3,'400uatom',1),(22,8,'2022-01-31T00:00:00Z',2)", w, val, distributionAddress(t)),
 		// Someone else's delegation to the same validator.
 		"INSERT INTO message_events VALUES (30,3,1,0),(31,3,3,1),(32,3,4,2)",
@@ -100,7 +102,7 @@ func TestPreV15DelegateAndUnbondReadPostgres(t *testing.T) {
 	}
 	want := []string{
 		fmt.Sprintf("%d delegate true %s 1000uatom", hDelegate, val),
-		fmt.Sprintf("%d unbond true %s 400uatom", hUnbond, val),
+		fmt.Sprintf("%d unbond true %s 399uatom", hUnbond, val),
 		fmt.Sprintf("%d delegate true %s 5uatom", hNamed, val),
 	}
 	for _, win := range [][2]int64{{hDelegate - 1, hNamed}, {hDelegate - 1, hDelegate}, {hUnbond - 1, hUnbond}, {hOther - 1, hOther}, {hNamed - 1, hNamed}} {

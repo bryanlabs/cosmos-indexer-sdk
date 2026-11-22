@@ -516,6 +516,35 @@ func TestAttributePreV15DelegateAndUnbond(t *testing.T) {
 		t.Fatalf("merged: the payout sender got %+v", events)
 	}
 
+	// Before Gaia v15 the unbond event names the amount asked for; the
+	// unbonding entry holds what the bonded pool moved.
+	bonded, notBonded := moduleAccount("bonded_tokens_pool"), moduleAccount("not_bonded_tokens_pool")
+	unbond := []ledgerAttrRow{
+		redelRow(9, 90, 180, "message", "action", "/cosmos.staking.v1beta1.MsgUndelegate"),
+		redelRow(9, 90, 180, "message", "sender", distr),
+		redelRow(9, 90, 180, "message", "sender", bonded),
+		redelRow(9, 90, 180, "message", "module", "staking"),
+		redelRow(9, 90, 180, "message", "sender", ledgerTestAddr),
+		redelRow(9, 91, 180, "transfer", "recipient", ledgerTestAddr),
+		redelRow(9, 91, 180, "transfer", "sender", distr),
+		redelRow(9, 91, 180, "transfer", "amount", "10815uatom"),
+		redelRow(9, 91, 180, "transfer", "recipient", notBonded),
+		redelRow(9, 91, 180, "transfer", "sender", bonded),
+		redelRow(9, 91, 180, "transfer", "amount", "941999uatom"),
+		redelRow(9, 92, 180, "unbond", "validator", ledgerTestVal),
+		redelRow(9, 92, 180, "unbond", "amount", "942000uatom"),
+		redelRow(9, 92, 180, "unbond", "completion_time", "2023-04-11T17:03:33Z"),
+	}
+	events, unattributed = attributeRedelegations(unbond, ledgerTestAddr)
+	if unattributed != 0 || len(events) != 1 || events[0].records()[0]["amount"] != "941999uatom" {
+		t.Fatalf("unbond paid: events = %+v, unattributed = %d", events, unattributed)
+	}
+	// An unbonded validator: no pool transfer, the event's amount stands.
+	events, _ = attributeRedelegations(append(append([]ledgerAttrRow{}, unbond[:5]...), unbond[11:]...), ledgerTestAddr)
+	if len(events) != 1 || events[0].records()[0]["amount"] != "942000uatom" {
+		t.Fatalf("unbond unpaid: events = %+v", events)
+	}
+
 	// A message that names the wallet but no delegator anywhere is refused.
 	nameless := []ledgerAttrRow{
 		redelRow(8, 80, 170, "message", "action", "/cosmos.staking.v1beta1.MsgUndelegate"),
