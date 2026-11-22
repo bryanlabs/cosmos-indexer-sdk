@@ -25,6 +25,8 @@ const (
 type pgTxResult struct {
 	Code      uint32  `json:"code"`
 	Codespace string  `json:"codespace,omitempty"`
+	Log       string  `json:"log,omitempty"`
+	GasWanted string  `json:"gas_wanted,omitempty"`
 	Events    []event `json:"events"`
 }
 
@@ -74,16 +76,17 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 	okF := protoTx(t, "f", "10uatom", "")
 	lostG := protoTx(t, "g", "20uatom", "")
 	ok := pgTxResult{Events: []event{{Type: "message", Attributes: []attr{{pgSenderKey, backTestSigner}}}}}
-	// Each block's BeginBlock collects the fees of the block before it.
+	// A failed transaction's fee is settled from its result.
 	// 9000002: B's staking message failed after its fee was charged, C had a
-	// wrong sequence; 9000003 collected 100 + 50.
-	cache(9000002, [][]byte{okA, failB, seqC}, []pgTxResult{ok, {Code: 19, Codespace: apiStaking}, {Code: 32, Codespace: codespaceSDK}}, collected("1040uatom"))
+	// wrong sequence.
+	cache(9000002, [][]byte{okA, failB, seqC}, []pgTxResult{ok, {Code: 19, Codespace: apiStaking, Log: "failed to execute message; message index: 0: no delegation for (address, validator) tuple"}, {Code: 32, Codespace: codespaceSDK, Log: logWrongSeq}}, collected("1040uatom"))
 	cache(9000003, nil, nil, collected("1150uatom"))
-	// 9000001: one of two equal failed fees was charged, so neither is known.
-	cache(9000001, [][]byte{failD, failE}, []pgTxResult{{Code: 5, Codespace: codespaceSDK}, {Code: 5, Codespace: codespaceSDK}}, collected("1030uatom"))
-	// 9000000: G ran out of gas after paying 20 and is missing from the
-	// index.
-	cache(9000000, [][]byte{okF, lostG}, []pgTxResult{ok, {Code: 11, Codespace: codespaceSDK}}, nil)
+	// 9000001: D's message failed; E ran out of gas below what the ante
+	// handler may spend, so its charge is unknown.
+	cache(9000001, [][]byte{failD, failE}, []pgTxResult{{Code: 5, Codespace: codespaceSDK, Log: logMsgFailed}, {Code: 11, Codespace: codespaceSDK, Log: logOutOfGas, GasWanted: "300"}}, collected("1030uatom"))
+	// 9000000: G ran out of gas in its message after paying 20 and is
+	// missing from the index.
+	cache(9000000, [][]byte{okF, lostG}, []pgTxResult{ok, {Code: 11, Codespace: codespaceSDK, Log: logOutOfGas, GasWanted: "300000"}}, nil)
 
 	for _, sql := range []string{
 		tempSearchPath,
@@ -101,7 +104,7 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 		tempHubChainRow,
 		"INSERT INTO blocks VALUES (1,1,9000000,true,true),(2,1,9000001,true,true),(3,1,9000002,true,true),(4,1,9000003,true,true)",
 		"INSERT INTO txes VALUES (1,3,'" + txHash(string(okA)) + "',0),(2,3,'" + txHash(string(failB)) + "',19),(3,3,'" + txHash(string(seqC)) + "',32)," +
-			"(4,2,'" + txHash(string(failD)) + "',5),(5,2,'" + txHash(string(failE)) + "',5),(6,1,'" + txHash(string(okF)) + "',0)",
+			"(4,2,'" + txHash(string(failD)) + "',5),(5,2,'" + txHash(string(failE)) + "',11),(6,1,'" + txHash(string(okF)) + "',0)",
 		"INSERT INTO messages VALUES (1,1),(2,6)",
 		"INSERT INTO tax_ledger_scans VALUES ('mainnet',9000003,9000003)",
 	} {
@@ -128,12 +131,12 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(9000000), from)
 	require.Equal(t, int64(3), sum.Blocks)
-	require.Equal(t, 2, sum.Fees, "B charged, C rejected; D and E unknown")
-	require.Equal(t, 1, sum.FeesCharged)
+	require.Equal(t, 3, sum.Fees, "B and D charged, C rejected; E unknown")
+	require.Equal(t, 2, sum.FeesCharged)
 	require.Equal(t, 1, sum.Grants)
 	require.Equal(t, 1, sum.Holes)
 	require.Equal(t, 1, sum.PreEvents.UnresolvedBlocks)
-	require.Equal(t, 2, sum.PreEvents.FailedUnknown)
+	require.Equal(t, 1, sum.PreEvents.FailedUnknown)
 	require.Equal(t, int64(9000003), span(), "a dry run moves nothing")
 	for _, table := range []string{"tax_failed_tx_fees", "tax_fee_grants", "tax_index_holes", "tax_index_hole_addresses"} {
 		require.Zero(t, count(table), table)
@@ -160,7 +163,7 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 	require.Equal(t, int64(9000000), span())
 	var fees []FailedTxFee
 	require.NoError(t, database.Order("tx_id").Find(&fees).Error)
-	require.Equal(t, []FailedTxFee{{TxID: 2, Charged: "50uatom"}, {TxID: 3, Charged: ""}}, fees)
+	require.Equal(t, []FailedTxFee{{TxID: 2, Charged: "50uatom"}, {TxID: 3, Charged: ""}, {TxID: 4, Charged: "40uatom"}}, fees)
 	var grants []FeeGrantUse
 	require.NoError(t, database.Find(&grants).Error)
 	require.Equal(t, []FeeGrantUse{{TxID: 2, Granter: backTestGranter}}, grants)

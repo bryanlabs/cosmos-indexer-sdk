@@ -42,12 +42,10 @@ type nodeTx struct {
 	// Rejected is a failed transaction with no events: the ante handler
 	// turned it away, so it changed nothing, not even the fee, and the same
 	// bytes can be included again in a later block. Before Gaia v7 a failed
-	// transaction had no events even when its fee was charged; the backward
-	// scan then decides it from the fees the block collected.
+	// transaction had no events even when its fee was charged;
+	// settlePreEventBlock then decides it from the transaction's result, and
+	// a failed transaction it cannot settle has ChargeKnown unset.
 	Rejected bool
-	// ChargeUnknown is a failed transaction whose fee outcome could not be
-	// established, so no outcome is recorded for it.
-	ChargeUnknown bool
 }
 
 // failedTxResult is what the block results say about one failed
@@ -154,9 +152,6 @@ type scannedBlock struct {
 	// raw holds each transaction's codespace and, when decoded, its declared
 	// fee and fee granter, in block order.
 	raw []rawTxInfo
-	// begin is the fee collector's movements in the block's BeginBlock
-	// events.
-	begin feeCollectorBegin
 }
 
 // blockScan reads a block's transactions and results once. With decodeFees
@@ -254,17 +249,20 @@ func (n *ledgerNode) blockScan(height int64, decodeFees bool) (scannedBlock, err
 			}
 		}
 		tx := nodeTx{Hash: strings.ToUpper(hex.EncodeToString(sum[:])), Code: t.Code, Granter: granter, Rejected: t.Code != 0 && len(t.Events) == 0}
+		if tx.Rejected {
+			gw, _ := strconv.ParseInt(t.GasWanted, 10, 64)
+			fee, signers, read := declaredFee(raw)
+			infos[i].Failed = &failedTxResult{
+				Code: t.Code, Codespace: t.Codespace, Log: t.Log, GasWanted: gw,
+				TxBytes: len(raw), Signers: signers, Fee: fee, FeeRead: read,
+			}
+		}
 		switch {
 		case t.Code == 0:
 		case coinEvents || len(t.Events) > 0:
 			tx.Charged, tx.ChargeKnown = strings.Join(spent, ","), true
 		default:
-			gw, _ := strconv.ParseInt(t.GasWanted, 10, 64)
-			fee, signers, read := declaredFee(raw)
-			tx.Charged, tx.ChargeKnown = preCoinEventsCharge(failedTxResult{
-				Code: t.Code, Codespace: t.Codespace, Log: t.Log, GasWanted: gw,
-				TxBytes: len(raw), Signers: signers, Fee: fee, FeeRead: read,
-			})
+			tx.Charged, tx.ChargeKnown = preCoinEventsCharge(*infos[i].Failed)
 		}
 		for a := range found {
 			tx.Accounts = append(tx.Accounts, a)
@@ -272,7 +270,7 @@ func (n *ledgerNode) blockScan(height int64, decodeFees bool) (scannedBlock, err
 		sort.Strings(tx.Accounts)
 		out = append(out, tx)
 	}
-	return scannedBlock{txs: out, raw: infos, begin: readFeeCollectorBegin(res.Result.BeginBlockEvents, res.Result.FinalizeBlockEvents)}, nil
+	return scannedBlock{txs: out, raw: infos}, nil
 }
 
 // declaredFee reads the fee, without zero coins, and the number of

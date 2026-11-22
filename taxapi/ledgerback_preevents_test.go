@@ -42,146 +42,81 @@ func TestDecodeTxFee(t *testing.T) {
 	require.False(t, ok)
 }
 
-func fcEvent(typ, who, amount, mode string, base64Attrs bool) rpcEvent {
-	key := attrReceiver
-	if typ == eventCoinSpent {
-		key = attrSpender
-	}
-	attrs := []rpcAttr{{Key: key, Value: who}, {Key: apiAmount, Value: amount}}
-	if mode != "" {
-		attrs = append(attrs, rpcAttr{Key: "mode", Value: mode})
-	}
-	if base64Attrs {
-		for i, a := range attrs {
-			attrs[i] = rpcAttr{Key: b64(a.Key), Value: b64(a.Value)}
+// Results of failed transactions as SDK 0.42 and 0.44 logged them.
+const (
+	logMsgFailed  = "failed to execute message; message index: 0: 5uatom is smaller than 40uatom: insufficient funds"
+	logWrongSeq   = "account sequence mismatch, expected 7, got 6: incorrect account sequence"
+	logOutOfGas   = "out of gas in location: WriteFlat; gasWanted: 300, gasUsed: 1200: out of gas"
+	logAnteNoFund = "0uatom is smaller than 40uatom: insufficient funds: insufficient funds"
+)
+
+// failedResult is a failed transaction's result as blockScan keeps it.
+func failedResult(code uint32, codespace, log string, gasWanted int64, fee string) *failedTxResult {
+	return &failedTxResult{Code: code, Codespace: codespace, Log: log, GasWanted: gasWanted, TxBytes: 200, Signers: 1, Fee: fee, FeeRead: true}
+}
+
+// Before Gaia v7 a failed transaction's fee is settled from where its result
+// says it failed: a message failure paid the declared fee, a rejection before
+// the messages paid nothing, and an out-of-gas panic the gas limit cannot
+// place is left unknown.
+func TestSettlePreEventBlock(t *testing.T) {
+	fresh := func() scannedBlock {
+		return scannedBlock{
+			txs: []nodeTx{
+				{Hash: "AA"},
+				{Hash: "BB", Code: 5, Rejected: true},
+				{Hash: "CC", Code: 32, Rejected: true},
+				{Hash: "DD", Code: 5, Rejected: true},
+				{Hash: "EE", Code: 11, Rejected: true},
+				{Hash: "FF", Code: 11, Rejected: true},
+			},
+			raw: []rawTxInfo{
+				{},
+				{Codespace: codespaceSDK, FeeGranter: backTestGranter, FeeDecoded: true, Failed: failedResult(5, codespaceSDK, logMsgFailed, 200000, "50uatom")},
+				{Codespace: codespaceSDK, Failed: failedResult(32, codespaceSDK, logWrongSeq, 200000, "30uatom")},
+				{Codespace: codespaceSDK, Failed: failedResult(5, codespaceSDK, logAnteNoFund, 200000, "40uatom")},
+				{Codespace: codespaceSDK, Failed: failedResult(11, codespaceSDK, logOutOfGas, 300000, "20uatom")},
+				{Codespace: codespaceSDK, Failed: failedResult(11, codespaceSDK, logOutOfGas, 300, "20uatom")},
+			},
 		}
 	}
-	return rpcEvent{Type: typ, Attributes: attrs}
-}
+	for _, h := range []int64{9000002, hubCoinEventsFrom - 2} {
+		b := fresh()
+		st := settlePreEventBlock(h, b)
+		require.Equal(t, 1, st.BlocksWithFailed)
+		require.Equal(t, 1, st.UnresolvedBlocks, "the out-of-gas panic below the ante limit is unknown")
+		require.Equal(t, []int64{h}, st.UnresolvedHeights)
+		require.Equal(t, map[string]int{preEventLogUnsettled: 1}, st.UnresolvedReasons)
+		require.Equal(t, 2, st.FailedCharged)
+		require.Equal(t, 2, st.FailedUncharged)
+		require.Equal(t, 1, st.FailedUnknown)
+		require.Equal(t, nodeTx{Hash: "BB", Code: 5, Charged: "50uatom", ChargeKnown: true, Granter: backTestGranter}, b.txs[1], "a message failure paid its fee")
+		require.Equal(t, nodeTx{Hash: "CC", Code: 32, Rejected: true, ChargeKnown: true}, b.txs[2], "a wrong sequence paid nothing")
+		require.Equal(t, nodeTx{Hash: "DD", Code: 5, Rejected: true, ChargeKnown: true}, b.txs[3], "a fee above the balance paid nothing")
+		require.Equal(t, nodeTx{Hash: "EE", Code: 11, Charged: "20uatom", ChargeKnown: true}, b.txs[4], "out of gas past the ante handler paid")
+		require.Equal(t, nodeTx{Hash: "FF", Code: 11}, b.txs[5], "out of gas below the ante limit is unknown")
 
-func TestCollectedFees(t *testing.T) {
-	fc := feeCollectorAddress()
-	require.Equal(t, "cosmos17xpfvakm2amg962yls6f84z3kell8c5lserqta", fc)
-
-	// Old results: BeginBlock events, base64 attributes, mint before
-	// distribution.
-	b := readFeeCollectorBegin([]rpcEvent{
-		fcEvent(eventCoinReceived, fc, testMintAmount, "", true),
-		fcEvent(eventCoinSpent, backTestSigner, "5uatom", "", true),
-		fcEvent(eventCoinSpent, fc, "1150uatom", "", true),
-	}, nil)
-	got, err := b.collectedFees()
-	require.NoError(t, err)
-	require.Equal(t, "150uatom", got.String())
-
-	// Newer nodes: finalize events with a mode; EndBlock movements are not
-	// the previous block's fees.
-	b = readFeeCollectorBegin(nil, []rpcEvent{
-		fcEvent(eventCoinReceived, fc, testMintAmount, "BeginBlock", false),
-		fcEvent(eventCoinSpent, fc, "1150uatom", "BeginBlock", false),
-		fcEvent(eventCoinReceived, fc, "7uatom", "EndBlock", false),
-	})
-	got, err = b.collectedFees()
-	require.NoError(t, err)
-	require.Equal(t, "150uatom", got.String())
-
-	// Distribution before mint (Gaia v7 order) is not read as v6 fees.
-	b = readFeeCollectorBegin(nil, []rpcEvent{
-		fcEvent(eventCoinSpent, fc, "1150uatom", "BeginBlock", false),
-		fcEvent(eventCoinReceived, fc, testMintAmount, "BeginBlock", false),
-	})
-	_, err = b.collectedFees()
-	require.ErrorContains(t, err, "before receiving")
-
-	b = readFeeCollectorBegin(nil, []rpcEvent{fcEvent(eventCoinReceived, fc, testMintAmount, "BeginBlock", false)})
-	_, err = b.collectedFees()
-	require.Error(t, err)
-}
-
-func TestResolvePreEventFees(t *testing.T) {
-	txs := []nodeTx{{Code: 0}, {Code: 19}, {Code: 32}, {Code: 5}}
-	raw := []rawTxInfo{
-		{Fee: coins(t, "100uatom"), FeeDecoded: true},
-		{Codespace: apiStaking, Fee: coins(t, "50uatom"), FeeDecoded: true},
-		{Codespace: codespaceSDK, Fee: coins(t, "30uatom"), FeeDecoded: true},
-		{Codespace: codespaceSDK, Fee: coins(t, "40uatom"), FeeDecoded: true},
+		index := []backTx{
+			{Height: h, Indexed: true, Hash: "aa", Messages: true, TxID: 1},
+			{Height: h, Indexed: true, Hash: "bb", Code: 5, TxID: 2},
+			{Height: h, Indexed: true, Hash: "ee", Code: 11, TxID: 3},
+			{Height: h, Indexed: true, Hash: "ff", Code: 11, TxID: 4},
+		}
+		got := scanBackBlock(h, b.txs, index)
+		require.Equal(t, []FailedTxFee{{TxID: 2, Charged: "50uatom"}, {TxID: 3, Charged: "20uatom"}}, got.fees, "an unknown outcome is not recorded")
+		require.Zero(t, got.chainTxs, "the rejected transactions need not be indexed")
+		got = scanBackBlock(h, b.txs, index[:3])
+		require.Equal(t, 4, got.chainTxs, "a failed transaction the index lacks is a hole while its charge is unknown")
 	}
-	charged, reason := resolvePreEventFees(txs, raw, coins(t, "190uatom"))
-	require.Equal(t, "", reason)
-	require.Equal(t, []bool{false, true, false, true}, charged)
 
-	charged, reason = resolvePreEventFees(txs, raw, coins(t, "150uatom"))
-	require.Equal(t, "subset", reason)
-	require.Equal(t, []bool{false, true, false, false}, charged)
-
-	// A wrong-sequence failure never pays, so 130 has no answer.
-	charged, reason = resolvePreEventFees(txs, raw, coins(t, "130uatom"))
-	require.Nil(t, charged)
-	require.Equal(t, "no combination matches", reason)
-
-	// Two failed transactions with the same fee, one charged: ambiguous.
-	raw[3].Fee = coins(t, "50uatom")
-	charged, reason = resolvePreEventFees(txs, raw, coins(t, "150uatom"))
-	require.Nil(t, charged)
-	require.Equal(t, "ambiguous combination", reason)
-
-	charged, reason = resolvePreEventFees(txs, raw, coins(t, "90uatom"))
-	require.Nil(t, charged)
-	require.Equal(t, "collected less than the successful fees", reason)
-
-	raw[1].FeeDecoded = false
-	charged, reason = resolvePreEventFees(txs, raw, coins(t, "150uatom"))
-	require.Nil(t, charged)
-	require.Equal(t, "undecodable transaction", reason)
-}
-
-func TestSettlePreEventBlock(t *testing.T) {
-	fc := feeCollectorAddress()
-	next := readFeeCollectorBegin([]rpcEvent{
-		fcEvent(eventCoinReceived, fc, testMintAmount, "", false),
-		fcEvent(eventCoinSpent, fc, "1150uatom", "", false),
-	}, nil)
-	b := scannedBlock{
-		txs: []nodeTx{{Hash: "AA"}, {Hash: "BB", Code: 19, Rejected: true}, {Hash: "CC", Code: 32, Rejected: true}},
-		raw: []rawTxInfo{
-			{Fee: coins(t, "100uatom"), FeeDecoded: true},
-			{Codespace: apiStaking, Fee: coins(t, "50uatom"), FeeGranter: backTestGranter, FeeDecoded: true},
-			{Codespace: codespaceSDK, Fee: coins(t, "30uatom"), FeeDecoded: true},
-		},
-	}
-	st := settlePreEventBlock(9000002, b, next)
+	// A block whose failed transactions all settle is resolved.
+	b := fresh()
+	b.txs, b.raw = b.txs[:5], b.raw[:5]
+	st := settlePreEventBlock(9000001, b)
 	require.Equal(t, 1, st.ResolvedBlocks)
-	require.Equal(t, 1, st.FailedCharged)
-	require.Equal(t, 1, st.FailedUncharged)
-	require.Equal(t, nodeTx{Hash: "BB", Code: 19, Charged: "50uatom", Granter: backTestGranter}, b.txs[1])
-	require.Equal(t, nodeTx{Hash: "CC", Code: 32, Rejected: true}, b.txs[2])
+	require.Zero(t, st.UnresolvedBlocks)
 
-	// Unresolved: failed transactions keep no outcome and must be indexed.
-	b.txs[1], b.txs[2] = nodeTx{Hash: "BB", Code: 19, Rejected: true}, nodeTx{Hash: "CC", Code: 32, Rejected: true}
-	bad := readFeeCollectorBegin([]rpcEvent{
-		fcEvent(eventCoinReceived, fc, testMintAmount, "", false),
-		fcEvent(eventCoinSpent, fc, "1140uatom", "", false),
-	}, nil)
-	st = settlePreEventBlock(9000002, b, bad)
-	require.Equal(t, 1, st.UnresolvedBlocks)
-	require.Equal(t, []int64{9000002}, st.UnresolvedHeights)
-	require.True(t, b.txs[1].ChargeUnknown)
-	require.False(t, b.txs[1].Rejected)
-	require.True(t, b.txs[2].Rejected, "a wrong sequence paid nothing whatever the block collected")
-	require.False(t, b.txs[2].ChargeUnknown)
-	index := []backTx{
-		{Height: 9000002, Indexed: true, Hash: "aa", Messages: true, TxID: 1},
-		{Height: 9000002, Indexed: true, Hash: "bb", Code: 19, TxID: 2},
-	}
-	got := scanBackBlock(9000002, b.txs, index)
-	require.Empty(t, got.fees, "an unknown outcome is not recorded")
-	require.Zero(t, got.chainTxs, "the wrong-sequence transaction need not be indexed")
-	got = scanBackBlock(9000002, b.txs, index[:1])
-	require.Equal(t, 2, got.chainTxs, "a failed transaction the index lacks is a hole while its charge is unknown")
-
-	// A block without failed transactions checks the method itself.
-	clean := scannedBlock{txs: []nodeTx{{Hash: "AA"}}, raw: []rawTxInfo{{Fee: coins(t, "100uatom"), FeeDecoded: true}}}
-	st = settlePreEventBlock(9000001, clean, next)
-	require.Equal(t, 1, st.CleanMismatch)
-	require.Equal(t, []int64{9000001}, st.MismatchHeights)
+	// A block without failed transactions has nothing to settle.
+	st = settlePreEventBlock(9000000, scannedBlock{txs: []nodeTx{{Hash: "AA"}}, raw: []rawTxInfo{{}}})
+	require.Equal(t, preEventStats{Blocks: 1}, st)
 }

@@ -148,8 +148,8 @@ type moduleFeeRow struct {
 // blockFees is what every transaction the ledger dates at block h paid the
 // fee collector: a successful one its declared fee, a failed one its recorded
 // charge. A failed one with no recorded charge paid nothing only when the
-// chain shows the ante handler turned it away at h; otherwise the reason is
-// returned.
+// chain shows the ante handler turned it away at h (before Gaia v7, when its
+// result settles it as charged nothing); otherwise the reason is returned.
 func (s *Server) blockFees(chain string, ids []int64, node *ledgerNode, h int64) (coinFlow, string, error) {
 	rel, rp := s.effectiveRel()
 	var rows []moduleFeeRow
@@ -199,15 +199,17 @@ ORDER BY tx_id`,
 			if err != nil {
 				return nil, "", err
 			}
+			if chainParam(chain) == apiMainnet && h < hubFailedTxEventsFrom {
+				settlePreEventBlock(h, b)
+			}
 			scan = &b
 		}
 		turnedAway := false
-		for i, t := range scan.txs {
+		for _, t := range scan.txs {
 			if t.Hash != r.Hash {
 				continue
 			}
-			preEvents := chainParam(chain) == apiMainnet && h < hubFailedTxEventsFrom
-			turnedAway = t.Rejected && (!preEvents || anteOnlyFailure(t.Code, scan.raw[i].Codespace))
+			turnedAway = t.Rejected
 			break
 		}
 		if !turnedAway {

@@ -222,7 +222,6 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 	// Read the hole blocks, then the blocks the index dates their
 	// transactions at instead.
 	scans := map[int64]scannedBlock{}
-	nexts := map[int64]feeCollectorBegin{}
 	var mu sync.Mutex
 	read := func(heights []int64) error {
 		var want []int64
@@ -251,16 +250,8 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 						errs[i] = fmt.Errorf("block %d: %w", h, err)
 						continue
 					}
-					var next scannedBlock
-					if preEvents(h) {
-						if next, err = node.blockScan(h+1, false); err != nil {
-							errs[i] = fmt.Errorf("block %d, read for the fees block %d collected: %w", h+1, h, err)
-							continue
-						}
-					}
 					mu.Lock()
 					scans[h] = b
-					nexts[h] = next.begin
 					mu.Unlock()
 				}
 			}()
@@ -321,7 +312,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 				b.raw[i].Reincluded = true
 			}
 		}
-		settlePreEventBlock(h, b, nexts[h])
+		settlePreEventBlock(h, b)
 	}
 
 	heightsNeeded := map[int64]bool{}
@@ -348,7 +339,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 				continue
 			}
 			p.ChainTxs++
-			if t.ChargeUnknown {
+			if t.Code != 0 && !t.ChargeKnown {
 				p.Blockers = append(p.Blockers, "a failed transaction's fee outcome could not be settled")
 				continue
 			}
@@ -386,7 +377,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 			case j < 0:
 				p.PlaceBlockers = append(p.PlaceBlockers, "the index dates a transaction at a block that does not include it")
 				continue
-			case passedAnte(hb.txs[j]) || hb.txs[j].ChargeUnknown:
+			case passedAnte(hb.txs[j]) || (hb.txs[j].Code != 0 && !hb.txs[j].ChargeKnown):
 				p.PlaceBlockers = append(p.PlaceBlockers, "the block the index dates a transaction at also let it past the ante handler")
 				continue
 			case t.Code == 0 && !r.Events:
