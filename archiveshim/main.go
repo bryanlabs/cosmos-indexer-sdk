@@ -47,7 +47,13 @@ type upstream struct {
 	gap    time.Duration
 	mu     sync.Mutex
 	next   time.Time
+	// restUntil is when an upstream that failed to answer is tried again
+	// first. Until then it is used only when every upstream is resting.
+	restUntil atomic.Int64
 }
+
+// restFor is how long an upstream that failed to answer is passed over.
+const restFor = 30 * time.Second
 
 // wait spaces calls to the upstream evenly at its rate.
 func (u *upstream) wait(ctx context.Context) error {
@@ -164,7 +170,14 @@ type errStatus struct {
 func (e errStatus) Error() string { return e.msg }
 
 func (s *shim) pick() *upstream {
-	return s.ups[int(s.next.Add(1)-1)%len(s.ups)]
+	now := time.Now().UnixNano()
+	first := int(s.next.Add(1) - 1)
+	for i := 0; i < len(s.ups); i++ {
+		if u := s.ups[(first+i)%len(s.ups)]; u.restUntil.Load() <= now {
+			return u
+		}
+	}
+	return s.ups[first%len(s.ups)]
 }
 
 // attempts is how many upstream calls one query may use when an upstream
@@ -184,6 +197,7 @@ func (s *shim) rpc(ctx context.Context, method string, params any, out any) erro
 		if !errors.As(err, &es) || es.code != http.StatusBadGateway || ctx.Err() != nil {
 			return err
 		}
+		u.restUntil.Store(time.Now().Add(restFor).UnixNano())
 		log.Printf("upstream %d failed %s (attempt %d): %v", s.index(u), method, i+1, err)
 	}
 	return err
@@ -274,6 +288,40 @@ func (s *shim) abciQuery(ctx context.Context, method string, req proto.Message, 
 	return base64.StdEncoding.DecodeString(r.Value)
 }
 
+// rawMethods are the RPC methods the tool also calls directly (store key
+// reads and block reads). The shim passes them to an upstream with the same
+// pacing and failover, so the tool needs no second node.
+var rawMethods = map[string]bool{"abci_query": true, "block": true, "block_results": true, "status": true}
+
+// rawRPC passes an RPC-style GET /<method>?... to an upstream as JSON-RPC and
+// returns its envelope. The caller checks the height it was answered at.
+func (s *shim) rawRPC(ctx context.Context, method string, q url.Values) ([]byte, error) {
+	params := map[string]any{}
+	for k := range q {
+		v := strings.Trim(q.Get(k), `"`)
+		switch k {
+		case "height":
+			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+				return nil, errStatus{http.StatusBadRequest, "bad height"}
+			}
+		case "data":
+			v = strings.TrimPrefix(v, "0x")
+		case "prove":
+			params[k] = v == "true"
+			continue
+		}
+		params[k] = v
+	}
+	if method == "abci_query" {
+		params["prove"] = false
+	}
+	var res json.RawMessage
+	if err := s.rpc(ctx, method, params, &res); err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"jsonrpc": "2.0", "id": -1, "result": res})
+}
+
 func (s *shim) latest(ctx context.Context) ([]byte, error) {
 	var st struct {
 		SyncInfo struct {
@@ -297,6 +345,9 @@ func (s *shim) answer(r *http.Request) ([]byte, error) {
 	}
 	if r.URL.Path == "/cosmos/base/tendermint/v1beta1/blocks/latest" {
 		return s.latest(r.Context())
+	}
+	if m := strings.TrimPrefix(r.URL.Path, "/"); rawMethods[m] {
+		return s.rawRPC(r.Context(), m, r.URL.Query())
 	}
 	var height int64
 	if v := r.Header.Get(heightHeader); v != "" {

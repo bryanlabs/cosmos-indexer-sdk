@@ -173,3 +173,51 @@ func TestQueryErrorIsNotRetried(t *testing.T) {
 		t.Fatalf("status %d calls %d %v", code, calls, body)
 	}
 }
+
+func TestRawStoreQueryPassesThrough(t *testing.T) {
+	var got map[string]any
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req struct {
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		_ = json.Unmarshal(raw, &req)
+		got = req.Params
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"response":{"code":0,"value":"AQI=","height":"9041673"}}}`)
+	}))
+	defer up.Close()
+	s, _ := newShim([]string{up.URL}, []float64{1000})
+	code, body := get(t, s, `/abci_query?path=%22/store/staking/key%22&data=0x31aa&height=9041673`, "")
+	if code != http.StatusOK || got["path"] != "/store/staking/key" || got["data"] != "31aa" || got["height"] != "9041673" {
+		t.Fatalf("status %d params %v body %v", code, got, body)
+	}
+	if body["result"].(map[string]any)["response"].(map[string]any)["height"] != "9041673" {
+		t.Fatalf("body %v", body)
+	}
+}
+
+func TestFailedUpstreamRestsWhileAnotherAnswers(t *testing.T) {
+	downCalls := 0
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downCalls++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer down.Close()
+	var seen banktypes.QueryAllBalancesRequest
+	var seenHeight string
+	up := fakeRPC(t, "", &seen, &seenHeight)
+	defer up.Close()
+	s, _ := newShim([]string{down.URL, up.URL}, []float64{1000, 1000})
+	for i := 0; i < 6; i++ {
+		if code, body := get(t, s, "/cosmos/bank/v1beta1/balances/cosmos1abc", "9041673"); code != http.StatusOK {
+			t.Fatalf("status %d %v", code, body)
+		}
+	}
+	if code, _ := get(t, s, "/cosmos/base/tendermint/v1beta1/blocks/latest", ""); code != http.StatusOK {
+		t.Fatalf("latest status %d", code)
+	}
+	if downCalls != 1 {
+		t.Fatalf("resting upstream called %d times", downCalls)
+	}
+}
