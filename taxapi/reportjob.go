@@ -178,6 +178,12 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		return &job, nil
 	}
 
+	// A wallet too large to build on request is refused before its history
+	// is read. A cached report that is still valid was served above.
+	if err := s.checkReportRowCap(addresses, start, end); err != nil {
+		return nil, err
+	}
+
 	if _, already := inFlight.LoadOrStore(key, struct{}{}); already {
 		job.Status = ReportJobPending
 		return &job, nil

@@ -165,6 +165,11 @@ func (s *Server) handleMyStaking(w http.ResponseWriter, r *http.Request) {
 	chain := chainParam(q.Get(apiChain))
 	start := dateParam(q.Get(apiStart), time.Time{})
 	end := dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
+	// The wallets' rows are all held at once, so they share one row cap.
+	if err := s.checkReportRowCap(addrs, start, end); err != nil {
+		writeTaxError(w, err)
+		return
+	}
 	rowsByAddr := make([][]Row, len(addrs))
 	for i, a := range addrs {
 		rows, err := s.rowsForRequest(r, chain, []string{a}, start, end)

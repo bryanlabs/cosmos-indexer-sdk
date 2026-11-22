@@ -104,10 +104,14 @@ func (s *Server) reportReadiness(chain string, addresses []string, start, end ti
 // cache evidence all belong to the same PostgreSQL MVCC snapshot. Materialize
 // before pricing so external services cannot prolong a database transaction.
 func (s *Server) readReportInput(chain string, addresses []string, start, end time.Time, fingerprint bool) (reportInput, error) {
+	if err := s.checkReportRowCap(addresses, start, end); err != nil {
+		return reportInput{}, err
+	}
 	return s.readWalletInput(chain, addresses, start, end, fingerprint, s.legacyEras(chain), 0)
 }
 
-// readReportJobInput is readReportInput for a background report job.
+// readReportJobInput is readReportInput for a background report job. The row
+// cap is checked when the job is started, in getOrStartReportJob.
 func (s *Server) readReportJobInput(chain string, addresses []string, start, end time.Time) (reportInput, error) {
 	return s.readWalletInput(chain, addresses, start, end, true, s.legacyEras(chain), reportJobReadSnapshotTimeout)
 }
