@@ -796,8 +796,12 @@ func (s *Server) checkInclusionPlans(chain string, ids []int64, node *ledgerNode
 
 // checkAccountAcross rebuilds addr from the chain's state at h back across
 // block h and compares the result with the chain's state at h-1. It returns
-// a reason when they differ.
+// a reason when they differ. The fee collector and the distribution module
+// are balanced across the block instead (checkModuleAcross).
 func (s *Server) checkAccountAcross(chain string, ids []int64, node *ledgerNode, addr string, h int64, rates *rateCache) (string, error) {
+	if module := checkedModule(addr); module != "" {
+		return s.checkModuleAcross(chain, ids, node, addr, module, h, rates)
+	}
 	at, err := rates.anchor(node, addr, h)
 	if err != nil {
 		return "", err
