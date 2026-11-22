@@ -75,6 +75,10 @@ func (p *privateReadPhases) wrap(err error) error {
 }
 
 func privateReadCause(err error) string {
+	var refusal commissionCorrectionRefusal
+	if errors.As(err, &refusal) {
+		return refusal.check()
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "deadline_exceeded"
 	}

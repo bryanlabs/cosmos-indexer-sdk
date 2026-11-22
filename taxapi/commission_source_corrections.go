@@ -96,6 +96,28 @@ type CommissionNativeRewardCorrection struct {
 	SourceBANKCreditOverlap     *bool  `json:"source_BANK_credit_overlap"`
 }
 
+// commissionCorrectionRefusal names the correction check that refused a read.
+// Its text is a fixed sentence with no address, amount or driver text, so a
+// private read failure can keep it as its cause.
+type commissionCorrectionRefusal string
+
+func correctionRefusal(text string) error { return commissionCorrectionRefusal(text) }
+
+func (e commissionCorrectionRefusal) Error() string { return string(e) }
+
+// check is the refusal as a cause slug, such as
+// correction_reward_source_footprint_changed.
+func (e commissionCorrectionRefusal) check() string {
+	words := strings.FieldsFunc(strings.TrimPrefix(string(e), "native "), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	})
+	return strings.ToLower(strings.Join(words, "_"))
+}
+
+// correctionEmptyFootprint is the fingerprint of a message with no rows for the
+// wallet: what the reward corrections were proved against.
+var correctionEmptyFootprint = privateSHA([]byte("[]"))
+
 func correctionHash(s string) bool {
 	if len(s) != 64 {
 		return false
@@ -127,7 +149,7 @@ func correctionInteger(s string) (*big.Int, error) {
 }
 func correctionCoins(m map[string]string) (map[string]*big.Int, error) {
 	if m == nil || len(m) > 64 {
-		return nil, fmt.Errorf("native correction coin vector missing")
+		return nil, correctionRefusal("native correction coin vector missing")
 	}
 	out := map[string]*big.Int{}
 	for d, s := range m {
@@ -164,15 +186,15 @@ func (p *CommissionSourceCorrections) validate() error { return p.validateReward
 
 func (p *CommissionSourceCorrections) validateRewards(rewards int) error {
 	if p.Schema != commissionCorrectionSchema || p.Chain != "cosmoshub-4" || !p.From.Equal(flowDay(p.From)) || !p.AsOf.Equal(flowDay(p.AsOf)) || !p.From.Before(p.AsOf) || !correctionHash(p.BaseProfileSHA256) || !correctionHash(p.NormalizerSHA256) || p.FiveAuthoritySHA256 != correctionFiveAuthority || p.SevenAuthoritySHA256 != correctionSevenAuthority || p.SixAuthoritySHA256 != correctionSixAuthority {
-		return fmt.Errorf("native correction manifest authority or window mismatch")
+		return correctionRefusal("native correction manifest authority or window mismatch")
 	}
 	if len(p.Windows) != 6 || len(p.Fees) > 786 || len(p.Fees) < 779 || len(p.Rewards) != rewards {
-		return fmt.Errorf("native correction bounded scope mismatch")
+		return correctionRefusal("native correction bounded scope mismatch")
 	}
 	windows := map[string]CommissionCorrectionWindow{}
 	for _, w := range p.Windows {
 		if w.ID == "" || w.Wallet == "" || !w.Start.Before(w.End) || !correctionHash(w.SourceInputSHA256) {
-			return fmt.Errorf("native correction source window invalid")
+			return correctionRefusal("native correction source window invalid")
 		}
 		if _, ok := windows[w.ID]; ok {
 			return fmt.Errorf("duplicate native correction window")
@@ -184,7 +206,7 @@ func (p *CommissionSourceCorrections) validateRewards(rewards int) error {
 	authorities := map[string]map[string]bool{correctionFiveAuthority: {}, correctionSevenAuthority: {}}
 	check := func(c CommissionCorrectionIdentity, actor string) error {
 		if !correctionHash(c.ID) || !correctionHash(strings.ToLower(c.TxHash)) || c.Height <= 0 || c.Timestamp.IsZero() || c.Timestamp.Before(p.From) || !c.Timestamp.Before(p.AsOf) || actor == "" || len(c.ProofSHA256) == 0 || len(c.Windows) == 0 {
-			return fmt.Errorf("native correction identity invalid")
+			return correctionRefusal("native correction identity invalid")
 		}
 		if ids[c.ID] {
 			return fmt.Errorf("duplicate native correction identity")
@@ -192,14 +214,14 @@ func (p *CommissionSourceCorrections) validateRewards(rewards int) error {
 		ids[c.ID] = true
 		for _, h := range c.ProofSHA256 {
 			if !correctionHash(h) {
-				return fmt.Errorf("native correction proof digest invalid")
+				return correctionRefusal("native correction proof digest invalid")
 			}
 		}
 		seen := map[string]bool{}
 		for _, id := range c.Windows {
 			w, ok := windows[id]
 			if !ok || seen[id] || w.Wallet != actor || c.Timestamp.Before(w.Start) || !c.Timestamp.Before(w.End) {
-				return fmt.Errorf("native correction source membership mismatch")
+				return correctionRefusal("native correction source membership mismatch")
 			}
 			seen[id] = true
 		}
@@ -296,7 +318,7 @@ func (p *CommissionSourceCorrections) validateRewards(rewards int) error {
 func LoadCommissionSourceCorrections(path, expected string) (*CommissionSourceCorrections, error) {
 	original, e := os.Lstat(path)
 	if e != nil || !original.Mode().IsRegular() {
-		return nil, fmt.Errorf("native correction manifest must be a regular non-symlink file")
+		return nil, correctionRefusal("native correction manifest must be a regular non-symlink file")
 	}
 	f, e := os.Open(path)
 	if e != nil {
@@ -305,23 +327,23 @@ func LoadCommissionSourceCorrections(path, expected string) (*CommissionSourceCo
 	defer f.Close()
 	st, e := f.Stat()
 	if e != nil || !os.SameFile(original, st) || !st.Mode().IsRegular() || st.Size() > 64<<20 {
-		return nil, fmt.Errorf("native correction manifest must be a bounded regular file")
+		return nil, correctionRefusal("native correction manifest must be a bounded regular file")
 	}
 	b, e := io.ReadAll(io.LimitReader(f, 64<<20+1))
 	if e != nil {
 		return nil, e
 	}
 	if len(b) > 64<<20 || !correctionHash(expected) || privateSHA(b) != expected {
-		return nil, fmt.Errorf("native correction manifest digest mismatch")
+		return nil, correctionRefusal("native correction manifest digest mismatch")
 	}
 	var p CommissionSourceCorrections
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if d.Decode(&p) != nil {
-		return nil, fmt.Errorf("native correction manifest decode failed")
+		return nil, correctionRefusal("native correction manifest decode failed")
 	}
 	if d.Decode(new(any)) != io.EOF {
-		return nil, fmt.Errorf("native correction manifest trailing data")
+		return nil, correctionRefusal("native correction manifest trailing data")
 	}
 	rewards := 6
 	if correctionRewardFreeManifests[expected] {
@@ -461,7 +483,7 @@ func (s *Server) correctionSourceTx(chain string, c CommissionCorrectionIdentity
 		return commissionCorrectionSourceTx{}, e
 	}
 	if len(rows) != 1 || rows[0].ID == 0 || rows[0].Hash != c.TxHash || rows[0].Height != c.Height || !correctionTimestampEqual(c.Timestamp, rows[0].Timestamp) || rows[0].Code != c.Code {
-		return commissionCorrectionSourceTx{}, fmt.Errorf("native correction indexed transaction identity changed")
+		return commissionCorrectionSourceTx{}, correctionRefusal("native correction indexed transaction identity changed")
 	}
 	return rows[0], nil
 }
@@ -474,7 +496,7 @@ func (s *Server) validateCorrectionFeeSource(tx uint, actor string, c Commission
 	actorFeePresent := false
 	for _, r := range rows {
 		if r.Actor != c.IndexedActor && r.Actor != c.ChargedActor {
-			return false, fmt.Errorf("native correction fee payer source changed")
+			return false, correctionRefusal("native correction fee payer source changed")
 		}
 		actorFeePresent = actorFeePresent || r.Actor == actor
 		v, e := correctionInteger(r.Amount)
@@ -488,14 +510,14 @@ func (s *Server) validateCorrectionFeeSource(tx uint, actor string, c Commission
 		coins[r.Denom] = prior.Add(prior, v).String()
 	}
 	if len(rows) > 0 && !correctionCoinEqual(coins, c.SourceNominal) {
-		return false, fmt.Errorf("native correction nominal source fee changed")
+		return false, correctionRefusal("native correction nominal source fee changed")
 	}
 	var grants int64
 	if e := s.db.Table("tax_fee_grants").Where("tx_id=?", tx).Count(&grants).Error; e != nil {
 		return false, e
 	}
 	if grants != 0 {
-		return false, fmt.Errorf("native correction fee grant not covered by retained proof")
+		return false, correctionRefusal("native correction fee grant not covered by retained proof")
 	}
 	return actorFeePresent, nil
 }
@@ -505,7 +527,7 @@ func (s *Server) correctionAnteMessage(tx uint) (uint, error) {
 		return 0, err
 	}
 	if len(rows) != 1 || rows[0].ID == 0 {
-		return 0, fmt.Errorf("native correction ante message identity is unavailable")
+		return 0, correctionRefusal("native correction ante message identity is unavailable")
 	}
 	return rows[0].ID, nil
 }
@@ -519,7 +541,7 @@ func (s *Server) correctionMessage(tx uint, c CommissionNativeRewardCorrection) 
 		return 0, e
 	}
 	if len(rows) != 1 || rows[0].ID == 0 || rows[0].MessageType != c.MessageType {
-		return 0, fmt.Errorf("native correction indexed message identity changed")
+		return 0, correctionRefusal("native correction indexed message identity changed")
 	}
 	return rows[0].ID, nil
 }
@@ -538,7 +560,7 @@ func (s *Server) deferNativeCorrectionFee(chain, addr, hash string, at, start, e
 			continue
 		}
 		if !correctionTimestampEqual(c.Timestamp, at) || c.Timestamp.Before(start) || !c.Timestamp.Before(end) {
-			return false, fmt.Errorf("native correction indexed fee time or period changed")
+			return false, correctionRefusal("native correction indexed fee time or period changed")
 		}
 		return true, nil
 	}
@@ -566,7 +588,7 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 		return rows, nil
 	}
 	if !s.readOnlyLedger || s.readSnapshotStarted.IsZero() || s.sourceCorrectionReceipts == nil || s.privateProjectionSnapshot == "" || chainParam(chain) != apiMainnet || !correctionHash(p.digest) {
-		return walletRows{}, fmt.Errorf("native correction requires exact private snapshot")
+		return walletRows{}, correctionRefusal("native correction requires exact private snapshot")
 	}
 	r := CommissionSourceCorrectionReceipt{ProfileSHA256: p.digest, WalletSHA256: privateSHA([]byte(addr)), Start: start.UTC(), End: end.UTC(), Snapshot: s.privateProjectionSnapshot, Status: "not_applicable_to_this_observed_wallet_period"}
 	// Copy only slices modified below. Source rows and another reader's input
@@ -585,7 +607,7 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 			return walletRows{}, e
 		}
 		if source.Timestamp.Before(start) || !source.Timestamp.Before(end) {
-			return walletRows{}, fmt.Errorf("native correction indexed transaction crossed read boundary")
+			return walletRows{}, correctionRefusal("native correction indexed transaction crossed read boundary")
 		}
 		actorFeePresent, e := s.validateCorrectionFeeSource(source.ID, addr, c)
 		if e != nil {
@@ -597,11 +619,11 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 		}
 		fingerprint := correctionEventsSHA(rows.Events, c.TxHash, 0)
 		if addr == c.ChargedActor && fingerprint != c.ChargedActorEventsSHA256 {
-			return walletRows{}, fmt.Errorf("native correction source BANK/events footprint changed")
+			return walletRows{}, correctionRefusal("native correction source BANK/events footprint changed")
 		}
 		for _, f := range out.Fees {
 			if f.Hash == c.TxHash {
-				return walletRows{}, fmt.Errorf("native correction original fee not deferred")
+				return walletRows{}, correctionRefusal("native correction original fee not deferred")
 			}
 		}
 		resolvedKey := flowKey{Time: source.Timestamp.UTC(), Height: c.Height, Message: anteMessage, Sub: -1}
@@ -620,7 +642,7 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 				v, _ := correctionInteger(c.Net[d])
 				if v.Sign() != 0 {
 					if d == apiUatom && unrankedBlocks[c.Height] {
-						return walletRows{}, fmt.Errorf("native correction same-block lifecycle ordering is not proved")
+						return walletRows{}, correctionRefusal("native correction same-block lifecycle ordering is not proved")
 					}
 					out.Fees = append(out.Fees, feeRec{Hash: c.TxHash, Ts: source.Timestamp.UTC(), Denom: d, Amount: v.String(), commissionKey: &resolvedKey})
 				}
@@ -632,9 +654,14 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 	// and event indices. Their real indexed message ID is resolved, never invented.
 	// Existing same-message credits commute for both origin rules; reject a debit
 	// or commission origin in that message rather than inventing source ordering.
+	// A message the indexer now stores itself is used as indexed only when its
+	// rows for the wallet are exactly the corrected rewards; the corrections
+	// are then left out, so the coins are never counted twice.
 	type rewardGroup struct {
 		message     uint
 		originalSHA string
+		sourceSHA   string
+		indexed     bool
 		nextSub     int
 		effects     []CommissionNativeRewardCorrection
 		tx          commissionCorrectionSourceTx
@@ -651,28 +678,32 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 			return walletRows{}, e
 		}
 		if source.Timestamp.Before(start) || !source.Timestamp.Before(end) {
-			return walletRows{}, fmt.Errorf("native correction indexed reward crossed read boundary")
+			return walletRows{}, correctionRefusal("native correction indexed reward crossed read boundary")
 		}
 		message, e := s.correctionMessage(source.ID, c)
 		if e != nil {
 			return walletRows{}, e
 		}
 		if unrankedBlocks[c.Height] {
-			return walletRows{}, fmt.Errorf("native correction same-block lifecycle ordering is not proved")
+			return walletRows{}, correctionRefusal("native correction same-block lifecycle ordering is not proved")
 		}
 		key := fmt.Sprintf("%s/%d", c.TxHash, message)
 		g := groups[key]
 		if g == nil {
 			fingerprint := correctionEventsSHA(rows.Events, c.TxHash, message)
-			if fingerprint != c.OriginalMessageEventsSHA256 {
-				return walletRows{}, fmt.Errorf("native correction reward source footprint changed")
+			indexed := fingerprint != c.OriginalMessageEventsSHA256
+			if indexed && c.OriginalMessageEventsSHA256 != correctionEmptyFootprint {
+				return walletRows{}, correctionRefusal("native correction reward source footprint changed")
 			}
-			g = &rewardGroup{message: message, originalSHA: fingerprint, tx: source}
+			if indexed && !correctionIndexedRewardsEqual(rows.Events, addr, source, message, correctionMessageRewards(p, addr, c, start, end)) {
+				return walletRows{}, correctionRefusal("native correction reward source footprint changed")
+			}
+			g = &rewardGroup{message: message, originalSHA: c.OriginalMessageEventsSHA256, sourceSHA: fingerprint, indexed: indexed, tx: source}
 			for _, event := range rows.Events {
 				if event.TxHash == c.TxHash && event.MessageID == message {
 					flow, ok := flowEventFromRow(event, addr, apiUatom)
 					if ok && (flow.Dir != "in" || flow.Category != apiReward) {
-						return walletRows{}, fmt.Errorf("native correction reward ordering is not proved")
+						return walletRows{}, correctionRefusal("native correction reward ordering is not proved")
 					}
 					if event.SubIndex >= g.nextSub {
 						g.nextSub = event.SubIndex + 1
@@ -682,13 +713,19 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 			groups[key] = g
 			order = append(order, key)
 		} else if g.originalSHA != c.OriginalMessageEventsSHA256 {
-			return walletRows{}, fmt.Errorf("native correction reward source proof conflicts")
+			return walletRows{}, correctionRefusal("native correction reward source proof conflicts")
 		}
 		g.effects = append(g.effects, c)
 	}
 	for _, key := range order {
 		g := groups[key]
 		sort.Slice(g.effects, func(i, j int) bool { return g.effects[i].NativeEventIndex < g.effects[j].NativeEventIndex })
+		if g.indexed {
+			for _, c := range g.effects {
+				r.Effects = append(r.Effects, CommissionSourceEffectReceipt{EffectID: c.ID, TxHashSHA256: privateSHA([]byte(c.TxHash)), ProofSHA256: append([]string(nil), c.ProofSHA256...), Kind: "reward", Disposition: "indexed_reward_equals_correction_not_added", SourceTxID: g.tx.ID, SourceMessageID: g.message, NativeEventIndex: c.NativeEventIndex, SourceRowsSHA256: g.sourceSHA})
+			}
+			continue
+		}
 		for _, c := range g.effects {
 			amount, e := decimal.NewFromString(c.Amount)
 			if e != nil {
@@ -705,4 +742,63 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 	}
 	s.sourceCorrectionReceipts.retain(r)
 	return out, nil
+}
+
+// correctionMessageRewards is every reward correction of addr in [start,end)
+// for c's transaction and outer message.
+func correctionMessageRewards(p *CommissionSourceCorrections, addr string, c CommissionNativeRewardCorrection, start, end time.Time) []CommissionNativeRewardCorrection {
+	var out []CommissionNativeRewardCorrection
+	for _, i := range p.rewardsByWallet[addr] {
+		o := p.Rewards[i]
+		if o.TxHash == c.TxHash && o.NativeMessageIndex == c.NativeMessageIndex && !o.Timestamp.Before(start) && o.Timestamp.Before(end) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// correctionIndexedRewardsEqual reports whether the wallet's indexed rows in a
+// corrected reward message are exactly those rewards: every row an inbound
+// uatom reward of that tx, block and time, with each denom's total equal to the
+// corrections' total. The indexer books one row per validator while the
+// corrections hold one per share record, so totals are compared, not rows.
+// Corrections name no validator; each row must name one.
+func correctionIndexedRewardsEqual(events []tax.TaxableEvent, addr string, tx commissionCorrectionSourceTx, message uint, effects []CommissionNativeRewardCorrection) bool {
+	want := map[string]*big.Int{}
+	for _, c := range effects {
+		v, err := correctionInteger(c.Amount)
+		if err != nil || v.Sign() <= 0 {
+			return false
+		}
+		if want[c.Denom] == nil {
+			want[c.Denom] = new(big.Int)
+		}
+		want[c.Denom].Add(want[c.Denom], v)
+	}
+	got := map[string]*big.Int{}
+	for _, e := range events {
+		if e.TxHash != tx.Hash || e.MessageID != message || isWithdrawAddressMove(e) {
+			continue
+		}
+		if e.Category != apiReward || e.ToAddr != addr || e.FromAddr == addr || e.ValidatorAddress == "" || e.RewardTrigger != "" || e.BlockHeight != tx.Height || !correctionTimestampEqual(tx.Timestamp, e.Timestamp) || want[e.Denom] == nil {
+			return false
+		}
+		v, err := correctionInteger(e.Amount)
+		if err != nil || v.Sign() <= 0 {
+			return false
+		}
+		if got[e.Denom] == nil {
+			got[e.Denom] = new(big.Int)
+		}
+		got[e.Denom].Add(got[e.Denom], v)
+	}
+	if len(got) != len(want) {
+		return false
+	}
+	for d, v := range want {
+		if got[d] == nil || got[d].Cmp(v) != 0 {
+			return false
+		}
+	}
+	return true
 }
