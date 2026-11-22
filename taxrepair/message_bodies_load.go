@@ -16,6 +16,7 @@ import (
 	"time"
 
 	dbpkg "github.com/DefiantLabs/cosmos-indexer/db"
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	sdktx "github.com/cosmos/cosmos-sdk/types/tx"
 	"gorm.io/gorm"
 )
@@ -153,18 +154,28 @@ func readMessageBodiesPlan(path string, perPart int) (string, []mbPart, error) {
 
 // refuseRecoveredBody names why a recovered body may not stand for a stored
 // message, or returns "" when it may: the archive transaction must hash to
-// the stored tx hash, and its message at the stored message index must be a
-// MsgExec, as the stored message is.
+// the stored tx hash, and its message at the stored message index must have
+// the stored type, which must be a MsgExec or an IBC refund lifecycle message
+// (timeout or acknowledgement), the types replays cannot rebuild from events.
 func refuseRecoveredBody(r mbRow, storedHash string, storedIndex int, storedType string) string {
 	switch {
 	case !strings.EqualFold(storedHash, r.TxHash):
 		return "hash"
 	case storedIndex != r.MessageIndex:
 		return "index"
-	case r.TypeURL != typeURLAuthzExec || storedType != typeURLAuthzExec:
+	case r.TypeURL != storedType || !recoverableBodyType(storedType):
 		return "type"
 	}
 	return ""
+}
+
+func recoverableBodyType(typeURL string) bool {
+	switch typeURL {
+	case typeURLAuthzExec, "/ibc.core.channel.v1.MsgTimeout", "/ibc.core.channel.v1.MsgTimeoutOnClose", "/ibc.core.channel.v1.MsgAcknowledgement",
+		tax.TypeURLV2Timeout, tax.TypeURLV2Acknowledgement:
+		return true
+	}
+	return false
 }
 
 func mbIDs(rows []mbRow) []uint {
