@@ -299,14 +299,14 @@ func TestLegacyRedeemOwnWithdrawAddressKeepsRedeemer(t *testing.T) {
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
 			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "9uatom"},
-			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, "1544uatom"},
+			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, settled},
 			[2]string{attributeRecipient, payee}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "3uatom"},
 		),
 		ev("withdraw_rewards",
 			[2]string{attributeAmount, "9uatom"}, [2]string{attributeValidator, lsmTestValoperA},
 			[2]string{attributeAmount, "3uatom"}, [2]string{attributeValidator, lsmTestValoperA},
 		),
-		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, "1544uatom"}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, settled}),
 	}}
 	out := classify(legacyRedeem(t, lsmTestValoperA), log)
 	requireRewardRows(t, out, []rewardRow{
