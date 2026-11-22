@@ -859,10 +859,16 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 					if owner != addr {
 						continue
 					}
-					if ev.Type == "unbond" && paid != "" {
-						rec["amount"] = paid
+					if ev.Type == "unbond" {
+						// The event names the tokens asked for, which fix
+						// the shares taken; the paid amount is what the
+						// unbonding entry holds.
+						rec["requested"] = rec["amount"]
+						if paid != "" {
+							rec["amount"] = paid
+						}
 					}
-					for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "new_shares", "completion_time"} {
+					for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "requested", "new_shares", "completion_time"} {
 						if v, ok := rec[k]; ok {
 							attrs = append(attrs, ledgerAttr{Key: k, Value: v})
 						}

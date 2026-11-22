@@ -536,12 +536,12 @@ func TestAttributePreV15DelegateAndUnbond(t *testing.T) {
 		redelRow(9, 92, 180, "unbond", "completion_time", "2023-04-11T17:03:33Z"),
 	}
 	events, unattributed = attributeRedelegations(unbond, ledgerTestAddr)
-	if unattributed != 0 || len(events) != 1 || events[0].records()[0]["amount"] != "941999uatom" {
+	if unattributed != 0 || len(events) != 1 || events[0].records()[0]["amount"] != "941999uatom" || events[0].records()[0]["requested"] != "942000uatom" {
 		t.Fatalf("unbond paid: events = %+v, unattributed = %d", events, unattributed)
 	}
 	// An unbonded validator: no pool transfer, the event's amount stands.
 	events, _ = attributeRedelegations(append(append([]ledgerAttrRow{}, unbond[:5]...), unbond[11:]...), ledgerTestAddr)
-	if len(events) != 1 || events[0].records()[0]["amount"] != "942000uatom" {
+	if len(events) != 1 || events[0].records()[0]["amount"] != "942000uatom" || events[0].records()[0]["requested"] != "942000uatom" {
 		t.Fatalf("unbond unpaid: events = %+v", events)
 	}
 
@@ -607,5 +607,50 @@ func TestChainTokensRoundsTo18PlacesFirst(t *testing.T) {
 		if got := chainTokens(decimal.RequireFromString(in)); got.IntPart() != want {
 			t.Fatalf("chainTokens(%s) = %s, want %d", in, got, want)
 		}
+	}
+}
+
+// A pre-v15 unbond names the tokens asked for. When the wallet keeps shares
+// on the validator, the shares taken are those tokens over the rate,
+// truncated, so undoing it gives the chain's shares instead of a one-token
+// span. Figures are a mainnet unbond at 14558149: 942000 asked, 941999 paid.
+func TestUndoPreV15UnbondFromRequestedTokens(t *testing.T) {
+	tokens := func(s string) *big.Int { n, _ := new(big.Int).SetString(s, 10); return n }
+	in := ledgerInput{Address: "w", BondDenom: "uatom",
+		Samples: map[string][]rateSample{"val": {
+			{14558148, validatorRate{tokens("3937452193313"), decimal.RequireFromString("3937845934960.16505149177549495")}},
+		}},
+		Anchor: ledgerAnchor{Height: 14558150, Rates: map[string]validatorRate{
+			"val": {tokens("3937451251314"), decimal.RequireFromString("3937844992865.965906100400790647")},
+		}},
+	}
+	after := decimal.RequireFromString("2000460.025532312090476741")
+	chain := decimal.RequireFromString("2942554.224677703465181044")
+	undo := func(attrs []ledgerAttr) shareSpan {
+		shares := map[string]*shareSpan{"val": {after, after}}
+		ev := ledgerEvent{ID: 1, Msg: 1, Height: 14558149, Phase: 1, Type: "unbond", Attrs: attrs}
+		if err := undoEvent(in, newRateBook(in), map[uint64]*big.Int{}, ev, map[string]*big.Int{}, shares); err != nil {
+			t.Fatal(err)
+		}
+		return *shares["val"]
+	}
+	base := []ledgerAttr{{Key: "validator", Value: "val"}, {Key: "amount", Value: "941999uatom"}, {Key: "delegator", Value: "w"}}
+	sp := undo(append(base, ledgerAttr{Key: "requested", Value: "942000uatom"}))
+	if sp.lo.GreaterThan(chain) || sp.hi.LessThan(chain) || sp.hi.Sub(sp.lo).GreaterThan(decimal.New(1, -6)) {
+		t.Fatalf("requested tokens: shares %s..%s, chain %s", sp.lo, sp.hi, chain)
+	}
+	sp = undo(base)
+	if sp.lo.GreaterThan(chain) || sp.hi.LessThan(chain) || sp.hi.Sub(sp.lo).LessThan(decimal.NewFromInt(1)) {
+		t.Fatalf("paid tokens only: shares %s..%s, chain %s", sp.lo, sp.hi, chain)
+	}
+	// Nothing left after the unbond: the chain may have capped the shares
+	// at the delegation's, so the requested tokens do not fix them.
+	shares := map[string]*shareSpan{"val": {decimal.Zero, decimal.Zero}}
+	ev := ledgerEvent{ID: 1, Msg: 1, Height: 14558149, Phase: 1, Type: "unbond", Attrs: append(base, ledgerAttr{Key: "requested", Value: "942000uatom"})}
+	if err := undoEvent(in, newRateBook(in), map[uint64]*big.Int{}, ev, map[string]*big.Int{}, shares); err != nil {
+		t.Fatal(err)
+	}
+	if shares["val"].hi.Sub(shares["val"].lo).LessThan(decimal.NewFromInt(1)) {
+		t.Fatalf("emptied delegation used the requested tokens: %s..%s", shares["val"].lo, shares["val"].hi)
 	}
 }
