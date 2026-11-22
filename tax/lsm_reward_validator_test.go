@@ -255,16 +255,18 @@ func TestLegacyRedeemDropsRecordWithdrawalFromOwnReward(t *testing.T) {
 // withdraws 9uatom and forwards its 1544uatom balance to its owner, who
 // tokenized it. The redeemer had no reward of its own, and the settlement is
 // the owner's income, not the redeemer's.
+const lsmSettledAmount = "1544uatom"
+
 func TestLegacyRedeemRecordPaysWithdrawAddress(t *testing.T) {
 	record := lsmRecordAccount("26746")
-	payee, withdrawn, settled := "cosmos1lsmpayee", "9uatom", "1544uatom"
+	payee, withdrawn := "cosmos1lsmpayee", "9uatom"
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
 			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, withdrawn},
-			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, settled},
+			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, lsmSettledAmount},
 		),
 		ev("withdraw_rewards", [2]string{attributeAmount, withdrawn}, [2]string{attributeValidator, lsmTestValoperA}),
-		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, settled}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, lsmSettledAmount}),
 	}}
 	out := classify(legacyRedeem(t, lsmTestValoperA), log)
 	requireRewardRows(t, out, []rewardRow{
@@ -299,14 +301,14 @@ func TestLegacyRedeemOwnWithdrawAddressKeepsRedeemer(t *testing.T) {
 	log := &indexerTxTypes.LogMessage{Events: []indexerTxTypes.LogMessageEvent{
 		ev(string(CategoryTransfer),
 			[2]string{attributeRecipient, record}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "9uatom"},
-			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, settled},
+			[2]string{attributeRecipient, payee}, [2]string{attributeSender, record}, [2]string{attributeAmount, lsmSettledAmount},
 			[2]string{attributeRecipient, payee}, [2]string{attributeSender, distributionModuleAddress}, [2]string{attributeAmount, "3uatom"},
 		),
 		ev("withdraw_rewards",
 			[2]string{attributeAmount, "9uatom"}, [2]string{attributeValidator, lsmTestValoperA},
 			[2]string{attributeAmount, "3uatom"}, [2]string{attributeValidator, lsmTestValoperA},
 		),
-		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, settled}),
+		ev("withdraw_tokenize_share_reward", [2]string{attributeWithdrawAddress, payee}, [2]string{attributeAmount, lsmSettledAmount}),
 	}}
 	out := classify(legacyRedeem(t, lsmTestValoperA), log)
 	requireRewardRows(t, out, []rewardRow{
