@@ -30,8 +30,8 @@ func TestFlowReadRetriesLockAborts(t *testing.T) {
 }
 
 func TestFlowReadKeepsOtherErrorsAndStops(t *testing.T) {
-	real := flowReadBackoff
-	defer func() { flowReadBackoff = real }()
+	defaultBackoff := flowReadBackoff
+	defer func() { flowReadBackoff = defaultBackoff }()
 	flowReadBackoff = func(int) time.Duration { return 0 }
 	for _, err := range []error{errors.New("other"), &pgconn.PgError{Code: "57014"}, &pgconn.PgError{Code: "42P01"}} {
 		calls := 0
@@ -47,7 +47,7 @@ func TestFlowReadKeepsOtherErrorsAndStops(t *testing.T) {
 	}
 	total := time.Duration(0)
 	for a := 0; a+1 < flowReadAttempts; a++ {
-		total += real(a)
+		total += defaultBackoff(a)
 	}
 	if total > 2*time.Minute {
 		t.Fatalf("retries wait %v in all, over two minutes", total)

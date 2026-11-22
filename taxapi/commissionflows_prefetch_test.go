@@ -18,9 +18,6 @@ import (
 // openings, pools, overdraws, fates, commission, stops and unresolved
 // wallets. Two traces with the same digest give the same rows.
 func flowTraceDigest(tr *flowTrace) string {
-	type pool struct {
-		Parts []flowPart
-	}
 	pools := func(m map[string]*flowPool) []any {
 		var out []any
 		for _, k := range sortedPoolKeys(m) {
@@ -65,7 +62,6 @@ func flowTraceDigest(tr *flowTrace) string {
 type prefetchFlowLedger struct {
 	*fakeFlowLedger
 	slots    int
-	mu       sync.Mutex
 	calls    []string
 	hinted   map[string]bool
 	open     map[string]bool
