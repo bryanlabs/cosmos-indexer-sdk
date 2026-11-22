@@ -100,7 +100,7 @@ const (
 	incHoleX        = 10100050 // X ran and is not in the index at all
 	incHeldP        = 9100005  // before v7: P turned away
 	incHoleP        = 9100010  // P failed after paying its fee
-	incHoleU        = 9100020  // two equal failed fees, one paid: not decidable
+	incHoleU        = 9100020  // a failed fee its result does not settle
 	incBetween      = 10100025 // a date between B's run and the copy the index dated it at
 	incFeeX         = "50uatom"
 	incPageKey      = "pagination"
@@ -139,7 +139,6 @@ func newInclusionFixture(t *testing.T) inclusionFixture {
 		"U2": walletTx(t, "u2", "40uatom", w["U"]),
 	}
 	dir := t.TempDir()
-	fc := feeCollectorAddress()
 	cache := func(height int64, txs [][]byte, results []pgTxResult, begin []event) {
 		h := strconv.FormatInt(height, 10)
 		raw := make([]string, len(txs))
@@ -153,12 +152,6 @@ func newInclusionFixture(t *testing.T) inclusionFixture {
 			results = []pgTxResult{}
 		}
 		writeCached(t, dir, height, "block_results", map[string]any{pgHeightKey: h, pgResultsKey: results, "begin_block_events": begin})
-	}
-	collected := func(fees int64) []event {
-		return []event{
-			{Type: eventCoinReceived, Attributes: []attr{{attrReceiver, fc}, {apiAmount, testMintAmount}}},
-			{Type: eventCoinSpent, Attributes: []attr{{attrSpender, fc}, {apiAmount, fmt.Sprintf("%duatom", 1000+fees)}}},
-		}
 	}
 	send := func(from, to string) pgTxResult {
 		return pgTxResult{Events: []event{
@@ -174,14 +167,12 @@ func newInclusionFixture(t *testing.T) inclusionFixture {
 	cache(incHeldC, [][]byte{tx["C"]}, []pgTxResult{seq}, nil)
 	cache(incHoleC, [][]byte{tx["C"]}, []pgTxResult{{Code: 5, Codespace: codespaceSDK, Events: []event{{Type: eventCoinSpent, Attributes: []attr{{attrSpender, w["C"]}, {apiAmount, "10uatom"}}}}}}, nil)
 	cache(incHoleX, [][]byte{tx["X"]}, []pgTxResult{{Events: []event{{Type: eventCoinSpent, Attributes: []attr{{attrSpender, w["X"]}, {apiAmount, incFeeX}}}}}}, nil)
-	cache(incHeldP, [][]byte{tx["P"]}, []pgTxResult{seq}, nil)
-	cache(incHeldP+1, nil, nil, collected(0))
-	cache(incHoleP, [][]byte{tx["P"]}, []pgTxResult{{Code: 5, Codespace: codespaceSDK}}, nil)
-	cache(incHoleP+1, nil, nil, collected(40))
-	cache(incHoleU, [][]byte{tx["U1"], tx["U2"]}, []pgTxResult{{Code: 5, Codespace: codespaceSDK}, {Code: 5, Codespace: codespaceSDK}}, nil)
-	cache(incHoleU+1, nil, nil, collected(40))
+	// Before v7 a failed transaction's result settles its fee.
+	cache(incHeldP, [][]byte{tx["P"]}, []pgTxResult{{Code: 32, Codespace: codespaceSDK, Log: logWrongSeq}}, nil)
+	cache(incHoleP, [][]byte{tx["P"]}, []pgTxResult{{Code: 5, Codespace: codespaceSDK, Log: logMsgFailed}}, nil)
+	cache(incHoleU, [][]byte{tx["U1"], tx["U2"]}, []pgTxResult{{Code: 5, Codespace: codespaceSDK, Log: logMsgFailed}, {Code: 11, Codespace: codespaceSDK, Log: logOutOfGas, GasWanted: "300"}}, nil)
 
-	heights := []int64{incHeldA, incHoleA, incHoleB, incBetween, incHeldB, incHeldC, incHoleC, incHoleX, incHeldP, incHeldP + 1, incHoleP, incHoleP + 1, incHoleU, incHoleU + 1}
+	heights := []int64{incHeldA, incHoleA, incHoleB, incBetween, incHeldB, incHeldC, incHoleC, incHoleX, incHeldP, incHoleP, incHoleU}
 	var blocks []string
 	for _, h := range heights {
 		blocks = append(blocks, fmt.Sprintf("(%d,1,%d,timestamptz '2022-03-01' + %d * interval '6 seconds',true,true)", h, h, h-9000000))
@@ -222,7 +213,7 @@ func newInclusionFixture(t *testing.T) inclusionFixture {
 		// Each index row is dated at a copy the chain turned away, with the
 		// code that copy failed with, as the upsert left it. A and B keep the
 		// messages and events of the copy that ran.
-		fmt.Sprintf("INSERT INTO txes VALUES (1,%d,'%s',32),(2,%d,'%s',32),(3,%d,'%s',32),(4,%d,'%s',32),(5,%d,'%s',5),(6,%d,'%s',5)",
+		fmt.Sprintf("INSERT INTO txes VALUES (1,%d,'%s',32),(2,%d,'%s',32),(3,%d,'%s',32),(4,%d,'%s',32),(5,%d,'%s',5),(6,%d,'%s',11)",
 			incHeldA, hash("A"), incHeldB, hash("B"), incHeldC, hash("C"), incHeldP, hash("P"), incHoleU, hash("U1"), incHoleU, hash("U2")),
 		"INSERT INTO messages VALUES (1,1),(2,2)",
 		"INSERT INTO message_events VALUES (1,1,1,0),(2,1,2,1),(3,2,1,0),(4,2,2,1)",
@@ -474,33 +465,34 @@ func TestRepairRepeatedInclusionsRefusesUnprovenHeldBlockPostgres(t *testing.T) 
 	require.Equal(t, 3, sum.Placements)
 }
 
-// A copy turned away while another copy of the same bytes got past the ante
-// handler is charged nothing before Gaia v7, even when its code alone would
-// let it have paid, so an equal fee in the same block is decided.
+// A copy of bytes another inclusion got past the ante handler was turned
+// away before Gaia v7. One whose result reads as a message failure is a
+// contradiction and stays unknown; one rejected before its messages paid
+// nothing.
 func TestSettlePreEventReincluded(t *testing.T) {
-	fc := feeCollectorAddress()
-	next := readFeeCollectorBegin([]rpcEvent{
-		fcEvent(eventCoinReceived, fc, testMintAmount, "", false),
-		fcEvent(eventCoinSpent, fc, "1040uatom", "", false),
-	}, nil)
-	fresh := func(reincluded bool) scannedBlock {
+	fresh := func(reincluded bool, log string) scannedBlock {
 		return scannedBlock{
 			txs: []nodeTx{{Hash: "RR", Code: 5, Rejected: true}, {Hash: "QQ", Code: 5, Rejected: true}},
 			raw: []rawTxInfo{
-				{Codespace: codespaceSDK, Fee: coins(t, "40uatom"), FeeDecoded: true, Reincluded: reincluded},
-				{Codespace: codespaceSDK, Fee: coins(t, "40uatom"), FeeDecoded: true},
+				{Codespace: codespaceSDK, Reincluded: reincluded, Failed: failedResult(5, codespaceSDK, log, 200000, "40uatom")},
+				{Codespace: codespaceSDK, Failed: failedResult(5, codespaceSDK, logMsgFailed, 200000, "40uatom")},
 			},
 		}
 	}
-	b := fresh(false)
-	settlePreEventBlock(9000000, b, next)
-	require.True(t, b.txs[0].ChargeUnknown, "two equal fees, one paid: undecidable")
-	require.True(t, b.txs[1].ChargeUnknown)
+	b := fresh(false, logMsgFailed)
+	st := settlePreEventBlock(9000000, b)
+	require.Equal(t, nodeTx{Hash: "RR", Code: 5, Charged: "40uatom", ChargeKnown: true}, b.txs[0], "two equal fees settle one by one")
+	require.Equal(t, nodeTx{Hash: "QQ", Code: 5, Charged: "40uatom", ChargeKnown: true}, b.txs[1])
+	require.Equal(t, 1, st.ResolvedBlocks)
 
-	b = fresh(true)
-	settlePreEventBlock(9000000, b, next)
-	require.Equal(t, nodeTx{Hash: "RR", Code: 5, Rejected: true}, b.txs[0])
-	require.Equal(t, nodeTx{Hash: "QQ", Code: 5, Charged: "40uatom"}, b.txs[1])
+	b = fresh(true, logMsgFailed)
+	st = settlePreEventBlock(9000000, b)
+	require.Equal(t, nodeTx{Hash: "RR", Code: 5}, b.txs[0], "a reincluded copy read as charged is unknown")
+	require.Equal(t, map[string]int{preEventReincluded: 1}, st.UnresolvedReasons)
+
+	b = fresh(true, logWrongSeq)
+	settlePreEventBlock(9000000, b)
+	require.Equal(t, nodeTx{Hash: "RR", Code: 5, Rejected: true, ChargeKnown: true}, b.txs[0])
 }
 
 // requireSameBlockReads proves the repair's block-driven event and fee reads return

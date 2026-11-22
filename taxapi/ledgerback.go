@@ -241,12 +241,6 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 		}
 		close(heights)
 		wg.Wait()
-		// A block's fees are collected in the next block's BeginBlock.
-		var top scannedBlock
-		var topErr error
-		if preEvents(hi) {
-			top, topErr = node.blockScan(hi+1, false)
-		}
 
 		plan := ledgerBackChunk{Version: 1, PlannedAt: time.Now().UTC(), Apply: opts.Apply, Chain: chain, FromBefore: from}
 		var scanned []backBlock
@@ -264,14 +258,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 			}
 			b := read[h-lo]
 			if preEvents(h) {
-				nextBegin := top.begin
-				if h < hi {
-					nextBegin = read[h+1-lo].begin
-				} else if topErr != nil {
-					stop = fmt.Errorf("block %d: fees collected in the next block: %w", h, topErr)
-					break
-				}
-				plan.PreEvents.add(settlePreEventBlock(h, b, nextBegin))
+				plan.PreEvents.add(settlePreEventBlock(h, b))
 			}
 			scanned = append(scanned, scanBackBlock(h, b.txs, idx))
 			next = h
@@ -326,10 +313,10 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 			sum.ExistingDiffer += len(differ)
 			// The summary keeps counts; heights stay in the backup's chunks.
 			counts := plan.PreEvents
-			counts.UnresolvedHeights, counts.MismatchHeights = nil, nil
+			counts.UnresolvedHeights = nil
 			sum.PreEvents.add(counts)
-			logf("ledger scan back (%s): span starts at %d (%d blocks, %d with missing transactions, %d failed fees, %d grants, %d recorded rows agree, %d disagree, pre-v7 unresolved blocks %d, clean-block mismatches %d)",
-				mode, next, from-next, len(plan.Holes), len(plan.Fees), len(plan.Grants), same, len(differ), plan.PreEvents.UnresolvedBlocks, plan.PreEvents.CleanMismatch)
+			logf("ledger scan back (%s): span starts at %d (%d blocks, %d with missing transactions, %d failed fees, %d grants, %d recorded rows agree, %d disagree, pre-v7 unresolved blocks %d)",
+				mode, next, from-next, len(plan.Holes), len(plan.Fees), len(plan.Grants), same, len(differ), plan.PreEvents.UnresolvedBlocks)
 			from = next
 			sum.From = from
 		}
