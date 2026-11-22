@@ -2,10 +2,12 @@ package taxapi
 
 import (
 	"container/heap"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -72,6 +74,7 @@ const (
 	flowBusyWallet        = "busy_wallet"
 	flowWideDistributor   = "wide_distributor"
 	flowUnresolved        = "unresolved"
+	flowIndexGap          = "index_gap"
 	flowBlockSpend        = "block_spend"
 	flowOriginOther       = ""
 	flowDust              = "0.000001"
@@ -1040,6 +1043,19 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 	}
 	cursor := e.Key
 	if err := t.discover(e.To, w.Hop+1, e.Key.Time, &cursor); err != nil {
+		if gap, ok := flowIndexGapStop(err); ok {
+			// The report refuses this wallet's history (an IBC refund with no
+			// matching send, a parser or decode gap), so the coins end at the
+			// wallet, named by the gate that refused it, and the rest of the
+			// trace goes on.
+			delete(t.Wallets, e.To)
+			for r := 0; r < flowRules; r++ {
+				t.recordStop(r, parts[r], w, e.To, gap)
+				t.record(r, parts[r], gap.Class, gap.Detail)
+			}
+			t.stops[e.To] = gap
+			return nil
+		}
 		if t.strict {
 			return err
 		}
@@ -1057,6 +1073,27 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 		dst.pools[r].liquid.add(parts[r])
 	}
 	return nil
+}
+
+// flowIndexGapStop is the stop for a wallet whose history the report's
+// readiness gate refuses, with the gate's reasons as the detail.
+func flowIndexGapStop(err error) (flowStop, bool) {
+	var gap reportReadinessRequired
+	if !errors.As(err, &gap) {
+		return flowStop{}, false
+	}
+	r := gap.Readiness
+	reasons := append([]string(nil), r.ReviewRequired...)
+	for _, c := range []struct {
+		n    int64
+		name string
+	}{{r.RemainingParserErrors, "parser_errors"}, {r.DecodeErrors, "decode_errors"}, {r.OpaqueMessages, "opaque_messages"}, {r.UnreviewedMessages, "unreviewed_messages"}} {
+		if c.n > 0 {
+			reasons = append(reasons, c.name)
+		}
+	}
+	sort.Strings(reasons)
+	return flowStop{Class: flowIndexGap, Detail: strings.Join(reasons, ",")}, true
 }
 
 // flowUnclassifiedBlockSpend reports a block event spend the parser could not

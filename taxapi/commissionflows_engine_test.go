@@ -28,6 +28,7 @@ type fakeFlowLedger struct {
 	loaded   []string
 	stopped  []string
 	slashed  []flowEvent
+	fail     map[string]error
 }
 
 func (l *fakeFlowLedger) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -40,6 +41,9 @@ func (l *fakeFlowLedger) opening(addr string, day time.Time) (flowHoldings, bool
 
 func (l *fakeFlowLedger) events(addr string, start, end time.Time) ([]flowEvent, error) {
 	l.loaded = append(l.loaded, addr)
+	if err := l.fail[addr]; err != nil {
+		return nil, err
+	}
 	var out []flowEvent
 	for _, e := range l.rows[addr] {
 		if !e.Key.Time.Before(start) && e.Key.Time.Before(end) {
@@ -340,7 +344,7 @@ func TestFlowWideDistributorClassServed(t *testing.T) {
 	classes := []string{
 		flowHeld, flowRestakedOwn, flowRestakedOther, flowUnbonding, flowLocked, flowHeldDownstream, flowStakedDownstream,
 		flowUnbondDownstream, flowLockedDownstream, flowExchange, flowExchangeLike, flowIBCOut, flowFees, flowSwapped, flowSpent, flowTokenized,
-		flowBurned, flowCommunityPool, flowModule, flowContract, flowBeyondHops, flowBusyWallet, flowWideDistributor, flowUnresolved, flowBlockSpend,
+		flowBurned, flowCommunityPool, flowModule, flowContract, flowBeyondHops, flowBusyWallet, flowWideDistributor, flowUnresolved, flowIndexGap, flowBlockSpend,
 	}
 	for _, class := range classes {
 		require.NotEmpty(t, FlowClassNotes[class], class)
@@ -461,4 +465,43 @@ func TestFlowRewardPayoutsKeepSourceCorrections(t *testing.T) {
 	require.Equal(t, []flowEvent{corrected}, got)
 	got = reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected}, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(30)}})
 	require.Equal(t, []flowEvent{corrected}, got)
+}
+
+// A wallet whose history the readiness gate refuses ends the coins sent to
+// it there, named by the gate and with its address kept, and the trace goes
+// on, strict or not. Any other read failure still fails a strict trace.
+func TestFlowIndexGapStopsAtRefusedWallet(t *testing.T) {
+	const gapWallet = "cosmos1gap"
+	refused := &CommissionReadFailure{Phase: "readiness", Cause: "other", wrappedErr: reportReadinessRequired{ReportReadiness{ReviewRequired: []string{ibcRefundBasisRequired}, DecodeErrors: 2}}}
+	for _, strict := range []bool{false, true} {
+		l := newFakeFlowLedger()
+		l.fail = map[string]error{gapWallet: refused}
+		l.commission(flowAt(1, 0), flowTestReceiver, 100)
+		l.send(flowAt(2, 0), flowTestReceiver, gapWallet, 60)
+		l.send(flowAt(3, 0), flowTestReceiver, gapWallet, 10)
+		tr := newFlowTrace(flowTestValidator, flowTestStart, flowTestStart.AddDate(0, 3, 0), l)
+		tr.strict = strict
+		require.NoError(t, tr.run([]string{flowTestReceiver}))
+		detail := "decode_errors," + ibcRefundBasisRequired
+		require.Equal(t, "70", fate(tr, flowRuleFIFO, "2025-01", flowIndexGap, detail, false))
+		require.Equal(t, "30", fate(tr, flowRuleFIFO, "2025-01", flowHeld, "", false))
+		require.Equal(t, "70", tr.Stops[FlowStopKey{Rule: flowRuleFIFO, Class: flowIndexGap, Detail: detail, From: flowTestReceiver, To: gapWallet, Hop: 0}].String())
+		require.NotContains(t, tr.Wallets, gapWallet)
+		require.Empty(t, tr.Unresolved)
+		loads := 0
+		for _, a := range l.loaded {
+			if a == gapWallet {
+				loads++
+			}
+		}
+		require.Equal(t, 1, loads, "the refused wallet is read once")
+	}
+
+	l := newFakeFlowLedger()
+	l.fail = map[string]error{gapWallet: &CommissionReadFailure{Phase: "readiness", Cause: "other", wrappedErr: fmt.Errorf("connection reset")}}
+	l.commission(flowAt(1, 0), flowTestReceiver, 100)
+	l.send(flowAt(2, 0), flowTestReceiver, gapWallet, 60)
+	tr := newFlowTrace(flowTestValidator, flowTestStart, flowTestStart.AddDate(0, 3, 0), l)
+	tr.strict = true
+	require.Error(t, tr.run([]string{flowTestReceiver}))
 }
