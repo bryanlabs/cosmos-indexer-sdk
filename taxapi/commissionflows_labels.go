@@ -99,7 +99,7 @@ func (s *Server) exchangeProfile(addr string, fedBy int, from, asOf time.Time) (
 		return err
 	}
 	var err error
-	p.MemoSenders, err = s.memoDepositSenders(addr)
+	p.MemoSenders, err = s.memoDepositSenders(addr, asOf)
 	if err = measure("memo-deposit", err); err != nil {
 		return p, err
 	}

@@ -595,7 +595,7 @@ func TestCommissionFlowWithdrawAddressMovesPostgres(t *testing.T) {
 	n, err := s.fanoutReceivers(delegator, flowPGWindowStart, flowPGWindowEnd, 100)
 	require.NoError(t, err)
 	require.Equal(t, 5, n)
-	senders, err := s.memoDepositSenders(flowPGDeposit)
+	senders, err := s.memoDepositSenders(flowPGDeposit, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, 120, senders)
 }

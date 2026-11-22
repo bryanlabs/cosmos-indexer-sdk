@@ -305,29 +305,40 @@ SELECT (SELECT count(*) FROM senders) AS examined,
 }
 
 // memoDepositSenders counts the distinct senders that paid addr with a
-// deposit-style memo, in a sample of its receipts.
-func (s *Server) memoDepositSenders(addr string) (int, error) {
+// deposit-style memo, in its first flowMemoSample memo receipts before end.
+// The bound and the total order make the count a function of the index
+// before end: receipts after a trace's as-of date, or a different query plan,
+// cannot change it.
+func (s *Server) memoDepositSenders(addr string, end time.Time) (int, error) {
+	end = end.UTC()
 	if s.flowShared != nil {
-		n, err := s.sharedCount(flowSharedKey{kind: flowSharedMemo, addr: addr}, func() (int64, error) {
-			n, err := s.readMemoDepositSenders(addr)
+		n, err := s.sharedCount(flowSharedKey{kind: flowSharedMemo, addr: addr, end: end}, func() (int64, error) {
+			n, err := s.readMemoDepositSenders(addr, end)
 			return int64(n), err
 		})
 		return int(n), err
 	}
-	return s.readMemoDepositSenders(addr)
+	return s.readMemoDepositSenders(addr, end)
 }
 
-func (s *Server) readMemoDepositSenders(addr string) (int, error) {
+func (s *Server) readMemoDepositSenders(addr string, end time.Time) (int, error) {
 	var rows []struct {
 		FromAddr string
 		Memo     string
 	}
+	// OFFSET 0 keeps the receipt read on the to_addr index; the sort is over
+	// addr's receipts only.
 	if err := s.db.Raw(`
-SELECT te.from_addr, t.memo FROM taxable_events te
+SELECT te.from_addr, t.memo FROM (
+  SELECT id, message_id, from_addr, timestamp FROM taxable_events
+  WHERE to_addr = @addr AND category IN ('transfer', 'ibc_in') AND coalesce(reward_trigger, '') <> @withdraw
+    AND timestamp < @end
+  OFFSET 0) te
 JOIN messages m ON m.id = te.message_id
 JOIN txes t ON t.id = m.tx_id
-WHERE te.to_addr = ? AND te.category IN ('transfer', 'ibc_in') AND t.memo <> '' AND coalesce(te.reward_trigger, '') <> ?
-LIMIT ?`, addr, tax.TriggerWithdrawAddress, flowMemoSample).Scan(&rows).Error; err != nil {
+WHERE t.memo <> ''
+ORDER BY te.timestamp, te.id
+LIMIT @sample`, map[string]any{"addr": addr, "withdraw": tax.TriggerWithdrawAddress, "end": end, "sample": flowMemoSample}).Scan(&rows).Error; err != nil {
 		return 0, err
 	}
 	senders := map[string]bool{}
@@ -1148,9 +1159,9 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 	j := l.pre.wait(addr)
 	var n int
 	var err error
-	if j != nil && j.memoOK {
+	if j != nil && j.memoOK && j.end.Equal(end) {
 		n = j.memo
-	} else if n, err = flowRead(func() (int, error) { return l.s.memoDepositSenders(addr) }); err != nil {
+	} else if n, err = flowRead(func() (int, error) { return l.s.memoDepositSenders(addr, end) }); err != nil {
 		return flowStop{}, err
 	}
 	if n >= flowMemoMinSenders {
@@ -1169,9 +1180,9 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 		return flowStop{Class: flowExchangeLike, Detail: flowMemoHeuristic}, nil
 	}
 	var rows int64
-	if j != nil && j.rowsOK {
+	if j != nil && j.rowsOK && j.end.Equal(end) {
 		rows = j.rows
-	} else if rows, err = flowRead(func() (int64, error) { return l.s.walletRows(addr, ledgerHeavyRows) }); err != nil {
+	} else if rows, err = flowRead(func() (int64, error) { return l.s.walletRowsBefore(addr, ledgerHeavyRows, end) }); err != nil {
 		return flowStop{}, err
 	}
 	if rows > ledgerHeavyRows {

@@ -337,7 +337,7 @@ func (p *flowPrefetch) read(j *flowPrefetchJob) {
 		if (ok && lab.Kind != labelValidatorOperator) || len(j.addr) > len("cosmos1")+38+1 {
 			return
 		}
-		n, err := l.s.memoDepositSenders(j.addr)
+		n, err := l.s.memoDepositSenders(j.addr, j.end)
 		if err != nil {
 			return
 		}
@@ -345,7 +345,7 @@ func (p *flowPrefetch) read(j *flowPrefetchJob) {
 		if n >= flowMemoMinSenders || j.dropped.Load() {
 			return
 		}
-		rows, err := l.s.walletRows(j.addr, ledgerHeavyRows)
+		rows, err := l.s.walletRowsBefore(j.addr, ledgerHeavyRows, j.end)
 		if err != nil {
 			return
 		}

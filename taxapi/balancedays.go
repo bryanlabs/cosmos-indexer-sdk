@@ -84,6 +84,42 @@ SELECT (SELECT count(*) FROM (SELECT 1 FROM message_event_attributes WHERE left(
 	return n, err
 }
 
+// walletRowsBefore decides the busy cutoff for a trace ending at end. A
+// wallet whose lifetime rows are at most limit is under it before any end,
+// and that count is returned. Otherwise its rows from blocks before end are
+// counted, up to limit+1, so activity after a trace's as-of date cannot move
+// a wallet across the cutoff.
+func (s *Server) walletRowsBefore(addr string, limit int, end time.Time) (int64, error) {
+	n, err := s.walletRows(addr, limit)
+	if err != nil || n <= int64(limit) {
+		return n, err
+	}
+	end = end.UTC()
+	if s.flowShared != nil {
+		return s.sharedCount(flowSharedKey{kind: flowSharedWalletRowsBefore, addr: addr, end: end, n: limit}, func() (int64, error) {
+			return s.readWalletRowsBefore(addr, limit, end)
+		})
+	}
+	return s.readWalletRowsBefore(addr, limit, end)
+}
+
+func (s *Server) readWalletRowsBefore(addr string, limit int, end time.Time) (int64, error) {
+	var n int64
+	err := s.db.Raw(`
+SELECT (SELECT count(*) FROM (SELECT 1 FROM message_event_attributes a
+          JOIN message_events me ON me.id = a.message_event_id
+          JOIN messages m ON m.id = me.message_id
+          JOIN txes x ON x.id = m.tx_id
+          JOIN blocks b ON b.id = x.block_id
+        WHERE left(a.value, 100) = left(@addr, 100) AND a.value = @addr AND b.time_stamp < @end LIMIT @lim) m)
+     + (SELECT count(*) FROM (SELECT 1 FROM block_event_attributes a
+          JOIN block_events be ON be.id = a.block_event_id
+          JOIN blocks b ON b.id = be.block_id
+        WHERE left(a.value, 100) = left(@addr, 100) AND a.value = @addr AND b.time_stamp < @end LIMIT @lim) b)`,
+		map[string]any{"addr": addr, "lim": limit + 1, "end": end}).Scan(&n).Error
+	return min(n, int64(limit)+1), err
+}
+
 // deferHeavyWallet records addr as deferred when it names more than
 // ledgerHeavyRows attribute rows, and removes any rows stored for it, so no
 // day is served from a row that later days were not appended to.

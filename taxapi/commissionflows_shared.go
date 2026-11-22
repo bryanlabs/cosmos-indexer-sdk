@@ -49,6 +49,7 @@ const (
 	flowSharedWalletRows
 	flowSharedMemo
 	flowSharedFanout
+	flowSharedWalletRowsBefore
 )
 
 type flowSharedKey struct {
