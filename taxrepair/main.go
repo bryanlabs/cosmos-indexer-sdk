@@ -63,6 +63,20 @@ type backup struct {
 	Bytes     string             `json:"message_bytes,omitempty"`
 	Old       []tax.TaxableEvent `json:"old"`
 	Expected  []tax.TaxableEvent `json:"expected"`
+	// ClearedParserErrors are the message's parser error rows that a
+	// --clear-parser-errors run deletes because the production parser now
+	// classifies the stored body. A record whose expected rows equal its old
+	// rows only clears errors and leaves the tax rows alone.
+	ClearedParserErrors []parserErrorRow `json:"cleared_parser_errors,omitempty"`
+}
+
+// parserErrorRow is one message_parser_errors row, kept whole in the backup so
+// a cleared error can be restored as it was.
+type parserErrorRow struct {
+	ID              uint   `json:"id"`
+	MessageID       uint   `json:"message_id"`
+	MessageParserID uint   `json:"message_parser_id"`
+	Error           string `json:"error"`
 }
 
 // totals sums amounts by category, denom and trigger so the before and after
@@ -183,6 +197,7 @@ func run() int {
 	idsFile := flag.String("message-ids-file", "", "optional file of message ids, one per line; replay only those messages")
 	readOnly := flag.Bool("read-only", false, "open the connection with default_transaction_read_only=on (plan only)")
 	keepSeqscan := flag.Bool("keep-seqscan", false, "leave enable_seqscan at the server default")
+	clearErrors := flag.Bool("clear-parser-errors", false, "also delete the tax parser error of each message the production parser now classifies from its stored body, as the indexer does on a clean parse (backed up)")
 	flag.Parse()
 	if *batch < 1 || *batch > 5000 {
 		fatal("batch must be between 1 and 5000")
@@ -295,7 +310,7 @@ func run() int {
 	if b != nil {
 		defer b.file.Close()
 	}
-	scanned, changed, zeroed, skipped := 0, 0, 0, 0
+	scanned, changed, zeroed, skipped, cleared := 0, 0, 0, 0, 0
 	oldTotal, newTotal := totals{}, totals{}
 	last := *from
 	fmt.Printf("snapshot_max_message_id=%d apply=%t candidates=%d categories=%s message_types=%s\n", maxID, *apply, len(candidates), strings.Join(categories, ","), strings.Join(types, ","))
@@ -324,9 +339,14 @@ func run() int {
 			}
 			break
 		}
-		plans, skips, err := planBatch(db, codec, rows)
+		plans, skips, parsed, err := planBatchParsed(db, codec, rows)
 		if err != nil {
 			fatal(err.Error())
+		}
+		if *clearErrors {
+			if plans, err = withResolvedErrors(db, plans, parsed, rows); err != nil {
+				fatal(err.Error())
+			}
 		}
 		for _, sk := range skips {
 			fmt.Printf("skip message_id=%d type=%s reason=%s\n", sk.MessageID, sk.Type, sk.Reason)
@@ -334,6 +354,13 @@ func run() int {
 		skipped += len(skips)
 		scanned += len(rows)
 		for _, p := range plans {
+			for _, e := range p.ClearedParserErrors {
+				cleared++
+				fmt.Printf("clear message_id=%d parser_error_id=%d\n", e.MessageID, e.ID)
+			}
+			if same(p.Old, p.Expected) {
+				continue
+			}
 			changed++
 			if len(p.Expected) == 0 {
 				zeroed++
@@ -353,7 +380,7 @@ func run() int {
 		if restricted {
 			last = chunk[len(chunk)-1]
 		}
-		fmt.Printf("last_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d\n", last, scanned, changed, zeroed, skipped)
+		fmt.Printf("last_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d cleared_parser_errors=%d\n", last, scanned, changed, zeroed, skipped, cleared)
 	}
 	sum, err := b.verify()
 	if err != nil {
@@ -362,7 +389,7 @@ func run() int {
 	if b != nil {
 		fmt.Printf("backup=%s sha256=%s records=%d\n", *path, sum, b.lines)
 	}
-	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", maxID, scanned, changed, zeroed, skipped, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
+	fmt.Printf("complete=true snapshot_max_message_id=%d scanned=%d changed=%d zeroed=%d skipped=%d cleared_parser_errors=%d apply=%t\nold_changed_totals=%s\nnew_changed_totals=%s\n", maxID, scanned, changed, zeroed, skipped, cleared, *apply, jsonTotals(oldTotal), jsonTotals(newTotal))
 	if skipped > 0 {
 		// Every skipped message is printed above; the run is incomplete until
 		// each one is explained or replayed from an archive node.
@@ -513,8 +540,17 @@ func oldRows(db *gorm.DB, ids []uint) (map[uint][]tax.TaxableEvent, error) {
 }
 
 func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup, []skip, error) {
+	plans, skips, _, err := planBatchParsed(db, codec, rows)
+	return plans, skips, err
+}
+
+// planBatchParsed also returns the messages the production parser classified
+// from their stored body without an error. Only those can have a parser error
+// cleared: a body-free reconstruction or a trivial-log fallback is not the
+// parse the indexer ran.
+func planBatchParsed(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup, []skip, []uint, error) {
 	if len(rows) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	ids := make([]uint, len(rows))
 	for i, r := range rows {
@@ -522,7 +558,7 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	}
 	old, err := oldRows(db, ids)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// The ids go in as one opaque array: with a literal list of hundreds the
 	// planner estimates enough events to merge join against the whole
@@ -541,7 +577,7 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 		err = db.Table("message_events e").Select("e.message_id,e.index,et.type,k.key,a.value,a.index attr_index").Joins("JOIN message_event_types et ON et.id=e.message_event_type_id LEFT JOIN message_event_attributes a ON a.message_event_id=e.id LEFT JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").Where("e.message_id = ANY(ARRAY(SELECT unnest(?::bigint[])))", idArray(ids)).Order("e.message_id,e.index,a.index").Scan(&attrs).Error
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	logs := map[uint]*txlog.LogMessage{}
 	var lastMsg uint
@@ -563,17 +599,20 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 	}
 	plans := []backup{}
 	var skips []skip
+	var parsed []uint
 	for _, r := range rows {
 		if logs[r.ID] == nil {
-			return nil, nil, fmt.Errorf("message %d missing event log", r.ID)
+			return nil, nil, nil, fmt.Errorf("message %d missing event log", r.ID)
 		}
 		var expected []tax.TaxableEvent
+		fromBody := false
 		if len(r.MessageBytes) == 0 {
 			expected, err = fromStoredLog(r.Type, logs[r.ID], old[r.ID])
 		} else {
 			var msg sdk.Msg
 			if err = codec.UnpackAny(&codectypes.Any{TypeUrl: r.Type, Value: r.MessageBytes}, &msg); err == nil {
 				expected, err = parse(msg, logs[r.ID])
+				fromBody = err == nil
 			}
 		}
 		if err != nil {
@@ -583,6 +622,9 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 				skips = append(skips, skip{r.ID, r.Type, err.Error()})
 				continue
 			}
+		}
+		if fromBody {
+			parsed = append(parsed, r.ID)
 		}
 		for i := range expected {
 			expected[i].MessageID = r.ID
@@ -594,9 +636,63 @@ func planBatch(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]backup,
 		if same(old[r.ID], expected) {
 			continue
 		}
-		plans = append(plans, backup{r.ID, r.Type, base64.StdEncoding.EncodeToString(r.MessageBytes), old[r.ID], expected})
+		plans = append(plans, backup{r.ID, r.Type, base64.StdEncoding.EncodeToString(r.MessageBytes), old[r.ID], expected, nil})
 	}
-	return plans, skips, nil
+	return plans, skips, parsed, nil
+}
+
+// withResolvedErrors attaches to the plans the tax parser errors of the
+// messages in parsed: the rows the indexer itself deletes when the same
+// parser now succeeds. A message whose tax rows do not change gets a record
+// with its current rows as both old and expected, so the backup still holds
+// the error and apply still checks the rows have not moved.
+func withResolvedErrors(db *gorm.DB, plans []backup, parsed []uint, rows []row) ([]backup, error) {
+	if len(parsed) == 0 {
+		return plans, nil
+	}
+	var errs []parserErrorRow
+	if err := db.Raw(`SELECT e.id,e.message_id,e.message_parser_id,e.error FROM message_parser_errors e
+ JOIN messages m ON m.id=e.message_id JOIN message_types mt ON mt.id=m.message_type_id
+ JOIN message_parsers p ON p.id=e.message_parser_id
+ WHERE e.message_id = ANY(?::bigint[]) AND p.identifier = 'tax:' || mt.message_type ORDER BY e.id`, idArray(parsed)).Scan(&errs).Error; err != nil {
+		return nil, err
+	}
+	if len(errs) == 0 {
+		return plans, nil
+	}
+	byMessage := map[uint][]parserErrorRow{}
+	for _, e := range errs {
+		byMessage[e.MessageID] = append(byMessage[e.MessageID], e)
+	}
+	planned := map[uint]bool{}
+	for i := range plans {
+		planned[plans[i].MessageID] = true
+		plans[i].ClearedParserErrors = byMessage[plans[i].MessageID]
+	}
+	var ids []uint
+	for id := range byMessage {
+		if !planned[id] {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return plans, nil
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	current, err := oldRows(db, ids)
+	if err != nil {
+		return nil, err
+	}
+	byID := map[uint]row{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	for _, id := range ids {
+		r := byID[id]
+		plans = append(plans, backup{id, r.Type, base64.StdEncoding.EncodeToString(r.MessageBytes), current[id], current[id], byMessage[id]})
+	}
+	sort.SliceStable(plans, func(i, j int) bool { return plans[i].MessageID < plans[j].MessageID })
+	return plans, nil
 }
 
 func applyPlans(db *gorm.DB, plans []backup) error {
@@ -627,12 +723,20 @@ func applyPlans(db *gorm.DB, plans []backup) error {
 				return fmt.Errorf("message %d changed since backup; retry with a new backup", p.MessageID)
 			}
 		}
-		if err := tx.Where("message_id IN ?", ids).Delete(&tax.TaxableEvent{}).Error; err != nil {
-			return err
-		}
+		// A record that only clears parser errors keeps its rows as they are.
+		var rewrite []uint
 		var expected []tax.TaxableEvent
 		for _, p := range plans {
+			if same(p.Old, p.Expected) {
+				continue
+			}
+			rewrite = append(rewrite, p.MessageID)
 			expected = append(expected, p.Expected...)
+		}
+		if len(rewrite) > 0 {
+			if err := tx.Where("message_id IN ?", rewrite).Delete(&tax.TaxableEvent{}).Error; err != nil {
+				return err
+			}
 		}
 		// Tax row IDs are not referenced by any table; canonical event identity is
 		// (message_id,sub_index). Bulk replacement is atomic for this bounded batch.
@@ -650,8 +754,40 @@ func applyPlans(db *gorm.DB, plans []backup) error {
 				return fmt.Errorf("post-write verification failed for %d", p.MessageID)
 			}
 		}
-		return nil
+		return clearParserErrors(tx, plans)
 	})
+}
+
+// clearParserErrors deletes exactly the backed-up parser error rows and
+// rolls the batch back unless every one was still there unchanged.
+func clearParserErrors(tx *gorm.DB, plans []backup) error {
+	want := map[uint]parserErrorRow{}
+	var ids []uint
+	for _, p := range plans {
+		for _, e := range p.ClearedParserErrors {
+			if e.MessageID != p.MessageID {
+				return fmt.Errorf("parser error %d belongs to message %d, not %d", e.ID, e.MessageID, p.MessageID)
+			}
+			want[e.ID] = e
+			ids = append(ids, e.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var gone []parserErrorRow
+	if err := tx.Raw("DELETE FROM message_parser_errors WHERE id = ANY(?::bigint[]) RETURNING id,message_id,message_parser_id,error", idArray(ids)).Scan(&gone).Error; err != nil {
+		return err
+	}
+	if len(gone) != len(want) {
+		return fmt.Errorf("cleared %d parser errors, backup holds %d", len(gone), len(want))
+	}
+	for _, g := range gone {
+		if want[g.ID] != g {
+			return fmt.Errorf("parser error %d changed since backup; retry with a new backup", g.ID)
+		}
+	}
+	return nil
 }
 
 func repairCodec() (codectypes.AnyUnpacker, error) {
@@ -669,6 +805,12 @@ func repairCodec() (codectypes.AnyUnpacker, error) {
 		m[k] = v
 	}
 	for k, v := range tax.LiquidityMsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.IBCClientV2MsgTypes() {
+		m[k] = v
+	}
+	for k, v := range tax.IBCWasmMsgTypes() {
 		m[k] = v
 	}
 	c, err := probe.GetProbeClient(config.Probe{RPC: "http://127.0.0.1:1"}, nil, m)

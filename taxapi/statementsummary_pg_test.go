@@ -210,7 +210,7 @@ func TestStatementSummaryEqualsBasePostgres(t *testing.T) {
 			without := statementPGRequest(t, s, statementPGPath+val+query)
 			s.SetStatementSummary(true)
 			require.Equal(t, http.StatusOK, with.Code, with.Body.String())
-			require.Equal(t, without.Body.String(), with.Body.String(), "%s %s", val, query)
+			require.Equal(t, withoutStatementGeneratedAt(without.Body.String()), withoutStatementGeneratedAt(with.Body.String()), "%s %s", val, query)
 		}
 	}
 	s.SetStatementSummary(false)

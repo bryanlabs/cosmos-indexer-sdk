@@ -95,6 +95,7 @@ func main() {
 	flowsLabelsSHA := flag.String("commission-label-file-sha256", "", "exact digest of --commission-label-file")
 	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
 	deriveTimeout := flag.Duration("commission-derive-statement-timeout", 2*time.Minute, "read only: per-query limit while deriving labels; a condition whose query hits it is recorded unmeasured")
+	flowsPrefetch := flag.Int("commission-wallet-prefetch", 0, "opt-in private versioned wallets one trace reads from the index ahead of its queue, each on its own connection (0 reads each wallet only when asked; results do not depend on it)")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
@@ -106,6 +107,9 @@ func main() {
 	}
 	if err := validateCommissionReadTimeout(*flows, *flowsVersion, *flowsReadTimeout); err != nil {
 		log.Fatal(err)
+	}
+	if *flowsPrefetch != 0 && (!*flows || strings.TrimSpace(*flowsVersion) == "") {
+		log.Fatal("commission wallet prefetch requires private versioned commission collection")
 	}
 
 	// The commission trace runs thousands of small per-wallet queries whose
@@ -156,7 +160,7 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, *flowsMaxHops)
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, *flowsMaxHops, *flowsPrefetch)
 		return
 	}
 	if *daysAppend {
@@ -234,7 +238,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops int) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int) {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -270,7 +274,7 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 			log.Fatal("commission archive configuration has no RPC endpoint")
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops}); err != nil {
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, WalletPrefetch: prefetch, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
 }

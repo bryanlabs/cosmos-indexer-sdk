@@ -462,6 +462,7 @@ type flowTrace struct {
 	order      []*flowWallet
 	queue      flowQueue
 	seq        int
+	ahead      flowAhead
 	stops      map[string]flowStop
 	sources    map[string]flowStop
 	Fates      map[FlowFateKey]decimal.Decimal
@@ -531,9 +532,11 @@ func (t *flowTrace) run(group []string) error {
 			return err
 		}
 	}
+	defer t.ahead.stop()
 	for t.queue.Len() > 0 {
 		q := heap.Pop(&t.queue).(flowQueued)
 		t.frontier = q.key.Time
+		t.lookAhead(q)
 		if err := t.apply(q.wallet, q.event, true); err != nil {
 			return err
 		}
@@ -606,6 +609,7 @@ func (t *flowTrace) discover(addr string, hop int, at time.Time, cursor *flowKey
 		}
 		t.seq++
 		heap.Push(&t.queue, flowQueued{key: e.Key, seq: t.seq, wallet: w, event: e})
+		t.ahead.offer(t.load, flowQueued{key: e.Key, seq: t.seq, wallet: w, event: e})
 	}
 	t.reportProgress("wallet_loaded", addr, -1)
 	return nil

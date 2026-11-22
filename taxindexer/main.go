@@ -53,6 +53,11 @@ func main() {
 	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.IBCClientV2MsgTypes()); err != nil {
 		log.Fatalf("tax-indexer: registering IBC client v2 message types: %v", err)
 	}
+	// The 08-wasm light client's code uploads and migrations, sent by the
+	// governance authority through authz. See tax/ibcwasm.go.
+	if err := indexer.RegisterCustomMsgTypesByTypeURLs(tax.IBCWasmMsgTypes()); err != nil {
+		log.Fatalf("tax-indexer: registering 08-wasm message types: %v", err)
+	}
 
 	// Gravity DEX (x/liquidity, Gaia v5 to v10). Its batch messages escrow
 	// coins and pool creation swaps them. See tax/liquidity.go.
