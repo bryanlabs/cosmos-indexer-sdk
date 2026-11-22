@@ -409,7 +409,7 @@ func (p *flowPrefetch) forget(addr string, j *flowPrefetchJob) {
 // are its own, so a read the trace never asks for leaves no receipt; the
 // trace merges them when it takes the events.
 func (s *Server) prefetchReader() *Server {
-	r := &Server{db: s.db, native: s.native, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, commissionPrivateProfile: s.commissionPrivateProfile, commissionSourceCorrections: s.commissionSourceCorrections}
+	r := &Server{db: s.db, native: s.native, readOnlyLedger: s.readOnlyLedger, privateReadSnapshotTimeout: s.privateReadSnapshotTimeout, commissionPrivateProfile: s.commissionPrivateProfile, commissionSourceCorrections: s.commissionSourceCorrections, flowShared: s.flowShared}
 	if s.privateProjectionReceipts != nil {
 		r.privateProjectionReceipts = &commissionProjectionJournal{rows: map[string]CommissionPrivateProjectionReceipt{}}
 	}

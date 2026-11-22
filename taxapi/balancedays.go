@@ -69,6 +69,13 @@ const ledgerHeavyRows = 500000
 
 // walletRows counts the event attribute rows that name addr, up to limit+1.
 func (s *Server) walletRows(addr string, limit int) (int64, error) {
+	if s.flowShared != nil {
+		return s.sharedCount(flowSharedKey{kind: flowSharedWalletRows, addr: addr, n: limit}, func() (int64, error) { return s.readWalletRows(addr, limit) })
+	}
+	return s.readWalletRows(addr, limit)
+}
+
+func (s *Server) readWalletRows(addr string, limit int) (int64, error) {
 	var n int64
 	err := s.db.Raw(`
 SELECT (SELECT count(*) FROM (SELECT 1 FROM message_event_attributes WHERE left(value, 100) = left(@addr, 100) AND value = @addr LIMIT @lim) m)

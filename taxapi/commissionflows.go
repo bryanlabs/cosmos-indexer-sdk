@@ -239,6 +239,17 @@ func depositMemo(memo string) bool {
 // category is wrapped so the planner walks idx_tax_from for this one sender
 // instead of intersecting it with the large category index.
 func (s *Server) fanoutReceivers(addr string, start, end time.Time, limit int) (int, error) {
+	if s.flowShared != nil {
+		n, err := s.sharedCount(flowSharedKey{kind: flowSharedFanout, addr: addr, start: start, end: end, n: limit}, func() (int64, error) {
+			n, err := s.readFanoutReceivers(addr, start, end, limit)
+			return int64(n), err
+		})
+		return int(n), err
+	}
+	return s.readFanoutReceivers(addr, start, end, limit)
+}
+
+func (s *Server) readFanoutReceivers(addr string, start, end time.Time, limit int) (int, error) {
 	var n int
 	err := s.db.Raw(`
 SELECT count(*) FROM (
@@ -296,6 +307,17 @@ SELECT (SELECT count(*) FROM senders) AS examined,
 // memoDepositSenders counts the distinct senders that paid addr with a
 // deposit-style memo, in a sample of its receipts.
 func (s *Server) memoDepositSenders(addr string) (int, error) {
+	if s.flowShared != nil {
+		n, err := s.sharedCount(flowSharedKey{kind: flowSharedMemo, addr: addr}, func() (int64, error) {
+			n, err := s.readMemoDepositSenders(addr)
+			return int64(n), err
+		})
+		return int(n), err
+	}
+	return s.readMemoDepositSenders(addr)
+}
+
+func (s *Server) readMemoDepositSenders(addr string) (int, error) {
 	var rows []struct {
 		FromAddr string
 		Memo     string
@@ -399,6 +421,13 @@ func (l *dbFlowLoader) holdingsWith(addr string, day time.Time, db *flowHoldingR
 }
 
 func (s *Server) flowHoldingsAt(chain, addr string, day time.Time, strict bool) (flowHoldings, CommissionFlowHoldingSource, error) {
+	if s.flowShared != nil {
+		return s.sharedFlowHoldingsAt(chain, addr, day, strict)
+	}
+	return s.readFlowHoldingsAt(chain, addr, day, strict)
+}
+
+func (s *Server) readFlowHoldingsAt(chain, addr string, day time.Time, strict bool) (flowHoldings, CommissionFlowHoldingSource, error) {
 	bals, err := s.HistoricalBalances(chain, addr, []time.Time{day})
 	if err != nil {
 		return flowHoldings{}, CommissionFlowHoldingSource{}, err
@@ -485,6 +514,13 @@ func (l *dbFlowLoader) flowHoldingsAt(addr string, day time.Time) (flowHoldings,
 // flowEvents is addr's native coin movements in [start,end), as the report
 // sees them: classified events, block events and fees.
 func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEvent, error) {
+	if s.flowShared != nil {
+		return s.sharedFlowEvents(chain, addr, start, end)
+	}
+	return s.readFlowEvents(chain, addr, start, end)
+}
+
+func (s *Server) readFlowEvents(chain, addr string, start, end time.Time) ([]flowEvent, error) {
 	input, err := s.readCurrentChainInput(chain, []string{addr}, start, end)
 	if err != nil {
 		return nil, err
@@ -1413,6 +1449,7 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		reader.privateReadSnapshotTimeout = options[0].ReadSnapshotTimeout
 		reader.commissionPrivateProfile = options[0].PrivateProfile
 		reader.commissionSourceCorrections = options[0].SourceCorrections
+		reader.flowShared = options[0].SharedHistory
 		if reader.commissionSourceCorrections != nil {
 			reader.sourceCorrectionReceipts = newCorrectionJournal()
 		}

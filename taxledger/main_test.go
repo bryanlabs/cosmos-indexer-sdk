@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -41,5 +42,28 @@ func TestCommissionRuntimeParamsPrivateOnly(t *testing.T) {
 				t.Fatalf("runtime params = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+func TestReadCommissionHopPlan(t *testing.T) {
+	path := t.TempDir() + "/plan"
+	if err := os.WriteFile(path, []byte("10 v1\n8 v1\n10 v2\n\n3 v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := readCommissionHopPlan(path, "ops847-proof-x-hops{hops}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []commissionHopRun{{hops: 10, only: "v1,v2", version: "ops847-proof-x-hops10"}, {hops: 8, only: "v1", version: "ops847-proof-x-hops8"}, {hops: 3, only: "v2", version: "ops847-proof-x-hops3"}}
+	if !reflect.DeepEqual(runs, want) {
+		t.Fatalf("plan %+v, want %+v", runs, want)
+	}
+	for _, bad := range []string{"", "10\n", "x v1\n", "0 v1\n", "5 v1\n5 v1\n", "5 v1 extra\n"} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readCommissionHopPlan(path, "v-hops{hops}"); err == nil {
+			t.Fatalf("plan %q accepted", bad)
+		}
 	}
 }

@@ -82,6 +82,10 @@ type Server struct {
 	// staking serves the staking views from the staking tables once they
 	// cover the embedded files; nil serves the embedded files.
 	staking *stakingTables
+
+	// flowShared, when set, shares commission trace index reads across the
+	// traces of one process.
+	flowShared *CommissionSharedHistory
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {

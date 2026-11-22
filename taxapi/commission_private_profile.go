@@ -170,6 +170,7 @@ func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoa
 	if r.commissionSourceCorrections != nil {
 		r.sourceCorrectionReceipts = newCorrectionJournal()
 	}
+	r.flowShared = s.flowShared
 	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, maxHops: base.maxHops, archive: base.archive, progress: base.progress, prefetchN: base.prefetchN, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
 	base.mu.Lock()
 	for k, v := range base.labels {

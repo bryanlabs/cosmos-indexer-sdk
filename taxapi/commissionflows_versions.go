@@ -68,6 +68,10 @@ type CommissionFlowBuildOptions struct {
 	// ahead of its queue. Zero reads each wallet only when the trace asks.
 	// Results do not depend on it.
 	WalletPrefetch int
+	// SharedHistory, when set, shares index reads with every other trace
+	// given the same one, in this run or another run of the same process.
+	// Results do not depend on it.
+	SharedHistory *CommissionSharedHistory
 }
 
 func (o CommissionFlowBuildOptions) profileSHA() string {

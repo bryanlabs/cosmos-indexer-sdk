@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,8 @@ func main() {
 	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
 	deriveTimeout := flag.Duration("commission-derive-statement-timeout", 2*time.Minute, "read only: per-query limit while deriving labels; a condition whose query hits it is recorded unmeasured")
 	flowsPrefetch := flag.Int("commission-wallet-prefetch", 0, "opt-in private versioned wallets one trace reads from the index ahead of its queue, each on its own connection (0 reads each wallet only when asked; results do not depend on it)")
+	flowsSharedMiB := flag.Int("commission-shared-history-mib", 0, "opt-in private versioned: share index reads across this process's traces, keeping up to this many MiB (0 shares nothing; results do not depend on it)")
+	flowsHopPlan := flag.String("commission-hop-plan", "", "private versioned runs only: a file of '<hop limit> <validator>' lines, run hop limit by hop limit in file order in this process; --commission-output-version names each run with {hops}")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
@@ -110,6 +113,12 @@ func main() {
 	}
 	if *flowsPrefetch != 0 && (!*flows || strings.TrimSpace(*flowsVersion) == "") {
 		log.Fatal("commission wallet prefetch requires private versioned commission collection")
+	}
+	if *flowsSharedMiB != 0 && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsSharedMiB < 0) {
+		log.Fatal("commission shared history requires private versioned commission collection and a positive size")
+	}
+	if *flowsHopPlan != "" && (!*flows || !strings.Contains(*flowsVersion, "{hops}") || *flowsOnly != "" || *flowsMaxHops != 0) {
+		log.Fatal("commission hop plan requires private versioned commission collection, {hops} in the version, and no --commission-only or --commission-max-hops")
 	}
 
 	// The commission trace runs thousands of small per-wallet queries whose
@@ -160,7 +169,30 @@ func main() {
 				log.Fatal(err)
 			}
 		}
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, *flowsMaxHops, *flowsPrefetch)
+		var shared *taxapi.CommissionSharedHistory
+		if *flowsSharedMiB > 0 {
+			shared = taxapi.NewCommissionSharedHistory(int64(*flowsSharedMiB) << 20)
+		}
+		runs := []commissionHopRun{{hops: *flowsMaxHops, only: *flowsOnly, version: *flowsVersion}}
+		if *flowsHopPlan != "" {
+			if runs, err = readCommissionHopPlan(*flowsHopPlan, *flowsVersion); err != nil {
+				log.Fatal(err)
+			}
+		}
+		var failed []string
+		for _, r := range runs {
+			if err := commissionFlows(db, *chain, *flowsFrom, r.only, *flowsWorkers, r.version, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, r.hops, *flowsPrefetch, shared); err != nil {
+				log.Printf("commission flows: %s: %v", r.version, err)
+				failed = append(failed, r.version)
+			}
+			if shared != nil {
+				hits, misses, evicted, bytes := shared.Stats()
+				log.Printf("commission shared history after %s: %d hits, %d reads, %d dropped, %d MiB kept", r.version, hits, misses, evicted, bytes>>20)
+			}
+		}
+		if len(failed) > 0 {
+			log.Fatalf("commission flows failed: %s", strings.Join(failed, ", "))
+		}
 		return
 	}
 	if *daysAppend {
@@ -238,7 +270,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int, shared *taxapi.CommissionSharedHistory) error {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -274,9 +306,57 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 			log.Fatal("commission archive configuration has no RPC endpoint")
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, WalletPrefetch: prefetch, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops}); err != nil {
-		log.Fatalf("commission flows: %v", err)
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, WalletPrefetch: prefetch, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops, SharedHistory: shared}); err != nil {
+		return err
 	}
+	return nil
+}
+
+// commissionHopRun is one versioned run of a hop plan.
+type commissionHopRun struct {
+	hops    int
+	only    string
+	version string
+}
+
+// readCommissionHopPlan groups a plan file's "<hop limit> <validator>" lines
+// by hop limit, in the order each limit first appears.
+func readCommissionHopPlan(path, version string) ([]commissionHopRun, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read commission hop plan: %w", err)
+	}
+	var runs []commissionHopRun
+	at := map[int]int{}
+	seen := map[string]bool{}
+	for i, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		hops, err := strconv.Atoi(f[0])
+		if len(f) != 2 || err != nil || hops < 1 {
+			return nil, fmt.Errorf("commission hop plan line %d: want '<hop limit> <validator>'", i+1)
+		}
+		if seen[line] {
+			return nil, fmt.Errorf("commission hop plan line %d repeats a run", i+1)
+		}
+		seen[line] = true
+		j, ok := at[hops]
+		if !ok {
+			j = len(runs)
+			at[hops] = j
+			runs = append(runs, commissionHopRun{hops: hops, version: strings.ReplaceAll(version, "{hops}", strconv.Itoa(hops))})
+		}
+		if runs[j].only != "" {
+			runs[j].only += ","
+		}
+		runs[j].only += f[1]
+	}
+	if len(runs) == 0 {
+		return nil, fmt.Errorf("commission hop plan is empty")
+	}
+	return runs, nil
 }
 
 // deriveFollowLabels writes the deposit-follow label file and its digest.
