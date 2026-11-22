@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
@@ -187,6 +188,22 @@ func TestFlowFollowsHopsAndReplaysDiscoveredWallet(t *testing.T) {
 	require.Equal(t, 1, tr.Wallets[w1].Hop)
 }
 
+// A block movement the parser could not give a receiver ends the trace as a
+// named block_spend, even in a strict private run, rather than failing it.
+func TestFlowBlockSpendWithoutReceiver(t *testing.T) {
+	l := newFakeFlowLedger()
+	r, w1 := flowTestReceiver, "cosmos1hop1"
+	l.commission(flowAt(1, 0), r, 100)
+	l.send(flowAt(2, 0), r, w1, 100)
+	l.rows[w1] = append(l.rows[w1], flowEvent{Key: flowAt(3, 0), Category: apiTransfer, Dir: apiOut, Amount: amt(30), From: w1, Detail: `{"event_type":"coin_spent","source":"block_event","review_required":"true","review_reason":"` + tax.ReviewUnclassifiedBlockMovement + `"}`})
+	tr := newFlowTrace(flowTestValidator, flowTestStart, flowTestStart.AddDate(0, 3, 0), l)
+	tr.strict = true
+	require.NoError(t, tr.run([]string{r}))
+	require.Equal(t, "30", fate(tr, flowRuleFIFO, "2025-01", flowBlockSpend, "coin_spent", false))
+	require.Equal(t, "70", fate(tr, flowRuleFIFO, "2025-01", flowHeldDownstream, "hop 1", false))
+	require.Empty(t, tr.Unresolved)
+}
+
 // A wallet a hop out that pays out to a crowd ends the trace there, the way
 // a busy wallet does, even when it is a validator operator account.
 func TestFlowWideDistributorStopsReceiver(t *testing.T) {
@@ -323,7 +340,7 @@ func TestFlowWideDistributorClassServed(t *testing.T) {
 	classes := []string{
 		flowHeld, flowRestakedOwn, flowRestakedOther, flowUnbonding, flowLocked, flowHeldDownstream, flowStakedDownstream,
 		flowUnbondDownstream, flowLockedDownstream, flowExchange, flowExchangeLike, flowIBCOut, flowFees, flowSwapped, flowSpent, flowTokenized,
-		flowBurned, flowCommunityPool, flowModule, flowContract, flowBeyondHops, flowBusyWallet, flowWideDistributor, flowUnresolved,
+		flowBurned, flowCommunityPool, flowModule, flowContract, flowBeyondHops, flowBusyWallet, flowWideDistributor, flowUnresolved, flowBlockSpend,
 	}
 	for _, class := range classes {
 		require.NotEmpty(t, FlowClassNotes[class], class)
