@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"sync"
@@ -23,6 +24,13 @@ func PostgresDbConnect(host string, port string, database string, user string, p
 	dsn := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=disable", host, port, database, user, password)
 	for _, r := range runtime {
 		dsn += " " + r
+	}
+	// A bulk writer (a replay or correction Job) sets REPORT_EVIDENCE_BULK=on
+	// so the report evidence journal marks its writes global in one row per
+	// transaction instead of tracing them row by row. The live indexer
+	// leaves it unset.
+	if os.Getenv("REPORT_EVIDENCE_BULK") == "on" {
+		dsn += " report_evidence.bulk=on"
 	}
 	gormLogLevel := logger.Silent
 
