@@ -7,24 +7,42 @@ import (
 	txtypes "github.com/cosmos/cosmos-sdk/types/tx"
 )
 
+// Keys and values of the cached RPC fixtures in this file and
+// uncharged_fees_pg_test.go.
+const (
+	rpcHeaderKey        = "header"
+	rpcDataKey          = "data"
+	rpcTxsResultsKey    = "txs_results"
+	rpcCodeKey          = "code"
+	rpcHeightKey        = "height"
+	rpcTxsKey           = "txs"
+	rpcCodespaceKey     = "codespace"
+	rpcGasWantedKey     = "gas_wanted"
+	rpcLogKey           = "log"
+	channelCodespace    = "channel"
+	sdkCodespace        = "sdk"
+	sequenceMismatchLog = "account sequence mismatch, expected 7, got 6: incorrect account sequence"
+	testFee2500         = "2500uatom"
+)
+
 func TestPreCoinEventsCharge(t *testing.T) {
-	const fee = "2500uatom"
+	const fee = testFee2500
 	cases := []struct {
 		name    string
 		r       failedTxResult
 		charged string
 		ok      bool
 	}{
-		{"message failed", failedTxResult{Code: 13, Codespace: "channel", Log: "failed to execute message; message index: 1: receive packet verification failed: packet sequence already received: redundant relay"}, fee, true},
-		{"message failed with insufficient funds", failedTxResult{Code: 5, Codespace: "sdk", Log: "failed to execute message; message index: 0: 5887uatom is smaller than 9000uatom: insufficient funds"}, fee, true},
-		{"message without a route", failedTxResult{Code: 6, Codespace: "sdk", Log: "unrecognized message service method: /a.b.Msg; message index: 0: unknown request"}, fee, true},
-		{"wrong sequence", failedTxResult{Code: 32, Codespace: "sdk", Log: "account sequence mismatch, expected 7, got 6: incorrect account sequence"}, "", true},
-		{"bad signature", failedTxResult{Code: 4, Codespace: "sdk", Log: "signature verification failed; please verify account number (1) and chain-id (cosmoshub-4): unauthorized"}, "", true},
-		{"fee above the balance", failedTxResult{Code: 5, Codespace: "sdk", Log: "1000uatom is smaller than 2500uatom: insufficient funds: insufficient funds"}, "", true},
-		{"no block gas left", failedTxResult{Code: 11, Codespace: "sdk", Log: "no block gas left to run tx: out of gas"}, "", true},
-		{"out of gas in a message", failedTxResult{Code: 11, Codespace: "sdk", Log: "out of gas in location: WritePerByte; gasWanted: 300000, gasUsed: 300120: out of gas", GasWanted: 300000, TxBytes: 400, Signers: 1}, fee, true},
-		{"out of gas below the ante bound", failedTxResult{Code: 11, Codespace: "sdk", Log: "out of gas in location: WriteFlat; gasWanted: 60000, gasUsed: 61000: out of gas", GasWanted: 60000, TxBytes: 400, Signers: 1}, "", false},
-		{"out of gas with two signers", failedTxResult{Code: 11, Codespace: "sdk", Log: "out of gas in location: ReadFlat; gasWanted: 150000, gasUsed: 151000: out of gas", GasWanted: 150000, TxBytes: 400, Signers: 2}, "", false},
+		{"message failed", failedTxResult{Code: 13, Codespace: channelCodespace, Log: "failed to execute message; message index: 1: receive packet verification failed: packet sequence already received: redundant relay"}, fee, true},
+		{"message failed with insufficient funds", failedTxResult{Code: 5, Codespace: sdkCodespace, Log: "failed to execute message; message index: 0: 5887uatom is smaller than 9000uatom: insufficient funds"}, fee, true},
+		{"message without a route", failedTxResult{Code: 6, Codespace: sdkCodespace, Log: "unrecognized message service method: /a.b.Msg; message index: 0: unknown request"}, fee, true},
+		{"wrong sequence", failedTxResult{Code: 32, Codespace: sdkCodespace, Log: sequenceMismatchLog}, "", true},
+		{"bad signature", failedTxResult{Code: 4, Codespace: sdkCodespace, Log: "signature verification failed; please verify account number (1) and chain-id (cosmoshub-4): unauthorized"}, "", true},
+		{"fee above the balance", failedTxResult{Code: 5, Codespace: sdkCodespace, Log: "1000uatom is smaller than 2500uatom: insufficient funds: insufficient funds"}, "", true},
+		{"no block gas left", failedTxResult{Code: 11, Codespace: sdkCodespace, Log: "no block gas left to run tx: out of gas"}, "", true},
+		{"out of gas in a message", failedTxResult{Code: 11, Codespace: sdkCodespace, Log: "out of gas in location: WritePerByte; gasWanted: 300000, gasUsed: 300120: out of gas", GasWanted: 300000, TxBytes: 400, Signers: 1}, fee, true},
+		{"out of gas below the ante bound", failedTxResult{Code: 11, Codespace: sdkCodespace, Log: "out of gas in location: WriteFlat; gasWanted: 60000, gasUsed: 61000: out of gas", GasWanted: 60000, TxBytes: 400, Signers: 1}, "", false},
+		{"out of gas with two signers", failedTxResult{Code: 11, Codespace: sdkCodespace, Log: "out of gas in location: ReadFlat; gasWanted: 150000, gasUsed: 151000: out of gas", GasWanted: 150000, TxBytes: 400, Signers: 2}, "", false},
 		{"redacted internal error", failedTxResult{Code: 1, Codespace: "undefined", Log: "internal"}, "", false},
 		{"redacted panic", failedTxResult{Code: 111222, Codespace: "undefined", Log: "panic message redacted to hide potentially sensitive system info: panic"}, "", false},
 	}
@@ -36,12 +54,12 @@ func TestPreCoinEventsCharge(t *testing.T) {
 		}
 	}
 	// A message failure whose bytes did not decode stays unsettled.
-	if charged, ok := preCoinEventsCharge(failedTxResult{Code: 13, Codespace: "channel", Log: msgFailurePrefix + "0: x"}); ok || charged != "" {
+	if charged, ok := preCoinEventsCharge(failedTxResult{Code: 13, Codespace: channelCodespace, Log: msgFailurePrefix + "0: x"}); ok || charged != "" {
 		t.Errorf("message failure without readable bytes: got (%q, %v)", charged, ok)
 	}
 	// A transaction that declared no fee had nothing to charge.
 	for _, log := range []string{msgFailurePrefix + "0: x", outOfGasPrefix + "WriteFlat; gasWanted: 10, gasUsed: 11: out of gas"} {
-		if charged, ok := preCoinEventsCharge(failedTxResult{Code: 11, Codespace: "sdk", Log: log, FeeRead: true}); !ok || charged != "" {
+		if charged, ok := preCoinEventsCharge(failedTxResult{Code: 11, Codespace: sdkCodespace, Log: log, FeeRead: true}); !ok || charged != "" {
 			t.Errorf("zero fee %q: got (%q, %v)", log, charged, ok)
 		}
 	}
@@ -79,20 +97,20 @@ func TestBlockTxsBeforeCoinEvents(t *testing.T) {
 	dir := t.TempDir()
 	const height = 6000000
 	msgTx, seqTx, gasTx := testTxBytes(t, "message", 1), testTxBytes(t, "sequence", 1), testTxBytes(t, "gas", 1)
-	writeCached(t, dir, height, "block", map[string]any{
-		"block": map[string]any{
-			"header": map[string]any{"height": "6000000"},
-			"data":   map[string]any{"txs": []string{b64(msgTx), b64(seqTx), b64(gasTx)}},
+	writeCached(t, dir, height, cachedBlock, map[string]any{
+		cachedBlock: map[string]any{
+			rpcHeaderKey: map[string]any{rpcHeightKey: "6000000"},
+			rpcDataKey:   map[string]any{rpcTxsKey: []string{b64(msgTx), b64(seqTx), b64(gasTx)}},
 		},
 	})
 	writeCached(t, dir, height, "block_results", map[string]any{
-		"height": "6000000",
-		"txs_results": []map[string]any{
-			{"code": 13, "codespace": "channel", "gas_wanted": "200000", "log": "failed to execute message; message index: 0: packet sequence already received: redundant relay"},
-			{"code": 32, "codespace": "sdk", "gas_wanted": "200000", "log": "account sequence mismatch, expected 7, got 6: incorrect account sequence"},
-			{"code": 11, "codespace": "sdk", "gas_wanted": "50000", "log": "out of gas in location: WriteFlat; gasWanted: 50000, gasUsed: 51000: out of gas"},
+		rpcHeightKey: "6000000",
+		rpcTxsResultsKey: []map[string]any{
+			{rpcCodeKey: 13, rpcCodespaceKey: channelCodespace, rpcGasWantedKey: "200000", rpcLogKey: "failed to execute message; message index: 0: packet sequence already received: redundant relay"},
+			{rpcCodeKey: 32, rpcCodespaceKey: sdkCodespace, rpcGasWantedKey: "200000", rpcLogKey: sequenceMismatchLog},
+			{rpcCodeKey: 11, rpcCodespaceKey: sdkCodespace, rpcGasWantedKey: "50000", rpcLogKey: "out of gas in location: WriteFlat; gasWanted: 50000, gasUsed: 51000: out of gas"},
 		},
-		"finalize_block_events": []event{{Type: "mint"}, {Type: "transfer"}},
+		"finalize_block_events": []event{{Type: "mint"}, {Type: apiTransfer}},
 	})
 	node := &ledgerNode{cache: dir}
 	txs, err := node.blockTxs(height)
@@ -102,7 +120,7 @@ func TestBlockTxsBeforeCoinEvents(t *testing.T) {
 	want := []struct {
 		charged string
 		known   bool
-	}{{"2500uatom", true}, {"", true}, {"", false}}
+	}{{testFee2500, true}, {"", true}, {"", false}}
 	for i, w := range want {
 		if txs[i].Charged != w.charged || txs[i].ChargeKnown != w.known {
 			t.Errorf("tx %d read as charged %q known %v, want %q %v", i, txs[i].Charged, txs[i].ChargeKnown, w.charged, w.known)
@@ -112,7 +130,7 @@ func TestBlockTxsBeforeCoinEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(charges) != 2 || charges[txHash(msgTx)] != "2500uatom" || charges[txHash(seqTx)] != "" {
+	if len(charges) != 2 || charges[txHash(msgTx)] != testFee2500 || charges[txHash(seqTx)] != "" {
 		t.Fatalf("charges %v", charges)
 	}
 	if _, ok := charges[txHash(gasTx)]; ok {
@@ -124,7 +142,7 @@ func TestBlockTxsBeforeCoinEvents(t *testing.T) {
 		{Height: height, Indexed: true, Hash: txHash(gasTx), Code: 11, TxID: 3},
 	}
 	b := scanBackBlock(height, txs, index)
-	if len(b.fees) != 2 || b.fees[0] != (FailedTxFee{TxID: 1, Charged: "2500uatom"}) || b.fees[1] != (FailedTxFee{TxID: 2}) {
+	if len(b.fees) != 2 || b.fees[0] != (FailedTxFee{TxID: 1, Charged: testFee2500}) || b.fees[1] != (FailedTxFee{TxID: 2}) {
 		t.Fatalf("scan fees %+v", b.fees)
 	}
 }
@@ -135,16 +153,16 @@ func TestBlockTxsWithCoinEvents(t *testing.T) {
 	dir := t.TempDir()
 	const height = 9000000
 	tx := testTxBytes(t, "rejected", 1)
-	writeCached(t, dir, height, "block", map[string]any{
-		"block": map[string]any{
-			"header": map[string]any{"height": "9000000"},
-			"data":   map[string]any{"txs": []string{b64(tx)}},
+	writeCached(t, dir, height, cachedBlock, map[string]any{
+		cachedBlock: map[string]any{
+			rpcHeaderKey: map[string]any{rpcHeightKey: "9000000"},
+			rpcDataKey:   map[string]any{rpcTxsKey: []string{b64(tx)}},
 		},
 	})
 	writeCached(t, dir, height, "block_results", map[string]any{
-		"height": "9000000",
-		"txs_results": []map[string]any{
-			{"code": 11, "codespace": "sdk", "gas_wanted": "900000", "log": "out of gas in location: WriteFlat; gasWanted: 900000, gasUsed: 901000: out of gas"},
+		rpcHeightKey: "9000000",
+		rpcTxsResultsKey: []map[string]any{
+			{rpcCodeKey: 11, rpcCodespaceKey: sdkCodespace, rpcGasWantedKey: "900000", rpcLogKey: "out of gas in location: WriteFlat; gasWanted: 900000, gasUsed: 901000: out of gas"},
 		},
 		"begin_block_events": []event{{Type: "coin_received"}, {Type: "coinbase"}},
 	})
@@ -159,7 +177,7 @@ func TestBlockTxsWithCoinEvents(t *testing.T) {
 
 func TestDeclaredFee(t *testing.T) {
 	fee, signers, ok := declaredFee([]byte(testTxBytes(t, "x", 2)))
-	if fee != "2500uatom" || signers != 2 || !ok {
+	if fee != testFee2500 || signers != 2 || !ok {
 		t.Fatalf("got %q %d %v", fee, signers, ok)
 	}
 	// A zero coin is no fee.

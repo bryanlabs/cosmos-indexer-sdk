@@ -70,7 +70,7 @@ func TestReportFeesSkipUnchargedFailedTxsPostgres(t *testing.T) {
 
 	oracle := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(apiContentType, apiJSONContentType)
-		if r.URL.Path == "/denoms" {
+		if r.URL.Path == statementPGDenomsPath {
 			_, _ = w.Write([]byte(`{"denoms":{"uatom":{"symbol":"ATOM","decimals":6}}}`))
 			return
 		}
@@ -148,19 +148,19 @@ func TestRecordFailedTxFeesBeforeCoinEventsPostgres(t *testing.T) {
 	const height = 6000000
 	okTx, msgTx, seqTx, gasTx := testTxBytes(t, "ok", 1), testTxBytes(t, "message", 1), testTxBytes(t, "sequence", 1), testTxBytes(t, "gas", 1)
 	dir := t.TempDir()
-	writeCached(t, dir, height, "block", map[string]any{
-		"block": map[string]any{
-			"header": map[string]any{"height": "6000000"},
-			"data":   map[string]any{"txs": []string{b64(okTx), b64(msgTx), b64(seqTx), b64(gasTx)}},
+	writeCached(t, dir, height, cachedBlock, map[string]any{
+		cachedBlock: map[string]any{
+			rpcHeaderKey: map[string]any{rpcHeightKey: "6000000"},
+			rpcDataKey:   map[string]any{rpcTxsKey: []string{b64(okTx), b64(msgTx), b64(seqTx), b64(gasTx)}},
 		},
 	})
 	writeCached(t, dir, height, "block_results", map[string]any{
-		"height": "6000000",
-		"txs_results": []map[string]any{
-			{"code": 0, "gas_wanted": "200000"},
-			{"code": 13, "codespace": "channel", "gas_wanted": "200000", "log": "failed to execute message; message index: 0: packet sequence already received: redundant relay"},
-			{"code": 32, "codespace": "sdk", "gas_wanted": "200000", "log": "account sequence mismatch, expected 7, got 6: incorrect account sequence"},
-			{"code": 11, "codespace": "sdk", "gas_wanted": "50000", "log": "out of gas in location: WriteFlat; gasWanted: 50000, gasUsed: 51000: out of gas"},
+		rpcHeightKey: "6000000",
+		rpcTxsResultsKey: []map[string]any{
+			{rpcCodeKey: 0, rpcGasWantedKey: "200000"},
+			{rpcCodeKey: 13, rpcCodespaceKey: channelCodespace, rpcGasWantedKey: "200000", rpcLogKey: "failed to execute message; message index: 0: packet sequence already received: redundant relay"},
+			{rpcCodeKey: 32, rpcCodespaceKey: sdkCodespace, rpcGasWantedKey: "200000", rpcLogKey: sequenceMismatchLog},
+			{rpcCodeKey: 11, rpcCodespaceKey: sdkCodespace, rpcGasWantedKey: "50000", rpcLogKey: "out of gas in location: WriteFlat; gasWanted: 50000, gasUsed: 51000: out of gas"},
 		},
 	})
 
@@ -191,7 +191,7 @@ func TestRecordFailedTxFeesBeforeCoinEventsPostgres(t *testing.T) {
 	require.Equal(t, FailedFeeCounts{Charged: 1, Uncharged: 1, Unsettled: 1}, n)
 	var got []FailedTxFee
 	require.NoError(t, database.Order("tx_id").Find(&got).Error)
-	require.Equal(t, []FailedTxFee{{TxID: 2, Charged: "2500uatom"}, {TxID: 3, Charged: ""}}, got)
+	require.Equal(t, []FailedTxFee{{TxID: 2, Charged: testFee2500}, {TxID: 3, Charged: ""}}, got)
 
 	// A rerun records nothing new and leaves the unsettled one unsettled.
 	n, err = s.RecordFailedTxFees(apiMainnet, node, 5000000, 7000000, 500000, 2, true, t.Logf)

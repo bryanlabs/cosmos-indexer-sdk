@@ -22,6 +22,12 @@ import (
 )
 
 // nodeTx is one transaction of a block as the chain has it.
+// The bank events naming coins an account received and spent.
+const (
+	ledgerCoinReceived = "coin_received"
+	ledgerCoinSpent    = "coin_spent"
+)
+
 type nodeTx struct {
 	Hash     string
 	Code     uint32
@@ -179,7 +185,7 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 	// mint at least) and on every failed transaction that paid its fee.
 	coinEvents := false
 	for _, e := range append(res.Result.BeginBlockEvents, res.Result.FinalizeBlockEvents...) {
-		if e.Type == "coin_spent" || e.Type == "coin_received" || e.Type == "coinbase" {
+		if e.Type == ledgerCoinSpent || e.Type == ledgerCoinReceived || e.Type == "coinbase" {
 			coinEvents = true
 			break
 		}
