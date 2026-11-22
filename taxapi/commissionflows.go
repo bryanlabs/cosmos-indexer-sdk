@@ -286,8 +286,10 @@ funded AS (
 	FROM moves m WHERE m.other = 0)
 SELECT (SELECT count(*) FROM senders) AS examined,
 	(SELECT count(*) FROM funded WHERE received > 0 AND swept >= received * CAST(@forward AS numeric) AND swept <= received) AS deposits`,
-		map[string]any{"addr": addr, "transfer": apiTransfer, "denom": s.native.Denom, "start": start, "end": end, "withdraw": tax.TriggerWithdrawAddress,
-			"sample": flowSweepSample, "senders": flowSweepSenders, "per": flowSweepPerSender, "forward": flowSweepForwardMin}).Scan(&row).Error
+		map[string]any{
+			"addr": addr, "transfer": apiTransfer, "denom": s.native.Denom, "start": start, "end": end, "withdraw": tax.TriggerWithdrawAddress,
+			"sample": flowSweepSample, "senders": flowSweepSenders, "per": flowSweepPerSender, "forward": flowSweepForwardMin,
+		}).Scan(&row).Error
 	return row.Examined, row.Deposits, err
 }
 
@@ -346,13 +348,26 @@ type dbFlowLoader struct {
 	labelFile string
 	archive   *flowArchive
 	progress  func(commissionFlowProgress)
+	// prefetchN is how many wallets each trace may read ahead; zero reads
+	// only when asked. pre is the trace's own read-ahead.
+	prefetchN int
+	pre       *flowPrefetch
 }
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
+	if j := l.pre.wait(addr); j != nil && j.heldOK && j.day.Equal(day) {
+		return l.holdingsWith(addr, day, &j.held)
+	}
 	return l.holdingsAt(addr, day)
 }
 
 func (l *dbFlowLoader) holdingsAt(addr string, day time.Time) (flowHoldings, bool, error) {
+	return l.holdingsWith(addr, day, nil)
+}
+
+// holdingsWith is holdingsAt with db, when set, as the index read already
+// made for this wallet and day.
+func (l *dbFlowLoader) holdingsWith(addr string, day time.Time, db *flowHoldingRead) (flowHoldings, bool, error) {
 	if l.archive != nil && l.chain == apiMainnet {
 		if h, ok := l.archive.cachedHoldings(addr, day); ok {
 			if l.private && h.Source.Kind != "archive_exact" {
@@ -361,7 +376,14 @@ func (l *dbFlowLoader) holdingsAt(addr string, day time.Time) (flowHoldings, boo
 			return h, true, nil
 		}
 	}
-	h, source, err := l.s.flowHoldingsAt(l.chain, addr, day, l.private)
+	var h flowHoldings
+	var source CommissionFlowHoldingSource
+	var err error
+	if db != nil {
+		h, source = db.h, db.source
+	} else {
+		h, source, err = l.flowHoldingsAt(addr, day)
+	}
 	known := source.Kind != ""
 	if err != nil || known || l.archive == nil {
 		h.Source = source
@@ -422,7 +444,7 @@ func flowHistoricalHoldings(b HistoricalBalance, denom string, strict bool) (flo
 }
 
 func (l *dbFlowLoader) events(addr string, start, end time.Time) ([]flowEvent, error) {
-	out, err := l.s.flowEvents(l.chain, addr, start, end)
+	out, err := l.prefetchedEvents(addr, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -431,6 +453,33 @@ func (l *dbFlowLoader) events(addr string, start, end time.Time) ([]flowEvent, e
 		return nil, err
 	}
 	return withSelfBonds(out, bonds[addr], start, end), nil
+}
+
+// prefetchedEvents is flowEvents for addr, from the read-ahead when it read
+// this wallet and window.
+func (l *dbFlowLoader) prefetchedEvents(addr string, start, end time.Time) ([]flowEvent, error) {
+	if j := l.pre.wait(addr); j != nil {
+		l.pre.forget(addr, j)
+		if j.eventsOK && j.day.AddDate(0, 0, 1).Equal(start) && j.end.Equal(end) {
+			l.s.mergePrefetchReceipts(j.reader)
+			return j.events, nil
+		}
+	}
+	return flowRead(func() ([]flowEvent, error) { return l.s.flowEvents(l.chain, addr, start, end) })
+}
+
+// flowHoldingsAt is the index's holdings for addr at the end of day, read
+// again when Postgres aborts the read.
+func (l *dbFlowLoader) flowHoldingsAt(addr string, day time.Time) (flowHoldings, CommissionFlowHoldingSource, error) {
+	type read struct {
+		h      flowHoldings
+		source CommissionFlowHoldingSource
+	}
+	r, err := flowRead(func() (read, error) {
+		h, source, err := l.s.flowHoldingsAt(l.chain, addr, day, l.private)
+		return read{h, source}, err
+	})
+	return r.h, r.source, err
 }
 
 // flowEvents is addr's native coin movements in [start,end), as the report
@@ -1057,8 +1106,12 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 	if contractAddress(addr) {
 		return flowStop{Class: flowContract}, nil
 	}
-	n, err := l.s.memoDepositSenders(addr)
-	if err != nil {
+	j := l.pre.wait(addr)
+	var n int
+	var err error
+	if j != nil && j.memoOK {
+		n = j.memo
+	} else if n, err = flowRead(func() (int, error) { return l.s.memoDepositSenders(addr) }); err != nil {
 		return flowStop{}, err
 	}
 	if n >= flowMemoMinSenders {
@@ -1076,8 +1129,10 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 		l.mu.Unlock()
 		return flowStop{Class: flowExchangeLike, Detail: flowMemoHeuristic}, nil
 	}
-	rows, err := l.s.walletRows(addr, ledgerHeavyRows)
-	if err != nil {
+	var rows int64
+	if j != nil && j.rowsOK {
+		rows = j.rows
+	} else if rows, err = flowRead(func() (int64, error) { return l.s.walletRows(addr, ledgerHeavyRows) }); err != nil {
 		return flowStop{}, err
 	}
 	if rows > ledgerHeavyRows {
@@ -1092,7 +1147,11 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 // senders are deposit addresses, a wide distributor when it pays out to a
 // crowd, otherwise busy_wallet with the measurements kept as evidence.
 func (l *dbFlowLoader) busy(addr string, rows int64, start, end time.Time) (flowStop, error) {
-	examined, deposits, err := l.s.sweepDepositSenders(addr, start, end)
+	read, err := flowRead(func() ([2]int, error) {
+		examined, deposits, err := l.s.sweepDepositSenders(addr, start, end)
+		return [2]int{examined, deposits}, err
+	})
+	examined, deposits := read[0], read[1]
 	if err != nil {
 		return flowStop{}, err
 	}
@@ -1141,7 +1200,7 @@ func (l *dbFlowLoader) distributor(addr string, start, end time.Time) (flowStop,
 	if limit <= 0 {
 		limit = flowFanoutMaxReceivers
 	}
-	n, err := l.s.fanoutReceivers(addr, start, end, limit)
+	n, err := flowRead(func() (int, error) { return l.s.fanoutReceivers(addr, start, end, limit) })
 	if err != nil {
 		return flowStop{}, err
 	}
@@ -1364,6 +1423,7 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
 	if len(options) == 1 {
 		loader.maxHops = options[0].MaxHops
+		loader.prefetchN = options[0].WalletPrefetch
 	}
 	var progressSink *commissionProgressSink
 	if root := os.Getenv("COSMOS_TAX_COMMISSION_CAPTURE_DIR"); loader.private && root != "" {
@@ -1486,6 +1546,12 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	if s.commissionPrivateProfile != nil || s.commissionSourceCorrections != nil {
 		s, loader = s.privateProjectionTrace(loader)
 	}
+	if loader.prefetchN > 0 {
+		own := *loader
+		own.pre = newFlowPrefetch(&own, own.prefetchN)
+		loader = &own
+		defer loader.closePrefetch()
+	}
 	run := CommissionFlowRun{Chain: chain, Validator: validator, FromDay: from, AsOf: asOf.AddDate(0, 0, -1), ComputedAt: nowUTC(), Overdraw: "{}", Commission: "{}", Untracked: "{}", DriftBase: "0"}
 	tr := newFlowTrace(validator, from, asOf, loader)
 	tr.maxHops = loader.maxHops
@@ -1542,6 +1608,8 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	var total [flowRules]decimal.Decimal
 	drift := decimal.Zero
 	asOfDay := asOf.AddDate(0, 0, -1)
+	closing := loader.closingReads(tr.order, asOfDay)
+	defer closing.close()
 	for i, w := range tr.order {
 		run.Wallets++
 		if !w.Known {
@@ -1554,7 +1622,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 			total[r] = total[r].Add(w.Overdraw[r])
 		}
 		tr.reportProgress("closing_started", w.Addr, len(tr.order)-i)
-		actual, known, err := loader.holdingsAt(w.Addr, asOfDay)
+		actual, known, err := closing.holdingsAt(loader, i, w.Addr, asOfDay)
 		if err != nil || !known {
 			if loader.private {
 				return fail(fmt.Errorf("commission closing requires exact archive state"))

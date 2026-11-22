@@ -19,12 +19,14 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/authz"
 )
 
-const privateParserSourceSHA = "7af52846f68ef38f3e02de6106762b3854b95d72083a600fadcc5b5b53c0fe1d"
-const privateEconomicProofSHA = "ed927d64ed94a8675ccebf2f0bc8f0e787e75e5b4be32ecbf86c661ef385aafe"
-const privateOriginalMessageSHA = "b22781c798ab832f40ad1b1c7ec33fbbb53128264a3150db78d031b128efa5a3"
-const privateOriginalErrorSHA = "cdf5f19bae10e6f42b34f1808d2b2619d645df659fac55755bc3cd1ef9012401"
-const privateOriginalTxSHA = "df16775e9770aff4f38e39bdd8b3f0e60319a474c3cea087714f80cc10ccbc10"
-const privateSourceSealSHA = "6ad0881533f774728fe0b96dfad6c26d61772786b2e4a42251391860b09a09ee"
+const (
+	privateParserSourceSHA    = "7af52846f68ef38f3e02de6106762b3854b95d72083a600fadcc5b5b53c0fe1d"
+	privateEconomicProofSHA   = "ed927d64ed94a8675ccebf2f0bc8f0e787e75e5b4be32ecbf86c661ef385aafe"
+	privateOriginalMessageSHA = "b22781c798ab832f40ad1b1c7ec33fbbb53128264a3150db78d031b128efa5a3"
+	privateOriginalErrorSHA   = "cdf5f19bae10e6f42b34f1808d2b2619d645df659fac55755bc3cd1ef9012401"
+	privateOriginalTxSHA      = "df16775e9770aff4f38e39bdd8b3f0e60319a474c3cea087714f80cc10ccbc10"
+	privateSourceSealSHA      = "6ad0881533f774728fe0b96dfad6c26d61772786b2e4a42251391860b09a09ee"
+)
 
 // Every original row, xmin, attribute order, fee, signer and database identity
 // participates. No snapshot ID is hashed: each read obtains a new repeatable-read
@@ -157,6 +159,7 @@ func (j *commissionProjectionJournal) retain(addresses []string, start, end time
 	defer j.mu.Unlock()
 	j.rows[key] = r
 }
+
 func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoader) {
 	r := NewServer(s.db, s.oracle, s.native)
 	r.readOnlyLedger = s.readOnlyLedger
@@ -167,7 +170,7 @@ func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoa
 	if r.commissionSourceCorrections != nil {
 		r.sourceCorrectionReceipts = newCorrectionJournal()
 	}
-	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, maxHops: base.maxHops, archive: base.archive, progress: base.progress, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
+	l := &dbFlowLoader{s: r, chain: base.chain, node: base.node, private: base.private, maxHops: base.maxHops, archive: base.archive, progress: base.progress, prefetchN: base.prefetchN, mu: &sync.Mutex{}, labels: map[string]AddressLabel{}, chans: map[string]string{}}
 	base.mu.Lock()
 	for k, v := range base.labels {
 		l.labels[k] = v
@@ -178,6 +181,7 @@ func (s *Server) privateProjectionTrace(base *dbFlowLoader) (*Server, *dbFlowLoa
 	base.mu.Unlock()
 	return r, l
 }
+
 func (j *commissionProjectionJournal) merge(pending *commissionProjectionJournal) {
 	pending.mu.Lock()
 	defer pending.mu.Unlock()

@@ -17,7 +17,7 @@ func (l *dbFlowLoader) slashes(start, end time.Time) ([]flowEvent, error) {
 		return v, nil
 	}
 	l.mu.Unlock()
-	out, err := l.s.flowSlashes(l.chain, l.node, start, end)
+	out, err := flowRead(func() ([]flowEvent, error) { return l.s.flowSlashes(l.chain, l.node, start, end) })
 	if err != nil {
 		return nil, err
 	}

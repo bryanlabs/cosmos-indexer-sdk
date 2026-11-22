@@ -64,6 +64,10 @@ type CommissionFlowBuildOptions struct {
 	// Labels adds a private label file's labels for this run. A version that
 	// uses one names its digest ("-labels<first 12>").
 	Labels *CommissionLabelFile
+	// WalletPrefetch is how many wallets one trace may read from the index
+	// ahead of its queue. Zero reads each wallet only when the trace asks.
+	// Results do not depend on it.
+	WalletPrefetch int
 }
 
 func (o CommissionFlowBuildOptions) profileSHA() string {
@@ -77,9 +81,14 @@ func (o CommissionFlowBuildOptions) profileSHA() string {
 	return ""
 }
 
+const maxCommissionWalletPrefetch = 16
+
 func (o CommissionFlowBuildOptions) validate() error {
 	if o.ReadSnapshotTimeout < 0 {
 		return fmt.Errorf("commission read snapshot timeout must not be negative")
+	}
+	if o.WalletPrefetch < 0 || o.WalletPrefetch > maxCommissionWalletPrefetch {
+		return fmt.Errorf("commission wallet prefetch must be 0 to %d", maxCommissionWalletPrefetch)
 	}
 	if strings.TrimSpace(o.Version) == "" || strings.TrimSpace(o.Build) == "" || o.AsOf.IsZero() {
 		return fmt.Errorf("versioned commission output requires version, build and exclusive as-of date")
