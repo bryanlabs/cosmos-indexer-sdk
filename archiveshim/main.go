@@ -167,8 +167,38 @@ func (s *shim) pick() *upstream {
 	return s.ups[int(s.next.Add(1)-1)%len(s.ups)]
 }
 
+// attempts is how many upstream calls one query may use when an upstream
+// fails to answer (transport error, HTTP error, or no JSON-RPC result).
+const attempts = 4
+
+// rpc sends one JSON-RPC call, moving to the next upstream when one fails to
+// answer. An answer the node gave (a query error) is never retried.
 func (s *shim) rpc(ctx context.Context, method string, params any, out any) error {
-	u := s.pick()
+	var err error
+	for i := 0; i < attempts; i++ {
+		u := s.pick()
+		if err = s.call(ctx, u, method, params, out); err == nil {
+			return nil
+		}
+		var es errStatus
+		if !errors.As(err, &es) || es.code != http.StatusBadGateway || ctx.Err() != nil {
+			return err
+		}
+		log.Printf("upstream %d failed %s (attempt %d): %v", s.index(u), method, i+1, err)
+	}
+	return err
+}
+
+func (s *shim) index(u *upstream) int {
+	for i, v := range s.ups {
+		if v == u {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *shim) call(ctx context.Context, u *upstream, method string, params any, out any) error {
 	if err := u.wait(ctx); err != nil {
 		return err
 	}

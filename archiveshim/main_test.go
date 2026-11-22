@@ -143,3 +143,33 @@ func TestReadOriginFromEnv(t *testing.T) {
 		t.Fatal("an empty variable was accepted")
 	}
 }
+
+func TestMovesToNextUpstreamWhenOneFails(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer down.Close()
+	var seen banktypes.QueryAllBalancesRequest
+	var seenHeight string
+	up := fakeRPC(t, "", &seen, &seenHeight)
+	defer up.Close()
+	s, _ := newShim([]string{down.URL, up.URL}, []float64{1000, 1000})
+	code, body := get(t, s, "/cosmos/bank/v1beta1/balances/cosmos1abc", "9041673")
+	if code != http.StatusOK {
+		t.Fatalf("status %d %v", code, body)
+	}
+}
+
+func TestQueryErrorIsNotRetried(t *testing.T) {
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"response":{"code":111222,"log":"invalid denom: : panic","height":"9041673"}}}`)
+	}))
+	defer up.Close()
+	s, _ := newShim([]string{up.URL}, []float64{1000})
+	code, body := get(t, s, "/cosmos/staking/v1beta1/delegations/cosmos1abc", "9041673")
+	if code != http.StatusInternalServerError || !strings.Contains(body["message"].(string), "invalid denom") || calls != 1 {
+		t.Fatalf("status %d calls %d %v", code, calls, body)
+	}
+}
