@@ -376,7 +376,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": from, "hi": to}).Scan(&rows
 			go func() {
 				defer wg.Done()
 				for i := range next {
-					charges[i], readErr[i] = node.failedTxCharges(heights[i])
+					charges[i], readErr[i] = node.failedTxCharges(heights[i], chainParam(chain) == apiMainnet && heights[i] < hubFailedTxEventsFrom)
 				}
 			}()
 		}

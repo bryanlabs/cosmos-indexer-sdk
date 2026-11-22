@@ -415,14 +415,20 @@ func (a rpcAttr) decoded() (string, string) {
 
 // failedTxCharges reads one block's failed transactions from the node and
 // returns, by hash, the coins each one's fee deduction moved. A transaction
-// whose block results do not settle it is left out.
-func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
-	txs, err := n.blockTxs(height)
+// whose block results do not settle it is left out. preEvents is set for a
+// mainnet block before Gaia v7, whose failed transactions carry no events
+// whether or not they paid: settlePreEventBlock decides them from their
+// results, as every other reader of those blocks does.
+func (n *ledgerNode) failedTxCharges(height int64, preEvents bool) (map[string]string, error) {
+	b, err := n.blockScan(height, preEvents)
 	if err != nil {
 		return nil, err
 	}
+	if preEvents {
+		settlePreEventBlock(height, b)
+	}
 	out := map[string]string{}
-	for _, t := range txs {
+	for _, t := range b.txs {
 		if t.Code != 0 && t.ChargeKnown {
 			out[t.Hash] = t.Charged
 		}
@@ -940,7 +946,7 @@ type ledgerFeeRow struct {
 // grants paid for. A successful transaction paid its declared fee. A failed
 // one paid what its block results show; ones not yet recorded are read from
 // the node, and the count still unknown is returned.
-func (s *Server) ledgerFees(ids []int64, addr string, lo, hi int64, node *ledgerNode) ([]ledgerFee, int, error) {
+func (s *Server) ledgerFees(chain string, ids []int64, addr string, lo, hi int64, node *ledgerNode) ([]ledgerFee, int, error) {
 	var rows []ledgerFeeRow
 	// A row with an effective inclusion pays as that inclusion did: at its
 	// block, with its outcome and through its fee grant.
@@ -1011,7 +1017,7 @@ ORDER BY height, tx_id`,
 	}
 	// A repair run's preview never records fee outcomes.
 	if len(pending) > 0 && node != nil && s.preview == nil {
-		resolved := s.resolveFailedFees(pending, node)
+		resolved := s.resolveFailedFees(chain, pending, node)
 		for id, charged := range resolved {
 			r := failed[id]
 			r.Resolved, r.Charged = true, charged
@@ -1038,14 +1044,14 @@ ORDER BY height, tx_id`,
 
 // resolveFailedFees reads failed transactions' fee outcomes from the node's
 // block results and records them.
-func (s *Server) resolveFailedFees(rows []ledgerFeeRow, node *ledgerNode) map[uint]string {
+func (s *Server) resolveFailedFees(chain string, rows []ledgerFeeRow, node *ledgerNode) map[uint]string {
 	byHeight := map[int64][]ledgerFeeRow{}
 	for _, r := range rows {
 		byHeight[r.Height] = append(byHeight[r.Height], r)
 	}
 	out := map[uint]string{}
 	for h, rs := range byHeight {
-		charges, err := node.failedTxCharges(h)
+		charges, err := node.failedTxCharges(h, chainParam(chain) == apiMainnet && h < hubFailedTxEventsFrom)
 		if err != nil {
 			continue
 		}
@@ -1096,7 +1102,7 @@ WHERE b.chain_id IN @ids AND b.height > @lo AND x.code <> 0 AND o.tx_id IS NULL`
 	if len(rows) == 0 {
 		return
 	}
-	done := s.resolveFailedFees(rows, node)
+	done := s.resolveFailedFees(chain, rows, node)
 	logf("failed-fee sweep: recorded %d of %d failed transactions", len(done), len(rows))
 }
 
@@ -1493,7 +1499,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			return out, tip.Height, nil
 		}
 	}
-	fees, unknownFees, err := s.ledgerFees(ids, addr, lowest, tip.Height, node)
+	fees, unknownFees, err := s.ledgerFees(chain, ids, addr, lowest, tip.Height, node)
 	if err != nil {
 		return nil, 0, err
 	}

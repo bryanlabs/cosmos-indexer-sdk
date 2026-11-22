@@ -829,7 +829,7 @@ func (s *Server) walkAcross(chain string, ids []int64, node *ledgerNode, addr st
 	if unattributed > 0 {
 		return nil, "a redelegation cannot be attributed", nil
 	}
-	fees, unknown, err := s.ledgerFees(ids, addr, lowest, anchor.Height, nil)
+	fees, unknown, err := s.ledgerFees(chain, ids, addr, lowest, anchor.Height, nil)
 	if err != nil {
 		return nil, "", err
 	}
