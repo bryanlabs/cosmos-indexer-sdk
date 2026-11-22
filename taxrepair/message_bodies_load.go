@@ -10,13 +10,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	dbpkg "github.com/DefiantLabs/cosmos-indexer/db"
-	"github.com/DefiantLabs/cosmos-indexer/tax"
 	sdktx "github.com/cosmos/cosmos-sdk/types/tx"
 	"gorm.io/gorm"
 )
@@ -170,12 +170,7 @@ func refuseRecoveredBody(r mbRow, storedHash string, storedIndex int, storedType
 }
 
 func recoverableBodyType(typeURL string) bool {
-	switch typeURL {
-	case typeURLAuthzExec, "/ibc.core.channel.v1.MsgTimeout", "/ibc.core.channel.v1.MsgTimeoutOnClose", "/ibc.core.channel.v1.MsgAcknowledgement",
-		tax.TypeURLV2Timeout, tax.TypeURLV2Acknowledgement:
-		return true
-	}
-	return false
+	return typeURL == typeURLAuthzExec || slices.Contains(refundLifecycleTypeURLs, typeURL)
 }
 
 func mbIDs(rows []mbRow) []uint {

@@ -17,6 +17,8 @@ import (
 const (
 	sqlSeedBlock    = "INSERT INTO blocks VALUES(?,?,?)"
 	sqlSeedTx       = "INSERT INTO txes VALUES(?,?,?,0)"
+	sqlSeedType     = "INSERT INTO message_types VALUES(?,?)"
+	sqlSeedMessage  = "INSERT INTO messages VALUES(?,?,?,0,?)"
 	attrMsgIndex    = "msg_index"
 	waLoadDelegator = "cosmos1loaddelegatorxxxxxxxxxxxxxxxxxxxxxxxxxx"
 	waLoadWithdraw  = "cosmos1loadwithdrawxxxxxxxxxxxxxxxxxxxxxxxxxxx"

@@ -117,8 +117,8 @@ func seedMessage(t *testing.T, db *gorm.DB, id uint, typ string, wire []byte, fi
 	}{
 		{"INSERT INTO blocks VALUES(?,?,?)", []any{id, 30672570 + id, stamp}},
 		{"INSERT INTO txes VALUES(?,?,?,0)", []any{id, id, fixture}},
-		{"INSERT INTO message_types VALUES(?,?)", []any{id, typ}},
-		{"INSERT INTO messages VALUES(?,?,?,0,?)", []any{id, id, id, wire}},
+		{sqlSeedType, []any{id, typ}},
+		{sqlSeedMessage, []any{id, id, id, wire}},
 		{"INSERT INTO taxable_events(message_id,sub_index,category,amount,denom,to_addr,block_height,timestamp,tx_hash) VALUES(?,0,'reward','94405000000','uatom','wallet',?,?,?)", []any{id, 30672570 + id, stamp, fixture}},
 	} {
 		if err := db.Exec(q.sql, q.args...).Error; err != nil {
