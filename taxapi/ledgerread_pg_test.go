@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -102,38 +103,50 @@ func TestLedgerEventsSplitMatchesOneRead(t *testing.T) {
 		}
 	}
 	s := &Server{db: db}
-	for _, c := range []struct {
-		name   string
-		lo, hi int64
-	}{
-		{"whole history", 0, 2000000},
-		{"window", int64(2000000 - blocks + 300), int64(2000000 - 500)},
-		{"empty window", 1, 2},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			got, gotUn, err := s.ledgerEvents([]int64{1}, "cosmos1delegator", "cosmosvaloper1operator", c.lo, c.hi)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want, wantUn, err := s.ledgerEventsOneRead([]int64{1}, "cosmos1delegator", "cosmosvaloper1operator", c.lo, c.hi)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if c.name == "whole history" {
-				redelegations := 0
-				for _, e := range want {
-					if e.Type == "redelegate" {
-						redelegations++
+	defer func(n int) { ledgerReadWorkers = n }(ledgerReadWorkers)
+	for _, workers := range []int{1, 2, 8} {
+		ledgerReadWorkers = workers
+		for _, c := range []struct {
+			name   string
+			lo, hi int64
+		}{
+			{"whole history", 0, 2000000},
+			{"window", int64(2000000 - blocks + 300), int64(2000000 - 500)},
+			{"empty window", 1, 2},
+		} {
+			t.Run(fmt.Sprintf("%d workers %s", workers, c.name), func(t *testing.T) {
+				got, gotUn, err := s.ledgerEvents([]int64{1}, "cosmos1delegator", "cosmosvaloper1operator", c.lo, c.hi)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, wantUn, err := s.ledgerEventsOneRead([]int64{1}, "cosmos1delegator", "cosmosvaloper1operator", c.lo, c.hi)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if c.name == "whole history" {
+					redelegations := 0
+					for _, e := range want {
+						if e.Type == "redelegate" {
+							redelegations++
+						}
+					}
+					if len(want) < messages || redelegations == 0 {
+						t.Fatalf("fixture too small: %d events, %d redelegations", len(want), redelegations)
 					}
 				}
-				if len(want) < messages || redelegations == 0 {
-					t.Fatalf("fixture too small: %d events, %d redelegations", len(want), redelegations)
+				if gotUn != wantUn || !reflect.DeepEqual(got, want) {
+					t.Fatalf("split read %d events (unattributed %d), one read %d events (unattributed %d), equal %v",
+						len(got), gotUn, len(want), wantUn, reflect.DeepEqual(got, want))
 				}
-			}
-			if gotUn != wantUn || !reflect.DeepEqual(got, want) {
-				t.Fatalf("split read %d events (unattributed %d), one read %d events (unattributed %d), equal %v",
-					len(got), gotUn, len(want), wantUn, reflect.DeepEqual(got, want))
-			}
-		})
+			})
+		}
+	}
+}
+
+func TestLedgerWorkersFromEnv(t *testing.T) {
+	for v, want := range map[string]int{"": 8, "2": 2, "1": 1, "8": 8, "0": 8, "9": 8, "x": 8} {
+		if got := ledgerWorkersFromEnv(v); got != want {
+			t.Fatalf("ledgerWorkersFromEnv(%q) = %d, want %d", v, got, want)
+		}
 	}
 }

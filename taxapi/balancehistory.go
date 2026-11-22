@@ -636,8 +636,17 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 // lookup at a time, so a busy wallet's opening read, as one statement, is
 // bound by that latency. Measured 2026-11-22 on a wallet with 168,516
 // matching attributes: 74 s as one statement per kind, 24 s split by event
-// into 8 concurrent reads.
-const ledgerReadWorkers = 8
+// into 8 concurrent reads. COSMOS_TAX_LEDGER_READ_WORKERS (1 to 8) lowers it
+// for a run that must leave Postgres headroom to the rest of the fleet; the
+// results are the same at any count.
+var ledgerReadWorkers = ledgerWorkersFromEnv(os.Getenv("COSMOS_TAX_LEDGER_READ_WORKERS"))
+
+func ledgerWorkersFromEnv(v string) int {
+	if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 8 {
+		return n
+	}
+	return 8
+}
 
 // ledgerChunk spreads n values over ledgerReadWorkers reads, none shorter
 // than 256 values, so a small wallet stays one read per kind.
