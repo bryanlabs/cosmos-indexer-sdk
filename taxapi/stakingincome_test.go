@@ -23,7 +23,9 @@ func TestValidatorIncomeAddsUpToHubCommission(t *testing.T) {
 	for _, day := range infl.Days {
 		byDate[day.Date] = day
 	}
-	complete := d.File.BlocksCounted == d.File.BlocksExpected
+	if d.File.BlocksExpected == 0 || d.File.BlocksCounted != d.File.BlocksExpected {
+		t.Fatalf("embedded validator income file is partial: %d of %d blocks counted", d.File.BlocksCounted, d.File.BlocksExpected)
+	}
 	for _, p := range incomePeriods(d.Days, "monthly") {
 		hub := new(big.Int)
 		for i := p.lo; i < p.hi; i++ {
@@ -33,9 +35,6 @@ func TestValidatorIncomeAddsUpToHubCommission(t *testing.T) {
 		for _, v := range d.Validators {
 			sum += v.commissionIn(p.lo, p.hi)
 			rewards += v.Rewards[p.key]
-		}
-		if !complete && sum == 0 {
-			continue
 		}
 		diff := new(big.Int).Sub(hub, big.NewInt(sum))
 		if diff.CmpAbs(big.NewInt(int64(len(d.Validators)))) > 0 {
