@@ -21,7 +21,21 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `denom:<raw>` or `policy:spam`, groups per token and the reason glossary in
   `reviewreasons.go`; see `taxapi/ASSET-REVIEW.md`), `balances.go` (`/balance` = live
   node read via `NODE_REST_API`, persisted to `balance_snapshots`), `form8949.go`,
-  `form990t.go` (reports/forms).
+  `form990t.go` (reports/forms), `stakinginflation.go` (`GET
+  /staking/inflation`, INF-748: ATOM minted per day, month or year from every
+  cosmoshub-4 block's mint event, where it went, supply, stated vs actual
+  inflation and stated, paid, after-commission and real APR; serves the
+  embedded `stakingdata/inflation_daily.json`, built from raw block results by
+  `scripts/staking-inflation/` (extract, merge with its checks, export; README
+  there); replace the file and rebuild to extend it until the daily job writes
+  a table). `mystaking.go` (`GET /staking/my-staking`, INF-749): one
+  holder's wallets per validator for a period. Rewards are the `/income`
+  rows (same filter, `reconciliation` proves the sum), commission paid is an
+  estimate from `tax_staking_validator_days`, yield from those days over
+  `tax_validator_rates` tokens, votes from `proposal_vote` events (two reads,
+  the second with seqscan and hashjoin off) against the node's proposal
+  list, commission changes from create and edit validator messages.
+  Slashing stays null until the ledger records it. Private: no cache.
 - Methodology v8 surfaces (2026-10-15): `tax/catalog.go` (everything the
   indexer watches, served as `GET /catalog`; the website renders it as
   `/tax/coverage`, so a new category, contract or tag belongs here first),
@@ -56,8 +70,10 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   event runs (every pass when events are the criterion, hourly otherwise).
   Snapshots publish every 25 bucket reads, so a pass cut off by its timeout
   still publishes; until every bucket has been read the status is `scanning`
-  and a period it cannot vouch for is `unknown`. Days before genesis count as
-  covered and add `note` / `X-Index-Coverage-Note` instead. Year start
+  and a period it cannot vouch for is `unknown`. A period that starts before
+  genesis and runs past it is judged from genesis and adds `note` /
+  `X-Index-Coverage-Note`; a period entirely before genesis is `incomplete`
+  with a warning (earlier Hub chains are not in reports yet). Year start
   heights for cosmoshub-4 are hard-coded in `hubYearStarts`; later years are
   found by binary search on indexed blocks. A block counts when
   `tx_indexed`; `TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true` also requires
@@ -67,11 +83,84 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   `X-Index-Coverage-Incomplete-Years` and `X-Index-Coverage-Note`; `/report-job`, `/positions` and
   `/validator-statement` also return `index_coverage` in the body, evaluated
   per response so cached jobs pick up backfill progress. No route clamps
-  dates to the index start). Every handler normalises `chain` through `chainParam` in
+  dates to the index start).
+  Earlier Hub chains (cosmoshub-1 to 3, `taxapi/legacyeras.go`): the API
+  reads the `legacy` schema (`eras`, `import_ranges`, `reconciliation`,
+  `taxable_events`, `tx_inclusions`, `blocks`, `balance_days`) every 5
+  minutes (`TAX_LEGACY_ERAS_INTERVAL`, `TAX_LEGACY_ERAS=off` turns it off).
+  An era joins reports only when it and every later era have
+  `published = true`, so the set in reports is always cosmoshub-3, then 2
+  and 3, then 1 to 3. While none is in reports every response is
+  byte-for-byte what it was before eras existed, apart from `eras[]` on
+  `/index-coverage` (`TestLegacyErasUnpublishedChangeNothingPostgres`).
+  Once one is: legacy rows are read with SQL (heights restart on every
+  chain, so order is always era, height, phase, tx_index, msg_index,
+  sub_index, never height alone), a genesis row is read only on the
+  earliest era in reports, rows past an era's export height are dropped,
+  events, 8949, journal, previews and balance statements gain a chain id
+  column, years and the date floor move to the earliest era, and past-date
+  balances on those chains come from `legacy.balance_days` (refused for a
+  wallet whose `reconciliation` row is not `closed*`). Commission flows and
+  the validator statement stay cosmoshub-4 only. A missing or unreadable
+  schema (no USAGE grant) leaves reports as they are and logs once.
+  Every handler normalises `chain` through `chainParam` in
   `taxapi/server.go` (`cosmoshub`, `cosmoshub-4` and `mainnet` are the same
   oracle key); never read `q.Get("chain")` raw. `/events?preview=1` emits the preview
   columns the website parses. A Gaia release that changes event shapes gets a
   review entry in `tax/gaia_versions.go`, not a silent parser change.
+- `taxapi/validatorstatement.go`: `/validator-statement` reads the validator's
+  reward and commission rows once (`readStatementAggregates`, a bitmap scan
+  with read-ahead, one snapshot) for the day sums and the distinct
+  recipients. No index holds the amount or the recipient, so cost grows with
+  the rows read, about 4 seconds per million on production. A period the
+  planner sizes above `TAX_STATEMENT_MAX_ROWS` (default 12 million) is
+  refused with 422 before any row is read; the database work is cancelled at
+  `TAX_STATEMENT_TIMEOUT` (default 90s, under the 120s edge) or when the
+  caller goes away, answering 504. At most three statements are read at a
+  time. `validatorstatement_pg_test.go` keeps the three former queries word
+  for word and pins the single read to them. Stage 2
+  (`taxapi/statementsummary*.go`, `taxstatement/`) requires explicit production
+  approval: a Job installs/fills derived day totals and monthly
+  recipient sets with statement-level invalidation triggers. The API never
+  installs or writes them; it mixes trusted, unmarked whole months with live
+  rows in one snapshot and counts unique recipients across their union.
+  `TAX_STATEMENT_SUMMARY=off` forces live-only reads without deleting anything.
+  Preserve the 12M live-row default and all coverage gates. Real-copy proofs
+  are opt-in, use newly retained schemas and never rewrite the preserved base.
+  DELETE-shaped fixture proofs must roll back.
+- `taxapi/coveragerollup.go`, `taxcoverage/` - `GET /coverage` sums a
+  rollup instead of counting every message in the period (the old query took
+  4 to 7 minutes and up to 10 GB of temp over all history). Three additive
+  tables (`tax_coverage_rollup*`, DDL in `CoverageRollupDDL`, created once by
+  the owner) hold message counts and classified counts by UTC day, chain,
+  type and id chunk, plus transaction counts by day. Only the `taxcoverage`
+  CronJob writes them: it extends to the frontier, rebuilds chunks touched by
+  new or changed taxable events, recounts the recent chunks, fingerprints
+  every chunk's classified count to catch deletes, and rebuilds the oldest
+  chunk each run. The API reads them in one read-only snapshot, recounts
+  partial days and the unbuilt tail live, caches by frontier and shares one
+  query among identical requests. It falls back to the original live query
+  only when the rollup is missing, unreadable or more than 1.5M ids behind.
+  The coverage statement adds "Transactions scanned" from the same rollup
+  (rollup only, 10 s cap, "not counted" otherwise).
+  `coveragerollup_pg_test.go` pins rolled counts to the live query.
+- `taxapi/stakingtables.go`, `taxstaking/` - the /tax/staking pages
+  (INF-748: inflation, staking income, validator income, unbonding) read per
+  UTC day staking sums. Four additive tables (`tax_staking_*`, DDL in
+  `StakingTablesDDL`, created once by the owner) hold them. `taxstaking
+  -seed-merged -seed-byval` loads the archive extraction once (one
+  transaction, refuses incomplete or failing input and non-empty tables);
+  the daily CronJob runs `taxstaking -refresh`, which adds whole UTC days from
+  our node, one transaction per day, and refuses any day with a missing,
+  unreadable or mint-less block or a community tax change without a passed
+  proposal. Sums are exact (big.Int at 1e18, the extraction's 60 digit
+  rounding); the per-block community tax comes from distribution params at
+  h-1. `-check FROM TO` recomputes days from the node and compares every
+  column. The API reads the tables only when the state row exists, reaches
+  the embedded file's last day and every day from the embedded first day is
+  present; otherwise it serves the embedded files, so output is identical
+  either way (`stakingtables_pg_test.go`). It never writes them. Bare-metal:
+  `cluster/apps/cosmos-tax-staking-daily/`.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message

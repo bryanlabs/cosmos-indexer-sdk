@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"hash"
@@ -48,10 +49,18 @@ func (s *Server) currentReviewFingerprint(chain string, addresses []string, _, _
 // The caller owns a repeatable-read snapshot. Never call this on the live pool:
 // financial scans and retained classification/packet evidence must agree.
 func (s *Server) reviewFingerprintInSnapshot(chain string, addresses []string) (string, error) {
+	return s.reviewEvidenceInSnapshot(chain, addresses, nil)
+}
+
+// reviewEvidenceInSnapshot is reviewFingerprintInSnapshot that also fills ev,
+// when given, with what a later view needs to confirm the digest unchanged
+// from the change journal (see evidencejournal.go). The digest is the same
+// either way.
+func (s *Server) reviewEvidenceInSnapshot(chain string, addresses []string, ev *evidenceCollector) (string, error) {
 	h := sha256.New()
 	writeFinancialFingerprintRow(h, "version", "reader-snapshot:v1")
 	events, err := s.scopedTaxEvents(chain).
-		Select("jsonb_build_array(to_jsonb(taxable_events), scope_t.memo, scope_t.hash, scope_t.code, scope_b.time_stamp, scope_c.chain_id)::text").
+		Select("jsonb_build_array(to_jsonb(taxable_events), scope_t.memo, scope_t.hash, scope_t.code, scope_b.time_stamp, scope_c.chain_id)::text, taxable_events.\"timestamp\"").
 		Where("(from_addr IN ? OR to_addr IN ?)", addresses, addresses).
 		Order("taxable_events.id").Rows()
 	if err != nil {
@@ -59,11 +68,15 @@ func (s *Server) reviewFingerprintInSnapshot(chain string, addresses []string) (
 	}
 	for events.Next() {
 		var exact string
-		if err := events.Scan(&exact); err != nil {
+		var at sql.NullTime
+		if err := events.Scan(&exact, &at); err != nil {
 			_ = events.Close()
 			return "", err
 		}
 		writeFinancialFingerprintRow(h, financialEventKind, exact)
+		if ev != nil && at.Valid {
+			ev.time(at.Time)
+		}
 	}
 	err = events.Err()
 	_ = events.Close()
@@ -96,20 +109,39 @@ func (s *Server) reviewFingerprintInSnapshot(chain string, addresses []string) (
 		return "", err
 	}
 	// Block event rows are derived at read time, so hash what they derive to.
+	var blockRows hash.Hash
+	if ev != nil {
+		blockRows = sha256.New()
+	}
+	if err := s.writeBlockEventFingerprint(h, blockRows, chain, addresses); err != nil {
+		return "", err
+	}
+	if ev != nil {
+		ev.blockRows = fmt.Sprintf("%x", blockRows.Sum(nil))
+	}
+	if err := s.writeClassificationFingerprint(h, chain, addresses, ev); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// writeBlockEventFingerprint hashes the block event rows into h and, when
+// given, into also.
+func (s *Server) writeBlockEventFingerprint(h, also hash.Hash, chain string, addresses []string) error {
 	for _, addr := range addresses {
 		rows, err := s.blockEventRows(chain, addr, time.Time{}, blockFingerprintEnd)
 		if err != nil {
-			return "", err
+			return err
 		}
 		for _, row := range rows {
 			data, _ := json.Marshal(row)
 			writeFinancialFingerprintRow(h, "block_event", string(data))
+			if also != nil {
+				writeFinancialFingerprintRow(also, "block_event", string(data))
+			}
 		}
 	}
-	if err := s.writeClassificationFingerprint(h, chain, addresses); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
+	return nil
 }
 
 func writeFinancialFingerprintRow(h hash.Hash, kind, exact string) {

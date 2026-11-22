@@ -1,9 +1,11 @@
 package taxapi
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/DefiantLabs/cosmos-indexer/tax"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +24,10 @@ type fakeFlowLedger struct {
 	openings map[string]flowHoldings
 	rows     map[string][]flowEvent
 	stops    map[string]flowStop
+	wide     map[string]bool
 	loaded   []string
+	stopped  []string
+	slashed  []flowEvent
 }
 
 func (l *fakeFlowLedger) opening(addr string, day time.Time) (flowHoldings, bool, error) {
@@ -44,9 +49,40 @@ func (l *fakeFlowLedger) events(addr string, start, end time.Time) ([]flowEvent,
 	return out, nil
 }
 
-func (l *fakeFlowLedger) stop(addr string) (flowStop, error) { return l.stops[addr], nil }
+func (l *fakeFlowLedger) stop(addr string, start, end time.Time) (flowStop, error) {
+	l.stopped = append(l.stopped, addr)
+	if s, ok := l.stops[addr]; ok {
+		return s, nil
+	}
+	return l.distributor(addr, start, end)
+}
+
+func (l *fakeFlowLedger) distributor(addr string, _, _ time.Time) (flowStop, error) {
+	if l.wide[addr] {
+		return flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, nil
+	}
+	return flowStop{}, nil
+}
+
+func (l *fakeFlowLedger) known(addr string) flowStop { return l.stops[addr] }
 
 func (l *fakeFlowLedger) ibcDestination(e flowEvent) string { return flowTestChain }
+
+func (l *fakeFlowLedger) slashes(start, end time.Time) ([]flowEvent, error) {
+	var out []flowEvent
+	for _, e := range l.slashed {
+		if !e.Key.Time.Before(start) && e.Key.Time.Before(end) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// slash adds a downtime slash of validator at k taking fraction of its stake.
+func (l *fakeFlowLedger) slash(k flowKey, validator, fraction string) {
+	k.Sub, k.Message = flowSlashSub, 0
+	l.slashed = append(l.slashed, flowEvent{Key: k, Category: flowCatSlash, Dir: apiOut, Amount: amt(1), Validator: validator, Fraction: decimal.RequireFromString(fraction)})
+}
 
 var flowTestStart = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -67,7 +103,7 @@ func (l *fakeFlowLedger) commission(k flowKey, to string, v int64) {
 }
 
 func newFakeFlowLedger() *fakeFlowLedger {
-	return &fakeFlowLedger{openings: map[string]flowHoldings{}, rows: map[string][]flowEvent{}, stops: map[string]flowStop{
+	return &fakeFlowLedger{openings: map[string]flowHoldings{}, rows: map[string][]flowEvent{}, wide: map[string]bool{}, stops: map[string]flowStop{
 		flowTestExchange: {Class: flowExchange, Detail: "Test Exchange"},
 	}}
 }
@@ -152,6 +188,88 @@ func TestFlowFollowsHopsAndReplaysDiscoveredWallet(t *testing.T) {
 	require.Equal(t, 1, tr.Wallets[w1].Hop)
 }
 
+// A block movement the parser could not give a receiver ends the trace as a
+// named block_spend, even in a strict private run, rather than failing it.
+func TestFlowBlockSpendWithoutReceiver(t *testing.T) {
+	l := newFakeFlowLedger()
+	r, w1 := flowTestReceiver, "cosmos1hop1"
+	l.commission(flowAt(1, 0), r, 100)
+	l.send(flowAt(2, 0), r, w1, 100)
+	l.rows[w1] = append(l.rows[w1], flowEvent{Key: flowAt(3, 0), Category: apiTransfer, Dir: apiOut, Amount: amt(30), From: w1, Detail: `{"event_type":"coin_spent","source":"block_event","review_required":"true","review_reason":"` + tax.ReviewUnclassifiedBlockMovement + `"}`})
+	tr := newFlowTrace(flowTestValidator, flowTestStart, flowTestStart.AddDate(0, 3, 0), l)
+	tr.strict = true
+	require.NoError(t, tr.run([]string{r}))
+	require.Equal(t, "30", fate(tr, flowRuleFIFO, "2025-01", flowBlockSpend, "coin_spent", false))
+	require.Equal(t, "70", fate(tr, flowRuleFIFO, "2025-01", flowHeldDownstream, "hop 1", false))
+	require.Empty(t, tr.Unresolved)
+}
+
+// A wallet a hop out that pays out to a crowd ends the trace there, the way
+// a busy wallet does, even when it is a validator operator account.
+func TestFlowWideDistributorStopsReceiver(t *testing.T) {
+	l := newFakeFlowLedger()
+	r, hub := flowTestReceiver, "cosmos1hub"
+	l.wide[hub] = true
+	l.commission(flowAt(1, 0), r, 100)
+	l.send(flowAt(2, 0), r, hub, 60)
+	l.send(flowAt(3, 0), hub, "cosmos1delegatorone", 30)
+	l.send(flowAt(3, 1), hub, "cosmos1delegatortwo", 30)
+	tr := runFlowTest(t, l, r)
+
+	for rule := 0; rule < flowRules; rule++ {
+		require.Equal(t, "60", fate(tr, rule, "2025-01", flowWideDistributor, flowFanoutHeuristic, false), flowRuleNames[rule])
+		require.Equal(t, "40", fate(tr, rule, "2025-01", flowHeld, "", false), flowRuleNames[rule])
+	}
+	require.Equal(t, []string{r}, l.loaded, "the distributor is never loaded as a wallet")
+	require.Equal(t, 50000, flowFanoutMaxReceivers)
+	require.Contains(t, FlowClassNotes[flowWideDistributor], "more than 50,000", "the page states the threshold the code uses")
+	require.Contains(t, FlowMethod, "more than 50,000")
+}
+
+// A receiving wallet (hop 0) that pays out to a crowd stays traced, so what
+// it keeps or restakes is still reported, but its payouts end as distributed
+// instead of opening a wallet per recipient. A labelled receiver keeps its
+// fate, and no receiver is looked up one by one.
+func TestFlowWideDistributorAtHopZero(t *testing.T) {
+	l := newFakeFlowLedger()
+	op := flowTestReceiver
+	l.wide[op] = true
+	l.openings[op] = flowHoldings{Liquid: amt(100)}
+	l.commission(flowAt(1, 0), op, 100)
+	l.rows[op] = append(l.rows[op], flowEvent{Key: flowAt(1, 5), Category: flowCatDelegate, Dir: apiOut, Amount: amt(20), From: op, Validator: flowTestValidator})
+	for i := 0; i < 50; i++ {
+		l.send(flowAt(2, i), op, fmt.Sprintf("cosmos1delegator%02d", i), 2)
+	}
+	l.send(flowAt(3, 0), op, flowTestExchange, 40)
+	tr := runFlowTest(t, l, op)
+
+	// FIFO: the 20 restaked and the first 80 out are the 100 held before.
+	require.Equal(t, "0", fate(tr, flowRuleFIFO, "2025-01", flowRestakedOwn, "", false))
+	require.Equal(t, "20", fate(tr, flowRuleFIFO, "2025-01", flowWideDistributor, flowFanoutHeuristic, false))
+	require.Equal(t, "40", fate(tr, flowRuleFIFO, "2025-01", flowExchange, "Test Exchange", false))
+	require.Equal(t, "40", fate(tr, flowRuleFIFO, "2025-01", flowHeld, "", false))
+	// Pro-rata: half of every outflow and of what is left is commission.
+	require.Equal(t, "10", fate(tr, flowRuleProRata, "2025-01", flowRestakedOwn, "", false))
+	require.Equal(t, "50", fate(tr, flowRuleProRata, "2025-01", flowWideDistributor, flowFanoutHeuristic, false))
+	require.Equal(t, "20", fate(tr, flowRuleProRata, "2025-01", flowExchange, "Test Exchange", false))
+	require.Equal(t, "20", fate(tr, flowRuleProRata, "2025-01", flowHeld, "", false))
+	require.Equal(t, []string{op}, l.loaded)
+	require.Empty(t, l.stopped, "receivers of a distributor are not looked up one by one")
+}
+
+// An ordinary receiving wallet still opens hop 1 for each receiver.
+func TestFlowNarrowReceiverStillFollowed(t *testing.T) {
+	l := newFakeFlowLedger()
+	r, w1 := flowTestReceiver, "cosmos1hop1"
+	l.commission(flowAt(1, 0), r, 100)
+	l.send(flowAt(2, 0), r, w1, 100)
+	tr := runFlowTest(t, l, r)
+
+	require.Equal(t, []string{r, w1}, l.loaded)
+	require.Equal(t, []string{w1}, l.stopped)
+	require.Equal(t, "100", fate(tr, flowRuleFIFO, "2025-01", flowHeldDownstream, "hop 1", false))
+}
+
 func TestFlowTransfersBetweenReceiversCountOnce(t *testing.T) {
 	l := newFakeFlowLedger()
 	a, b := flowTestReceiver, "cosmos1second"
@@ -204,4 +322,143 @@ func TestFlowPoolProRataKeepsTotals(t *testing.T) {
 	}
 	require.True(t, sum.Equal(amt(1)), sum.String())
 	require.True(t, p.total().Equal(amt(2)), p.total().String())
+}
+
+// A wide distributor stop is a served class like any other: it has a note
+// and a methodology sentence that state the threshold the tracer uses, and
+// its lines keep their class on a validator's page and in the Hub totals.
+func TestFlowWideDistributorClassServed(t *testing.T) {
+	require.Equal(t, "50,000", groupThousands(flowFanoutMaxReceivers))
+	require.Equal(t, "999", groupThousands(999))
+	require.Equal(t, "1,000", groupThousands(1000))
+	require.Equal(t, "1,234,567", groupThousands(1234567))
+	note := FlowClassNotes[flowWideDistributor]
+	require.Contains(t, note, "more than "+groupThousands(flowFanoutMaxReceivers)+" different wallets", "the page states the threshold the code uses")
+	require.Contains(t, note, "The trace stops there")
+	require.Contains(t, FlowMethod, "more than "+groupThousands(flowFanoutMaxReceivers)+" different wallets")
+	require.Contains(t, FlowMethod, flowWideDistributor)
+	classes := []string{
+		flowHeld, flowRestakedOwn, flowRestakedOther, flowUnbonding, flowLocked, flowHeldDownstream, flowStakedDownstream,
+		flowUnbondDownstream, flowLockedDownstream, flowExchange, flowExchangeLike, flowIBCOut, flowFees, flowSwapped, flowSpent, flowTokenized,
+		flowBurned, flowCommunityPool, flowModule, flowContract, flowBeyondHops, flowBusyWallet, flowWideDistributor, flowUnresolved, flowBlockSpend,
+	}
+	for _, class := range classes {
+		require.NotEmpty(t, FlowClassNotes[class], class)
+	}
+
+	s := &Server{native: DefaultNativeAsset}
+	withdrawn := map[string]decimal.Decimal{flowPGJan: decimal.RequireFromString("100000000")}
+	flows := []CommissionFlow{
+		{Month: flowPGJan, Class: flowWideDistributor, Detail: flowFanoutHeuristic, AmountBase: "60000000"},
+		{Month: flowPGJan, Class: flowHeld, AmountBase: "40000000"},
+	}
+	page := s.buildFlowMonths(flows, withdrawn, nil, nil, false)
+	require.Len(t, page, 1)
+	require.Equal(t, flowWideDistributor, page[0].Flows[0].Class)
+	require.Equal(t, flowFanoutHeuristic, page[0].Flows[0].Detail, "a validator's page keeps the heuristic that stopped the trace")
+	require.Equal(t, "60", page[0].Flows[0].Amount.String())
+	require.Equal(t, "0.6", page[0].Flows[0].Share.String())
+	hub := s.buildFlowMonths(flows, withdrawn, nil, nil, true)
+	require.Equal(t, flowWideDistributor, hub[0].Flows[0].Class)
+	require.Empty(t, hub[0].Flows[0].Detail, "the Hub collapses the detail like exchange_like")
+	total := flowTotals(hub)
+	require.Equal(t, "100", total.Withdrawn.String())
+	require.Equal(t, flowWideDistributor, total.Flows[0].Class)
+	require.Equal(t, "60", total.Flows[0].Amount.String())
+}
+
+// Reward rows name the delegator even when the chain paid its withdraw
+// address. The trace must take reward coins from what was paid.
+func TestFlowRewardsFollowTheWithdrawAddress(t *testing.T) {
+	const withdraw = "cosmos1withdraw"
+	k := flowAt(1, 5)
+	booked := []flowEvent{
+		{Key: k, Category: apiReward, Dir: "in", Amount: amt(50), To: flowTestReceiver, Validator: flowTestOther},
+	}
+	// The delegator was paid nothing: its reward row is dropped.
+	require.Empty(t, reconcileRewardPayouts(flowTestReceiver, booked, nil))
+	// Its withdraw address has no reward row but was paid 50.
+	got := reconcileRewardPayouts(withdraw, nil, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(50)}})
+	require.Len(t, got, 1)
+	require.Equal(t, apiReward, got[0].Category)
+	require.Equal(t, "50", got[0].Amount.String())
+	require.Equal(t, withdraw, got[0].To)
+	// Commission rows already name the receiver; only the rest of the
+	// payout is reward, so a 50 reward row paid 120 with 100 commission keeps 20.
+	mixed := []flowEvent{
+		{Key: k, Category: apiCommission, Dir: "in", Amount: amt(100), To: flowTestReceiver, Validator: flowTestValidator},
+		{Key: k, Category: apiReward, Dir: "in", Amount: amt(50), To: flowTestReceiver, Validator: flowTestOther},
+	}
+	got = reconcileRewardPayouts(flowTestReceiver, mixed, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(120)}})
+	require.Len(t, got, 2)
+	require.Equal(t, "100", got[0].Amount.String())
+	require.Equal(t, "20", got[1].Amount.String())
+	// A reward paid where it was booked is unchanged.
+	got = reconcileRewardPayouts(flowTestReceiver, booked, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(50)}})
+	require.Equal(t, booked, got)
+
+	// In a trace, the phantom reward dilutes the pro-rata share of
+	// commission that left: 100 of 150 instead of all of it.
+	run := func(rows []flowEvent) *flowTrace {
+		l := newFakeFlowLedger()
+		l.commission(flowAt(1, 0), flowTestReceiver, 100)
+		l.rows[flowTestReceiver] = append(l.rows[flowTestReceiver], rows...)
+		l.send(flowAt(2, 0), flowTestReceiver, flowTestExchange, 100)
+		return runFlowTest(t, l, flowTestReceiver)
+	}
+	before := run(booked)
+	require.Equal(t, "66.666666666667", fate(before, flowRuleProRata, "2025-01", flowExchange, "Test Exchange", false))
+	after := run(reconcileRewardPayouts(flowTestReceiver, booked, nil))
+	require.Equal(t, "100", fate(after, flowRuleProRata, "2025-01", flowExchange, "Test Exchange", false))
+	require.Equal(t, "100", fate(after, flowRuleFIFO, "2025-01", flowExchange, "Test Exchange", false))
+}
+
+// Older SDK logs merge a message's transfers into one event with several
+// recipient, sender, amount triples (an undelegate paying a 2 uatom reward
+// and moving 6198375 uatom of principal). Only the distribution triple to
+// the wallet is a payout.
+func TestFlowRewardPayoutsPairMergedTransfers(t *testing.T) {
+	const (
+		wallet = "cosmos1wallet"
+		pool   = "cosmos1notbonded"
+	)
+	dist := moduleAddress("distribution")
+	at := time.Date(2021, 10, 1, 0, 0, 0, 0, time.UTC)
+	ev := func(id uint, idx uint64, key, value string) flowTransferAttr {
+		return flowTransferAttr{EventID: id, MessageID: 7, Height: 8000002, TimeStamp: at, Index: idx, Key: key, Value: value}
+	}
+	merged := []flowTransferAttr{
+		ev(1, 0, "recipient", wallet), ev(1, 1, "sender", dist), ev(1, 2, "amount", "2uatom"),
+		ev(1, 3, "recipient", wallet), ev(1, 4, "sender", pool), ev(1, 5, "amount", "6198375uatom"),
+	}
+	got := rewardPayoutsFrom(merged, wallet, dist, "uatom")
+	require.Len(t, got, 1)
+	require.Equal(t, "2", got[7].Amount.String())
+	// A second event in the same message (newer SDKs) adds up.
+	more := append(merged, ev(2, 0, "recipient", wallet), ev(2, 1, "sender", dist), ev(2, 2, "amount", "5uatom,3ibc/ABC"))
+	require.Equal(t, "7", rewardPayoutsFrom(more, wallet, dist, "uatom")[7].Amount.String())
+	// The distribution triple to someone else is not this wallet's payout.
+	other := []flowTransferAttr{
+		ev(3, 0, "recipient", pool), ev(3, 1, "sender", dist), ev(3, 2, "amount", "9uatom"),
+		ev(3, 3, "recipient", wallet), ev(3, 4, "sender", pool), ev(3, 5, "amount", "4uatom"),
+	}
+	require.Empty(t, rewardPayoutsFrom(other, wallet, dist, "uatom"))
+}
+
+// A native source correction is a reward proved against the chain. It stays
+// as booked and uses its share of the payout, so the indexed reward row in
+// the same message keeps only the rest and nothing is counted twice.
+func TestFlowRewardPayoutsKeepSourceCorrections(t *testing.T) {
+	k := flowAt(1, 5)
+	corrected := flowEvent{Key: k, Category: apiReward, Dir: "in", Amount: amt(30), To: flowTestReceiver, Trigger: flowSourceCorrectionTrigger}
+	indexed := flowEvent{Key: k, Category: apiReward, Dir: "in", Amount: amt(50), To: flowTestReceiver, Validator: flowTestOther}
+	got := reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected, indexed}, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(50)}})
+	require.Len(t, got, 2)
+	require.Equal(t, "30", got[0].Amount.String())
+	require.Equal(t, flowSourceCorrectionTrigger, got[0].Trigger)
+	require.Equal(t, "20", got[1].Amount.String())
+	got = reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected}, nil)
+	require.Equal(t, []flowEvent{corrected}, got)
+	got = reconcileRewardPayouts(flowTestReceiver, []flowEvent{corrected}, map[uint]flowRewardPayout{k.Message: {Key: k, Amount: amt(30)}})
+	require.Equal(t, []flowEvent{corrected}, got)
 }

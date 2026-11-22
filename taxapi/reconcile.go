@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"context"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
@@ -45,6 +46,26 @@ type CoverageReport struct {
 	OpaqueMessages       int64         `json:"opaque_messages"`
 	UnreviewedMessages   int64         `json:"unreviewed_messages"`
 	ParserDecodeComplete bool          `json:"parser_decode_complete"`
+	// TransactionsScanned is the number of indexed transactions in the
+	// period; null when /coverage was counted live.
+	TransactionsScanned *int64 `json:"transactions_scanned,omitempty"`
+	// CountedFrom says how far the coverage rollup was built when it was
+	// summed; null when counted live.
+	CountedFrom *CoverageRollupInfo `json:"counted_from,omitempty"`
+	// Status is "counted", or "pending" while the coverage rollup does not
+	// cover the period yet; a pending report counts nothing and Note says so.
+	Status string `json:"status"`
+	Note   string `json:"note,omitempty"`
+}
+
+// coveragePendingNote is what a pending /coverage report says in place of counts.
+const coveragePendingNote = "Message counts for this period are still being built, so this file does not count or classify messages yet. Request it again later for the counts; the rest of the evidence does not depend on it."
+
+// pendingCoverage is the /coverage answer while the rollup cannot cover the period.
+func pendingCoverage(start, end time.Time) *CoverageReport {
+	rep := summarizeCoverage(nil, start, end)
+	rep.Status, rep.Note = "pending", coveragePendingNote
+	return rep
 }
 
 // typeCount is one row of the reconciliation query: a message type and how many
@@ -55,32 +76,31 @@ type typeCount struct {
 	Classified  int64
 }
 
-// coverage runs the reconciliation query over [start,end) and summarizes it.
+// coverage counts messages by type over [start,end) by summing the coverage
+// rollup (coveragerollup.go). It never counts every message live: that scan
+// wrote up to 86 GB of temp files. Until the rollup covers the period it
+// returns errCoverageRollupUnavailable, which /coverage answers with a
+// pending report (the evidence bundle needs a 200 to be built).
 func (s *Server) coverage(chain string, start, end time.Time) (*CoverageReport, error) {
-	var rows []typeCount
-	if err := s.db.Table("messages").
-		Select("message_types.message_type AS message_type, COUNT(DISTINCT messages.id) AS total, COUNT(DISTINCT taxable_events.message_id) AS classified").
-		Joins("JOIN message_types ON message_types.id = messages.message_type_id").
-		Joins("JOIN txes ON txes.id = messages.tx_id").
-		Joins("JOIN blocks ON blocks.id = txes.block_id").
-		Joins("JOIN chains ON chains.id = blocks.chain_id").
-		Where("chains.chain_id IN ?", chainIDs(chain)).
-		Joins("LEFT JOIN taxable_events ON taxable_events.message_id = messages.id").
-		Where("blocks.time_stamp >= ? AND blocks.time_stamp < ?", start, end).
-		Group("message_types.message_type").
-		Order("total DESC").
-		Scan(&rows).Error; err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), coverageRollupTimeout+10*time.Second)
+	defer cancel()
+	counts, err := s.covRollup.periodCounts(ctx, chain, start, end)
+	if err != nil {
 		return nil, err
 	}
 	readiness, err := s.classificationReadiness(chain, nil, start, end)
 	if err != nil {
 		return nil, err
 	}
-	report := summarizeCoverage(rows, start, end)
+	report := summarizeCoverage(counts.Types, start, end)
+	report.Status = "counted"
 	report.ParserErrors, report.DecodeErrors = readiness.ParserErrors, readiness.DecodeErrors
 	report.OpaqueMessages = readiness.OpaqueMessages
 	report.UnreviewedMessages = readiness.UnreviewedMessages
 	report.ParserDecodeComplete = readiness.ParserDecodeComplete
+	n := counts.Transactions
+	info := counts.Rollup
+	report.TransactionsScanned, report.CountedFrom = &n, &info
 	return report, nil
 }
 

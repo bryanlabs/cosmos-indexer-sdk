@@ -1,0 +1,196 @@
+{
+ "message_id": 1568253,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "29247092",
+ "hash": "1E305C11E9EFE0B779CCADCDCE874E95642CE6F90F0211134824F0B5C75DD7D1",
+ "timestamp": "2026-01-09T19:59:50Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos17meyl5tknxpvg9jrc0l45h4lzt8ulvx42ga0w6"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos13uyn5kr9su5p4gmvm2tes6jefwqqv63d7g95mnhe6vhmv88nypcqc295kf"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos13uyn5kr9su5p4gmvm2tes6jefwqqv63d7g95mnhe6vhmv88nypcqc295kf"
+    },
+    {
+     "key": "action",
+     "value": "execute"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos17meyl5tknxpvg9jrc0l45h4lzt8ulvx42ga0w6"
+    },
+    {
+     "key": "proposal_id",
+     "value": "52"
+    },
+    {
+     "key": "dao",
+     "value": "cosmos1kskluf738p0yph32a8n096ncc2q0x65cxzwz9pe7edlqk0trhzps8a78ja"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1kskluf738p0yph32a8n096ncc2q0x65cxzwz9pe7edlqk0trhzps8a78ja"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1kskluf738p0yph32a8n096ncc2q0x65cxzwz9pe7edlqk0trhzps8a78ja"
+    },
+    {
+     "key": "action",
+     "value": "execute_proposal_hook"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "400000000uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1kskluf738p0yph32a8n096ncc2q0x65cxzwz9pe7edlqk0trhzps8a78ja"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "400000000uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1q3sys786yt3yl2yrhlmmks4uua94qj5ndkf3cy"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "400000000uatom"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos1q3sys786yt3yl2yrhlmmks4uua94qj5ndkf3cy"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1kskluf738p0yph32a8n096ncc2q0x65cxzwz9pe7edlqk0trhzps8a78ja"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1hfw5fvq3yqwug3znstu53gxjh0c5ecwsy9u3mwxrxf73v4c4q54shrmkf8"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1hfw5fvq3yqwug3znstu53gxjh0c5ecwsy9u3mwxrxf73v4c4q54shrmkf8"
+    },
+    {
+     "key": "deposit_info",
+     "value": "bnVsbA=="
+    },
+    {
+     "key": "method",
+     "value": "execute_proposal_completed_hook"
+    },
+    {
+     "key": "proposal",
+     "value": "52"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

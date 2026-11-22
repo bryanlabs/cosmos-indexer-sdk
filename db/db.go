@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"sync"
@@ -18,8 +19,19 @@ import (
 )
 
 // PostgresDbConnect connects to the database according to the passed in parameters
-func PostgresDbConnect(host string, port string, database string, user string, password string, level string) (*gorm.DB, error) {
+// and sends each runtime setting ("jit=off") as a session parameter.
+func PostgresDbConnect(host string, port string, database string, user string, password string, level string, runtime ...string) (*gorm.DB, error) {
 	dsn := fmt.Sprintf("host=%s port=%s dbname=%s user=%s password=%s sslmode=disable", host, port, database, user, password)
+	for _, r := range runtime {
+		dsn += " " + r
+	}
+	// A bulk writer (a replay or correction Job) sets REPORT_EVIDENCE_BULK=on
+	// so the report evidence journal marks its writes global in one row per
+	// transaction instead of tracing them row by row. The live indexer
+	// leaves it unset.
+	if os.Getenv("REPORT_EVIDENCE_BULK") == "on" {
+		dsn += " report_evidence.bulk=on"
+	}
 	gormLogLevel := logger.Silent
 
 	if level == "info" {
@@ -415,10 +427,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 		}
 
 		if len(txesSlice) != 0 {
-			if err := dbTransaction.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "hash"}},
-				DoUpdates: clause.AssignmentColumns([]string{"code", "block_id"}),
-			}).Create(txesSlice).Error; err != nil {
+			if err := dbTransaction.Clauses(txUpsertConflict()).Create(txesSlice).Error; err != nil {
 				config.Log.Error("Error getting/creating txes.", err)
 				return err
 			}

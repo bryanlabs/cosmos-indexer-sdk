@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -49,9 +51,20 @@ var validTags = func() map[string]bool {
 	return m
 }()
 
-// UserTags maps a transaction hash, or "<hash>:<denom>" for one asset within
-// a transaction, to a tag.
+// UserTags maps a key to a tag. A key is one of three forms:
+//
+//   - "<hash>", every row of the transaction;
+//   - "<hash>:<denom>", the rows of one asset within it;
+//   - "<hash>#<message_index>#<sub_index>", one row: the message's index in
+//     the transaction and the row's index within that message (negative for
+//     the lot legs the API derives).
+//
+// A row key names exactly the rows tagged, so rows a later replay adds to the
+// transaction (a withdraw-address move, a contract's supplement row) inherit
+// nothing. MigrateUserTags turns the first two forms into row keys.
 type UserTags map[string]string
+
+const rowKeySep = "#"
 
 const maxUserTags = 20000
 
@@ -84,9 +97,57 @@ func ParseUserTags(input string) (UserTags, error) {
 		if !validTags[v] {
 			return nil, fmt.Errorf("unknown tag %q for %s", v, k)
 		}
-		out[strings.ToUpper(strings.SplitN(k, ":", 2)[0])+denomSuffix(k)] = v
+		key, err := normalizeTagKey(k)
+		if err != nil {
+			return nil, err
+		}
+		out[key] = v
 	}
 	return out, nil
+}
+
+// normalizeTagKey upper-cases the hash of a key and, for a row key, checks
+// both indexes and writes them in canonical form.
+func normalizeTagKey(k string) (string, error) {
+	if !strings.Contains(k, rowKeySep) {
+		return strings.ToUpper(strings.SplitN(k, ":", 2)[0]) + denomSuffix(k), nil
+	}
+	parts := strings.Split(k, rowKeySep)
+	if len(parts) != 3 || parts[0] == "" || strings.Contains(parts[0], ":") {
+		return "", fmt.Errorf("row tag key %q must be <tx_hash>#<message_index>#<sub_index>", k)
+	}
+	msg, err := strconv.Atoi(parts[1])
+	if err != nil || msg < 0 {
+		return "", fmt.Errorf("row tag key %q has an invalid message index", k)
+	}
+	sub, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return "", fmt.Errorf("row tag key %q has an invalid sub index", k)
+	}
+	return rowTagKey(parts[0], msg, sub), nil
+}
+
+func rowTagKey(hash string, messageIndex, subIndex int) string {
+	return strings.ToUpper(hash) + rowKeySep + strconv.Itoa(messageIndex) + rowKeySep + strconv.Itoa(subIndex)
+}
+
+// rowKey is the row's own tag key, or "" for a row that has none: a fee, a
+// block event with no message, or a row whose message index was not loaded.
+func (r Row) rowKey() string {
+	if r.Category == apiFee || r.MessageID == 0 || r.TxHash == "" || !r.hasMessageIndex {
+		return ""
+	}
+	return rowTagKey(r.TxHash, r.MessageIndex, r.SubIndex)
+}
+
+// hasRowKeys reports whether any key is a row key.
+func (t UserTags) hasRowKeys() bool {
+	for k := range t {
+		if strings.Contains(k, rowKeySep) {
+			return true
+		}
+	}
+	return false
 }
 
 func denomSuffix(key string) string {
@@ -124,28 +185,178 @@ func tagsFromRequest(r *http.Request) (UserTags, error) {
 	return t, nil
 }
 
-// ApplyTags stamps UserTag on the rows a tag addresses. A denom-specific tag
-// wins over a transaction-wide one. Fees are never tagged.
+// ApplyTags stamps UserTag on the rows a tag addresses. A row key wins over a
+// denom-specific tag, which wins over a transaction-wide one. Fees are never
+// tagged, and neither is a withdraw-address move under any key form: a tag on
+// its reward transaction would otherwise turn the move into income or a
+// disposal, and the reward stays the delegator's.
 func ApplyTags(rows []Row, tags UserTags) []Row {
 	if len(tags) == 0 {
 		return rows
 	}
 	for i := range rows {
-		if rows[i].Category == apiFee {
-			continue
-		}
-		hash := strings.ToUpper(rows[i].TxHash)
-		if t, ok := tags[hash+":"+rows[i].Denom]; ok {
-			rows[i].UserTag = t
-		} else if t, ok := tags[hash]; ok {
+		if t, _, ok := tagFor(rows[i], tags); ok {
 			rows[i].UserTag = t
 		}
 	}
 	return rows
 }
 
+// tagFor is the tag ApplyTags gives the row and the key it came from.
+func tagFor(r Row, tags UserTags) (tag, key string, ok bool) {
+	if r.Category == apiFee || r.isRewardMove() {
+		return "", "", false
+	}
+	hash := strings.ToUpper(r.TxHash)
+	for _, k := range []string{r.rowKey(), hash + ":" + r.Denom, hash} {
+		if k == "" {
+			continue
+		}
+		if t, found := tags[k]; found {
+			return t, k, true
+		}
+	}
+	return "", "", false
+}
+
+// TagMigration counts what MigrateUserTags did.
+type TagMigration struct {
+	RowKeys int `json:"row_keys"` // row keys written
+	Dropped int `json:"dropped"`  // transaction and asset keys replaced by row keys
+	Kept    int `json:"kept"`     // keys carried over unchanged
+}
+
+// MigrateUserTags rewrites transaction and asset tags as row tags over the
+// rows of one report. Every row a tag addresses today, except fees and
+// withdraw-address moves, gets its own row key with that tag. A transaction
+// or asset key is dropped once every row it addressed has its row key, so
+// rows a later replay adds to the transaction inherit nothing. Keys that
+// addressed no row here, or a row with no row key, are kept, and so are row
+// keys already present. ApplyTags gives every one of these rows the same tag
+// under the old tags and the migrated ones.
+func MigrateUserTags(rows []Row, tags UserTags) (UserTags, TagMigration, error) {
+	out := make(UserTags, len(tags))
+	used := map[string]bool{}
+	pinned := map[string]bool{}
+	for k, v := range tags {
+		out[k] = v
+	}
+	var m TagMigration
+	for _, r := range rows {
+		tag, key, ok := tagFor(r, tags)
+		if !ok {
+			continue
+		}
+		rk := r.rowKey()
+		switch {
+		case rk == "":
+			pinned[key] = true
+		case key == rk:
+		default:
+			used[key] = true
+			if prior, seen := out[rk]; seen && prior != tag {
+				return nil, TagMigration{}, fmt.Errorf("row %s would take tags %q and %q", rk, prior, tag)
+			}
+			if _, seen := out[rk]; !seen {
+				m.RowKeys++
+			}
+			out[rk] = tag
+		}
+	}
+	for k := range used {
+		if !pinned[k] {
+			delete(out, k)
+			m.Dropped++
+		}
+	}
+	m.Kept = len(out) - m.RowKeys
+	return out, m, nil
+}
+
+// TagWriteScope is the scope a caller needs to migrate tags. The tax service
+// is reached only through the website, which checks the caller's session or
+// API key and forwards the scopes it holds in TagScopesHeader.
+const (
+	TagWriteScope     = "tax:write"
+	TagScopesHeader   = "X-Tax-Caller-Scopes"
+	maxTagMigrateBody = 8 << 20
+)
+
+func callerHasScope(r *http.Request, scope string) bool {
+	for _, h := range r.Header.Values(TagScopesHeader) {
+		for _, s := range strings.FieldsFunc(h, func(c rune) bool { return c == ',' || c == ' ' }) {
+			if s == scope {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// handleTagMigrate returns a report's tags with its transaction and asset
+// keys rewritten as row keys (MigrateUserTags), for the caller to store in
+// place of the old ones. It changes what a saved report keeps, so it is a
+// POST and needs tax:write:
+//
+//	POST /tags/migrate
+//	{"chain": "", "addresses": ["..."], "start": "", "end": "", "tags": {...}}
+//
+// It reads the same rows the report does, without asset decisions, which
+// never add or remove a row. Nothing is stored here.
+func (s *Server) handleTagMigrate(w http.ResponseWriter, r *http.Request) {
+	if !callerHasScope(r, TagWriteScope) {
+		http.Error(w, "tag migration needs the tax:write scope", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Chain     string          `json:"chain"`
+		Addresses []string        `json:"addresses"`
+		Start     string          `json:"start"`
+		End       string          `json:"end"`
+		Tags      json.RawMessage `json:"tags"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTagMigrateBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, apiInvalidJSONBody, http.StatusBadRequest)
+		return
+	}
+	var addresses []string
+	for _, a := range body.Addresses {
+		if a = strings.TrimSpace(a); a != "" {
+			addresses = append(addresses, a)
+		}
+	}
+	if len(addresses) == 0 {
+		http.Error(w, "addresses required", http.StatusBadRequest)
+		return
+	}
+	tags, err := ParseUserTags(string(body.Tags))
+	if err != nil {
+		writeTaxError(w, assetReviewInputError{err})
+		return
+	}
+	chain := chainParam(body.Chain)
+	start := dateParam(body.Start, time.Time{})
+	end := dateParam(body.End, nowUTC().AddDate(0, 0, 1))
+	rows, err := s.reviewedRows(chain, addresses, start, end, nil, true)
+	if err == nil {
+		err = s.loadMessageIndexes(rows)
+	}
+	if err != nil {
+		writeTaxError(w, err)
+		return
+	}
+	migrated, counts, err := MigrateUserTags(rows, tags)
+	if err != nil {
+		writeTaxError(w, assetReviewInputError{err})
+		return
+	}
+	writeJSON(w, map[string]any{apiTags: migrated, "migration": counts})
+}
+
 func handleTagVocabulary(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{apiTags: TagVocabulary(), "key_forms": []string{"<tx_hash>", "<tx_hash>:<denom>"}})
+	writeJSON(w, map[string]any{apiTags: TagVocabulary(), "key_forms": []string{"<tx_hash>", "<tx_hash>:<denom>", "<tx_hash>#<message_index>#<sub_index>"}})
 }
 
 // koinlyTagLabel maps a user tag to Koinly's label vocabulary.
@@ -181,9 +392,9 @@ func ctcTagType(r Row) (string, bool) {
 	switch r.UserTag {
 	case TagInternalTransfer:
 		if in {
-			return "transfer-in", true
+			return ctcTransferIn, true
 		}
-		return "transfer-out", true
+		return ctcTransferOut, true
 	case TagIncome:
 		if in {
 			return TagIncome, true

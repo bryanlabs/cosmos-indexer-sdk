@@ -20,7 +20,7 @@ const maxStatementDates = 12
 // null: unclaimed rewards on a past date are not rebuilt (rewardsNote).
 func (s *Server) historicalBalanceJSON(b HistoricalBalance) map[string]any {
 	total := b.Liquid.Add(b.Staked).Add(b.Unbonding)
-	return map[string]any{
+	m := map[string]any{
 		apiAddress: b.Address, apiSymbol: s.native.Symbol, apiDate: b.Date,
 		apiLiquid: b.Liquid.InexactFloat64(), apiStaked: b.Staked.InexactFloat64(),
 		"unbonding": b.Unbonding.InexactFloat64(), apiReward: nil,
@@ -30,6 +30,10 @@ func (s *Server) historicalBalanceJSON(b HistoricalBalance) map[string]any {
 		"unpriced_lines": b.UnpricedLines, "reward_note": rewardsNote,
 		apiMethodologyVersion: MethodologyVersion,
 	}
+	if b.ChainID != "" {
+		m["chain_id"] = b.ChainID
+	}
+	return m
 }
 
 // balanceCoverageHeaders sets the period coverage headers for a rebuilt
@@ -163,7 +167,23 @@ const balanceStatementNote = "Each balance is the wallet's holdings at the end o
 
 func writeBalanceStatementCSV(w http.ResponseWriter, out []HistoricalBalance) {
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{apiAddress, apiDate, apiLabel, "status", "height", "bucket", apiValidator, "denom", apiSymbol, "quantity", "price_usd", "value_usd", "price_missing", "approximate", "max_error_base", "reason"})
+	// The chain column is added only while an earlier Hub chain is in
+	// reports, when every date names its chain.
+	withChain := false
+	for _, b := range out {
+		withChain = withChain || b.ChainID != ""
+	}
+	write := func(b HistoricalBalance, rec []string) {
+		if withChain {
+			rec = append(rec, b.ChainID)
+		}
+		_ = cw.Write(rec)
+	}
+	header := []string{apiAddress, apiDate, apiLabel, "status", "height", "bucket", apiValidator, "denom", apiSymbol, "quantity", "price_usd", "value_usd", "price_missing", "approximate", "max_error_base", "reason"}
+	if withChain {
+		header = append(header, "chain_id")
+	}
+	_ = cw.Write(header)
 	usd := func(d *decimal.Decimal) string {
 		if d == nil {
 			return ""
@@ -176,7 +196,7 @@ func writeBalanceStatementCSV(w http.ResponseWriter, out []HistoricalBalance) {
 			h = strconv.FormatInt(b.Height, 10)
 		}
 		if b.Status != balanceExact && b.Status != balanceApproximate {
-			_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, "", "", "", "", "", "", "", "", "", "", spreadsheetLabel(b.Reason)})
+			write(b, []string{b.Address, b.Date, b.Label, b.Status, h, "", "", "", "", "", "", "", "", "", "", spreadsheetLabel(b.Reason)})
 			continue
 		}
 		for _, l := range b.Lines {
@@ -184,10 +204,10 @@ func writeBalanceStatementCSV(w http.ResponseWriter, out []HistoricalBalance) {
 			if l.PriceUSD != nil {
 				price = l.PriceUSD.String()
 			}
-			_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, l.Bucket, l.Validator, l.Denom, spreadsheetLabel(l.Symbol), l.Quantity.String(), price, usd(l.ValueUSD), strconv.FormatBool(l.PriceMissing), strconv.FormatBool(l.Approximate), l.MaxErrorBase, ""})
+			write(b, []string{b.Address, b.Date, b.Label, b.Status, h, l.Bucket, l.Validator, l.Denom, spreadsheetLabel(l.Symbol), l.Quantity.String(), price, usd(l.ValueUSD), strconv.FormatBool(l.PriceMissing), strconv.FormatBool(l.Approximate), l.MaxErrorBase, ""})
 		}
 		total := b.TotalUSD
-		_ = cw.Write([]string{b.Address, b.Date, b.Label, b.Status, h, apiTotal, "", "", "USD", "", "", usd(&total), "", "", "", fmt.Sprintf("%d unpriced holdings not in the total", b.UnpricedLines)})
+		write(b, []string{b.Address, b.Date, b.Label, b.Status, h, apiTotal, "", "", "USD", "", "", usd(&total), "", "", "", fmt.Sprintf("%d unpriced holdings not in the total", b.UnpricedLines)})
 	}
 	cw.Flush()
 }

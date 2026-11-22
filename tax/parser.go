@@ -36,9 +36,9 @@ import (
 // the same parser instance under each.
 var MessageTypeURLs = []string{
 	"/cosmos.staking.v1beta1.MsgCreateValidator",
-	"/cosmos.distribution.v1beta1.MsgFundCommunityPool",
-	"/cosmos.vesting.v1beta1.MsgCreateVestingAccount",
-	"/cosmos.vesting.v1beta1.MsgCreatePermanentLockedAccount",
+	typeURLFundCommunityPool,
+	typeURLCreateVestingAccount,
+	typeURLCreatePermanentLockedAccount,
 	"/cosmos.vesting.v1beta1.MsgCreatePeriodicVestingAccount",
 	"/cosmwasm.wasm.v1.MsgInstantiateContract",
 	"/cosmwasm.wasm.v1.MsgInstantiateContract2",
@@ -141,15 +141,15 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// WithdrawAll emits one aggregate reward event rather than one per record;
 	// tokenizeShareRewardEvents handles both without counting module transfers.
 	case *LegacyMsgTokenizeShares:
-		return classify(&m.MsgTokenizeShares, log)
+		return classifyWithState(&m.MsgTokenizeShares, log, state, depth, path)
 	case *LegacyMsgRedeemTokensForShares:
-		return classify(&m.MsgRedeemTokensForShares, log)
+		return classifyWithState(&m.MsgRedeemTokensForShares, log, state, depth, path)
 	case *LegacyMsgTransferTokenizeShareRecord:
-		return classify(&m.MsgTransferTokenizeShareRecord, log)
+		return classifyWithState(&m.MsgTransferTokenizeShareRecord, log, state, depth, path)
 	case *LegacyMsgWithdrawTokenizeShareRecordReward:
-		return classify(&m.MsgWithdrawTokenizeShareRecordReward, log)
+		return classifyWithState(&m.MsgWithdrawTokenizeShareRecordReward, log, state, depth, path)
 	case *LegacyMsgWithdrawAllTokenizeShareRecordReward:
-		return classify(&m.MsgWithdrawAllTokenizeShareRecordReward, log)
+		return classifyWithState(&m.MsgWithdrawAllTokenizeShareRecordReward, log, state, depth, path)
 	case *banktypes.MsgSend:
 		for _, c := range m.Amount {
 			events = append(events, TaxableEvent{
@@ -181,16 +181,16 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// The principal itself is recorded too (record-only categories), so a
 	// controller can reconcile liquid against bonded balances.
 	case *stakingtypes.MsgDelegate:
-		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "delegate")...)
+		events = append(events, withdrawAddressPaid(state, log, m.DelegatorAddress, "delegate", stakingRewardEvents(log, m.DelegatorAddress, "delegate"))...)
 		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgUndelegate:
-		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "undelegate")...)
+		events = append(events, withdrawAddressPaid(state, log, m.DelegatorAddress, "undelegate", stakingRewardEvents(log, m.DelegatorAddress, "undelegate"))...)
 		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgBeginRedelegate:
-		events = append(events, stakingRewardEvents(log, m.DelegatorAddress, "redelegate")...)
+		events = append(events, withdrawAddressPaid(state, log, m.DelegatorAddress, "redelegate", stakingRewardEvents(log, m.DelegatorAddress, "redelegate"))...)
 		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 	case *stakingtypes.MsgCancelUnbondingDelegation:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding")...)
+		events = append(events, withdrawAddressPaid(state, log, m.DelegatorAddress, "cancel_unbonding", delegatorRewardEvents(log, m.DelegatorAddress, "cancel_unbonding"))...)
 		events = append(events, stakingPrincipalEvents(log, m.DelegatorAddress, m.Amount.Denom)...)
 
 	// A new validator's self-bond is staking principal like any delegation. The
@@ -233,11 +233,11 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// Instantiating or migrating a contract runs contract code that can sell,
 	// mint or distribute just like an execute.
 	case *wasmtypes.MsgInstantiateContract:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 	case *wasmtypes.MsgInstantiateContract2:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 	case *wasmtypes.MsgMigrateContract:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 
 	// Governance deposits are refundable, so record-only.
 	case *govv1.MsgDeposit:
@@ -254,7 +254,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// record's accrued reward through withdraw_tokenize_share_reward. Both are
 	// income; the conversion itself is record-only.
 	case *MsgTokenizeShares:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, "tokenize")...)
+		events = append(events, withdrawAddressPaid(state, log, m.DelegatorAddress, "tokenize", delegatorRewardEvents(log, m.DelegatorAddress, "tokenize"))...)
 		events = append(events, lsmRecordEvents(log, m.DelegatorAddress)...)
 	case *MsgRedeemTokensForShares:
 		events = append(events, redeemOwnRewardEvents(log, m.DelegatorAddress, m.AmountRaw)...)
@@ -269,7 +269,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, lsmRecordEvents(log, m.Sender)...)
 
 	case *disttypes.MsgWithdrawDelegatorReward:
-		events = append(events, delegatorRewardEvents(log, m.DelegatorAddress, actionClaim)...)
+		events = append(events, withdrawAddressPaid(state, log, m.DelegatorAddress, actionClaim, delegatorRewardEvents(log, m.DelegatorAddress, actionClaim))...)
 
 	case *disttypes.MsgWithdrawValidatorCommission:
 		credits := receivedCoinsByReceiver(log)
@@ -300,7 +300,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, tokenizeShareRewardEvents(log, m.OwnerAddress, "")...)
 
 	case *authz.MsgExec:
-		return classifyAuthz(m, log, state, depth, path)
+		events = classifyAuthz(m, log, state, depth, path)
 
 	case *transfertypes.MsgTransfer:
 		trigger, detail := ibcMemoIntent(m.Memo)
@@ -323,7 +323,7 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 	// Beyond sales, the Hub's contracts run auctions, vaults, voting locks,
 	// reward distributors, raffles and name services; see protocols.go.
 	case *wasmtypes.MsgExecuteContract:
-		events = append(events, wasmExecuteEvents(log, m.Sender)...)
+		events = append(events, wasmEvents(log, m.Sender, state)...)
 
 	// A tokenfactory mint credits the recipient with newly created coins, which
 	// is an acquisition for them. Cosmos Hub's observed traffic is STARS
@@ -475,7 +475,35 @@ func classifyWithState(cosmosMsg sdk.Msg, log *indexerTxTypes.LogMessage, state 
 		events = append(events, skipForwardEvents(log)...)
 	}
 
+	// Supplement rows of contract messages go after every other row of the
+	// top-level message, so adding them never moves an existing row.
+	if depth == 0 && len(state.late) != 0 {
+		events = append(events, state.late...)
+		state.late = nil
+	}
+	// Withdraw-address movements go after those, so they never move an
+	// existing row either.
+	if depth == 0 && len(state.paid) != 0 {
+		events = append(events, state.paid...)
+		state.paid = nil
+	}
 	return events
+}
+
+// wasmEvents is a contract message's known-pattern rows. Its supplement rows
+// wait in state until the top-level message is done. A contract message
+// inside a MsgExec gets the supplement the stored log alone gives, with no
+// signer, so the repair, which never sees the granter, writes the same rows.
+func wasmEvents(log *indexerTxTypes.LogMessage, sender string, state *classificationState) []TaxableEvent {
+	known := wasmExecuteEvents(log, sender)
+	if state.authz > 0 {
+		if !state.unsplitAuthz {
+			state.late = append(state.late, WasmSupplementForLog(log, "")...)
+		}
+		return known
+	}
+	state.late = append(state.late, wasmSupplementEvents(log, sender, known)...)
+	return known
 }
 
 func (p *Parser) IndexMessage(dataset *any, db *gorm.DB, message models.Message, _ []parsers.MessageEventWithAttributes, cfg config.IndexConfig) error {
@@ -524,6 +552,10 @@ func boundIndexed(s string) string {
 	prefix = strings.ReplaceAll(strings.ToValidUTF8(prefix, ""), "\x00", "")
 	return prefix + "...sha256:" + hex.EncodeToString(sum[:])
 }
+
+// BoundIndexedFields applies the bound IndexMessage applies to the indexed
+// columns, for a repair that writes rows the parser produced.
+func BoundIndexedFields(e *TaxableEvent) { boundIndexedFields(e) }
 
 func boundIndexedFields(e *TaxableEvent) {
 	e.FromAddr = boundIndexed(e.FromAddr)

@@ -60,6 +60,68 @@ type Row struct {
 	// tags.go). It never changes the on-chain record; it changes the label an
 	// exporter emits and whether Form 8949 sees a disposal.
 	UserTag string
+	// ChainID is the Cosmos Hub chain the row happened on. It is set on every
+	// row only while an earlier Hub chain (cosmoshub-1 to 3) is in reports;
+	// otherwise it is empty and every row is cosmoshub-4.
+	ChainID string
+	// MessageID is the stored message the row came from (0 for fees and
+	// block events). A withdraw-address move takes the lots its reward in
+	// that message booked.
+	MessageID uint `json:"-"`
+	// SubIndex is the row's index within its message and MessageIndex the
+	// message's index within the transaction. With TxHash they key a row
+	// tag. MessageIndex is loaded only with the report's tags
+	// (loadMessageIndexes); hasMessageIndex says it was.
+	SubIndex        int `json:"-"`
+	MessageIndex    int `json:"-"`
+	hasMessageIndex bool
+}
+
+// isRewardMove reports whether the row moves a reward the chain paid to the
+// delegator's withdraw address (INF-213). The move is not a disposal: the
+// delegator's reward lot leaves at its own basis and arrives with that basis
+// and acquisition time, whoever holds the withdraw address. The income stays
+// on the delegator's reward row.
+func (r Row) isRewardMove() bool {
+	return r.RewardTrigger == tax.TriggerWithdrawAddress && r.Category == apiTransfer
+}
+
+// lotsBefore orders rows for the lot engines: by chain era, then time
+// (rowBefore), and a withdraw-address move after the other rows of the same
+// chain and instant, so its reward lot exists.
+func lotsBefore(a, b Row) bool {
+	if rowBefore(a, b) {
+		return true
+	}
+	if rowBefore(b, a) {
+		return false
+	}
+	return !a.isRewardMove() && b.isRewardMove()
+}
+
+// takeRewardLots removes a withdraw-address move from the lots its reward
+// booked: the lots of the same message and denom, never by time. It reports
+// the lots taken, which the receiving side would hold.
+func takeRewardLots(q []lot, r Row) (kept, taken []lot) {
+	remaining := r.Amount
+	for i := range q {
+		if !remaining.IsPositive() || r.MessageID == 0 || q[i].msgID != r.MessageID || q[i].denom != r.Denom {
+			continue
+		}
+		take := decimal.Min(remaining, q[i].qty)
+		t := q[i]
+		t.qty = take
+		taken = append(taken, t)
+		q[i].qty = q[i].qty.Sub(take)
+		remaining = remaining.Sub(take)
+	}
+	kept = q[:0]
+	for _, l := range q {
+		if l.qty.IsPositive() {
+			kept = append(kept, l)
+		}
+	}
+	return kept, taken
 }
 
 // isTaxable mirrors tax.Category.Taxable; fees count as taxable spends.
@@ -123,6 +185,10 @@ func (r Row) description() string {
 
 // label maps our category to a human/tax label.
 func (r Row) label() string {
+	if r.isRewardMove() {
+		// Koinly's own transfer: no label, no disposal.
+		return ""
+	}
 	if l, ok := koinlyTagLabel(r); ok {
 		return l
 	}
@@ -182,9 +248,21 @@ func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
 	if err != nil {
 		return err
 	}
+	// The chain column is added only while an earlier Hub chain is in
+	// reports, when every row names its chain.
+	withChain := false
+	for _, row := range rows {
+		withChain = withChain || row.ChainID != ""
+	}
 	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", apiTaxable, apiPreviewDetail, "Price Implied", "User Tag", "Source")
+	if withChain {
+		records[0] = append(records[0], "Chain ID")
+	}
 	for i, row := range rows {
 		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, previewTaxableText(row), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger)
+		if withChain {
+			records[i+1] = append(records[i+1], row.ChainID)
+		}
 	}
 	return csv.NewWriter(out).WriteAll(records)
 }
@@ -286,7 +364,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
 				genericAssetDisplay(r), r.Denom, r.Amount.String(), rowPriceText(r), rowValueText(r),
-				r.From, r.To, r.Asset, apiHubChainID, boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
+				r.From, r.To, r.Asset, rowCSVChain(r), boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
 				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, apiValue), manualField(r, apiBasis), manualField(r, apiDate),
 				boolStr(r.isTaxable()), boolStr(r.PriceImplied), r.UserTag, r.Detail,
 			})
@@ -404,7 +482,20 @@ func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
 	return "", "", r.Amount.String(), r.Symbol
 }
 
+// CTC transfer types: a move between wallets, never a disposal.
+const (
+	ctcTransferIn  = "transfer-in"
+	ctcTransferOut = "transfer-out"
+)
+
 func ctcType(r Row) string {
+	if r.isRewardMove() {
+		// Not a disposal: the coins keep the reward's basis and date.
+		if r.Direction == "in" {
+			return ctcTransferIn
+		}
+		return ctcTransferOut
+	}
 	if t, ok := ctcTagType(r); ok {
 		return t
 	}
@@ -424,12 +515,12 @@ func ctcType(r Row) string {
 	case string(tax.CategoryGovDepositBurn):
 		return TagLost
 	case string(tax.CategoryGovDepositRefund), string(tax.CategoryUnbondingComplete):
-		return "transfer-in"
+		return ctcTransferIn
 	case "nft_transfer", "nft_burn", apiRedelegate, "cancel_unbonding", "share_record":
 		if r.Direction == "in" {
-			return "transfer-in"
+			return ctcTransferIn
 		}
-		return "transfer-out"
+		return ctcTransferOut
 	case apiNFTSale, apiSwap:
 		// Disposal leg = sell, acquisition leg = buy.
 		if r.Direction == apiOut {
@@ -495,4 +586,12 @@ func boolStr(b bool) string {
 		return apiTrue
 	}
 	return apiFalse
+}
+
+// rowCSVChain is the chain column of the Generic CSV.
+func rowCSVChain(r Row) string {
+	if r.ChainID != "" {
+		return r.ChainID
+	}
+	return apiHubChainID
 }

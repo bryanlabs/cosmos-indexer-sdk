@@ -3,12 +3,14 @@ package taxapi
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
@@ -34,18 +36,56 @@ type Server struct {
 	db     *gorm.DB
 	oracle *Oracle
 	native NativeAsset
+	// Private trace readers may derive fee outcomes but never persist ledger data.
+	readOnlyLedger              bool
+	privateReadSnapshotTimeout  time.Duration
+	readSnapshotStarted         time.Time
+	commissionPrivateProfile    *CommissionPrivateProfile
+	privateProjectionSnapshot   string
+	privateProjectionReceipts   *commissionProjectionJournal
+	commissionSourceCorrections *CommissionSourceCorrections
+	sourceCorrectionReceipts    *commissionCorrectionJournal
 
 	attestOnce sync.Once
 	attest     *attestationCache
 
 	indexCovMu      sync.RWMutex
 	coverageScanner *indexCoverageScanner
+	stmtCache       statementCache
 
 	ledgerCov ledgerCoverage
+
+	flowExpMu sync.Mutex
+	flowExp   map[string]*flowExpected
+
+	// flowSources overrides the versioned commission collections served, for tests.
+	flowSources map[string][]commissionServingSource
+	flowVerMu   sync.Mutex
+	flowVer     map[string]flowVersionCache
+	// flowVerDenied records that the denied-read notice was logged once.
+	flowVerDenied atomic.Bool
+	// flowPayloadFailed records that the unreadable-payload notice was logged once.
+	flowPayloadFailed atomic.Bool
+
+	statementMaxRows    int64
+	statementTimeout    time.Duration
+	statementSummaryOff bool
+
+	// legacy holds the earlier Hub chains' era state; legacySchema overrides
+	// the schema they are read from, for tests.
+	legacy       *legacyEraCache
+	legacySchema string
+
+	// covRollup reads the coverage rollup on the root database handle;
+	// nil counts /coverage live and leaves scan counts off statements.
+	covRollup *coverageRollup
+	// staking serves the staking views from the staking tables once they
+	// cover the embedded files; nil serves the embedded files.
+	staking *stakingTables
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
-	return &Server{db: db, oracle: oracle, native: native}
+	return &Server{db: db, oracle: oracle, native: native, covRollup: newCoverageRollup(db), staking: newStakingTables(db)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -60,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /990t", s.withPeriodCoverage(s.handle990T))
 	mux.HandleFunc("GET /coverage", s.handleCoverage)
 	mux.HandleFunc("GET /index-coverage", s.handleIndexCoverage)
+	mux.HandleFunc("GET /coverage-statement", s.handleCoverageStatement)
 	mux.HandleFunc("GET /balance", s.handleBalance)
 	mux.HandleFunc("GET /balance-statement", s.handleBalanceStatement)
 	mux.HandleFunc("GET /price-series", s.handlePriceSeries)
@@ -67,12 +108,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /recognition-policy", s.handleRecognitionPolicy)
 	mux.HandleFunc("GET /catalog", s.handleCatalog)
 	mux.HandleFunc("GET /tags/vocabulary", handleTagVocabulary)
+	mux.HandleFunc("POST /tags/migrate", s.handleTagMigrate)
 	mux.HandleFunc("GET /journal", s.withPeriodCoverage(s.handleJournal))
 	mux.HandleFunc("GET /positions", s.withPeriodCoverage(s.handlePositions))
 	mux.HandleFunc("GET /validator-statement", s.withPeriodCoverage(s.handleValidatorStatement))
 	mux.HandleFunc("GET /validator-commission-flows", s.handleValidatorCommissionFlows)
 	mux.HandleFunc("GET /commission-flows", s.handleCommissionFlowsHub)
+	mux.HandleFunc("GET /staking/inflation", s.handleStakingInflation)
+	mux.HandleFunc("GET /staking/validator-income", s.handleValidatorIncome)
+	mux.HandleFunc("GET /staking/validator-income/break-even", s.handleValidatorBreakEven)
+	mux.HandleFunc("GET /staking/where-atom-goes", s.handleWhereAtomGoes)
+	mux.HandleFunc("GET /staking/my-staking", s.withPeriodCoverage(s.handleMyStaking))
 	mux.HandleFunc("GET /address-labels", s.handleAddressLabels)
+	mux.HandleFunc("GET /validators", s.handleValidatorList)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)
 	mux.HandleFunc("GET /validators/attest/check", s.handleAttestationCheck)
 	mux.HandleFunc("GET /chain/releases", s.handleChainReleases)
@@ -317,6 +365,11 @@ func sumUBTI(rows []Row) (ubti decimal.Decimal, priceMissingRows int) {
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rep, err := s.coverage(chainParam(q.Get(apiChain)), dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
+	if errors.Is(err, errCoverageRollupUnavailable) {
+		start, end := dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
+		rep, err = pendingCoverage(start, end), nil
+		w.Header().Set("Retry-After", "600")
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -333,6 +386,9 @@ type feeRec struct {
 	Denom  string
 	Ts     time.Time
 	Hash   string
+	// ChainID is set on fees read from an earlier Hub chain.
+	ChainID       string
+	commissionKey *flowKey
 }
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),
@@ -356,50 +412,66 @@ func (s *Server) rowsFor(chain, addr string, start, end time.Time) ([]Row, error
 
 // loadWalletRows performs database work only. Pricing and shared Server caches
 // are deliberately used only after the read snapshot has been released.
-func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (walletRows, error) {
+func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refundPairs map[uint]string) (result walletRows, err error) {
+	phases := s.privateReadPhases([]string{addr}, start, end, "tax_events")
+	defer func() { err = phases.wrap(err) }()
 	var events []tax.TaxableEvent
-	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
+	if s.readOnlyLedger {
+		// Fence the indexed address set before applying the period. Otherwise
+		// PostgreSQL can build a bitmap over the entire multi-year time index
+		// and intersect it with the wallet, exhausting the snapshot deadline.
+		events = make([]tax.TaxableEvent, 0)
+		if err := s.db.Raw(privateWalletTaxEventsSQL, addr, addr, start, end, chainIDs(chain)).Scan(&events).Error; err != nil {
+			return walletRows{}, err
+		}
+	} else if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr = ? OR to_addr = ?)", addr, addr).
 		Where("timestamp >= ? AND timestamp < ?", start, end).
-		Order("timestamp asc").
+		Order("timestamp asc, taxable_events.id asc").
 		Find(&events).Error; err != nil {
 		return walletRows{}, err
 	}
+	phases.next("legacy_correction")
 	reconcileIBCRefunds(events, refundPairs)
+	phases.next("stream_lots")
+	if events, err = s.withStreamExitLegs(chain, addr, events); err != nil {
+		return walletRows{}, err
+	}
+	phases.next("limit_lots")
+	if events, err = s.withLimitMakerLegs(chain, addr, events); err != nil {
+		return walletRows{}, err
+	}
 
 	// Do not publish old inflated classifications for wallets not yet repaired.
 	// LSM reward rows have a different parser and are not part of this repair.
 	var legacyIDs []uint
+	legacySeen := map[uint]bool{}
 	for _, event := range events {
-		if event.Category == apiReward && event.RewardTrigger == "" {
+		if event.Category == apiReward && event.RewardTrigger == "" && !legacySeen[event.MessageID] {
+			legacySeen[event.MessageID] = true
 			legacyIDs = append(legacyIDs, event.MessageID)
 		}
 	}
-	if len(legacyIDs) > 0 {
-		var legacyCount int64
-		if err := s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
-			Where("m.id IN ? AND mt.message_type IN ?", legacyIDs, replayedMessageTypes).Count(&legacyCount).Error; err != nil {
-			return walletRows{}, err
-		}
+	var legacyCount int64
+	if err := inChunks(legacyIDs, func(chunk []uint) error {
 		if legacyCount > 0 {
-			return walletRows{}, errAwaitingCorrection
+			return nil
 		}
-	}
-
-	// Fees (generic SDK Fee table): a spend by the payer.
-	var fees []feeRec
-	if err := s.db.Table("fees").
-		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
-		Joins("JOIN addresses ON addresses.id = fees.payer_address_id").
-		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
-		Joins("JOIN txes ON txes.id = fees.tx_id").
-		Joins("JOIN blocks ON blocks.id = txes.block_id").
-		Joins("JOIN chains ON chains.id = blocks.chain_id").
-		Where("chains.chain_id IN ?", chainIDs(chain)).
-		Where("addresses.address = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", addr, start, end).
-		Scan(&fees).Error; err != nil {
+		return s.db.Table("messages m").Joins("JOIN message_types mt ON mt.id=m.message_type_id").
+			Where("m.id IN ? AND mt.message_type IN ?", chunk, replayedMessageTypes).Count(&legacyCount).Error
+	}); err != nil {
 		return walletRows{}, err
 	}
+	if legacyCount > 0 {
+		return walletRows{}, errAwaitingCorrection
+	}
+
+	phases.next("fees")
+	fees, err := s.walletFees(chain, addr, start, end)
+	if err != nil {
+		return walletRows{}, err
+	}
+	phases.next("memos")
 	memos, err := s.eventMemos(events)
 	if err != nil {
 		return walletRows{}, err
@@ -407,6 +479,7 @@ func (s *Server) loadWalletRows(chain, addr string, start, end time.Time, refund
 	// Coins the chain moved at the start or end of a block, with no
 	// transaction: unbonding completions, deposit refunds and burns,
 	// community pool payouts.
+	phases.next("block_events")
 	blockRows, err := s.blockEventRows(chain, addr, start, end)
 	if err != nil {
 		return walletRows{}, err
@@ -453,12 +526,17 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		row.ValidatorMoniker = validatorNames[e.ValidatorAddress]
 		row.RewardTrigger = e.RewardTrigger
 		row.Detail = e.Detail
+		row.MessageID = e.MessageID
+		row.SubIndex = e.SubIndex
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
+		row.ChainID = rowChainID(input.stampChain, e.ChainID)
 		out = append(out, row)
 	}
 	implySwapPrices(out)
 	for _, f := range fees {
-		out = append(out, s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, ""))
+		row := s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, "")
+		row.ChainID = rowChainID(input.stampChain, f.ChainID)
+		out = append(out, row)
 	}
 
 	return out

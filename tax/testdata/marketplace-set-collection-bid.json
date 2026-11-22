@@ -1,0 +1,128 @@
+{
+ "message_id": 116831,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "31816850",
+ "hash": "F1D7191EFCC239279EE72E35C32B8D1B70EF8B89DBED00C8AD06A2DA933021B4",
+ "timestamp": "2026-06-30T12:26:06Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1sakl84d2txcgrgkv707htqp5skmlqxm532ghr9"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1sakl84d2txcgrgkv707htqp5skmlqxm532ghr9"
+    },
+    {
+     "key": "amount",
+     "value": "650000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "amount",
+     "value": "650000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1sakl84d2txcgrgkv707htqp5skmlqxm532ghr9"
+    },
+    {
+     "key": "amount",
+     "value": "650000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  },
+  {
+   "type": "wasm-set-collection-bid",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1tl0ptdmlz422z5pj20zujzyt3c96qp2g9vp83uj9pyj8q994tzhsl77adr"
+    },
+    {
+     "key": "id",
+     "value": "4a18a5ae8859efb530e731248b53798ccd53ad4810277019cad164b90002b387"
+    },
+    {
+     "key": "creator",
+     "value": "cosmos1sakl84d2txcgrgkv707htqp5skmlqxm532ghr9"
+    },
+    {
+     "key": "collection",
+     "value": "cosmos1j6exdwvh4qdsk0qdds2gd8l6mvmnzm9hz7p0trp6uz5wmvkdcrxsmvua09"
+    },
+    {
+     "key": "price",
+     "value": "650000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "5"
+    }
+   ]
+  }
+ ]
+}

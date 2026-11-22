@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,37 +17,56 @@ import (
 
 // FlowClassNotes explains each fate class on the page and in the API.
 var FlowClassNotes = map[string]string{ //nolint:gosec // class descriptions, not credentials
-	flowHeld:             "Still in a wallet the commission was paid to, unstaked.",
-	flowRestakedOwn:      "Delegated back to this validator by a receiving wallet and still bonded.",
-	flowRestakedOther:    "Delegated to another validator by a receiving wallet and still bonded.",
-	flowUnbonding:        "In the unbonding queue of a receiving wallet at the as-of date.",
-	flowLocked:           "Locked in a protocol or a governance deposit by a receiving wallet.",
-	flowHeldDownstream:   "Sent on to another wallet (up to three hops) and still there, unstaked.",
-	flowStakedDownstream: "Sent on to another wallet (up to three hops) that delegated it.",
-	flowUnbondDownstream: "Sent on to another wallet (up to three hops) and unbonding there.",
-	flowLockedDownstream: "Sent on to another wallet (up to three hops) and locked in a protocol there.",
-	flowExchange:         "Sent to an address a named source labels as an exchange.",
-	flowExchangeLike:     "Sent to an address that receives deposit-style memos from many different senders, which is how exchange deposit addresses look. Inferred, not confirmed.",
-	flowIBCOut:           "Sent over IBC; the detail names the chain on the other end. Marked (swap) when the memo asked Skip Go to swap there.",
-	flowFees:             "Paid as transaction fees.",
-	flowSwapped:          "Swapped for another asset on the Hub.",
-	flowSpent:            "Paid to a contract or for an NFT on the Hub.",
-	flowTokenized:        "Turned into liquid staking share tokens, which the trace does not follow.",
-	flowBurned:           "Burned with a governance deposit.",
-	flowCommunityPool:    "Given to the community pool.",
-	flowModule:           "Sent to another module account.",
-	flowContract:         "Sent to a contract or an interchain account, which the trace does not follow.",
-	flowBeyondHops:       "Moved more than three wallets away from the receiving wallets.",
-	flowBusyWallet:       "Sent to a wallet with too much activity to trace (an exchange, a bridge or a service, most likely).",
-	flowUnresolved:       "The trace could not read the receiving wallet's history.",
+	flowHeld:              "Still in a wallet the commission was paid to, unstaked.",
+	flowRestakedOwn:       "Delegated back to this validator by a receiving wallet and still bonded.",
+	flowRestakedOther:     "Delegated to another validator by a receiving wallet and still bonded.",
+	flowUnbonding:         "In the unbonding queue of a receiving wallet at the as-of date.",
+	flowLocked:            "Locked in a protocol or a governance deposit by a receiving wallet.",
+	flowHeldDownstream:    "Sent on to another wallet (up to three hops) and still there, unstaked.",
+	flowStakedDownstream:  "Sent on to another wallet (up to three hops) that delegated it.",
+	flowUnbondDownstream:  "Sent on to another wallet (up to three hops) and unbonding there.",
+	flowLockedDownstream:  "Sent on to another wallet (up to three hops) and locked in a protocol there.",
+	flowExchange:          "Sent to an address a named source labels as an exchange.",
+	flowExchangeLike:      "Sent to an address that receives deposit-style memos from many different senders, which is how exchange deposit addresses look. Inferred, not confirmed.",
+	flowIBCOut:            "Sent over IBC; the detail names the chain on the other end. Marked (swap) when the memo asked Skip Go to swap there.",
+	flowFees:              "Paid as transaction fees.",
+	flowSwapped:           "Swapped for another asset on the Hub.",
+	flowSpent:             "Paid to a contract or for an NFT on the Hub.",
+	flowTokenized:         "Turned into liquid staking share tokens, which the trace does not follow.",
+	flowBurned:            "Burned with a governance deposit, or by a validator slash of the stake it was in (detail slash).",
+	flowCommunityPool:     "Given to the community pool.",
+	flowModule:            "Sent to another module account.",
+	flowContract:          "Sent to a contract or an interchain account, which the trace does not follow.",
+	flowInterchainAccount: "Sent to an interchain account, controlled from another chain over IBC; the detail names it. Derived from chain data.",
+	flowGrantRecipient:    "Sent to a wallet that received a community pool spend, as named in the governance proposal. Derived from chain data.",
+	flowBridge:            "Sent to a bridge escrow or bridge contract; the detail names the bridge. Derived from chain data or the bridge's own published addresses.",
+	flowDexPool:           "Sent to a decentralized exchange pool; the detail names the pool. Derived from chain data.",
+	flowBeyondHops:        "Moved more than three wallets away from the receiving wallets.",
+	flowBusyWallet:        "Sent to a wallet with too much activity to trace (an exchange, a bridge or a service, most likely).",
+	flowWideDistributor:   "Sent to, or paid out by, a wallet that sent ATOM to more than " + flowFanoutText + " different wallets during the trace window, such as an exchange hot wallet or a reward or airdrop distributor. The trace stops there, so value reaching it is shown as one amount rather than followed to each recipient. Inferred, not confirmed.",
+	flowUnresolved:        "The trace could not read the receiving wallet's history.",
+	flowBlockSpend:        "Spent by the chain at the start or end of a block with no receiver the indexer could classify; the detail names the block event. Under review.",
+}
+
+// flowFanoutText is the wide distributor threshold as the page writes it.
+var flowFanoutText = groupThousands(flowFanoutMaxReceivers)
+
+// groupThousands writes a non-negative count with comma separators.
+func groupThousands(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // FlowMethod is the method note served with every result.
-const FlowMethod = "Commission is followed from each withdrawal to the wallet that received it, then through every transfer, delegation, unbonding and IBC send of that wallet, and up to three wallets further. " +
+var FlowMethod = "Commission is followed from each withdrawal to the wallet that received it, then through every transfer, delegation, unbonding and IBC send of that wallet, and up to three wallets further. " +
 	"Each receiving wallet starts from its rebuilt holdings on the day before tracing starts, so coins it already held count as other coins. " +
 	"Mixed coins need a rule: first in first out spends a wallet's oldest coins first, pro-rata spends every origin in proportion. Both are stored; neither is the truth, and the gap between them is the uncertainty. " +
 	"Selling commission is normal: it is taxable income when withdrawn and pays for servers, staff and that tax. The figures describe on-chain movements, not intent, and are never ranked. " +
 	"Exchange labels come only from the label table, each with its source; addresses inferred from deposit-style memos are reported separately as exchange_like. " +
+	"A wallet that sent ATOM to more than " + flowFanoutText + " different wallets during the trace window (an exchange hot wallet or a reward or airdrop distributor, for example) is a wide distributor: the trace stops there, and commission sent to it, or paid out by it when it received the commission, is reported as wide_distributor instead of being split across every recipient. " +
 	"Amounts are in ATOM. USD is the amount times that month's average ATOM price on the days commission was withdrawn, so it is the value when earned, not the sale price. " +
 	"Commission paid in other denoms is listed as untracked."
 
@@ -317,18 +337,19 @@ func (s *Server) handleValidatorCommissionFlows(w http.ResponseWriter, r *http.R
 	chain := chainParam(q.Get(apiChain))
 	rule := flowRuleParam(q.Get("rule"))
 	start, end := flowMonthParam(q.Get(apiStart)), flowMonthParam(q.Get(apiEnd))
-	var run CommissionFlowRun
-	res := s.db.Where("chain = ? AND validator = ?", chain, val).Limit(1).Find(&run)
-	if res.Error != nil {
-		http.Error(w, res.Error.Error(), http.StatusInternalServerError)
+	served, err := s.servedCommissionFlows(chain, val)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if res.RowsAffected == 0 {
+	sv, ok := served[val]
+	if !ok {
 		http.Error(w, "no commission trace for this validator yet; traces are rebuilt daily for every validator that has withdrawn commission", http.StatusNotFound)
 		return
 	}
-	var flows []CommissionFlow
-	if err := s.db.Where("chain = ? AND validator = ? AND rule = ?", chain, val, rule).Find(&flows).Error; err != nil {
+	run := sv.Run
+	flows, err := s.servedFlowLines(chain, val, sv, rule)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -388,20 +409,117 @@ func (s *Server) handleValidatorCommissionFlows(w http.ResponseWriter, r *http.R
 	writeJSON(w, out)
 }
 
+// FlowLeftOut is what the Hub totals leave out because a validator's rebuilt
+// balances did not match the chain: how many validators and how much
+// commission they withdrew in the period.
+type FlowLeftOut struct {
+	Validators int             `json:"validators"`
+	Withdrawn  decimal.Decimal `json:"withdrawn"`
+}
+
+// flowHubLeftOut are the run statuses the Hub view leaves out of both its
+// withdrawn and its flow totals.
+var flowHubLeftOut = []string{flowStatusError, flowStatusDrift}
+
+// flowExpectedTTL is how long the list of validators that ever withdrew
+// commission is reused before it is read again in the background.
+const flowExpectedTTL = 6 * time.Hour
+
+type flowExpected struct {
+	// first is each validator's first commission withdrawal.
+	first   map[string]time.Time
+	at      time.Time
+	loading bool
+}
+
+// flowExpectedValidators returns the validators the daily trace covers on
+// chain with their first withdrawal, and false until that list has been read
+// once. Reading it takes tens
+// of seconds, so it never runs on the request path: a missing or stale list
+// is refreshed in the background and the last one is served meanwhile.
+func (s *Server) flowExpectedValidators(chain string) (map[string]time.Time, bool) {
+	s.flowExpMu.Lock()
+	defer s.flowExpMu.Unlock()
+	if s.flowExp == nil {
+		s.flowExp = map[string]*flowExpected{}
+	}
+	e := s.flowExp[chain]
+	if e == nil {
+		e = &flowExpected{}
+		s.flowExp[chain] = e
+	}
+	if !e.loading && (e.first == nil || time.Since(e.at) > flowExpectedTTL) {
+		e.loading = true
+		// A failed read leaves the list unknown and the next request retries.
+		go func() { _ = s.refreshFlowExpected(chain) }()
+	}
+	return e.first, e.first != nil
+}
+
+// flowExpectedBy is the validators whose first withdrawal falls before the
+// end of a trace. asOf is a run's as_of, the last day the trace includes, so
+// the trace ends at the start of the next day: one that first withdrew on the
+// as_of day is in the trace, and one that first withdrew later is not counted
+// as missing from it. A zero asOf (nothing traced yet) bounds nothing.
+func flowExpectedBy(first map[string]time.Time, asOf time.Time) map[string]bool {
+	out := make(map[string]bool, len(first))
+	end := asOf.AddDate(0, 0, 1)
+	for v, at := range first {
+		if asOf.IsZero() || at.Before(end) {
+			out[v] = true
+		}
+	}
+	return out
+}
+
+// WarmCommissionFlows starts reading chain's expected validator list at
+// startup, so the Hub figure is ready soon after a restart.
+func (s *Server) WarmCommissionFlows(chain string) {
+	s.flowExpectedValidators(chainParam(chain))
+}
+
+func (s *Server) refreshFlowExpected(chain string) error {
+	first, err := s.commissionFirstWithdrawals(chain)
+	s.flowExpMu.Lock()
+	defer s.flowExpMu.Unlock()
+	if s.flowExp == nil {
+		s.flowExp = map[string]*flowExpected{}
+	}
+	e := s.flowExp[chain]
+	if e == nil {
+		e = &flowExpected{}
+		s.flowExp[chain] = e
+	}
+	e.loading = false
+	if err != nil {
+		return err
+	}
+	e.first, e.at = first, time.Now()
+	return nil
+}
+
 // CommissionFlowsHub is the Hub-wide response: every traced validator's
 // commission summed by month, with no per-validator breakdown.
 type CommissionFlowsHub struct {
-	Chain      string            `json:"chain"`
-	Rule       string            `json:"rule"`
-	Rules      []string          `json:"rules"`
-	Validators int               `json:"validators"`
-	Statuses   map[string]int    `json:"statuses"`
-	AsOf       string            `json:"as_of,omitempty"`
-	Months     []FlowMonth       `json:"months"`
-	Total      FlowMonth         `json:"total"`
-	Classes    map[string]string `json:"classes"`
-	Method     string            `json:"method"`
-	Symbol     string            `json:"symbol"`
+	Chain      string         `json:"chain"`
+	Rule       string         `json:"rule"`
+	Rules      []string       `json:"rules"`
+	Validators int            `json:"validators"`
+	Statuses   map[string]int `json:"statuses"`
+	// Traced of Expected validators have a stored run. Expected is every
+	// validator that withdrew commission before AsOf, the set the daily trace
+	// covers; until that list is read the endpoint answers 503. Months and Total stay
+	// empty until Complete: a partial set is not a Hub figure.
+	Traced       int               `json:"traced"`
+	Expected     int               `json:"expected"`
+	Complete     bool              `json:"complete"`
+	Unreconciled FlowLeftOut       `json:"unreconciled"`
+	AsOf         string            `json:"as_of,omitempty"`
+	Months       []FlowMonth       `json:"months"`
+	Total        FlowMonth         `json:"total"`
+	Classes      map[string]string `json:"classes"`
+	Method       string            `json:"method"`
+	Symbol       string            `json:"symbol"`
 }
 
 func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request) {
@@ -409,19 +527,30 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 	chain := chainParam(q.Get(apiChain))
 	rule := flowRuleParam(q.Get("rule"))
 	start, end := flowMonthParam(q.Get(apiStart)), flowMonthParam(q.Get(apiEnd))
-	var runs []CommissionFlowRun
-	if err := s.db.Where("chain = ?", chain).Find(&runs).Error; err != nil {
+	first, known := s.flowExpectedValidators(chain)
+	if !known || len(first) == 0 {
+		// Until the list is read there is no true coverage figure to give,
+		// so the answer is "try again shortly" rather than 0 of 0.
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "The list of validators that have withdrawn commission is still being read after a restart. Try again in a minute.", http.StatusServiceUnavailable)
+		return
+	}
+	served, err := s.servedCommissionFlows(chain, "")
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// A failed run keeps its last good flows for its own page, but the Hub
-	// leaves that validator out of both sides so shares stay whole.
-	var flows []CommissionFlow
-	if err := s.db.Table(CommissionFlow{}.TableName()).
-		Select("month, class, detail, via_unbonding, SUM(amount_base)::text AS amount_base").
-		Where("chain = ? AND rule = ?", chain, rule).
-		Where("validator NOT IN (?)", s.db.Table(CommissionFlowRun{}.TableName()).Select(apiValidator).Where("chain = ? AND status = ?", chain, flowStatusError)).
-		Group("month, class, detail, via_unbonding").Scan(&flows).Error; err != nil {
+	// A failed run keeps its last good flows for its own page, and a run whose
+	// rebuilt balances do not match the chain keeps its flows there too, but
+	// the Hub leaves both out of both sides so shares stay whole.
+	include := map[string]bool{}
+	for v, sv := range served {
+		if !slices.Contains(flowHubLeftOut, sv.Run.Status) {
+			include[v] = true
+		}
+	}
+	flows, err := s.hubFlowLines(chain, rule, served, include)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -432,24 +561,46 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 	}
 	out := CommissionFlowsHub{Chain: chain, Rule: rule, Rules: flowRuleNames[:], Statuses: map[string]int{}, Classes: FlowClassNotes, Method: FlowMethod, Symbol: s.native.Symbol}
 	withdrawn := map[string]decimal.Decimal{}
+	unreconciled := decimal.Zero
 	var asOf time.Time
-	for _, run := range runs {
+	for _, sv := range served {
+		if sv.Run.AsOf.After(asOf) {
+			asOf = sv.Run.AsOf
+		}
+	}
+	expected := flowExpectedBy(first, asOf)
+	for _, sv := range served {
+		run := sv.Run
 		out.Validators++
 		out.Statuses[run.Status]++
-		if run.AsOf.After(asOf) {
-			asOf = run.AsOf
+		if expected[run.Validator] {
+			out.Traced++
 		}
 		if run.Status == flowStatusError {
 			continue
 		}
 		for m, v := range decodeFlowAmounts(run.Commission) {
-			if inFlowMonths(m, start, end) {
-				withdrawn[m] = withdrawn[m].Add(v)
+			if !inFlowMonths(m, start, end) {
+				continue
 			}
+			if run.Status == flowStatusDrift {
+				unreconciled = unreconciled.Add(v)
+				continue
+			}
+			withdrawn[m] = withdrawn[m].Add(v)
+		}
+		if run.Status == flowStatusDrift {
+			out.Unreconciled.Validators++
 		}
 	}
+	out.Unreconciled.Withdrawn = s.displayAmount(unreconciled)
 	if !asOf.IsZero() {
 		out.AsOf = asOf.Format(apiDateLayout)
+	}
+	out.Expected = len(expected)
+	out.Complete = len(expected) > 0 && out.Traced == len(expected)
+	if !out.Complete {
+		flows, withdrawn = nil, map[string]decimal.Decimal{}
 	}
 	kept := flows[:0]
 	for _, f := range flows {

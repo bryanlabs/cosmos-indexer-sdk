@@ -13,38 +13,17 @@ import (
 
 	dbpkg "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/tax"
-	"github.com/ory/dockertest/v3"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
 func assetReviewFixture(t *testing.T) (*Server, *gorm.DB, string, string) {
 	t.Helper()
-	pool, err := dockertest.NewPool("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resource, err := pool.Run("postgres", "15-alpine", []string{"POSTGRES_USER=test", "POSTGRES_PASSWORD=test", "POSTGRES_DB=test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := pool.Purge(resource); err != nil {
-			t.Error(err)
-		}
-	})
-	var db *gorm.DB
-	if err := pool.Retry(func() error {
-		var e error
-		db, e = dbpkg.PostgresDbConnect(resource.GetBoundIP(apiPostgresPort), resource.GetPort(apiPostgresPort), apiTest, apiTest, apiTest, "silent")
-		return e
-	}); err != nil {
-		t.Fatal(err)
-	}
+	db := isolatedAPIFixtureDB(t)
 	if err := dbpkg.MigrateModels(db); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&tax.TaxableEvent{}, &ReportJob{}); err != nil {
+	if err := db.AutoMigrate(&tax.TaxableEvent{}, &ReportJob{}, &FailedTxFee{}); err != nil {
 		t.Fatal(err)
 	}
 	wallet := "cosmos1testwallet"

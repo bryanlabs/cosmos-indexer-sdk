@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"encoding/csv"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -36,11 +37,22 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			sorted = append(sorted, r)
 		}
 	}
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	sort.SliceStable(sorted, func(i, j int) bool { return lotsBefore(sorted[i], sorted[j]) })
 	lots := map[string][]lot{}
 	denoms := map[string]string{}
 	for _, r := range sorted {
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+			continue
+		}
+		// A reward move takes exactly the reward lot to the withdraw address
+		// at its basis and receipt time, as in Form 8949.
+		if r.isRewardMove() {
+			asset := r.Symbol
+			if asset == "" {
+				asset = r.Denom
+			}
+			denoms[asset] = r.Denom
+			lots[asset] = moveRewardLots(lots[asset], r)
 			continue
 		}
 		if !r.isTaxable() || r.UserTag == TagInternalTransfer || r.UserTag == TagProtocolDeposit || r.UserTag == TagSpam {
@@ -60,7 +72,11 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil && r.Amount.IsPositive() {
 				cost, acquired, unknown = r.ManualBasisUSD.DivRound(r.Amount, 64), *r.ManualAcquiredDate, false
 			}
-			lots[asset] = append(lots[asset], lot{qty: r.Amount, cost: cost, date: acquired, basisUnknown: unknown})
+			l := lot{qty: r.Amount, cost: cost, date: acquired, basisUnknown: unknown, denom: r.Denom}
+			if r.Category == apiReward {
+				l.msgID = r.MessageID
+			}
+			lots[asset] = append(lots[asset], l)
 		case r.Direction == apiOut:
 			remaining := r.Amount
 			for remaining.IsPositive() && len(lots[asset]) > 0 {
@@ -150,9 +166,13 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		cw.Flush()
 		return
 	}
+	note := "Open lots from acquisitions seen in the indexed history, FIFO, per wallet. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before cosmoshub-4 genesis are not represented."
+	if eras := s.legacyEras(chain); eras.active() {
+		note = fmt.Sprintf("Open lots from acquisitions seen in the indexed history, FIFO, per wallet, across the Cosmos Hub restarts from %s (%s) on. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before %s are not represented.", eras.earliest().ChainID, dayString(eras.earliest().Start), eras.earliest().ChainID)
+	}
 	writeJSON(w, map[string]any{
 		apiAddress: addr, apiChain: chain, "as_of": day, apiMethodologyVersion: MethodologyVersion,
-		apiNote:          "Open lots from acquisitions seen in the indexed history, FIFO, per wallet. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before cosmoshub-4 genesis are not represented. Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
+		apiNote:          note + " Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
 		"positions":      positions,
 		"index_coverage": s.periodCoverage(time.Time{}, asOf.AddDate(0, 0, 1)),
 	})

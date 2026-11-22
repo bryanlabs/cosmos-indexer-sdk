@@ -168,5 +168,33 @@ func authzFromStoredLog(log *txlog.LogMessage, old []tax.TaxableEvent) ([]tax.Ta
 		out = append(out, rows...)
 	}
 	out = append(out, principal...)
-	return out, nil
+	return withAuthzWasmSupplement(out, log), nil
+}
+
+// withAuthzWasmSupplement appends the wasm supplement rows of each contract
+// message inside a MsgExec, in inner message order, after every other row,
+// as the indexer writes them for the top-level message. The indexer runs
+// only the rules that need no signer on contract messages inside a MsgExec,
+// so the stored log gives the same rows. A message whose stored rows already
+// hold a supplement row other than a bank fallback was written by an indexer
+// that has the supplement and is left as it is. Bank fallback rows of an
+// earlier repair are dropped by their marker and written again, so a second
+// replay is a no-op and a replay after a rule change does not keep the old
+// fallback next to a new row for the same coins.
+func withAuthzWasmSupplement(rows []tax.TaxableEvent, log *txlog.LogMessage) []tax.TaxableEvent {
+	out := make([]tax.TaxableEvent, 0, len(rows))
+	for _, e := range rows {
+		supplement, fallback := tax.SupplementRow(e)
+		if supplement && !fallback {
+			return rows
+		}
+		if !fallback {
+			out = append(out, e)
+		}
+	}
+	return append(out, tax.AuthzWasmSupplementForLog(log)...)
+}
+
+func rowKey(e tax.TaxableEvent) string {
+	return strings.Join([]string{e.Category, e.Amount, e.Denom, e.Asset, e.FromAddr, e.ToAddr, e.ValidatorAddress, e.RewardTrigger, e.Detail}, "|")
 }

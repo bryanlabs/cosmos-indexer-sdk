@@ -241,7 +241,55 @@ func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []strin
 	if err != nil {
 		return nil, err
 	}
+	return s.applyTags(rows, tags)
+}
+
+// applyTags loads the message indexes when a row key needs them, then
+// applies the tags.
+func (s *Server) applyTags(rows []Row, tags UserTags) ([]Row, error) {
+	if tags.hasRowKeys() {
+		if err := s.loadMessageIndexes(rows); err != nil {
+			return nil, err
+		}
+	}
 	return ApplyTags(rows, tags), nil
+}
+
+const messageIndexChunk = 5000
+
+// loadMessageIndexes sets each row's MessageIndex from its stored message,
+// a primary-key lookup per message. A message index never changes once
+// written, so reading it outside the report's snapshot is safe.
+func (s *Server) loadMessageIndexes(rows []Row) error {
+	seen := map[uint]bool{}
+	var ids []uint
+	for _, r := range rows {
+		if r.MessageID != 0 && !seen[r.MessageID] {
+			seen[r.MessageID] = true
+			ids = append(ids, r.MessageID)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	index := make(map[uint]int, len(ids))
+	for start := 0; start < len(ids); start += messageIndexChunk {
+		chunk := ids[start:min(start+messageIndexChunk, len(ids))]
+		var got []struct {
+			ID           uint
+			MessageIndex int
+		}
+		if err := s.db.Raw("SELECT id, message_index FROM messages WHERE id IN ?", chunk).Scan(&got).Error; err != nil {
+			return err
+		}
+		for _, g := range got {
+			index[g.ID] = g.MessageIndex
+		}
+	}
+	for i := range rows {
+		if mi, ok := index[rows[i].MessageID]; ok {
+			rows[i].MessageIndex, rows[i].hasMessageIndex = mi, true
+		}
+	}
+	return nil
 }
 
 // errAwaitingCorrection is returned while a wallet still has staking rows

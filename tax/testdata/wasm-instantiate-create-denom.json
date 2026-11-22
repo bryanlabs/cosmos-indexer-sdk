@@ -1,0 +1,267 @@
+{
+ "message_id": 9929747,
+ "message_type": "/cosmwasm.wasm.v1.MsgInstantiateContract",
+ "height": "32793113",
+ "hash": "EE55F0E87FEBE1E0E2AA425A63257BDF8367B8BFC98056EB13A31AD5EA772C91",
+ "timestamp": "2026-09-03T01:46:23Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgInstantiateContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1xkqh4c6pn4gclygthck0fealzjs37uzwttlcl2"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1xkqh4c6pn4gclygthck0fealzjs37uzwttlcl2"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1xkqh4c6pn4gclygthck0fealzjs37uzwttlcl2"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "instantiate",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "code_id",
+     "value": "737"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "action",
+     "value": "instantiate"
+    },
+    {
+     "key": "subdenom",
+     "value": "hydrogen"
+    },
+    {
+     "key": "null_address",
+     "value": "cosmos1mv580shc247u8vee4w0wnqs947cz6d24qtq720"
+    },
+    {
+     "key": "pay_denom",
+     "value": "uatom"
+    },
+    {
+     "key": "pay_amount",
+     "value": "1000000"
+    },
+    {
+     "key": "name",
+     "value": "Hydrogen"
+    },
+    {
+     "key": "symbol",
+     "value": "ATOM-H"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "create_denom",
+   "attributes": [
+    {
+     "key": "creator",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "new_token_denom",
+     "value": "factory/cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f/hydrogen"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "reply",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f"
+    },
+    {
+     "key": "action",
+     "value": "create_denom_reply"
+    },
+    {
+     "key": "denom",
+     "value": "factory/cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f/hydrogen"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "set_denom_metadata",
+   "attributes": [
+    {
+     "key": "denom",
+     "value": "factory/cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f/hydrogen"
+    },
+    {
+     "key": "denom_metadata",
+     "value": "description:\"Burn 1 ATOM to mint 1 Hydrogen. The Hub's first Proof of Burn token.\" denom_units:<denom:\"factory/cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f/hydrogen\" > denom_units:<denom:\"hydrogen\" exponent:6 > base:\"factory/cosmos1c2tu42xfctu520qyn4f54epndzn09vfdvf4aknftcz4xs3gvwjrs02gn8f/hydrogen\" display:\"hydrogen\" name:\"Hydrogen\" symbol:\"ATOM-H\" "
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

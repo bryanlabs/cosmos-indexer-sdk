@@ -1,0 +1,476 @@
+{
+ "message_id": 7148718,
+ "message_type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+ "height": "31472491",
+ "hash": "51C6F6AE25883A1175FCCC66E37B06BA4B46566C52ABE69FE3FD09DC6903C8DF",
+ "timestamp": "2026-06-07T15:42:50Z",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/cosmwasm.wasm.v1.MsgExecuteContract"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1y79s8xdlajg3wv6g0ngpf042nf94dxfcaug26w"
+    },
+    {
+     "key": "module",
+     "value": "wasm"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1y79s8xdlajg3wv6g0ngpf042nf94dxfcaug26w"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1y79s8xdlajg3wv6g0ngpf042nf94dxfcaug26w"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "execute",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "action",
+     "value": "create_denom_and_stakedrop"
+    },
+    {
+     "key": "subdenom",
+     "value": "mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "amount",
+     "value": "10000000uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "create_denom",
+   "attributes": [
+    {
+     "key": "creator",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "new_token_denom",
+     "value": "factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "reply",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "action",
+     "value": "create_token"
+    },
+    {
+     "key": "subdenom",
+     "value": "mow"
+    },
+    {
+     "key": "denom",
+     "value": "factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "set_denom_metadata",
+   "attributes": [
+    {
+     "key": "denom",
+     "value": "factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "denom_metadata",
+     "value": "description:\"ONE DOGGO, ONE MASTER\" denom_units:<denom:\"factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow\" aliases:\"umow\" > denom_units:<denom:\"mow\" exponent:6 > base:\"factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow\" display:\"mow\" name:\"MASTER OF WOOF\" symbol:\"mow\" uri:\"https://huahuaswapbackend-production.up.railway.app/uploads/mqr3vy50d1j17ekgnzharhx5.jpg\" uri_hash:\"87a49310603bd97fc6b7b5c1537c5e9b7628fb17d17c5e016d005a906a12856f\" "
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "100000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coinbase",
+   "attributes": [
+    {
+     "key": "minter",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "100000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "100000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "amount",
+     "value": "100000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos19ejy8n9qsectrf4semdp9cpknflld0j6aqaddp"
+    },
+    {
+     "key": "amount",
+     "value": "100000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "tf_mint",
+   "attributes": [
+    {
+     "key": "mint_to_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "amount",
+     "value": "100000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "70000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "70000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos15xdpnrfak4z8ctm0k4lkg5n3mhsr6n3jasl5f6pf8uruprce3m3spgj6tq"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "70000000000000factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos15xdpnrfak4z8ctm0k4lkg5n3mhsr6n3jasl5f6pf8uruprce3m3spgj6tq"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "instantiate",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos15xdpnrfak4z8ctm0k4lkg5n3mhsr6n3jasl5f6pf8uruprce3m3spgj6tq"
+    },
+    {
+     "key": "code_id",
+     "value": "392"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "reply",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9"
+    },
+    {
+     "key": "action",
+     "value": "register_token"
+    },
+    {
+     "key": "bonding_curve",
+     "value": "cosmos15xdpnrfak4z8ctm0k4lkg5n3mhsr6n3jasl5f6pf8uruprce3m3spgj6tq"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  },
+  {
+   "type": "change_admin",
+   "attributes": [
+    {
+     "key": "denom",
+     "value": "factory/cosmos10ssenm8hy7hnwqq7mf89n8hl9thvpv63e50c3e85z48lvsnnt72qp2akz9/mow"
+    },
+    {
+     "key": "new_admin",
+     "value": "cosmos15xdpnrfak4z8ctm0k4lkg5n3mhsr6n3jasl5f6pf8uruprce3m3spgj6tq"
+    },
+    {
+     "key": "msg_index",
+     "value": "0"
+    }
+   ]
+  }
+ ]
+}

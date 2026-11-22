@@ -32,6 +32,9 @@ type Form8949Row struct {
 	// asset on the sale date. Proceeds (and gain) are then 0, which is not a
 	// confirmed value; the line says so rather than report a silent 0.00.
 	ProceedsUnknown bool
+	// ChainID is the Hub chain of the disposal, set only while an earlier Hub
+	// chain is in reports.
+	ChainID string
 }
 
 const basisUnknownNote = " (basis unknown, complete in your aggregator)"
@@ -48,7 +51,51 @@ type lot struct {
 	cost         decimal.Decimal // USD per unit
 	date         time.Time
 	manual       bool
-	basisUnknown bool // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
+	basisUnknown bool   // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
+	msgID        uint   // the message a reward lot was booked in, 0 for any other lot
+	denom        string // the on-chain denom, which a withdraw-address move matches
+}
+
+// lotAsset is the fungible lot key Form 8949 uses for a row.
+func lotAsset(r Row) string {
+	asset := r.Symbol
+	if asset == "" {
+		asset = r.Denom
+	}
+	if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch && (r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride) {
+		asset = r.AssetIdentity.RawDenom
+	}
+	return asset
+}
+
+// moveLot is the lot a withdraw address receives from a reward move: the
+// reward's receipt-time value is its basis and the receipt its acquisition.
+func moveLot(r Row) lot {
+	l := lot{qty: r.Amount, cost: r.PriceUSD, date: r.Time, basisUnknown: r.PriceMissing, denom: r.Denom}
+	if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil && r.Amount.IsPositive() {
+		l.cost, l.date, l.basisUnknown, l.manual = r.ManualBasisUSD.DivRound(r.Amount, 64), *r.ManualAcquiredDate, false, true
+	}
+	return l
+}
+
+// moveRewardLots applies a withdraw-address move to the asset's lots: the
+// delegator side drops the reward lot of its message (takeRewardLots), and the
+// receiving side holds it at the reward's basis and receipt time. A move with
+// no message (MessageID 0, as on rows of an earlier Hub chain) cannot name its
+// reward lot, so it changes neither side: the delegator keeps the one lot and
+// the receiver books none. semanticReviewReason holds such a row for review,
+// so no download uses the result.
+func moveRewardLots(q []lot, r Row) []lot {
+	if r.MessageID == 0 {
+		return q
+	}
+	if r.Direction == apiOut {
+		kept, _ := takeRewardLots(q, r)
+		return kept
+	}
+	q = append(q, moveLot(r))
+	sort.SliceStable(q, func(i, j int) bool { return q[i].date.Before(q[j].date) })
+	return q
 }
 
 // basisUnknownFor reports whether an "in" event establishes a lot whose cost
@@ -88,14 +135,33 @@ func basisUnknownForRow(r Row) bool {
 func Build8949(rows []Row) []Form8949Row {
 	sorted := make([]Row, len(rows))
 	copy(sorted, rows)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Time.Before(sorted[j].Time) })
+	sort.SliceStable(sorted, func(i, j int) bool { return lotsBefore(sorted[i], sorted[j]) })
 
 	lots := map[string][]lot{}    // asset -> FIFO lots (fungible)
 	nftLots := map[string][]lot{} // "<collection>/<token>" -> FIFO lots (qty always 1, cost in total USD)
 	var out []Form8949Row
+	// Each disposal line carries the chain of the row that sold; stamped
+	// counts the lines done.
+	stamped, rowChain := 0, ""
+	stamp := func() {
+		for ; stamped < len(out); stamped++ {
+			out[stamped].ChainID = rowChain
+		}
+	}
 
 	for _, r := range sorted {
+		stamp()
+		rowChain = r.ChainID
 		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+			continue
+		}
+		// A reward paid to the withdraw address is no disposal: the delegator
+		// side drops exactly the reward lot of that message, with no 8949
+		// line, and the receiving side holds it at the reward's basis and
+		// receipt time (INF-213).
+		if r.isRewardMove() {
+			asset := lotAsset(r)
+			lots[asset] = moveRewardLots(lots[asset], r)
 			continue
 		}
 		// A Stargaze migration mint is record-only, but the NFT keeps the
@@ -173,13 +239,7 @@ func Build8949(rows []Row) []Form8949Row {
 			continue
 		}
 
-		asset := r.Symbol
-		if asset == "" {
-			asset = r.Denom
-		}
-		if r.AssetIdentity != nil && !r.AssetIdentity.OfficialAtomMatch && (r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionOverride) {
-			asset = r.AssetIdentity.RawDenom
-		}
+		asset := lotAsset(r)
 		switch {
 		case r.Direction == "in" && r.Category != apiFee:
 			// acquisition
@@ -191,10 +251,14 @@ func Build8949(rows []Row) []Form8949Row {
 				acquired = *r.ManualAcquiredDate
 				unknown = false
 			}
-			lots[asset] = append(lots[asset], lot{
+			l := lot{
 				qty: r.Amount, cost: cost, date: acquired,
-				basisUnknown: unknown, manual: r.ManualBasisUSD != nil,
-			})
+				basisUnknown: unknown, manual: r.ManualBasisUSD != nil, denom: r.Denom,
+			}
+			if r.Category == apiReward {
+				l.msgID = r.MessageID
+			}
+			lots[asset] = append(lots[asset], l)
 			sort.SliceStable(lots[asset], func(i, j int) bool { return lots[asset][i].date.Before(lots[asset][j].date) })
 
 		case r.Direction == apiOut:
@@ -287,6 +351,7 @@ func Build8949(rows []Row) []Form8949Row {
 			}
 		}
 	}
+	stamp()
 	return out
 }
 
@@ -372,13 +437,27 @@ func BuildScheduleD(rows []Form8949Row) ScheduleD {
 func Write8949CSV(out io.Writer, rows []Form8949Row) error {
 	w := csv.NewWriter(out)
 	defer w.Flush()
-	_ = w.Write([]string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown", "Proceeds unknown"})
+	// The chain column is added only while an earlier Hub chain is in
+	// reports, when every line names its chain.
+	withChain := false
+	for _, r := range rows {
+		withChain = withChain || r.ChainID != ""
+	}
+	header := []string{"Address", "Part", "Description of property", "Date acquired", "Date sold", "Proceeds (USD)", "Cost basis (USD)", "Gain or loss (USD)", "Basis unknown", "Proceeds unknown"}
+	if withChain {
+		header = append(header, "Chain ID")
+	}
+	_ = w.Write(header)
 	write := func(part string, longTerm bool) {
 		for _, r := range rows {
 			if r.LongTerm != longTerm {
 				continue
 			}
-			_ = w.Write([]string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown), boolStr(r.ProceedsUnknown)})
+			rec := []string{r.Address, part, r.Description, r.DateAcquired, r.DateSold, r.Proceeds.StringFixed(2), r.CostBasis.StringFixed(2), r.GainLoss.StringFixed(2), boolStr(r.BasisUnknown), boolStr(r.ProceedsUnknown)}
+			if withChain {
+				rec = append(rec, r.ChainID)
+			}
+			_ = w.Write(rec)
 		}
 	}
 	write("I (short-term)", false)

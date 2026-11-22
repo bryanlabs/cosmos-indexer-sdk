@@ -77,9 +77,9 @@ func (ValidatorConsensus) TableName() string { return "tax_validator_consensus" 
 // shares its hash with the copy the index keeps. A balance whose window covers
 // a hole cannot be rebuilt exactly. When AddressesKnown is set, IndexHoleAddress lists every account
 // the missing transactions name (in their bytes or any of their events), and
-// only those wallets are affected; otherwise every wallet is. The sweeper
-// removes the row once the block holds ChainTxs transactions again and each
-// successful one has its messages.
+// only those wallets are affected; otherwise every wallet is. Only an explicit
+// source-verified RecheckIndexHoles may remove the row, since counts cannot
+// establish that the expected transactions are indexed at this height.
 type IndexHole struct {
 	Chain          string `gorm:"primaryKey"`
 	Height         int64  `gorm:"primaryKey;autoIncrement:false"`
@@ -113,8 +113,8 @@ type ValidatorRateSample struct {
 func (ValidatorRateSample) TableName() string { return "tax_validator_rates" }
 
 // BalanceHistoryMigrate creates the tables the balance ledger reads.
-// The index scan and the hole sweeper read a block's transactions, which the
-// indexer's schema does not index.
+// The index scan and explicit hole recheck read a block's source transactions
+// to verify membership, which a stored transaction count cannot establish.
 func BalanceHistoryMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}, &BalanceDay{}, &BalanceBuild{}, &BalanceDeferred{}); err != nil {
 		return err
@@ -406,7 +406,8 @@ func (a rpcAttr) decoded() (string, string) {
 }
 
 // failedTxCharges reads one block's failed transactions from the node and
-// returns, by hash, the coins each one's fee deduction moved.
+// returns, by hash, the coins each one's fee deduction moved. A transaction
+// whose block results do not settle it is left out.
 func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
 	txs, err := n.blockTxs(height)
 	if err != nil {
@@ -414,7 +415,7 @@ func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
 	}
 	out := map[string]string{}
 	for _, t := range txs {
-		if t.Code != 0 {
+		if t.Code != 0 && t.ChargeKnown {
 			out[t.Hash] = t.Charged
 		}
 	}
@@ -583,33 +584,12 @@ ORDER BY h.height`,
 	return heights, err
 }
 
-// clearIndexHoles drops the holes whose block now holds every transaction.
+// clearIndexHoles deliberately retains recorded holes during ordinary sweeps.
+// Counts and message presence cannot prove source transaction membership: a
+// successful source hash may still be indexed at another height. Only an
+// explicit source-verified RecheckIndexHoles may clear these protections.
 func (s *Server) clearIndexHoles(chain string, ids []int64) (int64, error) {
-	var before int64
-	if err := s.db.Model(&IndexHole{}).Where("chain = ?", chain).Count(&before).Error; err != nil {
-		return 0, err
-	}
-	res := s.db.Exec(`
-WITH done AS (
-  DELETE FROM tax_index_holes h
-  WHERE h.chain = @chain AND h.chain_txs <= (
-    SELECT count(*) FROM txes x JOIN blocks b ON b.id = x.block_id
-    WHERE b.chain_id IN @ids AND b.height = h.height)
-  AND NOT EXISTS (
-    SELECT 1 FROM txes x JOIN blocks b ON b.id = x.block_id
-    WHERE b.chain_id IN @ids AND b.height = h.height AND x.code = 0
-    AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.tx_id = x.id))
-  RETURNING h.chain, h.height)
-DELETE FROM tax_index_hole_addresses a USING done
-WHERE a.chain = done.chain AND a.height = done.height`, map[string]any{"chain": chain, "ids": ids})
-	if res.Error != nil {
-		return 0, res.Error
-	}
-	var left int64
-	if err := s.db.Model(&IndexHole{}).Where("chain = ?", chain).Count(&left).Error; err != nil {
-		return 0, err
-	}
-	return before - left, nil
+	return 0, nil
 }
 
 // ledgerScan is the span whose fee grant use and index holes are recorded,
@@ -714,8 +694,24 @@ AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id 
 		Scan(&redelMsgs).Error; err != nil {
 		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
 	}
-	var redelRows []ledgerAttrRow
-	if len(redelMsgs) > 0 {
+	redelRows, err := s.redelegationRows(redelMsgs)
+	if err != nil {
+		return nil, 0, err
+	}
+	redelegations, unattributed := attributeRedelegations(redelRows, addr)
+	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
+	return append(events, redelegations...), unattributed, nil
+}
+
+// redelegationRows reads the redelegate, withdraw_rewards and message events
+// of the messages msgs, in height, message, event and attribute order. The
+// messages are read in chunks, since a wallet can name more than one
+// statement may bind. Each message's rows come whole from one chunk, so a
+// stable sort by height and message restores the order of a single read.
+func (s *Server) redelegationRows(msgs []uint64) ([]ledgerAttrRow, error) {
+	var rows []ledgerAttrRow
+	if err := inChunks(msgs, func(chunk []uint64) error {
+		var part []ledgerAttrRow
 		if err := s.db.Raw(`
 SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
 FROM message_events me
@@ -727,14 +723,22 @@ JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
 WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message')
 ORDER BY b.height, me.message_id, me.index, a.index`,
-			map[string]any{"msgs": redelMsgs}).
-			Scan(&redelRows).Error; err != nil {
-			return nil, 0, fmt.Errorf("redelegation events: %w", err)
+			map[string]any{"msgs": chunk}).
+			Scan(&part).Error; err != nil {
+			return fmt.Errorf("redelegation events: %w", err)
 		}
+		rows = append(rows, part...)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	redelegations, unattributed := attributeRedelegations(redelRows, addr)
-	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
-	return append(events, redelegations...), unattributed, nil
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Height != rows[j].Height {
+			return rows[i].Height < rows[j].Height
+		}
+		return rows[i].MessageID < rows[j].MessageID
+	})
+	return rows, nil
 }
 
 // attributeRedelegations gives the wallet its redelegate events. Gaia never
@@ -925,8 +929,10 @@ func (s *Server) resolveFailedFees(rows []ledgerFeeRow, node *ledgerNode) map[ui
 			if !ok {
 				continue
 			}
-			if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&FailedTxFee{TxID: r.TxID, Charged: charged}).Error; err != nil {
-				continue
+			if !s.readOnlyLedger {
+				if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&FailedTxFee{TxID: r.TxID, Charged: charged}).Error; err != nil {
+					continue
+				}
 			}
 			out[r.TxID] = charged
 		}
@@ -1141,6 +1147,9 @@ type HistoricalBalance struct {
 	// UnpricedLines counts holdings with no USD price on that date; they are
 	// not in total_usd.
 	UnpricedLines int `json:"unpriced_lines"`
+	// ChainID is the Hub chain whose state the date shows. It is set only
+	// while an earlier Hub chain is in reports.
+	ChainID string `json:"chain_id,omitempty"`
 }
 
 const (
@@ -1164,6 +1173,26 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	for i, d := range days {
 		out[i] = HistoricalBalance{Address: addr, Date: d.UTC().Format(apiDateLayout), Lines: []BalanceLine{}}
 	}
+	// Days on an earlier Hub chain in reports are read from its stored
+	// daily holdings; every other day is rebuilt from cosmoshub-4 below.
+	legacyDone := make([]bool, len(days))
+	remaining := len(days)
+	if eras := s.legacyEras(chain); eras.active() {
+		meta := s.oracle.Denoms(chain)
+		for i, d := range days {
+			out[i].ChainID = apiHubChainID
+			if e, ok := eras.eraAtDayEnd(d); ok && eras.inReports(e.ChainID) {
+				if err := s.legacyBalanceDay(chain, meta, eras, e, addr, d, &out[i]); err != nil {
+					return nil, err
+				}
+				legacyDone[i] = true
+				remaining--
+			}
+		}
+	}
+	if remaining == 0 {
+		return out, nil
+	}
 	ids, err := s.chainRowIDs(chain)
 	if err != nil {
 		return nil, err
@@ -1180,6 +1209,9 @@ func (s *Server) HistoricalBalances(chain, addr string, days []time.Time) ([]His
 	var idx []int
 	var targets []heightTime
 	for i, d := range days {
+		if legacyDone[i] {
+			continue
+		}
 		ht, err := s.dayEndBlock(ids, d)
 		if err != nil {
 			out[i].Status, out[i].Reason = balanceStatusFor(err)

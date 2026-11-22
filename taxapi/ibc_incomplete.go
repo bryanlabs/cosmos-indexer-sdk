@@ -49,34 +49,9 @@ func (s *Server) incompleteIBCRefunds(chain string, addresses []string) ([]tax.T
 	for _, message := range messages {
 		ids = append(ids, message.ID)
 	}
-	var attrs []struct {
-		MessageID uint
-		EventID   uint
-		Type      string
-		Key       string
-		Value     string
-	}
-	if err := s.db.Table("message_events me").
-		Select("me.message_id, me.id AS event_id, et.type, k.key, a.value").
-		Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
-		Joins("JOIN message_event_attributes a ON a.message_event_id=me.id").
-		Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
-		Where("me.message_id IN ?", ids).Order("me.message_id, me.index, a.index").Scan(&attrs).Error; err != nil {
+	logs, err := s.incompleteRefundEventLogs(ids)
+	if err != nil {
 		return nil, err
-	}
-	logs := map[uint]*txlog.LogMessage{}
-	var lastEvent uint
-	for _, attr := range attrs {
-		if logs[attr.MessageID] == nil {
-			logs[attr.MessageID] = &txlog.LogMessage{}
-		}
-		log := logs[attr.MessageID]
-		if lastEvent != attr.EventID || len(log.Events) == 0 {
-			log.Events = append(log.Events, txlog.LogMessageEvent{Type: attr.Type})
-		}
-		lastEvent = attr.EventID
-		i := len(log.Events) - 1
-		log.Events[i].Attributes = append(log.Events[i].Attributes, txlog.Attribute{Key: attr.Key, Value: attr.Value})
 	}
 	owners := map[string]bool{}
 	for _, address := range addresses {
@@ -95,4 +70,63 @@ func (s *Server) incompleteIBCRefunds(chain string, addresses []string) ([]tax.T
 		}
 	}
 	return out, nil
+}
+
+// incompleteRefundEventLogs reads the retained events of the given messages in
+// order. Each event's attributes are read through a per-event index lookup
+// (LATERAL with OFFSET 0). As a plain join Postgres estimated about 1,700
+// events per message, so for 64 messages it hash-joined the whole attribute
+// table (2.6 billion rows) and one wallet's readiness passed the 60 s private
+// read deadline; the fenced read returns the same rows in under a second.
+func (s *Server) incompleteRefundEventLogs(ids []uint) (map[uint]*txlog.LogMessage, error) {
+	type eventAttr struct {
+		MessageID uint
+		EventID   uint
+		Type      string
+		Key       string
+		Value     string
+	}
+	// Every row of a message is in that message's chunk, in order, and the
+	// logs are keyed by message, so chunking leaves them unchanged. A repeated
+	// id is dropped, as IN would, so no message is read twice.
+	seen := make(map[uint]bool, len(ids))
+	unique := make([]uint, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	ids = unique
+	var attrs []eventAttr
+	if err := inChunks(ids, func(chunk []uint) error {
+		var part []eventAttr
+		if err := s.db.Table("message_events me").
+			Select("me.message_id, me.id AS event_id, et.type, k.key, a.value").
+			Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
+			Joins("JOIN LATERAL (SELECT message_event_attribute_key_id, value, index FROM message_event_attributes WHERE message_event_id=me.id OFFSET 0) a ON true").
+			Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
+			Where("me.message_id IN ?", chunk).Order("me.message_id, me.index, a.index").Scan(&part).Error; err != nil {
+			return err
+		}
+		attrs = append(attrs, part...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	logs := map[uint]*txlog.LogMessage{}
+	var lastEvent uint
+	for _, attr := range attrs {
+		if logs[attr.MessageID] == nil {
+			logs[attr.MessageID] = &txlog.LogMessage{}
+		}
+		log := logs[attr.MessageID]
+		if lastEvent != attr.EventID || len(log.Events) == 0 {
+			log.Events = append(log.Events, txlog.LogMessageEvent{Type: attr.Type})
+		}
+		lastEvent = attr.EventID
+		i := len(log.Events) - 1
+		log.Events[i].Attributes = append(log.Events[i].Attributes, txlog.Attribute{Key: attr.Key, Value: attr.Value})
+	}
+	return logs, nil
 }

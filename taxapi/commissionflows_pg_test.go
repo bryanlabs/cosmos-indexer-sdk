@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/DefiantLabs/cosmos-indexer/tax"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,8 +34,10 @@ const (
 )
 
 var (
-	flowPGOther   = flowPGValoper(1)
-	flowPGTestnet = flowPGValoper(2)
+	flowPGWindowStart = time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	flowPGWindowEnd   = time.Date(2025, 4, 1, 0, 0, 0, 0, time.UTC)
+	flowPGOther       = flowPGValoper(1)
+	flowPGTestnet     = flowPGValoper(2)
 )
 
 func flowPGValoper(b byte) string {
@@ -106,7 +111,82 @@ func flowPGServer(t *testing.T) *Server {
 		_, _ = w.Write([]byte(`{"usd":10,"found":true}`))
 	}))
 	t.Cleanup(prices.Close)
-	return &Server{db: database, native: DefaultNativeAsset, oracle: NewOracle(prices.URL, "")}
+	return &Server{db: database, native: DefaultNativeAsset, oracle: NewOracle(prices.URL, ""), flowSources: map[string][]commissionServingSource{}}
+}
+
+// A wallet that pays the native coin out to more than the limit of distinct
+// receivers in the trace window is a wide distributor, even when it is a
+// validator operator account. Repeat payments, other coins, other categories
+// and payments outside the window do not count.
+func TestCommissionFlowWideDistributorPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	const hub = "cosmos1widedistributor"
+	for _, sql := range []string{
+		"CREATE TABLE message_event_attributes (value text)",
+		"CREATE TABLE block_event_attributes (value text)",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + hub + "', 'cosmos1payee'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,30) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + hub + "', 'cosmos1payee'||g, '2025-03-01T00:00:00Z' FROM generate_series(1,30) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + hub + "', 'cosmos1late'||g, '2025-05-01T00:00:00Z' FROM generate_series(1,10) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'ibc/ABC', '" + hub + "', 'cosmos1token'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,10) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'ibc_out', '1', 'uatom', '" + hub + "', 'osmo1ibc'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,10) g",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	n, err := s.fanoutReceivers(hub, flowPGWindowStart, flowPGWindowEnd, 100)
+	require.NoError(t, err)
+	require.Equal(t, 30, n, "distinct native transfer receivers in the window")
+	n, err = s.fanoutReceivers(hub, flowPGWindowStart, flowPGWindowEnd, 10)
+	require.NoError(t, err)
+	require.Equal(t, 11, n, "the count stops at the limit plus one")
+
+	operator := AddressLabel{Chain: apiMainnet, Address: hub, Name: "Some Validator", Kind: labelValidatorOperator, Source: "derived", CreatedAt: nowUTC()}
+	loader := func(limit int) *dbFlowLoader {
+		return &dbFlowLoader{s: s, chain: apiMainnet, labels: map[string]AddressLabel{hub: operator}, mu: &sync.Mutex{}, chans: map[string]string{}, private: true, fanoutLimit: limit}
+	}
+	narrow := loader(30)
+	stop, err := narrow.stop(hub, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "exactly the limit is still traced")
+	require.Len(t, narrow.evidence().Labels, 1)
+
+	wide := loader(29)
+	stop, err = wide.stop(hub, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, stop, "a validator operator account is not exempt")
+	src, err := wide.distributor(hub, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, stop, src)
+	stop, err = wide.stop(hub, flowPGWindowEnd, flowPGWindowEnd.AddDate(0, 2, 0))
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "the count is over the trace window only")
+	labels := wide.evidence().Labels
+	require.Len(t, labels, 2)
+	require.Equal(t, labelValidatorOperator, labels[0].Kind, "the operator label is kept")
+	require.Equal(t, labelWideDistributor, labels[1].Kind)
+	require.Equal(t, flowFanoutHeuristic, labels[1].Source)
+	require.Equal(t, "more than 29 distinct receivers of uatom from 2025-01-01 to 2025-04-01", labels[1].Evidence)
+	require.Equal(t, flowStop{}, wide.known(hub), "known never reads the index")
+
+	// At the real threshold: a wallet just under it is still traced, one
+	// receiver more is a distributor.
+	const big = "cosmos1nearlywide"
+	require.NoError(t, s.db.Exec("INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', ?, 'cosmos1crowd'||g, '2025-02-01T00:00:00Z' FROM generate_series(1, ?) g", big, flowFanoutMaxReceivers-1).Error)
+	full := &dbFlowLoader{s: s, chain: apiMainnet, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: true}
+	stop, err = full.stop(big, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "49,999 receivers are still traced")
+	require.NoError(t, s.db.Exec("INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) VALUES ('transfer', '1', 'uatom', ?, 'cosmos1crowdlast', '2025-02-02T00:00:00Z'), ('transfer', '1', 'uatom', ?, 'cosmos1crowd7', '2025-02-02T00:00:00Z')", big, big).Error)
+	stop, err = full.stop(big, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{}, stop, "exactly 50,000 receivers are still traced")
+	require.NoError(t, s.db.Exec("INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) VALUES ('transfer', '1', 'uatom', ?, 'cosmos1crowdnext', '2025-02-03T00:00:00Z')", big).Error)
+	stop, err = full.distributor(big, flowPGWindowStart, flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, flowStop{Class: flowWideDistributor, Detail: flowFanoutHeuristic}, stop, "50,001 receivers make a distributor")
+
+	var stored int64
+	require.NoError(t, s.db.Model(&AddressLabel{}).Where("kind = ?", labelWideDistributor).Count(&stored).Error)
+	require.Zero(t, stored, "a wide distributor depends on the window and is never stored as a label")
 }
 
 func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
@@ -115,6 +195,12 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	validators, err := s.commissionValidators(apiMainnet)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{flowPGValidator, flowPGOther}, validators, "testnet-only validators are not traced on the Hub")
+	first, err := s.commissionFirstWithdrawals(apiMainnet)
+	require.NoError(t, err)
+	require.ElementsMatch(t, validators, slices.Collect(maps.Keys(first)), "the expected list is the same validators, with their first withdrawal")
+	for _, at := range first {
+		require.False(t, at.IsZero())
+	}
 
 	op := operatorAccount(flowPGValidator)
 	require.NoError(t, s.db.Create(&AddressLabel{Chain: apiMainnet, Address: op, Name: "Named Exchange", Kind: labelExchange, Source: "manual", CreatedAt: nowUTC()}).Error)
@@ -139,18 +225,56 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	for _, l := range labels {
 		loader.labels[l.Address] = l
 	}
-	stop, err := loader.stop(moduleAddress("distribution"))
+	stop, err := loader.stop(moduleAddress("distribution"), flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowCommunityPool, stop.Class)
-	stop, err = loader.stop(ics20EscrowAddress("transfer", "channel-141"))
+	stop, err = loader.stop(ics20EscrowAddress("transfer", "channel-141"), flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowIBCOut, Detail: "transfer/channel-141"}, stop)
-	stop, err = loader.stop(op)
+	stop, err = loader.stop(op, flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowExchange, Detail: "Named Exchange"}, stop)
-	stop, err = loader.stop(flowPGDeposit)
+	stop, err = loader.stop(flowPGDeposit, flowPGWindowStart, flowPGWindowEnd)
 	require.NoError(t, err)
 	require.Equal(t, flowStop{Class: flowExchangeLike, Detail: flowMemoHeuristic}, stop)
+	// Workers share one loader: lookups run while the memo heuristic stores
+	// a new label. Run under -race.
+	shared := &dbFlowLoader{s: s, chain: apiMainnet, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}}
+	for _, l := range labels {
+		shared.labels[l.Address] = l
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 8; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				got, err := shared.stop(op, flowPGWindowStart, flowPGWindowEnd)
+				if err == nil && got.Class != flowExchange {
+					err = fmt.Errorf("labelled address stopped as %s", got.Class)
+				}
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+			errs <- nil
+		}()
+		go func() {
+			defer wg.Done()
+			got, err := shared.stop(flowPGDeposit, flowPGWindowStart, flowPGWindowEnd)
+			if err == nil && got.Class != flowExchangeLike {
+				err = fmt.Errorf("deposit address stopped as %s", got.Class)
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 	var inferred AddressLabel
 	require.NoError(t, s.db.Where("chain = ? AND address = ?", apiMainnet, flowPGDeposit).First(&inferred).Error)
 	require.Equal(t, labelExchangeLike, inferred.Kind, "the inferred label is stored with its evidence")
@@ -240,8 +364,62 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 	require.NoError(t, s.saveCommissionFlows(flowPGRun(flowPGOther, flowStatusReconciled, `{"2025-02":"300000"}`), flowPGRows(flowPGOther,
 		[3]string{flowPGFeb, flowExchange, "300000"})))
 	var hub CommissionFlowsHub
+	chain := chainParam("cosmoshub")
+
+	// Until the list of validators that ever withdrew commission is known
+	// the Hub has no true coverage to give, so it asks the caller to retry
+	// instead of stating 0 of 0. An empty list is not a known list either.
+	s.flowExp = map[string]*flowExpected{chain: {loading: true}}
+	rec = flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusServiceUnavailable, nil)
+	require.Equal(t, "60", rec.Header().Get("Retry-After"))
+	require.NotContains(t, rec.Body.String(), `"expected"`)
+	flowPGExpect(s, chain)
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusServiceUnavailable, nil)
+	// While any of them has no run, the Hub shows coverage, not totals.
+	flowPGExpect(s, chain, flowPGValidator, flowPGOther, "cosmosvaloper1untraced")
+	hub = CommissionFlowsHub{}
 	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.False(t, hub.Complete)
+	require.Equal(t, 2, hub.Traced)
+	require.Equal(t, 3, hub.Expected)
+	require.Empty(t, hub.Months, "two of three validators is not a Hub figure")
+
+	// The daily trace stores a run for every validator that ever withdrew
+	// commission, including one with none since the trace start, so a full
+	// run completes the set.
+	require.NoError(t, s.saveCommissionFlows(flowPGRun("cosmosvaloper1untraced", flowStatusOK, "{}"), nil))
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.True(t, hub.Complete, "a run with no commission in the window still counts as traced")
+	require.Equal(t, 3, hub.Traced)
 	require.Equal(t, "2.8", hub.Months[1].Withdrawn.String())
+	require.NoError(t, s.db.Where("validator = ?", "cosmosvaloper1untraced").Delete(&CommissionFlowRun{}).Error)
+
+	// A validator that first withdrew after the served as_of is not expected
+	// of a trace that ends before it.
+	flowPGExpect(s, chain, flowPGValidator, flowPGOther)
+	s.flowExp[chain].first["cosmosvaloper1later"] = flowPGWindowEnd.AddDate(1, 0, 0)
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.True(t, hub.Complete)
+	require.Equal(t, 2, hub.Traced)
+	require.Equal(t, 2, hub.Expected)
+	require.Equal(t, "2.8", hub.Months[1].Withdrawn.String())
+	require.Equal(t, 0, hub.Unreconciled.Validators)
+
+	// A run whose rebuilt balances do not match the chain is left out of both
+	// sides and counted as left out, with the commission it withdrew.
+	drift := flowPGRun(flowPGOther, flowStatusDrift, `{"2025-02":"300000"}`)
+	require.NoError(t, s.saveCommissionFlows(drift, flowPGRows(flowPGOther, [3]string{flowPGFeb, flowExchange, "300000"})))
+	hub = CommissionFlowsHub{}
+	flowPGGet(t, s.handleCommissionFlowsHub, "/commission-flows?chain=cosmoshub", http.StatusOK, &hub)
+	require.True(t, hub.Complete)
+	require.Equal(t, "2.5", hub.Months[1].Withdrawn.String())
+	require.Equal(t, "0.3", hub.Unreconciled.Withdrawn.String())
+	require.Equal(t, 1, hub.Unreconciled.Validators)
+	for _, l := range hub.Months[1].Flows {
+		require.NotEqual(t, flowExchange, l.Class, "only the drifted validator sent February commission to an exchange")
+	}
 
 	failed := flowPGRun(flowPGOther, flowStatusError, "{}")
 	failed.Reason = "node unreachable"
@@ -267,4 +445,157 @@ func TestCommissionFlowsSaveAndServePostgres(t *testing.T) {
 	for _, l := range hub.Months[1].Flows {
 		require.NotEqual(t, flowExchange, l.Class, "only the failed validator sent February commission to an exchange")
 	}
+}
+
+func flowPGExpect(s *Server, chain string, validators ...string) {
+	first := map[string]time.Time{}
+	for _, v := range validators {
+		first[v] = flowPGWindowStart
+	}
+	s.flowExp = map[string]*flowExpected{chain: {first: first, at: time.Now()}}
+}
+
+// A returning one-hop ATOM row counts only when its message credited the
+// wallet that exact native amount. Failed receives (an error acknowledgement
+// emits its coin events under another type) and credits to another account
+// do not.
+func TestFlowReturnCreditsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	holder := flowPGReceiver1
+	for _, sql := range []string{
+		"CREATE TABLE message_event_types (id bigint, type text)",
+		"CREATE TABLE message_events (id bigint, message_id bigint, message_event_type_id bigint, index bigint)",
+		"CREATE TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TABLE message_event_attributes (id bigint, message_event_id bigint, message_event_attribute_key_id bigint, value text, index bigint)",
+		"INSERT INTO message_event_types VALUES (1,'coin_received'),(2,'ibccallbackerror-coin_received')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'receiver'),(2,'amount')",
+		// Message 501: credited. 502: error ack. 503: credited to someone else.
+		// 504: credited in a list of coins.
+		"INSERT INTO message_events VALUES (1,501,1,0),(2,502,2,0),(3,503,1,0),(4,504,1,0)",
+		"INSERT INTO message_event_attributes VALUES " +
+			"(1,1,1,'" + holder + "',0),(2,1,2,'26560000uatom',1)," +
+			"(3,2,1,'" + holder + "',0),(4,2,2,'1000000uatom',1)," +
+			"(5,3,1,'" + flowPGReceiver2 + "',0),(6,3,2,'7000000uatom',1)," +
+			"(7,4,1,'" + holder + "',0),(8,4,2,'5ibc/ABC,9000000uatom',1)",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	row := func(msg uint, amount string) tax.TaxableEvent {
+		return tax.TaxableEvent{MessageID: msg, Category: string(tax.CategoryIBCIn), Amount: amount, Denom: "transfer/channel-1/uatom", ToAddr: holder}
+	}
+	rows := []tax.TaxableEvent{row(501, "26560000"), row(502, "1000000"), row(503, "7000000"), row(504, "9000000")}
+	got, err := s.flowReturnCredits(holder, rows)
+	require.NoError(t, err)
+	var kept []uint
+	for _, e := range rows {
+		if got[flowCredit{e.MessageID, e.Amount + "uatom"}] {
+			kept = append(kept, e.MessageID)
+		}
+	}
+	require.Equal(t, []uint{501, 504}, kept)
+}
+
+// The payout read against real tables: a merged 2021-style transfer event
+// pays the wallet a 2 uatom reward beside 6198375 uatom of principal, and a
+// newer message pays the wallet as another delegator's withdraw address.
+func TestFlowRewardPayoutsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	dist := moduleAddress("distribution")
+	for _, sql := range []string{
+		"ALTER TABLE blocks ADD COLUMN time_stamp timestamptz",
+		"UPDATE blocks SET time_stamp = '2025-01-01T00:00:00Z'::timestamptz + (height || ' minutes')::interval",
+		"CREATE TABLE message_event_types (id bigint, type text)",
+		"CREATE TABLE message_events (id bigint, message_id bigint, index bigint, message_event_type_id bigint)",
+		"CREATE TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TABLE message_event_attributes (id bigserial, message_event_id bigint, value text, index bigint, message_event_attribute_key_id bigint)",
+		"INSERT INTO message_event_types VALUES (1,'transfer'),(2,'coin_received')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'recipient'),(2,'sender'),(3,'amount'),(4,'receiver')",
+		"INSERT INTO message_events VALUES (10,1,1,1),(11,2,0,2),(12,2,3,1),(13,3,0,1)",
+		"INSERT INTO message_event_attributes (message_event_id, value, index, message_event_attribute_key_id) VALUES " +
+			"(10,'" + flowPGReceiver1 + "',0,1),(10,'" + dist + "',1,2),(10,'2uatom',2,3)," +
+			"(10,'" + flowPGReceiver1 + "',3,1),(10,'cosmos1notbonded',4,2),(10,'6198375uatom',5,3)," +
+			"(11,'" + flowPGReceiver1 + "',0,4),(11,'50uatom',1,3)," +
+			"(12,'" + flowPGReceiver1 + "',0,1),(12,'" + dist + "',1,2),(12,'50uatom,7ibc/ABC',2,3)," +
+			"(13,'" + flowPGReceiver2 + "',0,1),(13,'" + dist + "',1,2),(13,'9uatom',2,3)",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	start, end := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	paid, err := s.flowRewardPayouts(apiMainnet, flowPGReceiver1, start, end)
+	require.NoError(t, err)
+	require.Len(t, paid, 2)
+	require.Equal(t, "2", paid[1].Amount.String())
+	require.Equal(t, "50", paid[2].Amount.String())
+	require.Equal(t, int64(200), paid[2].Key.Height)
+	// Message 2 has no reward row to the wallet: it becomes a reward inflow.
+	got := reconcileRewardPayouts(flowPGReceiver1, nil, paid)
+	require.Len(t, got, 2)
+	none, err := s.flowRewardPayouts(apiMainnet, flowPGReceiver1, end, end.AddDate(0, 1, 0))
+	require.NoError(t, err)
+	require.Empty(t, none)
+}
+
+// The share-record read against real tables: a redeem by another wallet
+// settles the receiver's record (the record's account withdraws 40 uatom and
+// pays it on), beside an ordinary 50 uatom distribution payout and a plain
+// send from the same record account with no settlement, which stays out.
+func TestFlowShareRecordPayoutsPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	dist := moduleAddress("distribution")
+	const record = "cosmos1record"
+	for _, sql := range []string{
+		"ALTER TABLE blocks ADD COLUMN time_stamp timestamptz",
+		"INSERT INTO blocks VALUES (6,1,250),(7,1,260)",
+		"INSERT INTO txes VALUES (5,6,'E',0,''),(6,7,'F',0,'')",
+		"INSERT INTO messages VALUES (5,5),(6,6)",
+		"UPDATE blocks SET time_stamp = '2025-01-01T00:00:00Z'::timestamptz + (height || ' minutes')::interval",
+		"CREATE TABLE message_event_types (id bigint, type text)",
+		"CREATE TABLE message_events (id bigint, message_id bigint, index bigint, message_event_type_id bigint)",
+		"CREATE TABLE message_event_attribute_keys (id bigint, key text)",
+		"CREATE TABLE message_event_attributes (id bigserial, message_event_id bigint, value text, index bigint, message_event_attribute_key_id bigint)",
+		"INSERT INTO message_event_types VALUES (1,'transfer'),(18,'withdraw_rewards'),(1245,'withdraw_tokenize_share_reward')",
+		"INSERT INTO message_event_attribute_keys VALUES (1,'recipient'),(2,'sender'),(3,'amount'),(4,'delegator'),(5,'withdraw_address'),(6,'validator')",
+		"INSERT INTO message_events VALUES (12,2,3,1),(20,5,3,1),(21,5,5,18),(22,5,12,1),(23,5,14,1245),(30,6,0,18),(31,6,1,1)",
+		"INSERT INTO message_event_attributes (message_event_id, value, index, message_event_attribute_key_id) VALUES " +
+			"(12,'" + flowPGReceiver1 + "',0,1),(12,'" + dist + "',1,2),(12,'50uatom',2,3)," +
+			"(20,'" + record + "',0,1),(20,'" + dist + "',1,2),(20,'40uatom',2,3)," +
+			"(21,'40uatom',0,3),(21,'" + flowPGValidator + "',1,6),(21,'" + record + "',2,4)," +
+			"(22,'" + flowPGReceiver1 + "',0,1),(22,'" + record + "',1,2),(22,'7ibc/ABC,40uatom',2,3)," +
+			"(23,'" + flowPGReceiver1 + "',0,5),(23,'7ibc/ABC,40uatom',1,3)," +
+			"(30,'70uatom',0,3),(30,'" + record + "',1,4)," +
+			"(31,'" + flowPGReceiver1 + "',0,1),(31,'" + record + "',1,2),(31,'70uatom',2,3)",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	start, end := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	paid, err := s.flowRewardPayouts(apiMainnet, flowPGReceiver1, start, end)
+	require.NoError(t, err)
+	require.Len(t, paid, 2)
+	require.Equal(t, "50", paid[2].Amount.String())
+	require.Equal(t, "40", paid[5].Amount.String())
+	require.Equal(t, int64(250), paid[5].Key.Height)
+	_, sent := paid[6]
+	require.False(t, sent)
+}
+
+// Withdraw-address moves are not payments to a receiver: they add nobody to a
+// wallet's fan-out and no sender to a deposit-style count.
+func TestCommissionFlowWithdrawAddressMovesPostgres(t *testing.T) {
+	s := flowPGServer(t)
+	const delegator = "cosmos1delegatorwide"
+	for _, sql := range []string{
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp) SELECT 'transfer', '1', 'uatom', '" + delegator + "', 'cosmos1payee'||g, '2025-02-01T00:00:00Z' FROM generate_series(1,5) g",
+		"INSERT INTO taxable_events (category, amount, denom, from_addr, to_addr, timestamp, reward_trigger) VALUES ('transfer', '7', 'uatom', '" + delegator + "', 'cosmos1withdrawaddr', '2025-02-02T00:00:00Z', '" + tax.TriggerWithdrawAddress + "')",
+		"INSERT INTO txes VALUES (900, 5, 'W', 0, 'acct900001')",
+		"INSERT INTO messages VALUES (900, 900)",
+		"INSERT INTO taxable_events (message_id, category, amount, denom, from_addr, to_addr, timestamp, reward_trigger) VALUES (900, 'transfer', '7', 'uatom', 'cosmos1anotherdelegator', '" + flowPGDeposit + "', '2025-03-01T00:00:00Z', '" + tax.TriggerWithdrawAddress + "')",
+	} {
+		require.NoError(t, s.db.Exec(sql).Error, sql)
+	}
+	n, err := s.fanoutReceivers(delegator, flowPGWindowStart, flowPGWindowEnd, 100)
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	senders, err := s.memoDepositSenders(flowPGDeposit)
+	require.NoError(t, err)
+	require.Equal(t, 120, senders)
 }

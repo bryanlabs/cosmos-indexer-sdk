@@ -152,3 +152,35 @@ func TestMatchedRefundRestoresOriginalLots(t *testing.T) {
 		})
 	}
 }
+
+// A Skip Go send of IBC Eureka WBTC keeps its full trace through the v2 client
+// 08-wasm-1369, which ParseDenomTrace does not read as a channel hop; the error
+// acknowledgement returns the same voucher by its hash.
+func TestRefundMatchesSendKeptAsClientTrace(t *testing.T) {
+	const trace = "transfer/08-wasm-1369/0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+	const voucher = "ibc/D742E8566B0B8CC8F569D950051C09CF57988A88F0E45574BFB3079D41DE6462"
+	sent := time.Date(2026, 1, 29, 5, 35, 7, 0, time.UTC)
+	events := func(refundDenom string) []tax.TaxableEvent {
+		return []tax.TaxableEvent{
+			{ID: 1, Category: "ibc_out", FromAddr: apiWallet, Amount: "773106", Denom: trace, Detail: basisPacket, Timestamp: sent},
+			{ID: 2, Category: string(tax.CategoryProtocolWithdrawal), ToAddr: apiWallet, Amount: "773106", Denom: refundDenom, Detail: basisPacket, RewardTrigger: ibcErrorAckRefund, Timestamp: sent.Add(12 * time.Second)},
+		}
+	}
+	end := sent.AddDate(0, 10, 0)
+	require.Equal(t, voucher, ibcRefundDenom(trace))
+	require.Len(t, matchIBCRefunds(events(voucher)), 2)
+	require.True(t, ibcBasisReadiness(events(voucher), end).ExportReady)
+
+	other := fmt.Sprintf("ibc/%X", sha256.Sum256([]byte("transfer/08-wasm-1370/0x2260fac5e5542a773aa44fbcfedf7c193bc2c599")))
+	require.Empty(t, matchIBCRefunds(events(other)))
+	require.False(t, ibcBasisReadiness(events(other), end).ExportReady)
+}
+
+func TestClientTraceVoucherNeedsClientOrChannelHops(t *testing.T) {
+	for _, denom := range []string{"transfer/08-wasm-1369/0x2260fac5e5542a773aa44fbcfedf7c193bc2c599", "transfer/08-wasm-1369/transfer/channel-0/uatom", "transfer/07-tendermint-0/gamm/pool/1"} {
+		require.Equal(t, fmt.Sprintf("ibc/%X", sha256.Sum256([]byte(denom))), ibcRefundDenom(denom), denom)
+	}
+	for _, denom := range []string{"transfer/08-wasm/0x2260", "transfer/08-wasm-1369/", "transfer/08-wasm-1369", "/08-wasm-1369/uatom", "transfer/not-a-channel/uusdc"} {
+		require.Equal(t, denom, ibcRefundDenom(denom), denom)
+	}
+}

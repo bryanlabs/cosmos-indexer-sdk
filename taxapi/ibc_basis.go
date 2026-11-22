@@ -1,7 +1,9 @@
 package taxapi
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -9,6 +11,8 @@ import (
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	"github.com/DefiantLabs/cosmos-indexer/tax"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
+	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
+	channeltypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
 const (
@@ -42,6 +46,28 @@ func isIBCRefund(trigger string) bool {
 	return trigger == ibcTimeoutRefund || trigger == ibcErrorAckRefund
 }
 
+// ibcRefundDenom identifies a voucher by the hash of its complete ICS-20
+// trace. Legacy sends can retain the trace while native refunds name its hash.
+// Never strip a hop or compare base denoms: distinct routes are distinct coins.
+func ibcRefundDenom(denom string) string {
+	trace := transfertypes.ParseDenomTrace(denom)
+	if trace.Path != "" && trace.Validate() == nil {
+		return trace.IBCDenom()
+	}
+	// ParseDenomTrace reads only channel-N hops, so a trace through an IBC v2
+	// client (transfer/08-wasm-1369/0x...) comes back unparsed. Its voucher is
+	// still the hash of the complete trace.
+	parts := strings.Split(denom, "/")
+	hops := 0
+	for hops*2+2 < len(parts) && parts[hops*2] != "" && (channeltypes.IsValidChannelID(parts[hops*2+1]) || clienttypes.IsValidClientID(parts[hops*2+1])) {
+		hops++
+	}
+	if hops > 0 && parts[len(parts)-1] != "" {
+		return fmt.Sprintf("%s/%X", transfertypes.DenomPrefix, sha256.Sum256([]byte(denom)))
+	}
+	return denom
+}
+
 // matchIBCRefunds pairs each refund with the one send it returned: same owner,
 // same packet identity, same coin, and the refund no earlier than the send. A
 // matched send never left the wallet, so undoing it keeps the original lots
@@ -70,7 +96,7 @@ func matchIBCRefunds(events []tax.TaxableEvent) map[uint]string {
 			continue
 		}
 		r, o := returned[0], sent[0]
-		if r.ID == 0 || o.ID == 0 || r.Denom == "" || r.Denom != o.Denom || r.Amount == "" || r.Amount != o.Amount || r.Timestamp.Before(o.Timestamp) {
+		if r.ID == 0 || o.ID == 0 || r.Denom == "" || ibcRefundDenom(r.Denom) != ibcRefundDenom(o.Denom) || r.Amount == "" || r.Amount != o.Amount || r.Timestamp.Before(o.Timestamp) {
 			continue
 		}
 		pairs[o.ID] = ibcRefundRoleSend
@@ -191,28 +217,42 @@ func (s *Server) retainLegacyOutboundIdentities(events []tax.TaxableEvent) error
 		}
 	}
 	var ids []uint
+	seen := map[uint]bool{}
 	for _, e := range events {
-		if e.Category == string(tax.CategoryIBCOut) && tax.IBCPacketKey(e.Detail) == "" && owners[e.FromAddr] {
+		if e.Category == string(tax.CategoryIBCOut) && tax.IBCPacketKey(e.Detail) == "" && owners[e.FromAddr] && !seen[e.MessageID] {
 			ids = append(ids, e.MessageID)
+			seen[e.MessageID] = true
 		}
 	}
 	if len(ids) == 0 {
 		return nil
 	}
-	var attrs []struct {
+	type packetAttribute struct {
 		MessageID uint
 		EventID   uint
 		Key       string
 		Value     string
 	}
-	if err := s.db.Table("message_events me").
-		Select("me.message_id, me.id AS event_id, k.key, a.value").
-		Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
-		Joins("JOIN message_event_attributes a ON a.message_event_id=me.id").
-		Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
-		Where("me.message_id IN ? AND et.type = ?", ids, "send_packet").
-		Order("me.id, a.index").Scan(&attrs).Error; err != nil {
-		return err
+	var attrs []packetAttribute
+	const packetIdentityBatch = 32
+	for start := 0; start < len(ids); start += packetIdentityBatch {
+		end := start + packetIdentityBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var batch []packetAttribute
+		if err := s.db.Table("message_events me").
+			Select("me.message_id, me.id AS event_id, k.key, a.value").
+			Joins("JOIN message_event_types et ON et.id=me.message_event_type_id").
+			// Preserve per-event indexed reads instead of exposing all wallet
+			// packet IDs to a single global attribute-table join.
+			Joins("JOIN LATERAL (SELECT message_event_attribute_key_id, value, index FROM message_event_attributes WHERE message_event_id=me.id OFFSET 0) a ON true").
+			Joins("JOIN message_event_attribute_keys k ON k.id=a.message_event_attribute_key_id").
+			Where("me.message_id IN ? AND et.type = ?", ids[start:end], "send_packet").
+			Order("me.id, a.index").Scan(&batch).Error; err != nil {
+			return fmt.Errorf("outbound packet identities batch %d/%d: %w", start/packetIdentityBatch+1, (len(ids)+packetIdentityBatch-1)/packetIdentityBatch, err)
+		}
+		attrs = append(attrs, batch...)
 	}
 	logs := map[uint]*txlog.LogMessage{}
 	var last uint

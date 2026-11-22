@@ -195,7 +195,7 @@ func TestIndexCoveragePeriod(t *testing.T) {
 	require.Equal(t, coverageStatusComplete, p.Status)
 	require.True(t, p.BeforeGenesis)
 	require.Empty(t, p.Warning)
-	require.Contains(t, p.Note, "earlier chains")
+	require.Contains(t, p.Note, "earlier Hub chains")
 
 	p = snap.Period(day("2024-08-01"), day("2024-09-01"))
 	require.False(t, p.Complete)
@@ -206,10 +206,25 @@ func TestIndexCoveragePeriod(t *testing.T) {
 	require.Equal(t, "2024-06-01", p.Start)
 	require.Equal(t, "2024-07-31", p.End)
 
+	// A period entirely before genesis has no data in reports, so it is not
+	// covered: an empty report must not be stamped complete.
 	p = snap.Period(day("2023-01-01"), day("2024-01-01"))
-	require.True(t, p.Complete, "no backfill adds an earlier chain, so this never becomes more complete")
-	require.Empty(t, p.Warning)
-	require.Contains(t, p.Note, "entirely before fixture-1 genesis")
+	require.False(t, p.Complete)
+	require.Equal(t, coverageStatusIncomplete, p.Status)
+	require.True(t, p.BeforeGenesis)
+	require.Equal(t, "2023-01-01", p.Start)
+	require.Equal(t, "2023-12-31", p.End)
+	require.Empty(t, p.IncompleteYears)
+	require.Empty(t, p.Note)
+	require.Contains(t, p.Warning, "entirely before fixture-1 genesis (2024-06-01)")
+	require.Contains(t, p.Warning, "not in reports yet")
+
+	// The day before genesis is the last day that is not covered.
+	p = snap.Period(day("2024-05-01"), day("2024-06-01"))
+	require.False(t, p.Complete)
+	require.Equal(t, coverageStatusIncomplete, p.Status)
+	p = snap.Period(day("2024-05-01"), day("2024-06-02"))
+	require.True(t, p.Complete, "a period that reaches genesis is judged from genesis on")
 
 	p = snap.Period(day("2025-06-01"), day("2025-07-01"))
 	require.False(t, p.Complete)
@@ -494,13 +509,40 @@ func TestPeriodCoverageHeaders(t *testing.T) {
 	rec = httptest.NewRecorder()
 	srv.withPeriodCoverage(echo)(rec, httptest.NewRequest(http.MethodGet, "/positions?date=2024-12-31", nil))
 	require.Equal(t, "incomplete", rec.Header().Get(headerIndexCoverage))
+
+	// An events request entirely before genesis returns no rows; its header
+	// must not call that empty answer complete.
+	rec = httptest.NewRecorder()
+	srv.withPeriodCoverage(echo)(rec, httptest.NewRequest(http.MethodGet, "/events?start=2023-03-01&end=2024-06-01", nil))
+	require.Equal(t, "incomplete", rec.Header().Get(headerIndexCoverage))
+	require.Contains(t, rec.Header().Get(headerIndexCoverageWarning), "entirely before fixture-1 genesis")
+	require.Empty(t, rec.Header().Get(headerIndexCoverageYears))
+	require.Empty(t, rec.Header().Get(headerIndexCoverageNote))
+}
+
+func TestPeriodBeforeHubGenesis(t *testing.T) {
+	day := func(s string) time.Time { d, _ := time.Parse(apiDateLayout, s); return d }
+	snap := &IndexCoverage{Chain: apiHubChainID, Status: coverageStatusReady, GenesisDate: dayString(hubGenesisDate), TipTime: day("2026-11-17")}
+	snap.ranges = []dayRange{{From: hubGenesisDate, Through: day("2026-11-17")}}
+
+	p := snap.Period(day("2019-03-01"), day("2021-02-18"))
+	require.Equal(t, coverageStatusIncomplete, p.Status)
+	require.False(t, p.Complete)
+	require.True(t, p.BeforeGenesis)
+	require.Equal(t, "2019-03-01", p.Start)
+	require.Equal(t, "2021-02-17", p.End)
+	require.Equal(t, "This period is entirely before cosmoshub-4 genesis (2021-02-18). Earlier Cosmos Hub chains are not in reports yet, so this report has no data for it.", p.Warning)
+
+	p = snap.Period(day("2021-02-18"), day("2021-02-19"))
+	require.Equal(t, coverageStatusComplete, p.Status, "genesis day itself is covered")
+	require.False(t, p.BeforeGenesis)
 }
 
 func TestCoverageTextHasNoEmDash(t *testing.T) {
 	snap := refreshed(t, fixtureScanner(gappedSource(), false))
 	day := func(s string) time.Time { d, _ := time.Parse(apiDateLayout, s); return d }
 	before := snap.Period(day("2023-01-01"), day("2025-01-01"))
-	for _, s := range []string{snap.Note, before.Warning, before.Note, snap.Period(day("2023-01-01"), day("2024-01-01")).Note, unknownPeriodCoverage().Warning} {
+	for _, s := range []string{snap.Note, before.Warning, before.Note, snap.Period(day("2023-01-01"), day("2024-01-01")).Warning, unknownPeriodCoverage().Warning} {
 		require.False(t, strings.ContainsAny(s, "—–"), s)
 	}
 }

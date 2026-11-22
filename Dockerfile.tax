@@ -4,6 +4,9 @@
 #   taxrepair  - replays stored event logs through the current parser (one-off Jobs)
 #   taxwatch   - Cosmos Hub release watcher (CronJob)
 #   taxledger  - extends the balance ledger scan from the archive block cache (one-off Jobs)
+#   taxstatement - fills, refreshes and checks the validator statement summary (Job and CronJobs)
+#   taxcoverage  - keeps the /coverage rollup current (CronJob)
+#   taxstaking   - seeds and extends the /tax/staking day tables from our node (CronJob)
 #
 # Both are pure-Go static binaries (CGO off): wasmvm is only an indirect dep and is
 # never invoked, so no muslc/wasmvm static-lib dance is needed.
@@ -20,7 +23,11 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxapid ./taxapid && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxrepair ./taxrepair && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxwatch ./taxwatch && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxledger ./taxledger
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxledger ./taxledger && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstatement ./taxstatement && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxcoverage ./taxcoverage && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstaking ./taxstaking && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxcommissionexport ./taxcommissionexport
 
 FROM build AS test
 # Pure decoder/classification and bounded-enqueue tests only; no live DB or RPC.
@@ -32,12 +39,20 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     CGO_ENABLED=0 go test -p 1 ./core ./db -run '^(TestIndexedBlockWindow|TestBlockIndex|TestOpaque|TestFeePayer|TestFeeUpsert|TestMessageEvidence|TestMessageParserFailureDryRun|TestTxResults|TestKnownTransferOriginalWireBytes|TestKnownAuthzEnvelope)' -count=1
 
 FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+ARG SOURCE_COMMIT
+ARG VCS_REF=${SOURCE_COMMIT:-unknown}
+LABEL org.opencontainers.image.source="https://github.com/bryanlabs/cosmos-indexer-sdk"
+LABEL org.opencontainers.image.revision="${VCS_REF}"
 RUN apk add --no-cache ca-certificates && adduser -D -u 1137 tax
 COPY --from=build /out/taxindexer /usr/local/bin/taxindexer
 COPY --from=build /out/taxapid /usr/local/bin/taxapid
 COPY --from=build /out/taxrepair /usr/local/bin/taxrepair
 COPY --from=build /out/taxwatch /usr/local/bin/taxwatch
 COPY --from=build /out/taxledger /usr/local/bin/taxledger
+COPY --from=build /out/taxstatement /usr/local/bin/taxstatement
+COPY --from=build /out/taxcoverage /usr/local/bin/taxcoverage
+COPY --from=build /out/taxstaking /usr/local/bin/taxstaking
+COPY --from=build /out/taxcommissionexport /usr/local/bin/taxcommissionexport
 USER tax
 # Default entrypoint is the API; the indexer Deployment overrides command.
 ENTRYPOINT ["/usr/local/bin/taxapid"]

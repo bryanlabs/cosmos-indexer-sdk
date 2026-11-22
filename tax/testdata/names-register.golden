@@ -1,1 +1,2 @@
 expense|2000000|uatom||cosmos1yas0v2g5edqs6wd6rrxg8jstzdvsd3zlw56m9s|cosmos16nff0lmuegn2zr6ca3dp8jnqltpq2c9ayhmqn3avjq0wne95h2xqkhn9qe||name_registration|{"contract":"cosmos16nff0lmuegn2zr6ca3dp8jnqltpq2c9ayhmqn3avjq0wne95h2xqkhn9qe","name":"twix.og","protocol":"atom.names"}
+transfer|2000000|uatom||cosmos16nff0lmuegn2zr6ca3dp8jnqltpq2c9ayhmqn3avjq0wne95h2xqkhn9qe|cosmos1c3a2atultm8rqu2v66454m00tvj6v74nel6lag|||{"contract":"cosmos16nff0lmuegn2zr6ca3dp8jnqltpq2c9ayhmqn3avjq0wne95h2xqkhn9qe","fallback":"bank","name":"atom.names registry","protocol":"atom.names"}

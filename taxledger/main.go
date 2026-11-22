@@ -15,6 +15,11 @@
 // With -commission-flows it traces every validator's withdrawn commission
 // from -commission-flows-from to today and stores where it went (OPS-818).
 //
+// With -failed-fees-to it instead settles the fee outcome of every failed
+// transaction from -floor up to that height that has none yet, reading the
+// archive block cache, and records them with -failed-fees-write. Before Gaia v6 the block results carry no coin
+// events, so the outcome follows from where the transaction failed.
+//
 // Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, and NODE_REST_API for
 // -days-from, -days-append and -commission-flows (which also reads
 // ORACLE_URL for denoms).
@@ -23,6 +28,7 @@ package main
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -30,6 +36,7 @@ import (
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
+	"github.com/spf13/viper"
 	"gorm.io/gorm"
 )
 
@@ -38,6 +45,29 @@ func env(k, d string) string {
 		return v
 	}
 	return d
+}
+
+func commissionRuntimeParams(flows bool, version string) []string {
+	if !flows {
+		return nil
+	}
+	params := []string{"jit=off"}
+	if version != "" {
+		// Private full-history bitmap reads benefit from page prefetch. This
+		// is a connection startup parameter, never a global database change.
+		params = append(params, "effective_io_concurrency=200")
+	}
+	return params
+}
+
+func validateCommissionReadTimeout(flows bool, version string, timeout time.Duration) error {
+	if timeout < 0 {
+		return fmt.Errorf("commission read snapshot timeout must not be negative")
+	}
+	if timeout != 0 && (!flows || strings.TrimSpace(version) == "") {
+		return fmt.Errorf("commission read snapshot timeout requires private versioned commission collection")
+	}
+	return nil
 }
 
 func main() {
@@ -57,9 +87,45 @@ func main() {
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
 	flowsWorkers := flag.Int("commission-workers", 4, "validators traced in parallel")
+	flowsVersion := flag.String("commission-output-version", "", "required immutable output version, leaves existing serving rows untouched")
+	flowsBuild := flag.String("commission-build", "", "required image digest or source build for this output version")
+	flowsAsOf := flag.String("commission-as-of", "", "required exclusive end date (YYYY-MM-DD UTC) for this output version")
+	flowsArchive := flag.String("commission-archive-config", "", "optional Secret-mounted probe.toml containing exact historical archive RPC")
+	flowsProfile := flag.String("commission-private-profile", "", "source-bound read-only private staging profile; never enables ordinary readiness")
+	flowsProfileSHA := flag.String("commission-private-profile-sha256", "", "exact immutable staging profile digest")
+	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
+	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
+	flowsMaxHops := flag.Int("commission-max-hops", 0, "private versioned runs only: wallets followed past the receiving wallets (0 keeps the default 3); the version must name it, e.g. -hops5")
+	flowsLabels := flag.String("commission-label-file", "", "private versioned runs only: an immutable label file whose digest the version names (-labels<first 12>)")
+	flowsLabelsSHA := flag.String("commission-label-file-sha256", "", "exact digest of --commission-label-file")
+	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
+	deriveTimeout := flag.Duration("commission-derive-statement-timeout", 2*time.Minute, "read only: per-query limit while deriving labels; a condition whose query hits it is recorded unmeasured")
+	flowsPrefetch := flag.Int("commission-wallet-prefetch", 0, "opt-in private versioned wallets one trace reads from the index ahead of its queue, each on its own connection (0 reads each wallet only when asked; results do not depend on it)")
+	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
+	failedTo := flag.Int64("failed-fees-to", 0, "record failed-tx fee outcomes from -floor below this height, then stop")
+	failedWrite := flag.Bool("failed-fees-write", false, "write the outcomes -failed-fees-to settles; without it the run only counts them")
 	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
 	flag.Parse()
+	if (*flowsProfile != "" || *flowsProfileSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsProfileSHA == "") {
+		log.Fatal("private profile requires versioned commission collection and exact digest")
+	}
+	if (*flowsCorrections != "" || *flowsCorrectionsSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsCorrections == "" || *flowsCorrectionsSHA == "") {
+		log.Fatal("native source corrections require exact manifests and private versioned commission collection")
+	}
+	if err := validateCommissionReadTimeout(*flows, *flowsVersion, *flowsReadTimeout); err != nil {
+		log.Fatal(err)
+	}
+	if *flowsPrefetch != 0 && (!*flows || strings.TrimSpace(*flowsVersion) == "") {
+		log.Fatal("commission wallet prefetch requires private versioned commission collection")
+	}
 
+	// The commission trace runs thousands of small per-wallet queries whose
+	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
+	// of work. Session-only, so other jobs and the API keep their settings.
+	runtime := commissionRuntimeParams(*flows, *flowsVersion)
+	if *deriveLabels != "" {
+		runtime = append(runtime, "default_transaction_read_only=on", fmt.Sprintf("statement_timeout=%d", deriveTimeout.Milliseconds()), "plan_cache_mode=force_custom_plan")
+	}
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
@@ -67,12 +133,41 @@ func main() {
 		env("DB_USER", "postgres"),
 		env("DB_PASS", "postgres"),
 		env("DB_LOG_LEVEL", "warn"),
+		runtime...,
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
+	if *deriveLabels != "" {
+		deriveFollowLabels(db, *chain, *flowsFrom, *flowsAsOf, *deriveLabels)
+		return
+	}
 	if *flows {
-		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers)
+		var profile *taxapi.CommissionPrivateProfile
+		if *flowsProfile != "" || *flowsProfileSHA != "" {
+			profile, err = taxapi.LoadCommissionPrivateProfile(*flowsProfile, *flowsProfileSHA)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		var corrections *taxapi.CommissionSourceCorrections
+		if *flowsCorrections != "" {
+			corrections, err = taxapi.LoadCommissionSourceCorrections(*flowsCorrections, *flowsCorrectionsSHA)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		var labels *taxapi.CommissionLabelFile
+		if *flowsLabels != "" || *flowsLabelsSHA != "" {
+			if *flowsProfile == "" {
+				log.Fatal("a label file requires private versioned commission collection")
+			}
+			labels, err = taxapi.LoadCommissionLabelFile(*flowsLabels, *flowsLabelsSHA, *chain)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		commissionFlows(db, *chain, *flowsFrom, *flowsOnly, *flowsWorkers, *flowsVersion, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, *flowsMaxHops, *flowsPrefetch)
 		return
 	}
 	if *daysAppend {
@@ -88,6 +183,14 @@ func main() {
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	if *failedTo > 0 {
+		n, err := srv.RecordFailedTxFees(*chain, node, *floor, *failedTo, *chunk, *workers, *failedWrite, log.Printf)
+		if err != nil {
+			log.Fatalf("failed-tx fees: %v", err)
+		}
+		log.Printf("failed-tx fees: %d charged, %d charged nothing, %d left unsettled (write=%v)", n.Charged, n.Uncharged, n.Unsettled, *failedWrite)
+		return
+	}
 	if *recheck {
 		if _, _, err := srv.RecheckIndexHoles(*chain, node, log.Printf); err != nil {
 			log.Fatalf("index holes: %v", err)
@@ -150,7 +253,14 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int) {
+	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
+		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
+	}
+	asOf, err := time.Parse(time.DateOnly, asOfText)
+	if err != nil {
+		log.Fatalf("-commission-as-of: %v", err)
+	}
 	from, err := time.Parse(time.DateOnly, fromText)
 	if err != nil {
 		log.Fatalf("-commission-flows-from: %v", err)
@@ -167,7 +277,40 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int) {
 			validators = append(validators, v)
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf); err != nil {
+	archiveRPC := ""
+	if archiveConfig != "" {
+		config := viper.New()
+		config.SetConfigFile(archiveConfig)
+		if err := config.ReadInConfig(); err != nil {
+			log.Fatal("cannot read commission archive configuration")
+		}
+		archiveRPC = config.GetString("probe.rpc")
+		if archiveRPC == "" {
+			log.Fatal("commission archive configuration has no RPC endpoint")
+		}
+	}
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, WalletPrefetch: prefetch, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops}); err != nil {
 		log.Fatalf("commission flows: %v", err)
 	}
+}
+
+// deriveFollowLabels writes the deposit-follow label file and its digest.
+func deriveFollowLabels(db *gorm.DB, chain, fromText, asOfText, out string) {
+	from, err := time.Parse(time.DateOnly, fromText)
+	if err != nil {
+		log.Fatalf("-commission-flows-from: %v", err)
+	}
+	asOf, err := time.Parse(time.DateOnly, asOfText)
+	if err != nil {
+		log.Fatalf("-commission-as-of: %v", err)
+	}
+	lf, err := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset).DeriveDepositFollowLabels(chain, from, asOf)
+	if err != nil {
+		log.Fatalf("derive labels: %v", err)
+	}
+	digest, err := taxapi.WriteCommissionLabelFile(out, lf)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("label file %s: %d labels, %d unfollowed, %d profiles, sha256 %s", out, len(lf.Labels), len(lf.Unfollowed), len(lf.Profiles), digest)
 }

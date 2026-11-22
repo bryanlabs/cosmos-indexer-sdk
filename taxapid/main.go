@@ -110,8 +110,23 @@ func main() {
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
+	// Validator statements: the largest period (in planner-estimated rows) read
+	// on request, and how long one may run before it is stopped. Unset keeps
+	// the defaults in taxapi; a negative row limit turns the size check off.
+	statementRows, _ := strconv.ParseInt(os.Getenv("TAX_STATEMENT_MAX_ROWS"), 10, 64)
+	statementTimeout, _ := time.ParseDuration(os.Getenv("TAX_STATEMENT_TIMEOUT"))
+	srv.SetStatementLimits(statementRows, statementTimeout)
+	// The statement summary (filled by the taxstatement Job) is read whenever
+	// it is installed, built and passes its checks. TAX_STATEMENT_SUMMARY=off
+	// makes every statement read live rows only.
+	srv.SetStatementSummary(os.Getenv("TAX_STATEMENT_SUMMARY") != "off")
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
+	srv.WarmCommissionFlows("mainnet")
+	// Trims the report evidence journal (installed by taxevidence -install)
+	// past the report age limit. Without the journal every view of a cached
+	// report runs the full check.
+	srv.StartEvidenceJournalPrune(time.Hour, log.Printf)
 	// Per-year block coverage for /index-coverage and the coverage warning
 	// on reports. TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true counts a block only
 	// once its block events are indexed too; reports read transactions only,
@@ -121,6 +136,16 @@ func main() {
 		coverageEvery = d
 	}
 	srv.StartIndexCoverage(coverageEvery, os.Getenv("TAX_COVERAGE_REQUIRE_BLOCK_EVENTS") == "true", log.Printf)
+	// The earlier Hub chains (cosmoshub-1 to 3) in the legacy schema join
+	// reports once legacy.eras marks them published; the state is reread
+	// every TAX_LEGACY_ERAS_INTERVAL. TAX_LEGACY_ERAS=off never reads them.
+	if os.Getenv("TAX_LEGACY_ERAS") != "off" {
+		erasEvery := 5 * time.Minute
+		if d, err := time.ParseDuration(os.Getenv("TAX_LEGACY_ERAS_INTERVAL")); err == nil && d >= 10*time.Second {
+			erasEvery = d
+		}
+		srv.StartLegacyEras(erasEvery, log.Printf)
+	}
 
 	listen := env("LISTEN", ":8082")
 	log.Printf("tax-api listening on %s", listen)
