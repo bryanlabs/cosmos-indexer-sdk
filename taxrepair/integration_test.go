@@ -60,13 +60,18 @@ func scratchConn(t *testing.T) *gorm.DB {
 		if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
 			t.Fatal(err)
 		}
-		sep := "?"
-		if strings.Contains(dsn, "?") {
-			sep = "&"
-		}
 		// Every pooled connection gets the schema, so tests that hold locks
-		// on one connection and wait on another still work.
-		db := open(dsn + sep + "search_path=" + schema)
+		// on one connection and wait on another still work. The DSN may be a
+		// URL or key=value pairs.
+		withSchema := dsn + " search_path=" + schema
+		if strings.Contains(dsn, "://") {
+			sep := "?"
+			if strings.Contains(dsn, "?") {
+				sep = "&"
+			}
+			withSchema = dsn + sep + "search_path=" + schema
+		}
+		db := open(withSchema)
 		t.Cleanup(func() {
 			if conn, err := db.DB(); err == nil {
 				conn.Close()
