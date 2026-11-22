@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"os"
 	"sort"
@@ -596,6 +597,7 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 	out := rows
 	out.Fees = append([]feeRec(nil), rows.Fees...)
 	out.CommissionCorrections = append([]flowEvent(nil), rows.CommissionCorrections...)
+	out.IndexedRewardCorrections = maps.Clone(rows.IndexedRewardCorrections)
 	unrankedBlocks := correctionUnrankedNativeBlocks(rows.Events, addr)
 	for _, i := range p.feesByWallet[addr] {
 		c := p.Fees[i]
@@ -721,9 +723,19 @@ func (s *Server) applyCommissionSourceCorrections(chain, addr string, start, end
 		g := groups[key]
 		sort.Slice(g.effects, func(i, j int) bool { return g.effects[i].NativeEventIndex < g.effects[j].NativeEventIndex })
 		if g.indexed {
+			total := decimal.Zero
 			for _, c := range g.effects {
+				amount, e := decimal.NewFromString(c.Amount)
+				if e != nil {
+					return walletRows{}, e
+				}
+				total = total.Add(amount)
 				r.Effects = append(r.Effects, CommissionSourceEffectReceipt{EffectID: c.ID, TxHashSHA256: privateSHA([]byte(c.TxHash)), ProofSHA256: append([]string(nil), c.ProofSHA256...), Kind: "reward", Disposition: "indexed_reward_equals_correction_not_added", SourceTxID: g.tx.ID, SourceMessageID: g.message, NativeEventIndex: c.NativeEventIndex, SourceRowsSHA256: g.sourceSHA})
 			}
+			if out.IndexedRewardCorrections == nil {
+				out.IndexedRewardCorrections = map[uint]decimal.Decimal{}
+			}
+			out.IndexedRewardCorrections[g.message] = out.IndexedRewardCorrections[g.message].Add(total)
 			continue
 		}
 		for _, c := range g.effects {
@@ -762,7 +774,9 @@ func correctionMessageRewards(p *CommissionSourceCorrections, addr string, c Com
 // uatom reward of that tx, block and time, with each denom's total equal to the
 // corrections' total. The indexer books one row per validator while the
 // corrections hold one per share record, so totals are compared, not rows.
-// Corrections name no validator; each row must name one.
+// Corrections name no validator; each row must name one. Rows are chosen by
+// message id alone, so a row of the message under another hash, or a
+// withdraw-address move, refuses instead of being left out.
 func correctionIndexedRewardsEqual(events []tax.TaxableEvent, addr string, tx commissionCorrectionSourceTx, message uint, effects []CommissionNativeRewardCorrection) bool {
 	want := map[string]*big.Int{}
 	for _, c := range effects {
@@ -777,10 +791,10 @@ func correctionIndexedRewardsEqual(events []tax.TaxableEvent, addr string, tx co
 	}
 	got := map[string]*big.Int{}
 	for _, e := range events {
-		if e.TxHash != tx.Hash || e.MessageID != message || isWithdrawAddressMove(e) {
+		if e.MessageID != message {
 			continue
 		}
-		if e.Category != apiReward || e.ToAddr != addr || e.FromAddr == addr || e.ValidatorAddress == "" || e.RewardTrigger != "" || e.BlockHeight != tx.Height || !correctionTimestampEqual(tx.Timestamp, e.Timestamp) || want[e.Denom] == nil {
+		if e.TxHash != tx.Hash || isWithdrawAddressMove(e) || e.Category != apiReward || e.ToAddr != addr || e.FromAddr == addr || e.ValidatorAddress == "" || e.RewardTrigger != "" || e.BlockHeight != tx.Height || !correctionTimestampEqual(tx.Timestamp, e.Timestamp) || want[e.Denom] == nil {
 			return false
 		}
 		v, err := correctionInteger(e.Amount)
@@ -801,4 +815,26 @@ func correctionIndexedRewardsEqual(events []tax.TaxableEvent, addr string, tx co
 		}
 	}
 	return true
+}
+
+// indexedRewardCorrectionsKept refuses a trace whose payout reconciliation
+// changed a message whose indexed rewards were taken in place of its
+// corrections: that message must credit exactly the corrected total, as the
+// corrections themselves would.
+func indexedRewardCorrectionsKept(addr string, events []flowEvent, proved map[uint]decimal.Decimal) error {
+	if len(proved) == 0 {
+		return nil
+	}
+	got := map[uint]decimal.Decimal{}
+	for _, e := range events {
+		if _, ok := proved[e.Key.Message]; ok && e.Category == apiReward && e.Dir != apiOut && e.To == addr {
+			got[e.Key.Message] = got[e.Key.Message].Add(e.Amount)
+		}
+	}
+	for message, want := range proved {
+		if !got[message].Equal(want) {
+			return correctionRefusal("native correction indexed reward payout differs")
+		}
+	}
+	return nil
 }
