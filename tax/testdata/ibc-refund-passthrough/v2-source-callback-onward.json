@@ -1,0 +1,291 @@
+{
+ "source": "cosmoshub-4 production index, addresses replaced by same-length placeholders",
+ "message_type": "/ibc.core.channel.v2.MsgTimeout",
+ "height": "25196419",
+ "code": 0,
+ "message_bytes": "CsMFCIgBEgwwOC13YXNtLTEzNjkaC2Nvc21vc2h1Yi0wIOD51L8GKpwFCgh0cmFuc2ZlchIIdHJhbnNmZXIaB2ljczIwLTEiGmFwcGxpY2F0aW9uL3gtc29saWRpdHktYWJpKuAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAmtwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAV1YXRvbQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBY29zbW9zMXk4czh4Nnp0czg4cWxnemVxaDZ2eWRlOThrMDV2N2Z4bThzZ3BxeGpnMjdlazVyenlyMHU3eHQ1Y24AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACoweGYyYzAyZDg5NzYxNGFFMGU3NjNCN0Q1MWYyM0JkMzE3Qzk2YTI4NDQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGB7InNyY19jYWxsYmFjayI6eyJhZGRyZXNzIjoiY29zbW9zMXk4czh4Nnp0czg4cWxnemVxaDZ2eWRlOThrMDV2N2Z4bThzZ3BxeGpnMjdlazVyenlyMHU3eHQ1Y24ifX0Svg17ImtleSI6IjB4NmJlNWMwZmM2YTQ0NDk3MjYzMzg3ODc5NjIwMTUxM2MwNTc2NmYwMDc4YWE4MzA2YzZlZTlkZjc1MDAxMDY5YyIsInZhbHVlIjoiMHgwIiwicHJvb2YiOlsiMHhmOTAyMTFhMGFmNDVkNzAwZTk4NWVjNzk4Mjg0YjIwZTcwNWFlZmU2YjIxNjhiNjdjZmJiOTZiZjFhYTgyNGQzOTJlNWI3NGZhMDQzZjVjODI0MjFkOTIyNWZlOGM4MzNlNThhZWMyMDk2YWY2ZjcwNGI2OWVlNzVkNTkwN2UxMjgzYzRjNWJjODlhMGJiYzI1YzAyYTBlYzcxZDQwY2FiM2U3YmMxMzc1MTI3OTQzMjI3OWZkYzBiNjlmOWMzMzFlZWFjMzc0YjY0YTZhMGY2MWNlODFmODllM2M5MDYzOTU5NWRlYTQzNmVlY2U3MmFjNWZmODdiNWFhY2UxNjk1NjMwYzgyZDViMjZiNzdhMGVhODAwOGQ5M2QxZTNhYzUxODc4MjJlNmQwYTU2NDFmNjJmYTYyN2EyZGZiMmNiYWY5ZmI3NWQ5YzU0MDJhMmRhMDhjYTU2OGI4YjFhMWE3ZjkzZDcyNjA3MjI2NWMzNWU1MTEwZTUzNjRhOTlkZmRlZGM2ZjY1ZjdiYjFhNTk1MGVhMDg5YWRhYjEwMjZmNWZkNGI0YjgxOWMwNWYzZjNkNzc1MjEzN2M2MTM0MDRhZDg1YjQ3NTkyNTgyZjY0NTUwNjNhMGY4Mzk4ZTU1MjE0YzcwOTI3ZmNlNTc5NDNlYjEzOTU3MjNlNjAyOTA0MTgyZjkzOTgxZmYzZDY3ZjQ4YWE1ZDRhMDBkOGQ0ZGZlYWUwYzkwYTlkNDQ2MDA5N2I4NDA4OTlmZjJhNDUxNjQ4Nzg1YjUwMzk0OWZkNmIwMTRjNWI3YTlhMDMzNTQ4Y2ZlOGZiMTBjOGI2YmZmNDExZTRmMjYxZTI2ZTIwYzAyMmE0NTBkYWUwZmQ0NmMxY2EyMzY2MzZhNjdhMDBjNjRlMDY2YzUwNjgyNWIxZDIwOTg0MjljMTdhMWMwMWViOTg4MmJlZWFiOTgyM2I4ZWNkNjIxYTkzODAzNjlhMDM2ZGQyMDM0ODUwNzBhYmE4MjRlNGM3MjI5NzM5OTQ2ODY3ZDQ4NzhmOGNjMDg3MTliY2M1OTFjMGZkMGI2ZjVhMDM4N2VkODE1NTdkYmM0Y2JlY2QxNDc4MjcwMGI0ZDBiZGI5Y2MwYjQzOTQ0YTZjMGE3ODdjNjBkNWJjMDEyYWZhMGY4Y2Y3NzZjNDRhZTYxM2E2NDg0NjMwZGQzNjYzZmRkY2NjY2IxNGYwNjU5ZGNkMTBmNDkwMThiZmE1NTRiNmJhMGJiYWNlNzlhYmZkZTZhNjFmMjRlOGQ5Yzk5OWNhMmM3NWVhZTk4NDlkMDk2Y2JjNzcyYWNmYmI3NmY0NmExNWZhMDc1MGU1OTA4ZDYwYjY2YWMzODkxMDdjMDE2OTQxZDI4MDBjMDc1YTJmOTU1MGQxZTEyZjU4YmM5ZDA4MDg0NDU4MCIsIjB4ZjkwMTExYTA1OGNmNzNlNzljOTIyNDdiYjYyNzUwYzg3NjQxNjBiNGNmZDZiOWI3NmUyYTQ5N2UxMzJmODExOTBhOGZjNjZiYTBhNmQ3ZmI0ZmQ5MzMwODZmODdhMDc5Y2JlYzJiMWY3ZTIwZDcyNzZjMzdhYzgzZTU5NjRlMzU2ZWYzNGU2MzU2ODA4MGEwZjEzNDQzYmYyNmU5ZWY1ODQ3MTM0MGE1ZjU5ZWI4OTM2M2ZjZTc0NjlkMjAyN2YyZGViM2NkYzNlZmUxODhhZDgwYTAzMjAzZTAxYjhjY2E3OTY2MzdiNDhmYWVhMjcyZDUyNzZiYTk0ZWVkOWZhYmEyZDUxYjY5OWQ4YmI1NDFkMWMwODA4MDgwYTBhYjg2YmEwZjg0NjZjZTgwNDRiZmEwNmY0ODkxMzY5OGU3N2FjMzMxYTM0MGZkODI3OWFmZjRjYTgwNjUwMzNiYTBiNGFiNGNmNmIwZDc5MGM5Njg5Y2ZhOWYyZjgwMzViN2UzOGI3MTg1ZTEyYmMxYzU0MjIwOGFhNDc3YjlhZjRhODBhMGM4MmQxMWQyOWJjNzI2ZjlhOTI3ZTY5NzU1NTRjMTBhNWMyNzIwNTI0N2I2YzgwNTBkZDNhYTRmN2FhMGM1YTM4MGEwN2FjNDQ3OWIzYjMzMmU0ZTA5N2Q4M2VhNDZjYWFmZWU3OTg5Y2YyMzQxNzAxODIyZjQxNWYxNmJiMTM1M2ExNDgwIl19GgUQoLK6BSotY29zbW9zMWRyejNhNXRsaHN3dmUyeGZmNTdnenBzaHFoOXFkeGgzaHhwcXgz",
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/ibc.core.channel.v2.MsgTimeout"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1drz3a5tlhswve2xff57gzpshqh9qdxh3hxpqx3"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "timeout_packet",
+   "attributes": [
+    {
+     "key": "packet_source_client",
+     "value": "08-wasm-1369"
+    },
+    {
+     "key": "packet_dest_client",
+     "value": "cosmoshub-0"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "136"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1744125152"
+    },
+    {
+     "key": "encoded_packet_hex",
+     "value": "088801120c30382d7761736d2d313336391a0b636f736d6f736875622d3020e0f9d4bf062a9c050a087472616e7366657212087472616e736665721a0769637332302d31221a6170706c69636174696f6e2f782d736f6c69646974792d6162692ae004000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000016000000000000000000000000000000000000000000000000000000000000026b700000000000000000000000000000000000000000000000000000000000001c000000000000000000000000000000000000000000000000000000000000000057561746f6d0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041636f736d6f73317938733878367a74733838716c677a657168367679646539386b3035763766786d3873677071786a673237656b35727a7972307537787435636e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002a3078663263303264383937363134614530653736334237443531663233426433313743393661323834340000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000607b227372635f63616c6c6261636b223a7b2261646472657373223a22636f736d6f73317938733878367a74733838716c677a657168367679646539386b3035763766786d3873677071786a673237656b35727a7972307537787435636e227d7d"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channelv2"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos13da3masfh6npzq6zqcxe7g3q76gkw89a5u295j"
+    },
+    {
+     "key": "amount",
+     "value": "9911uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "amount",
+     "value": "9911uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos13da3masfh6npzq6zqcxe7g3q76gkw89a5u295j"
+    },
+    {
+     "key": "amount",
+     "value": "9911uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos13da3masfh6npzq6zqcxe7g3q76gkw89a5u295j"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "timeout",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "refund_tokens",
+     "value": "{\"denom\":{\"base\":\"uatom\",\"trace\":null},\"amount\":\"9911\"}"
+    },
+    {
+     "key": "memo",
+     "value": "{\"src_callback\":{\"address\":\"cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn\"}}"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "transfer"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "wasm",
+   "attributes": [
+    {
+     "key": "_contract_address",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "action",
+     "value": "source_callback_timeout_and_bank_send"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "amount",
+     "value": "9911uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1wr5u8qrqkpuq4tqdkf4teeta99ulagj4wstpnn"
+    },
+    {
+     "key": "amount",
+     "value": "9911uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1wr5u8qrqkpuq4tqdkf4teeta99ulagj4wstpnn"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "amount",
+     "value": "9911uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "ibc_src_callback",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibccallbacks"
+    },
+    {
+     "key": "callback_type",
+     "value": "timeout_packet"
+    },
+    {
+     "key": "callback_address",
+     "value": "cosmos1y8s8x6zts88qlgzeqh6vyde98k05v7fxm8sgpqxjg27ek5rzyr0u7xt5cn"
+    },
+    {
+     "key": "callback_exec_gas_limit",
+     "value": "518222"
+    },
+    {
+     "key": "callback_commit_gas_limit",
+     "value": "10000000"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "136"
+    },
+    {
+     "key": "callback_base_application_version",
+     "value": "ics20-1"
+    },
+    {
+     "key": "callback_result",
+     "value": "success"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "transfer"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "08-wasm-1369"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  }
+ ]
+}
