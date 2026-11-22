@@ -122,6 +122,72 @@ func response(rr *httptest.ResponseRecorder) string {
 	return fmt.Sprintf("%d\n%s\n%s", rr.Code, strings.Join(h, "\n"), rr.Body.String())
 }
 
+// withoutUnreportedEras removes what the coverage statement adds for each
+// legacy era that reports do not read yet: its chain entry, its open item and
+// both of its lines in the statement text. The statement lists those eras on
+// purpose, so a response is otherwise unchanged byte for byte.
+func withoutUnreportedEras(t *testing.T, s string) string {
+	t.Helper()
+	const key = `"statement":`
+	for from := 0; ; {
+		i := strings.Index(s[from:], key)
+		if i < 0 {
+			return s
+		}
+		at := from + i + len(key)
+		var st CoverageStatement
+		require.NoError(t, json.NewDecoder(strings.NewReader(s[at:])).Decode(&st))
+		for _, c := range st.Chains {
+			if c.InReports || c.ChainID == apiHubChainID {
+				continue
+			}
+			chain, err := json.Marshal(c)
+			require.NoError(t, err)
+			cut := []string{string(chain) + ","}
+			for _, item := range st.OpenItems {
+				if strings.HasPrefix(item, c.ChainID+" (") {
+					q, err := json.Marshal(item)
+					require.NoError(t, err)
+					cut = append(cut, string(q)+",")
+					q, err = json.Marshal("- " + item + "\n")
+					require.NoError(t, err)
+					cut = append(cut, string(q[1:len(q)-1]))
+				}
+			}
+			for _, line := range strings.Split(st.Text, "\n") {
+				if strings.HasPrefix(line, c.ChainID+":") {
+					q, err := json.Marshal(line + "\n")
+					require.NoError(t, err)
+					cut = append(cut, string(q[1:len(q)-1]))
+				}
+			}
+			require.Len(t, cut, 4, "%s: chain, open item and both text lines", c.ChainID)
+			for _, part := range cut {
+				j := strings.Index(s[at:], part)
+				require.GreaterOrEqual(t, j, 0, "%s: %s", c.ChainID, part)
+				s = s[:at+j] + s[at+j+len(part):]
+			}
+		}
+		from = at
+	}
+}
+
+// withoutStatement cuts the coverage statement from a response body, which
+// the old /index-coverage handler did not write, and returns it on its own.
+func withoutStatement(t *testing.T, body string) (string, string) {
+	t.Helper()
+	const key = `,"statement":`
+	i := strings.Index(body, key)
+	if i < 0 {
+		return body, ""
+	}
+	dec := json.NewDecoder(strings.NewReader(body[i+len(key):]))
+	var raw json.RawMessage
+	require.NoError(t, dec.Decode(&raw))
+	end := i + len(key) + int(dec.InputOffset())
+	return body[:i] + body[end:], `"statement":` + body[i+len(key):end]
+}
+
 // withoutEras removes the eras field from an /index-coverage body. It must
 // sit right before period (or at the end), so the rest of the body is the
 // response as it was before eras existed, byte for byte.
@@ -148,8 +214,9 @@ func hub4Rows(t *testing.T, s *Server) {
 }
 
 // While no earlier Hub chain is published every response is what it was
-// before eras existed, byte for byte, apart from eras[] on /index-coverage:
-// with the legacy schema present and holding rows, and with it missing or
+// before eras existed, byte for byte, apart from eras[] on /index-coverage
+// and the coverage statement naming each era reports do not read yet: with
+// the legacy schema present and holding rows, and with it missing or
 // unreadable.
 func TestLegacyErasUnpublishedChangeNothingPostgres(t *testing.T) {
 	s := refundCachePGFixture(t)
@@ -194,14 +261,22 @@ func TestLegacyErasUnpublishedChangeNothingPostgres(t *testing.T) {
 			if strings.HasPrefix(p, "/index-coverage") {
 				parts := strings.SplitN(got, "\n", 9)
 				body := parts[len(parts)-1]
-				require.Equal(t, oldCoverage(p), withoutEras(t, body), "%s %s", label, p)
+				rest, statement := withoutStatement(t, withoutEras(t, body))
+				_, beforeStatement := withoutStatement(t, strings.SplitN(before[p], "\n", 9)[8])
+				require.Equal(t, oldCoverage(p), rest, "%s %s", label, p)
+				require.Equal(t, withoutStatementGeneratedAt(beforeStatement), withoutStatementGeneratedAt(withoutUnreportedEras(t, statement)), "%s %s statement", label, p)
 				require.Equal(t, strings.SplitN(before[p], "\n", 9)[:8], parts[:8], "%s %s headers", label, p)
 				continue
 			}
-			require.Equal(t, before[p], got, "%s %s", label, p)
+			require.Equal(t, withoutStatementGeneratedAt(before[p]), withoutStatementGeneratedAt(withoutUnreportedEras(t, got)), "%s %s", label, p)
 		}
 	}
 	check("unpublished")
+	// The coverage statement names each era that reports do not read yet.
+	positions := response(legacyGet(t, s, "/positions?address=wallet&chain=mainnet&date=2026-06-30"))
+	for _, era := range []string{"cosmoshub-1", "cosmoshub-2", "cosmoshub-3"} {
+		require.Contains(t, positions, era+" (heights 1 to 10) is not read by reports yet")
+	}
 
 	// Every era imported but only cosmoshub-1 and 2 published: an earlier
 	// era waits for every later one, so nothing joins reports.
