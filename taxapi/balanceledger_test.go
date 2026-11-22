@@ -493,6 +493,39 @@ func TestAttributePreV15DelegateAndUnbond(t *testing.T) {
 	if len(events) != 0 || unattributed != 150 {
 		t.Fatalf("events = %+v, unattributed = %d", events, unattributed)
 	}
+
+	// SDK 0.42 to 0.45 merge a message's message events into one: the
+	// distribution module's sender for the reward payout comes first, the
+	// staking delegator after module=staking. Only the latter is the owner.
+	distr := "cosmos1distribution"
+	merged := []ledgerAttrRow{
+		redelRow(7, 70, 160, "message", "action", "/cosmos.staking.v1beta1.MsgDelegate"),
+		redelRow(7, 70, 160, "message", "sender", distr),
+		redelRow(7, 70, 160, "message", "module", "staking"),
+		redelRow(7, 70, 160, "message", "sender", ledgerTestAddr),
+		redelRow(7, 71, 160, "delegate", "validator", ledgerTestVal),
+		redelRow(7, 71, 160, "delegate", "amount", "3700000uatom"),
+		redelRow(7, 72, 160, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(7, 72, 160, "withdraw_rewards", "amount", "8569uatom"),
+	}
+	events, unattributed = attributeRedelegations(merged, ledgerTestAddr)
+	if unattributed != 0 || len(events) != 1 || events[0].records()[0]["delegator"] != ledgerTestAddr || events[0].records()[0]["amount"] != "3700000uatom" {
+		t.Fatalf("merged: events = %+v, unattributed = %d", events, unattributed)
+	}
+	if events, _ = attributeRedelegations(merged, distr); len(events) != 0 {
+		t.Fatalf("merged: the payout sender got %+v", events)
+	}
+
+	// A message that names the wallet but no delegator anywhere is refused.
+	nameless := []ledgerAttrRow{
+		redelRow(8, 80, 170, "message", "action", "/cosmos.staking.v1beta1.MsgUndelegate"),
+		redelRow(8, 81, 170, "unbond", "validator", ledgerTestVal),
+		redelRow(8, 81, 170, "unbond", "amount", "5uatom"),
+	}
+	events, unattributed = attributeRedelegations(nameless, ledgerTestAddr)
+	if len(events) != 0 || unattributed != 170 {
+		t.Fatalf("nameless: events = %+v, unattributed = %d", events, unattributed)
+	}
 }
 
 func TestApproximateLinesCarryTheirBound(t *testing.T) {

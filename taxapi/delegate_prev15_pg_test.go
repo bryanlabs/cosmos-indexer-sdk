@@ -66,16 +66,18 @@ func TestPreV15DelegateAndUnbondReadPostgres(t *testing.T) {
 		// w delegates 1000: it spends the coins, and the delegate event
 		// names no delegator.
 		"INSERT INTO message_events VALUES (10,1,1,0),(11,1,3,1),(12,1,4,2)",
-		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (10,1,'%[1]s',0),(10,3,'1000uatom',1),(11,4,'%[1]s',0),(11,5,'staking',1),(12,6,'%[2]s',0),(12,3,'1000uatom',1),(12,7,'1000.000000000000000000',2)", w, val),
-		// w unbonds 400 after withdrawing its rewards.
+		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (10,1,'%[1]s',0),(10,3,'1000uatom',1),(11,5,'staking',0),(11,4,'%[1]s',1),(12,6,'%[2]s',0),(12,3,'1000uatom',1),(12,7,'1000.000000000000000000',2)", w, val),
+		// w unbonds 400 and is paid its rewards. SDK 0.42 to 0.45 merge the
+		// message events: the distribution module's sender for the payout
+		// comes before the staking delegator.
 		"INSERT INTO message_events VALUES (20,2,6,0),(21,2,3,1),(22,2,5,2)",
-		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (20,6,'%[2]s',0),(20,9,'%[1]s',1),(21,4,'%[1]s',0),(21,5,'staking',1),(22,6,'%[2]s',0),(22,3,'400uatom',1),(22,8,'2022-01-31T00:00:00Z',2)", w, val),
+		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (20,6,'%[2]s',0),(20,3,'7uatom',1),(21,4,'%[3]s',0),(21,5,'staking',1),(21,4,'%[1]s',2),(22,6,'%[2]s',0),(22,3,'400uatom',1),(22,8,'2022-01-31T00:00:00Z',2)", w, val, distributionAddress(t)),
 		// Someone else's delegation to the same validator.
 		"INSERT INTO message_events VALUES (30,3,1,0),(31,3,3,1),(32,3,4,2)",
-		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (30,1,'%[1]s',0),(30,3,'9uatom',1),(31,4,'%[1]s',0),(31,5,'staking',1),(32,6,'%[2]s',0),(32,3,'9uatom',1)", other, val),
+		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (30,1,'%[1]s',0),(30,3,'9uatom',1),(31,5,'staking',0),(31,4,'%[1]s',1),(32,6,'%[2]s',0),(32,3,'9uatom',1)", other, val),
 		// A delegate event that names w.
 		"INSERT INTO message_events VALUES (40,4,1,0),(41,4,3,1),(42,4,4,2)",
-		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (40,1,'%[1]s',0),(40,3,'5uatom',1),(41,4,'%[1]s',0),(41,5,'staking',1),(42,6,'%[2]s',0),(42,9,'%[1]s',1),(42,3,'5uatom',2)", w, val),
+		fmt.Sprintf("INSERT INTO message_event_attributes VALUES (40,1,'%[1]s',0),(40,3,'5uatom',1),(41,5,'staking',0),(41,4,'%[1]s',1),(42,6,'%[2]s',0),(42,9,'%[1]s',1),(42,3,'5uatom',2)", w, val),
 	} {
 		require.NoError(t, database.Exec(sql).Error, sql)
 	}

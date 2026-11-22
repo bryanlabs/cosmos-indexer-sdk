@@ -778,15 +778,34 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		events := groupLedgerRows(rows[start:end])
 		start = end
 		delegators := map[string]bool{}
+		unnamed := int64(0)
 		for _, ev := range events {
-			for _, rec := range ev.records() {
-				switch {
-				case ev.Type == "withdraw_rewards" && rec["delegator"] != "":
-					delegators[rec["delegator"]] = true
-				case ev.Type == "message" && rec["module"] == "staking" && rec["sender"] != "":
-					delegators[rec["sender"]] = true
+			switch ev.Type {
+			case "withdraw_rewards":
+				for _, rec := range ev.records() {
+					if rec["delegator"] != "" {
+						delegators[rec["delegator"]] = true
+					}
+				}
+			case "message":
+				for _, d := range stakingMessageSenders(ev.Attrs) {
+					delegators[d] = true
+				}
+			case "redelegate", "delegate", "unbond":
+				for _, rec := range ev.records() {
+					if rec["delegator"] == "" && ev.Height > unnamed {
+						unnamed = ev.Height
+					}
 				}
 			}
+		}
+		if len(delegators) == 0 {
+			// The message names the wallet, but nothing in it says whose
+			// stake moved: refuse rather than guess either way.
+			if unnamed > unattributed {
+				unattributed = unnamed
+			}
+			continue
 		}
 		if !delegators[addr] {
 			continue
@@ -845,6 +864,22 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		}
 	}
 	return out, unattributed
+}
+
+// stakingMessageSenders is the delegators a staking message event names. The
+// staking module emits module=staking followed by sender=<delegator>; SDK
+// 0.42 to 0.45 merge every message event of a message into one, so other
+// modules' senders (the distribution module paying out rewards, for one) sit
+// in the same event and only the sender right after module=staking is the
+// delegator's.
+func stakingMessageSenders(attrs []ledgerAttr) []string {
+	var out []string
+	for i := 0; i+1 < len(attrs); i++ {
+		if attrs[i].Key == "module" && attrs[i].Value == "staking" && attrs[i+1].Key == "sender" && attrs[i+1].Value != "" {
+			out = append(out, attrs[i+1].Value)
+		}
+	}
+	return out
 }
 
 type ledgerFeeRow struct {
