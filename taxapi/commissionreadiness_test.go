@@ -22,16 +22,20 @@ func TestCommissionReadinessSurvivesStatementBuild(t *testing.T) {
 	}
 }
 
-// A validator whose first withdrawal is at or after the served as_of (the
-// trace's exclusive end) cannot be in that trace, so it is not expected yet.
+// The served as_of is the last day a trace includes (a run built with
+// exclusive end 2026-11-13 stores as_of 2026-11-12). A validator whose first
+// withdrawal falls on that day is in the trace and expected; one whose first
+// withdrawal is on a later day cannot be in it, so it is not expected yet.
 func TestFlowExpectedByAsOf(t *testing.T) {
 	asOf := time.Date(2026, 11, 12, 0, 0, 0, 0, time.UTC)
 	first := map[string]time.Time{
-		"early":  time.Date(2021, 3, 1, 0, 0, 0, 0, time.UTC),
-		"lastin": asOf.Add(-time.Second),
-		"onasof": asOf,
-		"later":  time.Date(2026, 11, 21, 15, 14, 0, 0, time.UTC),
+		"early":    time.Date(2021, 3, 1, 0, 0, 0, 0, time.UTC),
+		"onasof":   asOf,
+		"lateasof": time.Date(2026, 11, 12, 15, 14, 0, 0, time.UTC),
+		"lastin":   asOf.AddDate(0, 0, 1).Add(-time.Nanosecond),
+		"nextday":  asOf.AddDate(0, 0, 1),
+		"later":    time.Date(2026, 11, 21, 15, 14, 0, 0, time.UTC),
 	}
-	require.Equal(t, map[string]bool{"early": true, "lastin": true}, flowExpectedBy(first, asOf))
-	require.Len(t, flowExpectedBy(first, time.Time{}), 4, "with nothing traced yet every withdrawer is expected")
+	require.Equal(t, map[string]bool{"early": true, "onasof": true, "lateasof": true, "lastin": true}, flowExpectedBy(first, asOf))
+	require.Len(t, flowExpectedBy(first, time.Time{}), 6, "with nothing traced yet every withdrawer is expected")
 }
