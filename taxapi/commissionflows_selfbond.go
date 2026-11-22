@@ -23,7 +23,7 @@ func (l *dbFlowLoader) selfBonds() (map[string][]flowEvent, error) {
 		return v, nil
 	}
 	l.mu.Unlock()
-	out, err := l.s.flowSelfBonds(l.chain)
+	out, err := flowRead(func() (map[string][]flowEvent, error) { return l.s.flowSelfBonds(l.chain) })
 	if err != nil {
 		return nil, err
 	}

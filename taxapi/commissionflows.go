@@ -380,7 +380,7 @@ func (l *dbFlowLoader) holdingsWith(addr string, day time.Time, db *flowHoldingR
 	if db != nil {
 		h, source = db.h, db.source
 	} else {
-		h, source, err = l.s.flowHoldingsAt(l.chain, addr, day, l.private)
+		h, source, err = l.flowHoldingsAt(addr, day)
 	}
 	known := source.Kind != ""
 	if err != nil || known || l.archive == nil {
@@ -463,7 +463,21 @@ func (l *dbFlowLoader) prefetchedEvents(addr string, start, end time.Time) ([]fl
 			return j.events, nil
 		}
 	}
-	return l.s.flowEvents(l.chain, addr, start, end)
+	return flowRead(func() ([]flowEvent, error) { return l.s.flowEvents(l.chain, addr, start, end) })
+}
+
+// flowHoldingsAt is the index's holdings for addr at the end of day, read
+// again when Postgres aborts the read.
+func (l *dbFlowLoader) flowHoldingsAt(addr string, day time.Time) (flowHoldings, CommissionFlowHoldingSource, error) {
+	type read struct {
+		h      flowHoldings
+		source CommissionFlowHoldingSource
+	}
+	r, err := flowRead(func() (read, error) {
+		h, source, err := l.s.flowHoldingsAt(l.chain, addr, day, l.private)
+		return read{h, source}, err
+	})
+	return r.h, r.source, err
 }
 
 // flowEvents is addr's native coin movements in [start,end), as the report
@@ -1095,7 +1109,7 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 	var err error
 	if j != nil && j.memoOK {
 		n = j.memo
-	} else if n, err = l.s.memoDepositSenders(addr); err != nil {
+	} else if n, err = flowRead(func() (int, error) { return l.s.memoDepositSenders(addr) }); err != nil {
 		return flowStop{}, err
 	}
 	if n >= flowMemoMinSenders {
@@ -1116,7 +1130,7 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 	var rows int64
 	if j != nil && j.rowsOK {
 		rows = j.rows
-	} else if rows, err = l.s.walletRows(addr, ledgerHeavyRows); err != nil {
+	} else if rows, err = flowRead(func() (int64, error) { return l.s.walletRows(addr, ledgerHeavyRows) }); err != nil {
 		return flowStop{}, err
 	}
 	if rows > ledgerHeavyRows {
@@ -1131,7 +1145,11 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 // senders are deposit addresses, a wide distributor when it pays out to a
 // crowd, otherwise busy_wallet with the measurements kept as evidence.
 func (l *dbFlowLoader) busy(addr string, rows int64, start, end time.Time) (flowStop, error) {
-	examined, deposits, err := l.s.sweepDepositSenders(addr, start, end)
+	read, err := flowRead(func() ([2]int, error) {
+		examined, deposits, err := l.s.sweepDepositSenders(addr, start, end)
+		return [2]int{examined, deposits}, err
+	})
+	examined, deposits := read[0], read[1]
 	if err != nil {
 		return flowStop{}, err
 	}
@@ -1180,7 +1198,7 @@ func (l *dbFlowLoader) distributor(addr string, start, end time.Time) (flowStop,
 	if limit <= 0 {
 		limit = flowFanoutMaxReceivers
 	}
-	n, err := l.s.fanoutReceivers(addr, start, end, limit)
+	n, err := flowRead(func() (int, error) { return l.s.fanoutReceivers(addr, start, end, limit) })
 	if err != nil {
 		return flowStop{}, err
 	}
