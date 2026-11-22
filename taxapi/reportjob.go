@@ -38,9 +38,14 @@ type ReportJob struct {
 	// ComputedThrough is the computation start, used only for the age backstop.
 	// ReviewFingerprint covers the full persisted financial history.
 	ComputedThrough time.Time
-	Error           string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// EvidenceCheck and EvidenceSnapshot let a repeat view confirm the
+	// fingerprint from the change journal instead of rereading the history
+	// (reportjob_evidence.go). Empty means the next view runs the full check.
+	EvidenceCheck    string `gorm:"type:text"`
+	EvidenceSnapshot string `gorm:"type:text"`
+	Error            string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 const (
@@ -122,8 +127,17 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		return nil, err
 	}
 
+	// A ready report whose evidence the change journal shows untouched since
+	// its last full check is served without rereading the history.
+	if !resync {
+		if cached, ok := s.reportJobFastPath(key, chain, addresses, end); ok {
+			return cached, nil
+		}
+	}
+
 	var job ReportJob
 	var found, stale bool
+	var record *evidenceRecord
 	// Cache rows, gates and their complete evidence digest are accepted from a
 	// single snapshot, not a gate-before-fingerprint race on the live pool.
 	err = s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
@@ -137,11 +151,12 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		}
 		stale = found && job.Status == ReportJobReady && s.reportIsStale(&job, addresses)
 		if found && job.Status == ReportJobReady && !stale && !resync {
-			fingerprint, err := reader.reviewFingerprintInSnapshot(chain, addresses)
+			fingerprint, rec, err := reader.reportEvidenceInSnapshot(chain, addresses, end)
 			if err != nil {
 				return err
 			}
 			stale = fingerprint != job.ReviewFingerprint
+			record = rec
 		}
 		return nil
 	})
@@ -149,6 +164,9 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		return nil, err
 	}
 	needsCompute := !found || resync || stale
+	if !needsCompute && job.Status == ReportJobReady {
+		s.storeEvidenceCheck(job.ID, job.ReviewFingerprint, record)
+	}
 	// A job already pending (someone else's request, or ours from a moment
 	// ago) is left alone; the caller just polls it.
 	if !needsCompute || job.Status == ReportJobPending {
@@ -209,12 +227,13 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 	}
 
 	var after string
+	var record *evidenceRecord
 	err = s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
 		if err := reader.requireReportReady(chain, addresses, start, end); err != nil {
 			return err
 		}
 		var err error
-		after, err = reader.reviewFingerprintInSnapshot(chain, addresses)
+		after, record, err = reader.reportEvidenceInSnapshot(chain, addresses, end)
 		return err
 	})
 	if err != nil {
@@ -226,7 +245,13 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 		return
 	}
 	readinessJSON, _ := json.Marshal(readinessForRows(all))
+	evidenceCheck, evidenceSnapshot := "", ""
+	if record != nil {
+		evidenceCheck, evidenceSnapshot = record.check, record.snapshot
+	}
 	s.db.Model(&ReportJob{}).Where(apiKey, key).Updates(map[string]any{
+		"evidence_check":     evidenceCheck,
+		"evidence_snapshot":  evidenceSnapshot,
 		"readiness_json":     string(readinessJSON),
 		apiStatus:            ReportJobReady,
 		apiCSV:               buf.String(),
