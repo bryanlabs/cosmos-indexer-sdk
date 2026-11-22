@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"github.com/shopspring/decimal"
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -629,13 +631,23 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 	return out
 }
 
-// ledgerEvents loads every message and block event in (lo, hi] that names
-// addr (and the wallet's own create_validator), with all their attributes,
-// plus the wallet's redelegations, and the highest height of a redelegation
-// that cannot be attributed.
-func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
-	var msgRows []ledgerAttrRow
-	if err := s.db.Raw(`
+// ledgerReadWorkers is how many of one wallet's ledger reads run at once.
+// Each read is a chain of index and heap lookups that waits on disk one
+// lookup at a time, so a busy wallet's opening read, as one statement, is
+// bound by that latency. Measured 2026-11-22 on a wallet with 168,516
+// matching attributes: 74 s as one statement per kind, 24 s split by event
+// into 8 concurrent reads.
+const ledgerReadWorkers = 8
+
+// ledgerChunk spreads n values over ledgerReadWorkers reads, none shorter
+// than 256 values, so a small wallet stays one read per kind.
+func ledgerChunk(n int) int {
+	return max(256, (n+ledgerReadWorkers-1)/ledgerReadWorkers)
+}
+
+// ledgerMessageSQL reads the message events @evs, with all their
+// attributes, that are of a ledger type and in (lo, hi].
+const ledgerMessageSQL = `
 SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
 FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
@@ -644,23 +656,23 @@ JOIN txes x ON x.id = m.tx_id
 JOIN blocks b ON b.id = x.block_id
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.id IN (
-  SELECT a0.message_event_id FROM message_event_attributes a0
-  WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr
-  UNION
-  SELECT a1.message_event_id FROM message_event_attributes a1
-  JOIN message_events me1 ON me1.id = a1.message_event_id
-  JOIN message_event_types t1 ON t1.id = me1.message_event_type_id
-  WHERE left(a1.value, 100) = left(@op, 100) AND a1.value = @op AND t1.type = 'create_validator')
+WHERE me.id IN @evs
 AND (t.type IN @types OR t.type = 'create_validator')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, me.id, a.index`,
-		map[string]any{"addr": addr, "op": operator, "types": ledgerMessageTypes, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&msgRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("message events: %w", err)
-	}
+ORDER BY b.height, me.id, a.index`
+
+// ledgerEvents loads every message and block event in (lo, hi] that names
+// addr (and the wallet's own create_validator), with all their attributes,
+// plus the wallet's redelegations, and the highest height of a redelegation
+// that cannot be attributed. The wallet's matching message events are found
+// once; their rows and the test for redelegation messages are then read in
+// chunks of events, up to ledgerReadWorkers at once, beside the block events.
+// The rows are those of one read ordered by height, event and attribute.
+func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
 	var blockRows []ledgerAttrRow
-	if err := s.db.Raw(`
+	var outer errgroup.Group
+	outer.Go(func() error {
+		if err := s.db.Raw(`
 SELECT be.id AS event_id, b.height, b.time_stamp, CASE WHEN be.lifecycle_position = 0 THEN 0 ELSE 2 END AS phase, t.type, k.key, a.value
 FROM block_events be
 JOIN block_event_types t ON t.id = be.block_event_type_id
@@ -673,25 +685,18 @@ WHERE be.id IN (
 AND t.type IN @types
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 ORDER BY b.height, be.id, a.index`,
-		map[string]any{"addr": addr, "types": ledgerBlockTypes, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&blockRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("block events: %w", err)
+			map[string]any{"addr": addr, "types": ledgerBlockTypes, "ids": ids, "lo": lo, "hi": hi}).
+			Scan(&blockRows).Error; err != nil {
+			return fmt.Errorf("block events: %w", err)
+		}
+		return nil
+	})
+	msgRows, redelMsgs, msgErr := s.ledgerMessageRows(ids, addr, operator, lo, hi)
+	if err := outer.Wait(); err != nil {
+		return nil, 0, err
 	}
-	var redelMsgs []uint64
-	if err := s.db.Raw(`
-SELECT DISTINCT me0.message_id FROM message_event_attributes a0
-JOIN message_events me0 ON me0.id = a0.message_event_id
-JOIN message_event_types t0 ON t0.id = me0.message_event_type_id
-JOIN messages m ON m.id = me0.message_id
-JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
-WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr AND t0.type IN ('withdraw_rewards', 'message')
-AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = me0.message_id AND rt.type = 'redelegate')`,
-		map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&redelMsgs).Error; err != nil {
-		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
+	if msgErr != nil {
+		return nil, 0, msgErr
 	}
 	redelRows, err := s.redelegationRows(redelMsgs)
 	if err != nil {
@@ -700,6 +705,105 @@ AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id 
 	redelegations, unattributed := attributeRedelegations(redelRows, addr)
 	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
 	return append(events, redelegations...), unattributed, nil
+}
+
+type ledgerHit struct {
+	ID        uint64
+	MessageID uint64
+	Type      string
+}
+
+// ledgerMessageRows reads the wallet's message event rows and the messages
+// in (lo, hi] in which one of its withdraw_rewards or message events sits
+// beside a redelegate event.
+func (s *Server) ledgerMessageRows(ids []int64, addr, operator string, lo, hi int64) ([]ledgerAttrRow, []uint64, error) {
+	var found []uint64
+	if err := s.db.Raw(`
+SELECT a0.message_event_id FROM message_event_attributes a0
+WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr
+UNION
+SELECT a1.message_event_id FROM message_event_attributes a1
+JOIN message_events me1 ON me1.id = a1.message_event_id
+JOIN message_event_types t1 ON t1.id = me1.message_event_type_id
+WHERE left(a1.value, 100) = left(@op, 100) AND a1.value = @op AND t1.type = 'create_validator'`,
+		map[string]any{"addr": addr, "op": operator}).
+		Scan(&found).Error; err != nil {
+		return nil, nil, fmt.Errorf("message events: %w", err)
+	}
+	slices.Sort(found)
+	var g errgroup.Group
+	g.SetLimit(ledgerReadWorkers)
+	hitParts := goChunks(&g, found, ledgerChunk(len(found)), func(chunk []uint64) ([]ledgerHit, error) {
+		var part []ledgerHit
+		if err := s.db.Raw(`
+SELECT me.id, me.message_id, t.type FROM message_events me
+JOIN message_event_types t ON t.id = me.message_event_type_id
+WHERE me.id IN @evs`, map[string]any{"evs": chunk}).Scan(&part).Error; err != nil {
+			return nil, fmt.Errorf("message events: %w", err)
+		}
+		return part, nil
+	})
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	// Only the wallet's own events (not its operator's create_validator)
+	// can mark a message as one of its redelegations; those are never of
+	// type withdraw_rewards or message, so the type alone tells them apart.
+	ledger := map[string]bool{"create_validator": true}
+	for _, t := range ledgerMessageTypes {
+		ledger[t] = true
+	}
+	var evs, candidates []uint64
+	for _, h := range slices.Concat(hitParts...) {
+		switch {
+		case ledger[h.Type]:
+			evs = append(evs, h.ID)
+		case h.Type == "withdraw_rewards" || h.Type == "message":
+			candidates = append(candidates, h.MessageID)
+		}
+	}
+	slices.Sort(evs)
+	slices.Sort(candidates)
+	candidates = slices.Compact(candidates)
+	rowParts := goChunks(&g, evs, ledgerChunk(len(evs)), func(chunk []uint64) ([]ledgerAttrRow, error) {
+		var part []ledgerAttrRow
+		if err := s.db.Raw(ledgerMessageSQL,
+			map[string]any{"evs": chunk, "types": ledgerMessageTypes, "ids": ids, "lo": lo, "hi": hi}).
+			Scan(&part).Error; err != nil {
+			return nil, fmt.Errorf("message events: %w", err)
+		}
+		return part, nil
+	})
+	redelParts := goChunks(&g, candidates, ledgerChunk(len(candidates)), func(chunk []uint64) ([]uint64, error) {
+		var part []uint64
+		if err := s.db.Raw(`
+SELECT DISTINCT m.id FROM messages m
+JOIN txes x ON x.id = m.tx_id
+JOIN blocks b ON b.id = x.block_id
+WHERE m.id IN @msgs AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
+AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
+            WHERE r.message_id = m.id AND rt.type = 'redelegate')`,
+			map[string]any{"msgs": chunk, "ids": ids, "lo": lo, "hi": hi}).
+			Scan(&part).Error; err != nil {
+			return nil, fmt.Errorf("redelegation messages: %w", err)
+		}
+		return part, nil
+	})
+	if err := g.Wait(); err != nil {
+		return nil, nil, err
+	}
+	// Each chunk is in height, event and attribute order and holds whole
+	// events, so a stable sort by height and event restores one read's order.
+	rows := slices.Concat(rowParts...)
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Height != rows[j].Height {
+			return rows[i].Height < rows[j].Height
+		}
+		return rows[i].EventID < rows[j].EventID
+	})
+	redelMsgs := slices.Concat(redelParts...)
+	slices.Sort(redelMsgs)
+	return rows, redelMsgs, nil
 }
 
 // redelegationRows reads the redelegate, withdraw_rewards and message events
