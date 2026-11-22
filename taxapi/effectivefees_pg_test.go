@@ -153,6 +153,7 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 	// IDs are deliberately not height order. Transaction IDs and fee IDs within
 	// one timestamp are increasing so expected ordering is unambiguous.
 	for _, sql := range []string{
+		"CREATE TABLE messages(id bigint PRIMARY KEY,tx_id bigint,opaque boolean)",
 		"INSERT INTO blocks VALUES(90,1,1,'2026-01-01 23:59Z'),(4,2,1,'2026-01-02 00:00Z'),(80,3,1,'2026-01-02 12:00Z'),(2,4,1,'2026-01-02 23:59Z'),(70,5,1,'2026-01-03 00:00Z'),(6,6,1,'2026-01-04 12:00Z'),(60,7,1,'2026-01-05 12:00Z'),(8,8,1,'2026-01-06 12:00Z'),(9,3,2,'2026-01-02 12:00Z'),(10,3,3,'2026-01-02 12:00Z')",
 		"INSERT INTO txes VALUES(1,90,'before',0),(2,4,'start',0),(3,80,'own-multidenom',0),(4,80,'grant-absent-id',0),(5,80,'grant-self',0),(6,80,'failed-multidenom',5),(7,80,'failed-nocharge',5),(8,2,'last',0),(9,70,'end',0),(10,9,'alias',0),(11,10,'foreign',0),(12,6,'good-before-unresolved',0),(13,6,'unresolved',5),(14,60,'good-before-malformed',0),(15,60,'malformed',5),(16,8,'granted-failed',5),(17,80,'grant-known-owner',0)",
 		"INSERT INTO fees VALUES(1,1,1,1,1),(2,1,1,2,2),(3,1,1,3,3),(4,1,2,3,4),(5,2,1,4,5),(6,1,1,5,6),(7,1,1,6,700),(8,1,2,6,800),(9,1,1,7,900),(10,1,1,8,10),(11,1,1,9,11),(12,1,1,10,12),(13,1,1,11,13),(14,1,1,12,14),(15,1,1,13,15),(16,1,1,14,16),(17,1,1,15,17),(18,2,1,16,1800),(19,2,2,16,1900),(20,2,1,17,20)",
