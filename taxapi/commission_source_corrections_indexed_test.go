@@ -182,6 +182,7 @@ func TestCommissionSourceCorrectionIndexedRewardSameTracedTotals(t *testing.T) {
 		require.NoError(t, err)
 		l := newFakeFlowLedger()
 		l.rows["payer"] = reconcileRewardPayouts("payer", commissionFlowEventsFromRows(out, "payer", apiUatom, nil), paid)
+		require.NoError(t, indexedRewardCorrectionsKept("payer", l.rows["payer"], out.IndexedRewardCorrections))
 		sort.SliceStable(l.rows["payer"], func(i, j int) bool { return l.rows["payer"][i].Key.before(l.rows["payer"][j].Key) })
 		tr := runFlowTest(t, l, "payer")
 		fates := map[string]string{}
@@ -264,4 +265,56 @@ func TestCommissionSourceCorrectionIndexedRewardRetainedManifest(t *testing.T) {
 		}
 	}
 	require.Equal(t, map[int64]string{31944427: "2932922", 31944434: "1194225"}, totals)
+}
+
+// Cross-review cases: a row of the corrected message under another hash, or an
+// outbound withdraw-address move in it, refuses; and a trace whose payout
+// reconciliation would cut the indexed reward refuses instead of crediting
+// less than the corrections did.
+func TestCommissionSourceCorrectionIndexedRewardReviewCases(t *testing.T) {
+	p := correctionIndexedManifest(t)
+	a := p.Rewards[0]
+	row := correctionIndexedRow(a, 71, 0, "2932922", "validator-985c")
+	extra := row
+	extra.SubIndex, extra.Category, extra.FromAddr, extra.ToAddr, extra.ValidatorAddress, extra.Amount = 1, apiTransfer, a.Recipient, "outside", "", "5"
+	otherHash, move := extra, extra
+	otherHash.TxHash = ""
+	move.Denom, move.RewardTrigger = "ibc/27BC", tax.TriggerWithdrawAddress
+	rewardOtherHash := row
+	rewardOtherHash.SubIndex, rewardOtherHash.TxHash = 1, ""
+	for name, rows := range map[string][]tax.TaxableEvent{
+		"outbound under another hash": {row, otherHash},
+		"reward under another hash":   {row, rewardOtherHash},
+		"withdraw-address move":       {row, move},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, m := correctionTestSQL(t, p)
+			expectCorrectionReward(m, a, 71)
+			_, e := s.applyCommissionSourceCorrections(apiMainnet, "reward-a", a.Timestamp, a.Timestamp.Add(time.Second), walletRows{Events: rows})
+			require.ErrorContains(t, e, "reward source footprint changed")
+		})
+	}
+
+	s, m := correctionTestSQL(t, p)
+	for _, c := range p.Rewards[:4] {
+		expectCorrectionReward(m, c, 71)
+	}
+	out, e := s.applyCommissionSourceCorrections(apiMainnet, "reward-a", a.Timestamp, a.Timestamp.Add(time.Second), walletRows{Events: []tax.TaxableEvent{row}})
+	require.NoError(t, e)
+	require.Equal(t, "2932922", out.IndexedRewardCorrections[71].String())
+	events := commissionFlowEventsFromRows(out, "reward-a", apiUatom, nil)
+	key := flowKey{Time: a.Timestamp.Truncate(time.Microsecond), Height: a.Height, Message: 71, Sub: flowPayoutSub}
+	for name, paid := range map[string]map[uint]flowRewardPayout{
+		"no payout":    nil,
+		"short payout": {71: {Key: key, Amount: decimal.RequireFromString("2932921")}},
+		"more paid":    {71: {Key: key, Amount: decimal.RequireFromString("2932923")}},
+	} {
+		got := reconcileRewardPayouts("reward-a", events, paid)
+		err := indexedRewardCorrectionsKept("reward-a", got, out.IndexedRewardCorrections)
+		require.ErrorContains(t, err, "indexed reward payout differs", name)
+		require.Equal(t, "correction_indexed_reward_payout_differs", privateReadCause(err), name)
+	}
+	got := reconcileRewardPayouts("reward-a", events, map[uint]flowRewardPayout{71: {Key: key, Amount: decimal.RequireFromString("2932922")}})
+	require.NoError(t, indexedRewardCorrectionsKept("reward-a", got, out.IndexedRewardCorrections))
+	require.NoError(t, indexedRewardCorrectionsKept("reward-a", got, nil))
 }
