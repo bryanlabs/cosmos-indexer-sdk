@@ -38,8 +38,8 @@ func seedExec(t *testing.T, db *gorm.DB, id uint, inner *codectypes.Any, events 
 	}{
 		{"INSERT INTO blocks VALUES(?,?,?)", []any{id, 25030000 + id, stamp}},
 		{"INSERT INTO txes VALUES(?,?,?,0)", []any{id, id, "exec"}},
-		{"INSERT INTO message_types VALUES(?,?)", []any{id, execURL}},
-		{"INSERT INTO messages VALUES(?,?,?,0,?)", []any{id, id, id, wire}},
+		{sqlSeedType, []any{id, execURL}},
+		{sqlSeedMessage, []any{id, id, id, wire}},
 	} {
 		if err := db.Exec(q.sql, q.args...).Error; err != nil {
 			t.Fatal(err)

@@ -39,10 +39,10 @@ func TestReplayRefundLifecycleOnlyFromStoredBody(t *testing.T) {
 		sql  string
 		args []any
 	}{
-		{"INSERT INTO blocks VALUES(?,?,?)", []any{id, 19814108, stamp}},
-		{"INSERT INTO txes VALUES(?,?,?,0)", []any{id, id, "REFUND"}},
-		{"INSERT INTO message_types VALUES(?,?)", []any{id, typ}},
-		{"INSERT INTO messages VALUES(?,?,?,0,?)", []any{id, id, id, wire}},
+		{sqlSeedBlock, []any{id, 19814108, stamp}},
+		{sqlSeedTx, []any{id, id, "REFUND"}},
+		{sqlSeedType, []any{id, typ}},
+		{sqlSeedMessage, []any{id, id, id, wire}},
 		{"INSERT INTO taxable_events(message_id,sub_index,category,amount,denom,to_addr,block_height,timestamp,tx_hash,reward_trigger) VALUES(?,0,'protocol_withdrawal','10000000','uatom','intermediate',19814108,?,'REFUND','ibc_timeout_refund')", []any{id, stamp}},
 	} {
 		if err := db.Exec(q.sql, q.args...).Error; err != nil {

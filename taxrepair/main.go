@@ -44,8 +44,13 @@ var urls = append(append(append([]string{}, tax.ReplayableTypeURLs...), refundLi
 // book refunds. ReconstructMsg cannot rebuild them from events, so they are
 // replayed only from a stored body (message-bodies-load recovers missing
 // ones); a bodiless one is skipped and its rows are left alone.
-var refundLifecycleTypeURLs = []string{"/ibc.core.channel.v1.MsgTimeout", "/ibc.core.channel.v1.MsgTimeoutOnClose", "/ibc.core.channel.v1.MsgAcknowledgement",
-	tax.TypeURLV2Timeout, tax.TypeURLV2Acknowledgement}
+var refundLifecycleTypeURLs = []string{
+	"/ibc.core.channel.v1.MsgTimeout",
+	"/ibc.core.channel.v1.MsgTimeoutOnClose",
+	"/ibc.core.channel.v1.MsgAcknowledgement",
+	tax.TypeURLV2Timeout,
+	tax.TypeURLV2Acknowledgement,
+}
 
 const skipNoStoredBody = "no stored body"
 
