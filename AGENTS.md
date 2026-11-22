@@ -137,6 +137,23 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   The coverage statement adds "Transactions scanned" from the same rollup
   (rollup only, 10 s cap, "not counted" otherwise).
   `coveragerollup_pg_test.go` pins rolled counts to the live query.
+- `taxapi/stakingtables.go`, `taxstaking/` - the /tax/staking pages
+  (INF-748: inflation, staking income, validator income, unbonding) read per
+  UTC day staking sums. Four additive tables (`tax_staking_*`, DDL in
+  `StakingTablesDDL`, created once by the owner) hold them. `taxstaking
+  -seed-merged -seed-byval` loads the archive extraction once (one
+  transaction, refuses incomplete or failing input and non-empty tables);
+  the daily CronJob runs `taxstaking -refresh`, which adds whole UTC days from
+  our node, one transaction per day, and refuses any day with a missing,
+  unreadable or mint-less block or a community tax change without a passed
+  proposal. Sums are exact (big.Int at 1e18, the extraction's 60 digit
+  rounding); the per-block community tax comes from distribution params at
+  h-1. `-check FROM TO` recomputes days from the node and compares every
+  column. The API reads the tables only when the state row exists, reaches
+  the embedded file's last day and every day from the embedded first day is
+  present; otherwise it serves the embedded files, so output is identical
+  either way (`stakingtables_pg_test.go`). It never writes them. Bare-metal:
+  `cluster/apps/cosmos-tax-staking-daily/`.
 - `taxapid/main.go` — the API daemon entrypoint.
 - `taxindexer/` — the indexing entrypoint; `tax/` — tax computation logic.
 - `tax/gaialiquid.go`, `tax/ibcv2.go`, `tax/tokenfactory.go` — hand-written message

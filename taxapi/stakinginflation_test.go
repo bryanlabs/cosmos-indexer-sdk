@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -120,6 +121,27 @@ func TestStakingInflationHandler(t *testing.T) {
 		}
 		if body.Coverage["complete"] != true || len(body.Changes) != 5 || len(body.Rows) == 0 || body.Method["apr_real"] == "" {
 			t.Fatalf("%s: body %s", c.query, rec.Body.String()[:200])
+		}
+	}
+}
+
+// Rounding remainders that exceed a period's fees show as zero fees, never negative.
+func TestFeesToStakersNeverNegative(t *testing.T) {
+	if got := feesToStakers(big.NewInt(999_815), big.NewInt(1_000_000)); got.Sign() != 0 {
+		t.Fatalf("got %s, want 0", got)
+	}
+	if got := feesToStakers(big.NewInt(1_000_250), big.NewInt(1_000_000)); got.Int64() != 250 {
+		t.Fatalf("got %s, want 250", got)
+	}
+	d, err := loadInflation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range []string{"daily", "monthly", "yearly"} {
+		for _, r := range groupInflation(d.Days, view) {
+			if strings.HasPrefix(r.FeeShare, "-") {
+				t.Fatalf("%s %s: fees_to_stakers %s", view, r.Period, r.FeeShare)
+			}
 		}
 	}
 }

@@ -15,8 +15,9 @@ import (
 // GET /staking/inflation: how much new ATOM the Hub minted, where it went, and
 // what staking paid against it, by day, month or year. Built from the mint
 // event of every cosmoshub-4 block (INF-748). The daily file is produced by
-// the extraction under cluster/apps/cosmos-tax-sdk-backfill and embedded here
-// until the daily job writes it to Postgres.
+// the extraction under cluster/apps/cosmos-tax-sdk-backfill and embedded here.
+// Once the taxstaking Job has seeded and extended the staking tables, the API
+// serves them instead (stakingtables.go).
 
 //go:embed stakingdata/inflation_daily.json
 var inflationDailyJSON []byte
@@ -154,21 +155,29 @@ func parseInflation(raw []byte) (*inflationData, error) {
 		if day.BondedAvg, err = flt(r, "bonded_ratio_avg"); err != nil {
 			return nil, err
 		}
-		dayStart, err := time.Parse(time.DateOnly, day.Date)
-		if err != nil {
+		if day.Seconds, err = inflationDaySeconds(day.Date, first); err != nil {
 			return nil, err
 		}
-		start := dayStart
-		if first.After(start) {
-			start = first
-		}
-		day.Seconds = dayStart.Add(24 * time.Hour).Sub(start).Seconds()
 		d.Days = append(d.Days, day)
 	}
 	if len(d.Days) == 0 {
 		return nil, fmt.Errorf("inflation file has no days")
 	}
 	return d, nil
+}
+
+// inflationDaySeconds is how much of the UTC day the chain ran: the whole day,
+// or from the first block on the chain's first day.
+func inflationDaySeconds(date string, first time.Time) (float64, error) {
+	dayStart, err := time.Parse(time.DateOnly, date)
+	if err != nil {
+		return 0, err
+	}
+	start := dayStart
+	if first.After(start) {
+		start = first
+	}
+	return dayStart.Add(24 * time.Hour).Sub(start).Seconds(), nil
 }
 
 // inflationChange is one governance decision that moved issuance or its split.
@@ -241,6 +250,18 @@ func atomString(u *big.Int) string {
 	return s
 }
 
+// feesToStakers is what validators were credited beyond new ATOM. The chain
+// sends the sub-uatom remainders of each block's split to the community pool,
+// so in a period with almost no fees the difference can dip a fraction of an
+// ATOM below zero; that is rounding, not negative fees, and is shown as zero.
+func feesToStakers(rewards, stakers *big.Int) *big.Int {
+	f := new(big.Int).Sub(rewards, stakers)
+	if f.Sign() < 0 {
+		return f.SetInt64(0)
+	}
+	return f
+}
+
 func ratio(a, b *big.Int) float64 {
 	if b.Sign() == 0 {
 		return 0
@@ -294,7 +315,7 @@ func summarize(period string, days []inflationDay, next *inflationDay) inflation
 		ToValidatorsCommission: atomString(commission),
 		ToDelegators:           atomString(new(big.Int).Sub(stakers, commission)),
 		SupplyStart:            atomString(supply),
-		FeeShare:               atomString(new(big.Int).Sub(rewards, stakers)),
+		FeeShare:               atomString(feesToStakers(rewards, stakers)),
 	}
 	if next != nil {
 		row.SupplyEnd = atomString(next.SupplyStart)
@@ -356,7 +377,7 @@ var inflationMethod = map[string]string{
 	"community_pool":       "The community tax share of new ATOM, at the rate in force at each block. A change passed by governance applies from the block after the vote closed.",
 	"stakers":              "New ATOM left after the community tax, paid to bonded validators by voting power. Validators keep their commission rate from it and the rest accrues to their delegators.",
 	"commission":           "The commission part of what stakers received, in the same proportion the chain's commission events show for the period. Delegators' part is the rest.",
-	"fees_to_stakers":      "Transaction fees paid to stakers on top of new ATOM, net of the fractions of a uatom the chain sends to the community pool when it divides each block's rewards. It can be a tiny negative amount when fees are close to zero.",
+	"fees_to_stakers":      "Transaction fees paid to stakers on top of new ATOM, net of the fractions of a uatom the chain sends to the community pool when it divides each block's rewards. When fees are close to zero those remainders can exceed them by a fraction of an ATOM, and the figure is shown as zero.",
 	"bonded_ratio":         "Share of all ATOM that is staked, as reported in each block's mint event, averaged over the period's blocks.",
 	"apr_stated":           "What staking pays if the stated inflation rate were the real one: stated inflation times (1 minus community tax), divided by the staked share.",
 	"apr_paid":             "What staking actually paid before validator commission: rewards the chain credited to validators in the period (new ATOM plus fees), divided by the ATOM staked on average over the period, scaled to a year.",
@@ -367,7 +388,7 @@ var inflationMethod = map[string]string{
 }
 
 func (s *Server) handleStakingInflation(w http.ResponseWriter, r *http.Request) {
-	data, err := loadInflation()
+	data, err := s.stakingInflation(r.Context())
 	if err != nil {
 		http.Error(w, "inflation data unavailable", http.StatusInternalServerError)
 		return

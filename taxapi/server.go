@@ -79,10 +79,13 @@ type Server struct {
 	// covRollup reads the coverage rollup on the root database handle;
 	// nil counts /coverage live and leaves scan counts off statements.
 	covRollup *coverageRollup
+	// staking serves the staking views from the staking tables once they
+	// cover the embedded files; nil serves the embedded files.
+	staking *stakingTables
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
-	return &Server{db: db, oracle: oracle, native: native, covRollup: newCoverageRollup(db)}
+	return &Server{db: db, oracle: oracle, native: native, covRollup: newCoverageRollup(db), staking: newStakingTables(db)}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -112,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /validator-commission-flows", s.handleValidatorCommissionFlows)
 	mux.HandleFunc("GET /commission-flows", s.handleCommissionFlowsHub)
 	mux.HandleFunc("GET /staking/inflation", s.handleStakingInflation)
+	mux.HandleFunc("GET /staking/validator-income", s.handleValidatorIncome)
+	mux.HandleFunc("GET /staking/validator-income/break-even", s.handleValidatorBreakEven)
 	mux.HandleFunc("GET /address-labels", s.handleAddressLabels)
 	mux.HandleFunc("GET /validators", s.handleValidatorList)
 	mux.HandleFunc("GET /validators/jurisdictions", s.handleValidatorJurisdictions)

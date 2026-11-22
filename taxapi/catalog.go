@@ -43,6 +43,8 @@ func (s *Server) handleCatalog(w http.ResponseWriter, _ *http.Request) {
 			{apiPath: "/balance-statement", apiPurpose: "Quarter-end and year-end holdings for a wallet (year=) or listed dates (dates=), JSON or format=csv, each date with its own status."},
 			{apiPath: "/delegator-report", apiPurpose: "Embeddable per-delegator summary for a validator's website."},
 			{apiPath: "/staking/inflation", apiPurpose: "ATOM minted per day, month or year from every block's mint event, where it went, and stated, paid and real staking APR, with the proposals that changed them."},
+			{apiPath: "/staking/validator-income", apiPurpose: "Commission the Hub's validators earned and withdrew per month or year, in ATOM and in dollars at each day's price, the spread across the set, groups by stake rank and the exchange-run group. No validator is named."},
+			{apiPath: "/staking/validator-income/break-even", apiPurpose: "For a month, a monthly running cost and an inflation rate: how many validators would earn less commission than the cost, with the count across inflation rates from 0% to 20%."},
 			{apiPath: "/index-coverage", apiPurpose: "Which blocks are indexed, per calendar year: block range, indexed and expected counts, fully covered dates and gaps. Reports for a period that is not fully indexed carry an X-Index-Coverage warning."},
 			{apiPath: "/coverage-statement", apiPurpose: "The coverage statement every report and export carries (also index_coverage.statement and X-Coverage-Statement): chains and heights read, indexed-through height and time, and known open items. JSON, or format=text."},
 		},
