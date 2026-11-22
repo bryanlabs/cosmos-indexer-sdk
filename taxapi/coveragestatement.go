@@ -271,7 +271,7 @@ func statementText(st *CoverageStatement, period PeriodCoverage) string {
 // period, which is what the statement's coverage claims rest on.
 func statementScanLine(st *CoverageStatement) string {
 	if st.TransactionsScanned == nil || st.MessagesScanned == nil {
-		return "Transactions scanned: not counted when this was generated."
+		return "Transactions scanned: not available yet. The per-day count of indexed transactions is still being built; the rest of this statement does not depend on it."
 	}
 	return fmt.Sprintf("Transactions scanned: %s %s transactions (%s messages) indexed in the period.",
 		groupDigits(*st.TransactionsScanned), apiHubChainID, groupDigits(*st.MessagesScanned))

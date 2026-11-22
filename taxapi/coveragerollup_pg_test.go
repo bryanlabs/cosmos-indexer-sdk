@@ -119,7 +119,13 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	addBlocks(400, base, 41*time.Minute) // about 11 days over the new year
 	addBlocks(60, base.AddDate(0, 0, 5).Add(3*time.Hour), 2*time.Hour)
 
-	live := &Server{db: db}
+	live := func(chain string, start, end time.Time) (*CoverageReport, error) {
+		rows, err := liveCoverageRowsForTest(db, chain, start, end)
+		if err != nil {
+			return nil, err
+		}
+		return summarizeCoverage(rows, start, end), nil
+	}
 	rolled := &Server{db: db, covRollup: newCoverageRollup(db)}
 	ctx := context.Background()
 	periods := [][2]time.Time{
@@ -141,40 +147,41 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	compare := func(phase string, wantRollup bool) {
 		t.Helper()
 		for _, p := range periods {
-			want, err := live.coverage(apiMainnet, p[0], p[1])
+			want, err := live(apiMainnet, p[0], p[1])
 			require.NoError(t, err)
 			got, err := rolled.coverage(apiMainnet, p[0], p[1])
-			require.NoError(t, err, phase)
 			label := fmt.Sprintf("%s %s..%s", phase, p[0].Format(time.RFC3339), p[1].Format(time.RFC3339))
+			if !wantRollup {
+				// The API never counts live: it says the rollup is not ready.
+				require.ErrorIs(t, err, errCoverageRollupUnavailable, label)
+				continue
+			}
+			require.NoError(t, err, phase)
 			require.Equal(t, sortedRows(want.Rows), sortedRows(got.Rows), label)
 			require.Equal(t, want.TotalMessages, got.TotalMessages, label)
 			require.Equal(t, want.ClassifiedMsgs, got.ClassifiedMsgs, label)
 			require.Equal(t, len(want.Gaps), len(got.Gaps), label)
-			if wantRollup {
-				require.NotNil(t, got.TransactionsScanned, label)
-				require.Equal(t, txCount(p[0], p[1]), *got.TransactionsScanned, label)
-				require.NotNil(t, got.CountedFrom, label)
-			} else {
-				require.Nil(t, got.TransactionsScanned, label)
-			}
+			require.NotNil(t, got.TransactionsScanned, label)
+			require.Equal(t, txCount(p[0], p[1]), *got.TransactionsScanned, label)
+			require.NotNil(t, got.CountedFrom, label)
 			for i := 1; i < len(got.Rows); i++ {
 				require.GreaterOrEqual(t, got.Rows[i-1].Total, got.Rows[i].Total, label)
 			}
 		}
 	}
 	someMessages := func() bool {
-		r, err := live.coverage(apiMainnet, periods[0][0], periods[0][1])
+		r, err := live(apiMainnet, periods[0][0], periods[0][1])
 		require.NoError(t, err)
 		return r.TotalMessages > 100 && r.ClassifiedMsgs > 0 && r.ClassifiedMsgs < r.TotalMessages
 	}
 	require.True(t, someMessages())
 
-	// No rollup tables: the rollup server counts live.
+	// No rollup tables: /coverage is not available yet.
 	compare("no tables", false)
 
 	require.NoError(t, db.Exec(CoverageRollupDDL).Error)
 	require.NoError(t, db.Exec("UPDATE tax_coverage_rollup_state SET message_chunk = 37, tx_chunk = 23").Error)
-	// Installed but not built yet: still live.
+	// Installed but not built yet: still not available.
 	compare("not built", false)
 
 	opts := CoverageRollupOptions{BatchTime: time.Millisecond, Logf: t.Logf}
@@ -206,6 +213,16 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, res.Dirtied, 1)
 	compare("new event on old message", true)
+	// With nothing changed, a run rebuilds nothing (ids just below the
+	// frontier are re-read but their chunks have not moved).
+	idle := opts
+	idle.Rolling = -1
+	res, err = RefreshCoverageRollup(ctx, db, idle)
+	require.NoError(t, err)
+	require.Equal(t, 0, res.Dirtied)
+	require.Equal(t, 0, res.Rebuilt)
+	var oldTE int64
+	require.NoError(t, db.Raw("SELECT id FROM taxable_events WHERE message_id = ?", oldMsg).Scan(&oldTE).Error)
 
 	// The only taxable event of an old message deleted: the fingerprint
 	// pass finds the chunk.
@@ -218,6 +235,14 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	require.GreaterOrEqual(t, res.Dirtied, 1)
 	require.Positive(t, res.Fingerprinted)
 	compare("deleted event", true)
+
+	// A taxable event committed late, with an id below the frontier: the
+	// re-read finds the chunk's classified count moved.
+	require.NoError(t, db.Exec("INSERT INTO taxable_events (id, message_id, sub_index) VALUES (?, ?, 0)", oldTE, oldMsg).Error)
+	res, err = RefreshCoverageRollup(ctx, db, idle)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Dirtied)
+	compare("late taxable event", true)
 
 	// A late commit below the frontier: a recent chunk's row count moved.
 	var maxMsg int64
@@ -268,10 +293,29 @@ func TestCoverageRollupMatchesLiveQueryPostgres(t *testing.T) {
 	require.NoError(t, err)
 	t.Log(status)
 
-	// Revoked read: the API counts live again.
+	// Revoked read: not available, and no live count.
 	require.NoError(t, db.Exec("ALTER TABLE tax_coverage_rollup_state RENAME TO tax_coverage_rollup_state_off").Error)
 	compare("state missing", false)
 	_ = sql.ErrNoRows
+}
+
+// liveCoverageRowsForTest is the original reconciliation query over every
+// message in the period, kept only as the reference the rollup must match.
+func liveCoverageRowsForTest(db *gorm.DB, chain string, start, end time.Time) ([]typeCount, error) {
+	var rows []typeCount
+	err := db.Table("messages").
+		Select("message_types.message_type AS message_type, COUNT(DISTINCT messages.id) AS total, COUNT(DISTINCT taxable_events.message_id) AS classified").
+		Joins("JOIN message_types ON message_types.id = messages.message_type_id").
+		Joins("JOIN txes ON txes.id = messages.tx_id").
+		Joins("JOIN blocks ON blocks.id = txes.block_id").
+		Joins("JOIN chains ON chains.id = blocks.chain_id").
+		Where("chains.chain_id IN ?", chainIDs(chain)).
+		Joins("LEFT JOIN taxable_events ON taxable_events.message_id = messages.id").
+		Where("blocks.time_stamp >= ? AND blocks.time_stamp < ?", start, end).
+		Group("message_types.message_type").
+		Order("total DESC").
+		Scan(&rows).Error
+	return rows, err
 }
 
 func sortedRows(rows []CoverageRow) []CoverageRow {

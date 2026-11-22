@@ -2,7 +2,10 @@ package taxapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,7 +54,7 @@ func TestRollupWindows(t *testing.T) {
 
 func TestStatementScanLine(t *testing.T) {
 	st := &CoverageStatement{}
-	if got := statementScanLine(st); got != "Transactions scanned: not counted when this was generated." {
+	if got := statementScanLine(st); got != "Transactions scanned: not available yet. The per-day count of indexed transactions is still being built; the rest of this statement does not depend on it." {
 		t.Fatal(got)
 	}
 	tx, msgs := int64(95123456), int64(137000001)
@@ -66,7 +69,7 @@ func TestStatementScanLine(t *testing.T) {
 	}
 	s := &Server{}
 	p := s.periodCoverage(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
-	if !strings.Contains(p.Statement.Text, "Transactions scanned: not counted") || p.Statement.TransactionsScanned != nil {
+	if !strings.Contains(p.Statement.Text, "Transactions scanned: not available yet") || p.Statement.TransactionsScanned != nil {
 		t.Fatalf("statement without a rollup:\n%s", p.Statement.Text)
 	}
 }
@@ -111,5 +114,21 @@ func TestFlightGroupSharesOneCall(t *testing.T) {
 	v, err := g.do(context.Background(), "k2", func() (any, error) { return 2, nil })
 	if err != nil || (v.(int) != 1 && v.(int) != 2) {
 		t.Fatalf("got %v %v", v, err)
+	}
+}
+
+func TestCoverageWithoutRollupIsPending(t *testing.T) {
+	s := &Server{}
+	w := httptest.NewRecorder()
+	s.handleCoverage(w, httptest.NewRequest("GET", "/coverage?start=2026-10-01&end=2026-11-01", nil))
+	if w.Code != http.StatusOK || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("got %d, Retry-After %q", w.Code, w.Header().Get("Retry-After"))
+	}
+	var rep CoverageReport
+	if err := json.Unmarshal(w.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Status != "pending" || !strings.Contains(rep.Note, "still being built") || rep.TotalMessages != 0 || rep.Start != "2026-10-01" {
+		t.Fatalf("pending report: %+v", rep)
 	}
 }

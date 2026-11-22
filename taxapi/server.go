@@ -3,6 +3,7 @@ package taxapi
 import (
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -362,6 +363,11 @@ func sumUBTI(rows []Row) (ubti decimal.Decimal, priceMissingRows int) {
 func (s *Server) handleCoverage(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	rep, err := s.coverage(chainParam(q.Get(apiChain)), dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)))
+	if errors.Is(err, errCoverageRollupUnavailable) {
+		start, end := dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1))
+		rep, err = pendingCoverage(start, end), nil
+		w.Header().Set("Retry-After", "600")
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
