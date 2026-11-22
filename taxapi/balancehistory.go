@@ -1347,10 +1347,6 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	if err != nil {
 		return nil, 0, err
 	}
-	unnamed, err := s.unnamedStakingHeights(chain, addr, lowest)
-	if err != nil {
-		return nil, 0, err
-	}
 	lowest = tip.Height
 	var usable []int
 	for i, t := range targets {
@@ -1384,11 +1380,6 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			out[i].Status, out[i].Reason = balanceIncompleteS, reason
 			continue
 		}
-		if k := sort.Search(len(unnamed), func(k int) bool { return unnamed[k] > t.Height }); k < len(unnamed) {
-			out[i].Status = balanceIncompleteS
-			out[i].Reason = fmt.Sprintf("the wallet moved stake at height %d, before Gaia v15 (block %d), when staking events did not name the delegator; rebuilding those from the messages is not deployed yet", unnamed[k], hubStakingDelegatorFrom)
-			continue
-		}
 		usable = append(usable, i)
 		lowest = min(lowest, t.Height)
 	}
@@ -1416,7 +1407,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		for _, i := range usable {
 			if targets[i].Height < unattributed {
 				out[i].Status = balanceIncompleteS
-				out[i].Reason = fmt.Sprintf("a redelegation at height %d after this date cannot be attributed to one delegator", unattributed)
+				out[i].Reason = fmt.Sprintf("a staking event at height %d after this date that does not name its delegator cannot be attributed to one delegator", unattributed)
 				continue
 			}
 			kept = append(kept, i)
