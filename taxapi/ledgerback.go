@@ -175,8 +175,8 @@ func openLedgerBackBackup(opts LedgerBackOptions) (*os.File, error) {
 // span.
 func (s *Server) ExtendLedgerScanBack(chain string, node *ledgerNode, floor, chunk int64, workers int, opts LedgerBackOptions, logf func(string, ...any)) (int64, LedgerBackSummary, error) {
 	sum := LedgerBackSummary{Apply: opts.Apply}
-	if chainParam(chain) == apiMainnet && floor < hubCoinEventsFrom {
-		return 0, sum, fmt.Errorf("floor %d is below block %d: failed transactions' fees before Gaia v6 cannot be read from the chain yet", floor, hubCoinEventsFrom)
+	if chainParam(chain) == apiMainnet && floor < hubGenesisHeight {
+		return 0, sum, fmt.Errorf("floor %d is below block %d, the first block of cosmoshub-4", floor, hubGenesisHeight)
 	}
 	backup, err := openLedgerBackBackup(opts)
 	if err != nil {

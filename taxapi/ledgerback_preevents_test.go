@@ -80,7 +80,13 @@ func TestSettlePreEventBlock(t *testing.T) {
 			},
 		}
 	}
-	for _, h := range []int64{9000002, hubCoinEventsFrom - 2} {
+	// Below Gaia v6 the result settles the fee the same way down to
+	// cosmoshub-4's first block, and a granter in the bytes paid nothing.
+	for _, h := range []int64{9000002, hubCoinEventsFrom - 2, hubGenesisHeight} {
+		granter := backTestGranter
+		if h < hubCoinEventsFrom {
+			granter = ""
+		}
 		b := fresh()
 		st := settlePreEventBlock(h, b)
 		require.Equal(t, 1, st.BlocksWithFailed)
@@ -90,7 +96,7 @@ func TestSettlePreEventBlock(t *testing.T) {
 		require.Equal(t, 2, st.FailedCharged)
 		require.Equal(t, 2, st.FailedUncharged)
 		require.Equal(t, 1, st.FailedUnknown)
-		require.Equal(t, nodeTx{Hash: "BB", Code: 5, Charged: "50uatom", ChargeKnown: true, Granter: backTestGranter}, b.txs[1], "a message failure paid its fee")
+		require.Equal(t, nodeTx{Hash: "BB", Code: 5, Charged: "50uatom", ChargeKnown: true, Granter: granter}, b.txs[1], "a message failure paid its fee")
 		require.Equal(t, nodeTx{Hash: "CC", Code: 32, Rejected: true, ChargeKnown: true}, b.txs[2], "a wrong sequence paid nothing")
 		require.Equal(t, nodeTx{Hash: "DD", Code: 5, Rejected: true, ChargeKnown: true}, b.txs[3], "a fee above the balance paid nothing")
 		require.Equal(t, nodeTx{Hash: "EE", Code: 11, Charged: "20uatom", ChargeKnown: true}, b.txs[4], "out of gas past the ante handler paid")
@@ -104,6 +110,11 @@ func TestSettlePreEventBlock(t *testing.T) {
 		}
 		got := scanBackBlock(h, b.txs, index)
 		require.Equal(t, []FailedTxFee{{TxID: 2, Charged: "50uatom"}, {TxID: 3, Charged: "20uatom"}}, got.fees, "an unknown outcome is not recorded")
+		if granter == "" {
+			require.Empty(t, got.grants, "no fee grant before Gaia v6")
+		} else {
+			require.Equal(t, []FeeGrantUse{{TxID: 2, Granter: granter}}, got.grants)
+		}
 		require.Zero(t, got.chainTxs, "the rejected transactions need not be indexed")
 		got = scanBackBlock(h, b.txs, index[:3])
 		require.Equal(t, 4, got.chainTxs, "a failed transaction the index lacks is a hole while its charge is unknown")

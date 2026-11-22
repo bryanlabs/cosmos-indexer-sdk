@@ -19,6 +19,11 @@ import (
 // ones.
 const hubFailedTxEventsFrom = 10085397
 
+// hubGenesisHeight is cosmoshub-4's first block. Before Gaia v6 a failed
+// transaction has no events either, so its fee is settled from its result
+// the same way, down to here.
+const hubGenesisHeight = 5200791
+
 const (
 	eventCoinReceived = "coin_received"
 	eventCoinSpent    = "coin_spent"
@@ -145,7 +150,9 @@ const (
 // rejection before the messages paid nothing. One the result does not settle
 // is left unknown. A copy of bytes another inclusion ran was turned away, so
 // one whose result reads as charged is a contradiction and is left unknown
-// too. A failed transaction's fee grant is read from its bytes.
+// too. A failed transaction's fee grant is read from its bytes from Gaia v6,
+// where the feegrant module started; before it a granter in the bytes paid
+// nothing.
 func settlePreEventBlock(height int64, b scannedBlock) preEventStats {
 	st := preEventStats{Blocks: 1}
 	failed, unknown := 0, 0
@@ -157,7 +164,7 @@ func settlePreEventBlock(height int64, b scannedBlock) preEventStats {
 			continue
 		}
 		failed++
-		if t.Granter == "" && info.FeeDecoded {
+		if t.Granter == "" && info.FeeDecoded && height >= hubCoinEventsFrom {
 			t.Granter = info.FeeGranter
 		}
 		charged, ok := preCoinEventsCharge(*info.Failed)
