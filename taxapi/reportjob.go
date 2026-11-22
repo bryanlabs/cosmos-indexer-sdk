@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -106,6 +107,8 @@ func reportJobKey(chain string, addresses []string, startStr, endStr, format str
 // remain failed until explicit resync. It never blocks on computation itself.
 func (s *Server) getOrStartReportJob(chain string, addresses []string, start, end time.Time, startStr, endStr, format string, resync bool, decisions AssetDecisions, tags UserTags) (*ReportJob, error) {
 	addresses = normalizedWalletScope(addresses)
+	stages := newStageTimer()
+	defer stages.logSlow(len(addresses))
 	key, err := reportJobKey(chain, addresses, startStr, endStr, format, decisions, tags)
 	if err != nil {
 		return nil, err
@@ -126,6 +129,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 	} else if err != gorm.ErrRecordNotFound {
 		return nil, err
 	}
+	stages.mark("pending")
 
 	// A ready report whose evidence the change journal shows untouched since
 	// its last full check is served without rereading the history.
@@ -134,6 +138,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 			return cached, nil
 		}
 	}
+	stages.mark("fast_path")
 
 	var job ReportJob
 	var found, stale bool
@@ -160,6 +165,7 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		}
 		return nil
 	})
+	stages.mark("snapshot")
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +186,9 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 
 	// A wallet too large to build on request is refused before its history
 	// is read. A cached report that is still valid was served above.
-	if err := s.checkReportRowCap(addresses, start, end); err != nil {
+	err = s.checkReportRowCap(addresses, start, end)
+	stages.mark("row_cap")
+	if err != nil {
 		return nil, err
 	}
 
@@ -348,4 +356,31 @@ func splitNonEmpty(s, sep string) []string {
 		}
 	}
 	return out
+}
+
+// stageTimer times the steps of a report job request, so a slow answer says
+// where its time went.
+type stageTimer struct {
+	began, last time.Time
+	parts       []string
+}
+
+// reportJobSlowStages is the request time above which the stages are logged.
+const reportJobSlowStages = 2 * time.Second
+
+func newStageTimer() *stageTimer {
+	now := time.Now()
+	return &stageTimer{began: now, last: now}
+}
+
+func (t *stageTimer) mark(stage string) {
+	now := time.Now()
+	t.parts = append(t.parts, fmt.Sprintf("%s=%dms", stage, now.Sub(t.last).Milliseconds()))
+	t.last = now
+}
+
+func (t *stageTimer) logSlow(wallets int) {
+	if total := time.Since(t.began); total >= reportJobSlowStages {
+		log.Printf("report job stages: wallets=%d %s total=%dms", wallets, strings.Join(t.parts, " "), total.Milliseconds())
+	}
 }
