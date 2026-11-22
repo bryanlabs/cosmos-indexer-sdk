@@ -76,6 +76,8 @@ func (u *upstream) wait(ctx context.Context) error {
 }
 
 type shim struct {
+	// rest is an optional archive REST origin tried before the RPC upstreams.
+	rest   *upstream
 	ups    []*upstream
 	next   atomic.Uint64
 	client *http.Client
@@ -386,6 +388,9 @@ func (s *shim) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
+	if s.rest != nil && !rawMethods[strings.TrimPrefix(r.URL.Path, "/")] && s.fromREST(w, r) {
+		return
+	}
 	body, err := s.answer(r)
 	w.Header().Set("content-type", "application/json")
 	if err != nil {
@@ -400,6 +405,60 @@ func (s *shim) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(body)
+}
+
+// fromREST answers from the primary archive REST origin when one is set and
+// not resting. It returns false, writing nothing, when that origin fails to
+// answer (transport error, 429 or 5xx gateway status) or answers at a height
+// other than the one asked for, so the RPC upstreams answer instead. Any
+// other answer, query errors included, is passed on as the origin gave it.
+func (s *shim) fromREST(w http.ResponseWriter, r *http.Request) bool {
+	if s.rest.restUntil.Load() > time.Now().UnixNano() {
+		return false
+	}
+	fail := func(why string) bool {
+		s.rest.restUntil.Store(time.Now().Add(restFor).UnixNano())
+		log.Printf("rest origin failed %s height=%s: %s", routeName(r.URL.Path), r.Header.Get(heightHeader), why)
+		return false
+	}
+	if err := s.rest.wait(r.Context()); err != nil {
+		return false
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.rest.origin+r.URL.RequestURI(), nil)
+	if err != nil {
+		return fail("bad request")
+	}
+	asked := r.Header.Get(heightHeader)
+	if asked != "" {
+		req.Header.Set(heightHeader, asked)
+	}
+	res, err := s.client.Do(req)
+	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fail(err.Error())
+	}
+	defer res.Body.Close()
+	switch res.StatusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return fail(fmt.Sprintf("HTTP status %d", res.StatusCode))
+	}
+	if asked != "" && res.Header.Get(heightHeader) != asked {
+		return fail(fmt.Sprintf("answered at height %q", res.Header.Get(heightHeader)))
+	}
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 256<<20))
+	if err != nil {
+		return fail("read failed")
+	}
+	w.Header().Set("content-type", "application/json")
+	if asked != "" {
+		w.Header().Set(heightHeader, asked)
+	}
+	w.WriteHeader(res.StatusCode)
+	_, _ = w.Write(raw)
+	return true
 }
 
 // routeName names the query without the account it was asked for.
@@ -458,6 +517,7 @@ func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
 func main() {
 	var upstreams listFlag
 	listen := flag.String("listen", ":1317", "address to serve the REST queries on")
+	restPrimary := flag.String("rest-primary", "", "archive REST origin (or env:<NAME>) and calls per second, as <source>=<rate>, tried before the RPC upstreams")
 	flag.Var(&upstreams, "upstream", "RPC origin file (or env:<NAME>) and calls per second, as <source>=<rate>; repeat for more origins")
 	flag.Parse()
 	var origins []string
@@ -482,7 +542,19 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("serving on %s with %d upstreams", *listen, len(origins))
+	if *restPrimary != "" {
+		file, r, _ := strings.Cut(*restPrimary, "=")
+		n, err := strconv.ParseFloat(r, 64)
+		if err != nil || n <= 0 {
+			log.Fatalf("--rest-primary rate %q is not a positive number", r)
+		}
+		o, err := readOrigin(file)
+		if err != nil {
+			log.Fatal(err)
+		}
+		s.rest = &upstream{origin: strings.TrimRight(o, "/"), gap: time.Duration(float64(time.Second) / n)}
+	}
+	log.Printf("serving on %s with %d upstreams, rest primary %t", *listen, len(origins), s.rest != nil)
 	srv := &http.Server{Addr: *listen, Handler: s, ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }

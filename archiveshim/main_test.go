@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	sdkmath "cosmossdk.io/math"
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -219,5 +220,74 @@ func TestFailedUpstreamRestsWhileAnotherAnswers(t *testing.T) {
 	}
 	if downCalls != 1 {
 		t.Fatalf("resting upstream called %d times", downCalls)
+	}
+}
+
+func restOrigin(t *testing.T, status int, height string, calls *int) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		if height == "" {
+			height = r.Header.Get(heightHeader)
+		}
+		w.Header().Set(heightHeader, height)
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"balances":[{"denom":"uatom","amount":"777"}],"pagination":{"next_key":null,"total":"0"}}`)
+	}))
+}
+
+func TestRESTPrimaryAnswersFirst(t *testing.T) {
+	var seen banktypes.QueryAllBalancesRequest
+	var seenHeight string
+	up := fakeRPC(t, "", &seen, &seenHeight)
+	defer up.Close()
+	calls := 0
+	rest := restOrigin(t, http.StatusOK, "", &calls)
+	defer rest.Close()
+	s, _ := newShim([]string{up.URL}, []float64{1000})
+	s.rest = &upstream{origin: rest.URL, gap: time.Millisecond}
+	code, body := get(t, s, "/cosmos/bank/v1beta1/balances/cosmos1abc", "9041673")
+	if code != http.StatusOK || body["balances"].([]any)[0].(map[string]any)["amount"] != "777" || seenHeight != "" || calls != 1 {
+		t.Fatalf("status %d calls %d rpc height %q %v", code, calls, seenHeight, body)
+	}
+}
+
+func TestRESTPrimaryFallsBackToRPC(t *testing.T) {
+	for _, c := range []struct {
+		status int
+		height string
+	}{{http.StatusBadGateway, ""}, {http.StatusOK, "27000000"}} {
+		var seen banktypes.QueryAllBalancesRequest
+		var seenHeight string
+		up := fakeRPC(t, "", &seen, &seenHeight)
+		calls := 0
+		rest := restOrigin(t, c.status, c.height, &calls)
+		s, _ := newShim([]string{up.URL}, []float64{1000})
+		s.rest = &upstream{origin: rest.URL, gap: time.Millisecond}
+		for i := 0; i < 2; i++ {
+			code, body := get(t, s, "/cosmos/bank/v1beta1/balances/cosmos1abc", "9041673")
+			if code != http.StatusOK || body["balances"].([]any)[0].(map[string]any)["amount"] != "13002" || seenHeight != "9041673" {
+				t.Fatalf("%+v: status %d %v", c, code, body)
+			}
+		}
+		if calls != 1 {
+			t.Fatalf("%+v: resting rest origin called %d times", c, calls)
+		}
+		up.Close()
+		rest.Close()
+	}
+}
+
+func TestRESTPrimaryPassesQueryErrors(t *testing.T) {
+	var seen banktypes.QueryAllBalancesRequest
+	var seenHeight string
+	up := fakeRPC(t, "", &seen, &seenHeight)
+	defer up.Close()
+	calls := 0
+	rest := restOrigin(t, http.StatusInternalServerError, "", &calls)
+	defer rest.Close()
+	s, _ := newShim([]string{up.URL}, []float64{1000})
+	s.rest = &upstream{origin: rest.URL, gap: time.Millisecond}
+	if code, _ := get(t, s, "/cosmos/bank/v1beta1/balances/cosmos1abc", "9041673"); code != http.StatusInternalServerError || seenHeight != "" {
+		t.Fatalf("status %d rpc height %q", code, seenHeight)
 	}
 }
