@@ -125,11 +125,16 @@ func testDB(t *testing.T) *gorm.DB {
 			_ = c.Close()
 		}
 	})
-	sep := "?"
-	if strings.Contains(dsn, "?") {
-		sep = "&"
+	// The DSN may be a URL or key=value pairs (CI uses key=value).
+	withSchema := dsn + " search_path=" + schema
+	if strings.Contains(dsn, "://") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		withSchema = dsn + sep + "search_path=" + schema
 	}
-	db, err := gorm.Open(postgres.Open(dsn+sep+"search_path="+schema), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	db, err := gorm.Open(postgres.Open(withSchema), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	require.NoError(t, err)
 	pool, err := db.DB()
 	require.NoError(t, err)

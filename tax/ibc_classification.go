@@ -467,9 +467,9 @@ func ibcV1RefundEvents(log *txlog.LogMessage, packet chantypes.Packet, timeout b
 	detail := map[string]string{
 		attributeIBCPacketSequence: strconv.FormatUint(packet.Sequence, 10), attributeIBCSrcPort: packet.SourcePort,
 		attributeIBCSrcChannel: packet.SourceChannel, attributeIBCDstPort: packet.DestinationPort,
-		attributeIBCDstChannel: packet.DestinationChannel, attributeIBCGeneration: ibcGenerationV1, "principal_return": attributeTrue,
+		attributeIBCDstChannel: packet.DestinationChannel, attributeIBCGeneration: ibcGenerationV1, detailPrincipalReturn: attributeTrue,
 	}
-	return ibcRefundRow(data.Sender, coin, timeout, detail), nil
+	return ibcRefundRows(log, data.Sender, coin, timeout, detail), nil
 }
 
 func ibcRefundApplication(log *txlog.LogMessage, timeout bool) bool {
@@ -509,6 +509,7 @@ func ibcRefundRow(receiver string, coin sdk.Coin, timeout bool, detail map[strin
 func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) ([]TaxableEvent, []string) {
 	var out []TaxableEvent
 	var issues []string
+	attributed := false
 	if log == nil {
 		return nil, nil
 	}
@@ -565,11 +566,12 @@ func ibcV2RefundEvents(log *txlog.LogMessage, packet PacketV2, timeout bool) ([]
 		}
 		detail := map[string]string{
 			attributeIBCPacketSequence: strconv.FormatUint(packet.Sequence, 10), "packet_source_client": packet.SourceClient,
-			"packet_destination_client": packet.DestinationClient, attributeIBCGeneration: ibcGenerationV2, "principal_return": attributeTrue,
+			"packet_destination_client": packet.DestinationClient, attributeIBCGeneration: ibcGenerationV2, detailPrincipalReturn: attributeTrue,
 		}
-		out = append(out, ibcRefundRow(receiver, coin, timeout, detail)...)
+		out = append(out, ibcRefundRows(log, receiver, coin, timeout, detail)...)
+		attributed = true
 	}
-	if ibcRefundApplication(log, timeout) && len(out) == 0 && len(issues) == 0 {
+	if ibcRefundApplication(log, timeout) && !attributed && len(issues) == 0 {
 		issues = append(issues, "committed refund application has no attributable refund token")
 	}
 	return out, issues
