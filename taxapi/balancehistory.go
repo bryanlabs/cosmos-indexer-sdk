@@ -691,7 +691,7 @@ JOIN txes x ON x.id = m.tx_id
 WHERE {{HIT}} AND t0.type IN ('withdraw_rewards', 'message')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = me0.message_id AND rt.type = 'redelegate') {{OWN}}`, rel,
+            WHERE r.message_id = me0.message_id AND rt.type IN ('redelegate', 'delegate', 'unbond')) {{OWN}}`, rel,
 		`me0.id IN (SELECT a0.message_event_id FROM message_event_attributes a0 WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr)`,
 		`EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me0.id AND a0.value = @addr)`) + `) u`
 	if s.blockReads {
@@ -718,8 +718,8 @@ AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id 
 	return append(events, redelegations...), unattributed, nil
 }
 
-// redelegationRows reads the redelegate, withdraw_rewards and message events
-// of the messages msgs, in height, message, event and attribute order. The
+// redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards
+// and message events of the messages msgs, in height, message, event and attribute order. The
 // messages are read in chunks, since a wallet can name more than one
 // statement may bind. Each message's rows come whole from one chunk, so a
 // stable sort by height and message restores the order of a single read.
@@ -736,7 +736,7 @@ JOIN txes x ON x.id = m.tx_id
 {{BLOCK}}
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message') {{OWN}}`, rel)+`) u
+WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message') {{OWN}}`, rel)+`) u
 ORDER BY height, message_id, event_index, attr_index`,
 			withParams(rp, map[string]any{"msgs": chunk})).
 			Scan(&part).Error; err != nil {
@@ -756,15 +756,17 @@ ORDER BY height, message_id, event_index, attr_index`,
 	return rows, nil
 }
 
-// attributeRedelegations gives the wallet its redelegate events. Gaia never
-// puts the delegator on a redelegate event, so it is read from the same
-// message: the delegators its withdraw_rewards events name, or the sender of
-// its staking message event on SDKs that leave the delegator off those too.
-// A message with one such delegator is that delegator's. In one with several
-// (an authz exec for many granters), a redelegation is matched to the reward
-// withdrawal from its source validator that precedes it. The highest height
-// of a redelegation that may be the wallet's but cannot be matched is
-// returned, so dates before it are refused.
+// attributeRedelegations gives the wallet the staking events that do not name
+// their delegator: every redelegate event, and the delegate and unbond events
+// of SDKs before Gaia v15. The delegator is read from the same message: the
+// delegators its withdraw_rewards events name, or the sender of its staking
+// message event on SDKs that leave the delegator off those too. A message
+// with one such delegator is that delegator's. In one with several (an authz
+// exec for many granters), an event is matched to the reward withdrawal from
+// its (source) validator that precedes it. The highest height of an event
+// that may be the wallet's but cannot be matched is returned, so dates before
+// it are refused. Events that name their delegator are read with the
+// wallet's other events and skipped here.
 func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, int64) {
 	var out []ledgerEvent
 	var unattributed int64
@@ -801,16 +803,20 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 						withdrawn[rec["validator"]][rec["delegator"]] = true
 					}
 				}
-			case "redelegate":
+			case "redelegate", "delegate", "unbond":
 				var attrs []ledgerAttr
 				for _, rec := range ev.records() {
 					if rec["delegator"] != "" {
 						continue
 					}
+					validator := rec["validator"]
+					if ev.Type == "redelegate" {
+						validator = rec["source_validator"]
+					}
 					owner := ""
 					if len(delegators) == 1 {
 						owner = addr
-					} else if w := withdrawn[rec["source_validator"]]; len(w) == 1 {
+					} else if w := withdrawn[validator]; len(w) == 1 {
 						for d := range w {
 							owner = d
 						}
@@ -825,7 +831,7 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 					if owner != addr {
 						continue
 					}
-					for _, k := range []string{"source_validator", "destination_validator", "amount", "completion_time"} {
+					for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "new_shares", "completion_time"} {
 						if v, ok := rec[k]; ok {
 							attrs = append(attrs, ledgerAttr{Key: k, Value: v})
 						}

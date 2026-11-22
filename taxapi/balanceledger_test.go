@@ -419,6 +419,82 @@ func TestAttributeRedelegations(t *testing.T) {
 	}
 }
 
+// Before Gaia v15 the delegate and unbond events name no delegator; the
+// wallet gets them from its own staking message. Events that do name it are
+// read with the wallet's other events and are not given twice.
+func TestAttributePreV15DelegateAndUnbond(t *testing.T) {
+	other := "cosmos1other"
+	rows := []ledgerAttrRow{
+		// The wallet's own MsgDelegate, first delegation to the validator.
+		redelRow(1, 10, 100, "message", "action", "/cosmos.staking.v1beta1.MsgDelegate"),
+		redelRow(1, 10, 100, "message", "module", "staking"),
+		redelRow(1, 10, 100, "message", "sender", ledgerTestAddr),
+		redelRow(1, 11, 100, "delegate", "validator", ledgerTestVal),
+		redelRow(1, 11, 100, "delegate", "amount", "1000uatom"),
+		redelRow(1, 11, 100, "delegate", "new_shares", "1000.000000000000000000"),
+		// The wallet's own MsgUndelegate.
+		redelRow(2, 20, 110, "message", "module", "staking"),
+		redelRow(2, 20, 110, "message", "sender", ledgerTestAddr),
+		redelRow(2, 21, 110, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(2, 21, 110, "withdraw_rewards", "delegator", ledgerTestAddr),
+		redelRow(2, 22, 110, "unbond", "validator", ledgerTestVal),
+		redelRow(2, 22, 110, "unbond", "amount", "400uatom"),
+		redelRow(2, 22, 110, "unbond", "completion_time", "2022-03-22T00:00:00Z"),
+		// Someone else's delegation.
+		redelRow(3, 30, 120, "message", "module", "staking"),
+		redelRow(3, 30, 120, "message", "sender", other),
+		redelRow(3, 31, 120, "delegate", "validator", ledgerTestVal),
+		redelRow(3, 31, 120, "delegate", "amount", "9uatom"),
+		// Gaia v15 and later: the delegator is on the event already.
+		redelRow(4, 40, 130, "message", "module", "staking"),
+		redelRow(4, 40, 130, "message", "sender", ledgerTestAddr),
+		redelRow(4, 41, 130, "delegate", "validator", ledgerTestVal),
+		redelRow(4, 41, 130, "delegate", "delegator", ledgerTestAddr),
+		redelRow(4, 41, 130, "delegate", "amount", "5uatom"),
+		// An authz exec for two granters: matched by the preceding withdrawal.
+		redelRow(5, 50, 140, "message", "module", "authz"),
+		redelRow(5, 51, 140, "withdraw_rewards", "validator", ledgerTestVal2),
+		redelRow(5, 51, 140, "withdraw_rewards", "delegator", other),
+		redelRow(5, 52, 140, "delegate", "validator", ledgerTestVal2),
+		redelRow(5, 52, 140, "delegate", "amount", "3uatom"),
+		redelRow(5, 53, 140, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(5, 53, 140, "withdraw_rewards", "delegator", ledgerTestAddr),
+		redelRow(5, 54, 140, "unbond", "validator", ledgerTestVal),
+		redelRow(5, 54, 140, "unbond", "amount", "2uatom"),
+	}
+	events, unattributed := attributeRedelegations(rows, ledgerTestAddr)
+	if unattributed != 0 {
+		t.Fatalf("unattributed = %d", unattributed)
+	}
+	want := []struct {
+		typ, amount string
+		height      int64
+	}{{"delegate", "1000uatom", 100}, {"unbond", "400uatom", 110}, {"unbond", "2uatom", 140}}
+	if len(events) != len(want) {
+		t.Fatalf("events = %+v", events)
+	}
+	for i, w := range want {
+		rec := events[i].records()
+		if events[i].Type != w.typ || events[i].Height != w.height || len(rec) != 1 || rec[0]["delegator"] != ledgerTestAddr || rec[0]["amount"] != w.amount || rec[0]["validator"] != ledgerTestVal {
+			t.Fatalf("event %d = %s %d %+v", i, events[i].Type, events[i].Height, rec)
+		}
+	}
+
+	// Two granters withdrawing from the same validator leave it ambiguous.
+	ambiguous := []ledgerAttrRow{
+		redelRow(6, 60, 150, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(6, 60, 150, "withdraw_rewards", "delegator", other),
+		redelRow(6, 61, 150, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(6, 61, 150, "withdraw_rewards", "delegator", ledgerTestAddr),
+		redelRow(6, 62, 150, "delegate", "validator", ledgerTestVal),
+		redelRow(6, 62, 150, "delegate", "amount", "1uatom"),
+	}
+	events, unattributed = attributeRedelegations(ambiguous, ledgerTestAddr)
+	if len(events) != 0 || unattributed != 150 {
+		t.Fatalf("events = %+v, unattributed = %d", events, unattributed)
+	}
+}
+
 func TestApproximateLinesCarryTheirBound(t *testing.T) {
 	s := &Server{native: DefaultNativeAsset, oracle: NewOracle(apiTestUnusedOrigin, "")}
 	h := ledgerHoldings{

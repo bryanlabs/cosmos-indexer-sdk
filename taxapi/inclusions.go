@@ -202,7 +202,7 @@ func windowTxs(rel string) string {
 }
 
 // blockReadQueries are ledgerEvents' message event, block event and
-// redelegation message reads for a window a few blocks wide, driven from the
+// unattributed staking message reads for a window a few blocks wide, driven from the
 // window's blocks. Each event's attributes are read by event id and matched to
 // the wallet there, never through the wallet's attribute index. The
 // materialized steps keep the planner from turning that around.
@@ -251,6 +251,6 @@ WITH ` + events("t.type IN ('withdraw_rewards', 'message')") + `
 SELECT DISTINCT ev.message_id FROM ev JOIN attrs x ON x.id = ev.id
 WHERE x.value = @addr
 AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = ev.message_id AND rt.type = 'redelegate')`
+            WHERE r.message_id = ev.message_id AND rt.type IN ('redelegate', 'delegate', 'unbond'))`
 	return msgQuery, blockQuery, redelQuery
 }
