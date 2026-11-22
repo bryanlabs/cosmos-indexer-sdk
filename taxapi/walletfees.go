@@ -5,8 +5,29 @@ import (
 	"time"
 )
 
-// walletFees preserves every payer-side fee in [start,end), including fees on
-// failed transactions and transactions with no classified taxable event.
+// feeChargedCondition keeps a fee row unless the chain is recorded as having
+// charged nothing for it. A successful transaction paid its declared fee. A
+// failed one paid it only when the ante handler passed and a message then
+// failed; when the ante handler rejected the transaction (a wrong sequence,
+// for one) its state was reverted and nothing was charged.
+// tax_failed_tx_fees holds the outcome read from the chain's block results,
+// with an empty charged column for nothing charged. The balance ledger applies
+// the same rule (ledgerFees).
+//
+// The chain can include the same bytes twice, a rejected copy beside the copy
+// that ran, and the index keeps one row per hash. A failed row with decoded
+// messages is such a copy: the indexer stores decoded messages only for a
+// transaction that ran, so those bytes paid their fee in another block even
+// though the outcome recorded at the stored block is nothing (OPS-821).
+const feeChargedCondition = `(txes.code = 0 OR NOT EXISTS (
+ SELECT 1 FROM tax_failed_tx_fees uncharged
+ WHERE uncharged.tx_id = fees.tx_id AND uncharged.charged = '')
+ OR EXISTS (SELECT 1 FROM messages ran WHERE ran.tx_id = fees.tx_id AND NOT ran.opaque))`
+
+// walletFees loads every payer-side fee the chain charged in [start,end),
+// including fees on failed transactions that passed the ante handler and
+// transactions with no classified taxable event, and leaving out failed
+// transactions recorded as charged nothing.
 func (s *Server) walletFees(chain, addr string, start, end time.Time) ([]feeRec, error) {
 	if s.readOnlyLedger {
 		return s.effectiveWalletFees(chain, addr, start, end)
@@ -29,7 +50,8 @@ func (s *Server) walletFees(chain, addr string, start, end time.Time) ([]feeRec,
 		Joins("JOIN blocks ON blocks.id = txes.block_id").
 		Joins("JOIN chains ON chains.id = blocks.chain_id").
 		Where("chains.chain_id IN ?", chainIDs(chain)).
-		Where("fees.payer_address_id = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", payer.ID, start, end)
+		Where("fees.payer_address_id = ? AND blocks.time_stamp >= ? AND blocks.time_stamp < ?", payer.ID, start, end).
+		Where(feeChargedCondition)
 
 	// On one chain, consensus timestamps are monotonic with height. Proven day
 	// boundaries provide a redundant height range, letting a heavy payer's

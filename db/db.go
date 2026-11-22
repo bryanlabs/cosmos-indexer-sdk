@@ -427,10 +427,7 @@ func indexBlockData(db *gorm.DB, block models.Block, txs []TxDBWrapper, indexerC
 		}
 
 		if len(txesSlice) != 0 {
-			if err := dbTransaction.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "hash"}},
-				DoUpdates: clause.AssignmentColumns([]string{"code", "block_id"}),
-			}).Create(txesSlice).Error; err != nil {
+			if err := dbTransaction.Clauses(txUpsertConflict()).Create(txesSlice).Error; err != nil {
 				config.Log.Error("Error getting/creating txes.", err)
 				return err
 			}
