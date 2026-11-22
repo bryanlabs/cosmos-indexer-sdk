@@ -1,0 +1,426 @@
+{
+ "source": "cosmoshub-4 production index, addresses replaced by same-length placeholders",
+ "message_type": "/ibc.core.channel.v1.MsgRecvPacket",
+ "height": "32908898",
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/ibc.core.channel.v1.MsgRecvPacket"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jlwxu4kvz49ehvs294qny4rxp6dscrcnjeduqd"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "recv_packet",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a2243714d42436877765932397a6257397a4c6d4a68626d7375646a46695a5852684d53354e633264545a57356b456f4942436b466a62334e7462334d78613363336332673062445131656a4e734d48557962484a784d334e3364324d33626d303159334a71595855334e44633263574e304e325674637a5534633352796258466d4e6d5a6a65546735655249745932397a6257397a4d577073643368314e477432656a51355a576832637a49354e48467565545279654841325a484e6a636d4e75616d566b6458466b4767344b4258566864473974456755784d5445774d41716242416f704c326c69597935686348427361574e6864476c76626e4d7564484a68626e4e6d5a584975646a457554584e6e56484a68626e4e6d5a58495337514d4b434852795957357a5a6d56794567786a61474675626d56734c5445344f44496144776f466457463062323053426a45774e7a41794e434a425932397a6257397a4d5774334e334e6f4e4777304e586f7a624442314d6d787963544e7a6433646a4e3235744e574e79616d46314e7a51334e6e466a6444646c62584d314f484e30636d31785a6a5a6d59336b344f586b714b334631595751786358463363335577643259326433566f4e33686b5a32523261444a3065577034654870724d47706d5a475635614746714f57457941446938395a7543307665473668684378514a786457466b4f6d4e766332317663326831596931795a584e305957746c6369316a62323530636d39734f6e4e335a5756774f6d4e76626e5279623278735a584939636d567a644746725a58493763484a76646d6c6b5a584a66636d56786457567a644639705a4430314e6a64424e305a464e446b33517a4a43516b49334d5445784e6a4933516a4931526a51774d5442464f555644515441784e7a41335154497a4e544d344e6b4d334d6a6c424e6a59324d454d344d5556474e4556434f3256326157526c626d4e6c58334e6f595449314e6a3144515456474d446b795154524352554d334d445a454f4459314e454935516a6c444e3046464d44677951304d35524556434e30517a526b453151304d324d5559324e544e424f45517a4f4456444e554e424e7a45344f334a6c64485679626c396a61474675626d567350574e6f595735755a5777744d5467344d6a74795a585231636d35666347397964443130636d467563325a6c636a74795a574e6c61585a6c636a31786457466b4d58467864334e314d48646d4e6e6431614464345a47646b646d677964486c7165486836617a42715a6d526c65576868616a6c68222c226d656d6f223a22717561643a636f736d6f736875622d72657374616b65722d636f6e74726f6c3a73776565703a636f6e74726f6c6c65723d72657374616b65723b70726f76696465725f726571756573745f69643d353637413746453439374332424242373131313632374232354634303130453945434130313730374132333533383643373239413636363043383145463445423b65766964656e63655f7368613235363d434135463039324134424543373036443836353442394239433741453038324343394445423744334641354343363146363533413844333835433543413731383b72657475726e5f6368616e6e656c3d6368616e6e656c2d313838323b72657475726e5f706f72743d7472616e736665723b72656365697665723d7175616431717177737530776636777568377864676476683274796a78787a6b306a6664657968616a3961222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1789064451077221052"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "38"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-quad1y96gtvmk64llyt8uc305jv2tuvc6e2upf87glu"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-34"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-1917"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_ORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-1280"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-1280"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "amount",
+     "value": "11100uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1jlwxu4kvz49ehvs294qny4rxp6dscrcnjeduqd"
+    },
+    {
+     "key": "amount",
+     "value": "11100uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos1jlwxu4kvz49ehvs294qny4rxp6dscrcnjeduqd"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "amount",
+     "value": "11100uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "amount",
+     "value": "107024uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos10xgtlz73x7hqkhsxhu3ynwm2s0f06gke7u2wyh"
+    },
+    {
+     "key": "amount",
+     "value": "107024uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos10xgtlz73x7hqkhsxhu3ynwm2s0f06gke7u2wyh"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "amount",
+     "value": "107024uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "send_packet",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264656e6f6d223a227561746f6d222c22616d6f756e74223a22313037303234222c2273656e646572223a22636f736d6f73316b77377368346c34357a336c3075326c72713373777763376e6d3563726a61753734373671637437656d7335387374726d716636666379383979222c227265636569766572223a227175616431717177737530776636777568377864676476683274796a78787a6b306a6664657968616a3961222c226d656d6f223a22717561643a636f736d6f736875622d72657374616b65722d636f6e74726f6c3a73776565703a636f6e74726f6c6c65723d72657374616b65723b70726f76696465725f726571756573745f69643d353637413746453439374332424242373131313632374232354634303130453945434130313730374132333533383643373239413636363043383145463445423b65766964656e63655f7368613235363d434135463039324134424543373036443836353442394239433741453038324343394445423744334641354343363146363533413844333835433543413731383b72657475726e5f6368616e6e656c3d6368616e6e656c2d313838323b72657475726e5f706f72743d7472616e736665723b72656365697665723d7175616431717177737530776636777568377864676476683274796a78787a6b306a6664657968616a3961227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1789085451077221052"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "170"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "transfer"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-1882"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "transfer"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-0"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_UNORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-1280"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-1280"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "ibc_transfer",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1kw7sh4l45z3l0u2lrq3swwc7nm5crjau7476qct7ems58strmqf6fcy89y"
+    },
+    {
+     "key": "receiver",
+     "value": "quad1qqwsu0wf6wuh7xdgdvh2tyjxxzk0jfdeyhaj9a"
+    },
+    {
+     "key": "denom",
+     "value": "uatom"
+    },
+    {
+     "key": "amount",
+     "value": "107024"
+    },
+    {
+     "key": "memo",
+     "value": "quad:cosmoshub-restaker-control:sweep:controller=restaker;provider_request_id=567A7FE497C2BBB7111627B25F4010E9ECA01707A235386C729A6660C81EF4EB;evidence_sha256=CA5F092A4BEC706D8654B9B9C7AE082CC9DEB7D3FA5CC61F653A8D385C5CA718;return_channel=channel-1882;return_port=transfer;receiver=quad1qqwsu0wf6wuh7xdgdvh2tyjxxzk0jfdeyhaj9a"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "transfer"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "ics27_packet",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "interchainaccounts"
+    },
+    {
+     "key": "host_channel_id",
+     "value": "channel-1917"
+    },
+    {
+     "key": "success",
+     "value": "true"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "write_acknowledgement",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a2243714d42436877765932397a6257397a4c6d4a68626d7375646a46695a5852684d53354e633264545a57356b456f4942436b466a62334e7462334d78613363336332673062445131656a4e734d48557962484a784d334e3364324d33626d303159334a71595855334e44633263574e304e325674637a5534633352796258466d4e6d5a6a65546735655249745932397a6257397a4d577073643368314e477432656a51355a576832637a49354e48467565545279654841325a484e6a636d4e75616d566b6458466b4767344b4258566864473974456755784d5445774d41716242416f704c326c69597935686348427361574e6864476c76626e4d7564484a68626e4e6d5a584975646a457554584e6e56484a68626e4e6d5a58495337514d4b434852795957357a5a6d56794567786a61474675626d56734c5445344f44496144776f466457463062323053426a45774e7a41794e434a425932397a6257397a4d5774334e334e6f4e4777304e586f7a624442314d6d787963544e7a6433646a4e3235744e574e79616d46314e7a51334e6e466a6444646c62584d314f484e30636d31785a6a5a6d59336b344f586b714b334631595751786358463363335577643259326433566f4e33686b5a32523261444a3065577034654870724d47706d5a475635614746714f57457941446938395a7543307665473668684378514a786457466b4f6d4e766332317663326831596931795a584e305957746c6369316a62323530636d39734f6e4e335a5756774f6d4e76626e5279623278735a584939636d567a644746725a58493763484a76646d6c6b5a584a66636d56786457567a644639705a4430314e6a64424e305a464e446b33517a4a43516b49334d5445784e6a4933516a4931526a51774d5442464f555644515441784e7a41335154497a4e544d344e6b4d334d6a6c424e6a59324d454d344d5556474e4556434f3256326157526c626d4e6c58334e6f595449314e6a3144515456474d446b795154524352554d334d445a454f4459314e454935516a6c444e3046464d44677951304d35524556434e30517a526b453151304d324d5559324e544e424f45517a4f4456444e554e424e7a45344f334a6c64485679626c396a61474675626d567350574e6f595735755a5777744d5467344d6a74795a585231636d35666347397964443130636d467563325a6c636a74795a574e6c61585a6c636a31786457466b4d58467864334e314d48646d4e6e6431614464345a47646b646d677964486c7165486836617a42715a6d526c65576868616a6c68222c226d656d6f223a22717561643a636f736d6f736875622d72657374616b65722d636f6e74726f6c3a73776565703a636f6e74726f6c6c65723d72657374616b65723b70726f76696465725f726571756573745f69643d353637413746453439374332424242373131313632374232354634303130453945434130313730374132333533383643373239413636363043383145463445423b65766964656e63655f7368613235363d434135463039324134424543373036443836353442394239433741453038324343394445423744334641354343363146363533413844333835433543413731383b72657475726e5f6368616e6e656c3d6368616e6e656c2d313838323b72657475726e5f706f72743d7472616e736665723b72656365697665723d7175616431717177737530776636777568377864676476683274796a78787a6b306a6664657968616a3961222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1789064451077221052"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "38"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-quad1y96gtvmk64llyt8uc305jv2tuvc6e2upf87glu"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-34"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-1917"
+    },
+    {
+     "key": "packet_ack_hex",
+     "value": "7b22726573756c74223a224569594b4a43396a62334e7462334d75596d4675617935324d574a6c644745784c6b317a5a314e6c626d52535a584e776232357a5a524934436a457661574a6a4c6d467763477870593246306157397563793530636d467563325a6c636935324d53354e63326455636d467563325a6c636c4a6c63334276626e4e6c45674d497167453d227d"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_ORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-1280"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-1280"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  }
+ ]
+}
