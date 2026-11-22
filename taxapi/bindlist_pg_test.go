@@ -20,6 +20,9 @@ func bindListFixture(t *testing.T) (*gorm.DB, int, int) {
 	if err := dbpkg.MigrateModels(db); err != nil {
 		t.Fatal(err)
 	}
+	if err := inclusionsMigrate(db); err != nil {
+		t.Fatal(err)
+	}
 	messages := 2*bindListChunk + 7
 	blocks := (messages + 1) / 2
 	for _, q := range []string{
