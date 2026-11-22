@@ -26,6 +26,20 @@ type commissionFlowProgress struct {
 	DiscoveryComplete bool    `json:"discovery_complete"`
 	// -1 means unknown, including every phase before discovery completes.
 	ClosingRemaining int `json:"closing_remaining"`
+	// What the read-ahead did with the queued transfers it looked at, and how
+	// many wallet openings it served or the trace read itself.
+	AheadCounts       map[string]int `json:"ahead_counts,omitempty"`
+	ReadAheadOpenings int64          `json:"read_ahead_openings"`
+	InlineOpenings    int64          `json:"inline_openings"`
+}
+
+// readAheadOpenings is how many openings the trace took from its read-ahead
+// and how many it read itself; both are zero without a read-ahead.
+func (l *dbFlowLoader) readAheadOpenings() (int64, int64) {
+	if l.pre == nil {
+		return 0, 0
+	}
+	return l.pre.used.Load(), l.pre.missed.Load()
 }
 
 func (t *flowTrace) reportProgress(phase, _ string, closingRemaining int) {
@@ -41,6 +55,15 @@ func (t *flowTrace) reportProgress(phase, _ string, closingRemaining int) {
 		PendingEvents:               t.queue.Len(), AppliedQueuedEvents: t.appliedQueuedEvents,
 		DiscoveryComplete: t.discoveryComplete, ClosingRemaining: closingRemaining,
 		EventTimeFraction: -1,
+	}
+	if len(t.ahead.counts) > 0 {
+		p.AheadCounts = make(map[string]int, len(t.ahead.counts))
+		for k, v := range t.ahead.counts {
+			p.AheadCounts[k] = v
+		}
+	}
+	if l, ok := t.load.(interface{ readAheadOpenings() (int64, int64) }); ok {
+		p.ReadAheadOpenings, p.InlineOpenings = l.readAheadOpenings()
 	}
 	if span := t.AsOf.Sub(t.From); !t.frontier.IsZero() && span > 0 {
 		p.EventTimeFraction = float64(t.frontier.Sub(t.From)) / float64(span)

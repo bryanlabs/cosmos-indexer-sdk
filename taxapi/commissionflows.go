@@ -378,7 +378,11 @@ type dbFlowLoader struct {
 
 func (l *dbFlowLoader) opening(addr string, day time.Time) (flowHoldings, bool, error) {
 	if j := l.pre.wait(addr); j != nil && j.heldOK && j.day.Equal(day) {
+		l.pre.used.Add(1)
 		return l.holdingsWith(addr, day, &j.held)
+	}
+	if l.pre != nil {
+		l.pre.missed.Add(1)
 	}
 	return l.holdingsAt(addr, day)
 }

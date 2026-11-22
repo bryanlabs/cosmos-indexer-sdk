@@ -67,8 +67,10 @@ type flowAhead struct {
 }
 
 // flowAheadScan bounds how many queued transfers, per slot, lookAhead looks
-// at in one step.
-const flowAheadScan = 8
+// at in one step. A large trace queues many transfers from wallets that hold
+// no commission coins yet, which are kept but not read ahead; at 8 per slot
+// they filled the whole window and the giant trace read one wallet at a time.
+const flowAheadScan = 128
 
 func (a *flowAhead) count(what string) {
 	if a.counts == nil {
@@ -219,14 +221,17 @@ type flowHoldingRead struct {
 // flowPrefetch reads wallets ahead for one trace with a fixed number of
 // workers, each one database connection at a time.
 type flowPrefetch struct {
-	l       *dbFlowLoader
-	slots   int
-	mu      sync.Mutex
-	cond    *sync.Cond
-	queue   []*flowPrefetchJob
-	jobs    map[string]*flowPrefetchJob
-	started bool
-	closed  bool
+	l     *dbFlowLoader
+	slots int
+	// used and missed count the openings the trace took from the read-ahead
+	// and the ones it read itself, for progress telemetry.
+	used, missed atomic.Int64
+	mu           sync.Mutex
+	cond         *sync.Cond
+	queue        []*flowPrefetchJob
+	jobs         map[string]*flowPrefetchJob
+	started      bool
+	closed       bool
 }
 
 func newFlowPrefetch(l *dbFlowLoader, slots int) *flowPrefetch {
