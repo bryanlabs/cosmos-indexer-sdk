@@ -1,0 +1,207 @@
+{
+ "source": "cosmoshub-4 icahost MsgRecvPacket, addresses replaced",
+ "message_type": "/ibc.core.channel.v1.MsgRecvPacket",
+ "height": 27476772,
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/ibc.core.channel.v1.MsgRecvPacket"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos18dwclmas8mjp05xv9agn4370p0mnwczyde4t8n"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "recv_packet",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a22436f6743436830765932397a6257397a4c6d4631644768364c6e5978596d56305954457554584e6e5258686c59784c6d415170425932397a6257397a4d585a6a647a5a714f4746324d6a593363334630633278795a5442714d477834655759304d7a4a32636d5672646d4e334e6d6f34595859794e6a647a6358527a62484a6c4d476f334d32646864324d536f41454b4e79396a62334e7462334d755a476c7a64484a70596e5630615739754c6e5978596d56305954457554584e6e56326c3061475279595864455a57786c5a32463062334a535a586468636d51535a516f745932397a6257397a4d584931646e56795958453263444e6c4e334e6a5a6a5278616e56724d7a4e6e63334e6e63446777655774784e33567862575636456a526a62334e7462334e3259577876634756794d546c3563324e6a6332523359545673616e4a685a48593361334a344e48497a633368686433467262575a325a6a6b3262586b32222c226d656d6f223a22222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1757584003225215427"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "234"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-into1np9jne4c9lrncsdt0r58verckvzzm6y4np9jne4c9lrncsdt0r58hccrnm"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-6"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-1494"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_UNORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-1175"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-1175"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "withdraw_rewards",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "0stake"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper19ysccsdwa5ljradv7krx4r3sxawqkmfvf96my6"
+    },
+    {
+     "key": "delegator",
+     "value": "cosmos1r5vuraq6p3e7scf4qjuk33gssgp80ykq7uqmez"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "ics27_packet",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "interchainaccounts"
+    },
+    {
+     "key": "host_channel_id",
+     "value": "channel-1494"
+    },
+    {
+     "key": "success",
+     "value": "true"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "write_acknowledgement",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a22436f6743436830765932397a6257397a4c6d4631644768364c6e5978596d56305954457554584e6e5258686c59784c6d415170425932397a6257397a4d585a6a647a5a714f4746324d6a593363334630633278795a5442714d477834655759304d7a4a32636d5672646d4e334e6d6f34595859794e6a647a6358527a62484a6c4d476f334d32646864324d536f41454b4e79396a62334e7462334d755a476c7a64484a70596e5630615739754c6e5978596d56305954457554584e6e56326c3061475279595864455a57786c5a32463062334a535a586468636d51535a516f745932397a6257397a4d584931646e56795958453263444e6c4e334e6a5a6a5278616e56724d7a4e6e63334e6e63446777655774784e33567862575636456a526a62334e7462334e3259577876634756794d546c3563324e6a6332523359545673616e4a685a48593361334a344e48497a633368686433467262575a325a6a6b3262586b32222c226d656d6f223a22222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1757584003225215427"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "234"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-into1np9jne4c9lrncsdt0r58verckvzzm6y4np9jne4c9lrncsdt0r58hccrnm"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-6"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-1494"
+    },
+    {
+     "key": "packet_ack_hex",
+     "value": "7b22726573756c74223a22456a634b4a53396a62334e7462334d755958563061486f75646a46695a5852684d53354e633264466547566a556d567a634739756332555344676f4d43676f4b42584e305957746c45674577227d"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_UNORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-1175"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-1175"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  }
+ ]
+}

@@ -7,6 +7,7 @@ import (
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/x/authz"
 	disttypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
@@ -33,6 +34,43 @@ var icaBatchOtherTypes = map[string]bool{
 	typeURLBankSend: true, typeURLBankMultiSend: true, typeURLIBCTransfer: true,
 }
 
+// icaBatchMessage is one message of a batch after authz MsgExec is opened:
+// granted says it ran through MsgExec, so its delegator is the granter.
+type icaBatchMessage struct {
+	any     *codectypes.Any
+	path    string
+	granted bool
+}
+
+// icaBatchMessages opens each MsgExec in the batch into its inner messages,
+// one level deep, keeping message order. ok is false for a nested MsgExec or
+// an Exec that does not decode.
+func icaBatchMessages(msgs []*codectypes.Any) ([]icaBatchMessage, bool) {
+	var out []icaBatchMessage
+	for i, a := range msgs {
+		path := "ica/" + strconv.Itoa(i)
+		if a.TypeUrl != typeURLAuthzExec {
+			out = append(out, icaBatchMessage{any: a, path: path})
+			continue
+		}
+		inner, err := unpackAuthzInner(a)
+		if err != nil {
+			return nil, false
+		}
+		exec, ok := inner.(*authz.MsgExec)
+		if !ok {
+			return nil, false
+		}
+		for j, b := range exec.Msgs {
+			if b.TypeUrl == typeURLAuthzExec {
+				return nil, false
+			}
+			out = append(out, icaBatchMessage{any: b, path: path + "/" + strconv.Itoa(j), granted: true})
+		}
+	}
+	return out, true
+}
+
 type icaGroup struct {
 	kind  string
 	attrs map[string]string
@@ -49,13 +87,32 @@ type icaGroup struct {
 // another delegator, or not matched by the distribution module's payments
 // refuses the whole packet. applies is false when the batch holds a type this
 // split cannot place, which keeps the unresolved issue.
+//
+// A MsgExec in the batch is opened into its inner messages in place: the host
+// runs them in that order inside the same log, and each names its granter as
+// delegator, so each reward group must name its own message's delegator.
+//
+// SDK 0.45 does not emit withdraw_rewards for the withdrawal a delegate,
+// undelegate or redelegate makes, only the distribution module's transfer, and
+// it pays nothing when the pending reward rounds to zero. When a batch has no
+// withdraw_rewards event and no explicit withdrawal, and the module made
+// exactly one payment per validator the batch touches with no validator
+// touched twice, the payments can only belong to those validators in message
+// order, so they become the reward groups. Fewer payments than validators
+// leave which validator paid nothing unknown, and the packet is refused.
 func icaStakingBatch(msgs []*codectypes.Any, log *txlog.LogMessage, state *classificationState, depth int) (rows []TaxableEvent, applies bool) {
+	batch, opened := icaBatchMessages(msgs)
+	if !opened {
+		return nil, false
+	}
 	staking := 0
-	for _, a := range msgs {
+	explicitWithdraw := false
+	for _, m := range batch {
 		switch {
-		case icaStakingTypes[a.TypeUrl]:
+		case icaStakingTypes[m.any.TypeUrl]:
 			staking++
-		case icaBatchOtherTypes[a.TypeUrl]:
+			explicitWithdraw = explicitWithdraw || m.any.TypeUrl == typeURLWithdrawDelegatorReward
+		case icaBatchOtherTypes[m.any.TypeUrl]:
 		default:
 			return nil, false
 		}
@@ -87,12 +144,22 @@ func icaStakingBatch(msgs []*codectypes.Any, log *txlog.LogMessage, state *class
 		}
 	}
 
+	if len(rewards) == 0 && !explicitWithdraw {
+		synthesized, reason := icaPaymentRewardGroups(batch, log)
+		if reason != "" {
+			return refuse(reason)
+		}
+		rewards = synthesized
+	}
+
 	owner := ""
 	ri, pi := 0, 0
-	var out, rewardRows []TaxableEvent
+	var out []TaxableEvent
+	rewardRows := map[string][]TaxableEvent{}
+	var owners []string
 	triggers := map[string]bool{}
-	for i, a := range msgs {
-		path := "ica/" + strconv.Itoa(i)
+	for _, bm := range batch {
+		a, path := bm.any, bm.path
 		inner, err := unpackAuthzInner(a)
 		if err != nil {
 			return refuse(fmt.Sprintf("%s: %v", path, err))
@@ -116,16 +183,25 @@ func icaStakingBatch(msgs []*codectypes.Any, log *txlog.LogMessage, state *class
 			out = append(out, classifyWithState(inner, &txlog.LogMessage{}, state, depth+1, path)...)
 			continue
 		}
-		if delegator == "" || (owner != "" && delegator != owner) {
-			return refuse(path + ": inner messages name different delegators")
+		if delegator == "" {
+			return refuse(path + ": no delegator")
 		}
-		owner = delegator
+		if !bm.granted {
+			if owner != "" && delegator != owner {
+				return refuse(path + ": inner messages name different delegators")
+			}
+			owner = delegator
+		}
+		if _, seen := rewardRows[delegator]; !seen {
+			rewardRows[delegator] = nil
+			owners = append(owners, delegator)
+		}
 
 		sub := &txlog.LogMessage{}
 		for _, v := range validators {
 			if ri < len(rewards) && rewards[ri].attrs[attributeValidator] == v {
 				g := rewards[ri].attrs
-				if d := g[attributeDelegator]; d != "" && d != owner {
+				if d := g[attributeDelegator]; d != "" && d != delegator {
 					return refuse(path + ": reward group names another delegator")
 				}
 				sub.Events = append(sub.Events, groupEvent(eventWithdrawRewards, g, attributeAmount, attributeValidator, attributeDelegator))
@@ -137,7 +213,7 @@ func icaStakingBatch(msgs []*codectypes.Any, log *txlog.LogMessage, state *class
 				return refuse(path + ": no " + principalKind + " event in message order")
 			}
 			g := principals[pi].attrs
-			if !icaPrincipalMatches(principalKind, g, validators, amount, owner) {
+			if !icaPrincipalMatches(principalKind, g, validators, amount, delegator) {
 				return refuse(path + ": " + principalKind + " event does not carry the message's validator and amount")
 			}
 			sub.Events = append(sub.Events, txlog.LogMessageEvent{Type: principalKind, Attributes: groupAttributes(g)})
@@ -146,7 +222,7 @@ func icaStakingBatch(msgs []*codectypes.Any, log *txlog.LogMessage, state *class
 		rows := classifyWithState(inner, sub, state, depth+1, path)
 		for _, r := range rows {
 			if r.Category == string(CategoryReward) {
-				rewardRows = append(rewardRows, r)
+				rewardRows[delegator] = append(rewardRows[delegator], r)
 				triggers[r.RewardTrigger] = true
 			}
 		}
@@ -167,8 +243,103 @@ func icaStakingBatch(msgs []*codectypes.Any, log *txlog.LogMessage, state *class
 			trigger = t
 		}
 	}
-	withdrawAddressPaid(state, log, owner, trigger, rewardRows)
+	if len(owners) == 1 {
+		withdrawAddressPaid(state, log, owners[0], trigger, rewardRows[owners[0]])
+		return out, true
+	}
+	if !distributionPaidSelf(log, rewards) {
+		return refuse("granters' rewards were not all paid to the granters themselves")
+	}
 	return out, true
+}
+
+// distributionPaidSelf checks, for a batch whose reward groups name several
+// delegators, that the distribution module paid each delegator exactly its
+// own groups, so no reward went to a withdraw address that would need its own
+// transfer row.
+func distributionPaidSelf(log *txlog.LogMessage, rewards []icaGroup) bool {
+	want := map[string]sdk.Coins{}
+	for _, g := range rewards {
+		d := g.attrs[attributeDelegator]
+		if d == "" {
+			return false
+		}
+		coins, err := sdk.ParseCoinsNormalized(g.attrs[attributeAmount])
+		if err != nil {
+			return false
+		}
+		want[d] = want[d].Add(coins...)
+	}
+	paid := map[string]sdk.Coins{}
+	for _, p := range transferRuns(log, distributionModuleAddress) {
+		if _, ok := want[p.recipient]; !ok {
+			return false
+		}
+		paid[p.recipient] = paid[p.recipient].Add(p.coins...)
+	}
+	for d, w := range want {
+		if !paid[d].IsEqual(w) {
+			return false
+		}
+	}
+	return true
+}
+
+// icaPaymentRewardGroups turns the distribution module's payments into reward
+// groups for a batch whose log has no withdraw_rewards event (SDK 0.45). Every
+// payment is matched to the validator the batch touches at the same position,
+// which is only proven when there is one payment per touched validator, no
+// validator is touched twice and one delegator owns the whole batch.
+func icaPaymentRewardGroups(batch []icaBatchMessage, log *txlog.LogMessage) ([]icaGroup, string) {
+	runs := transferRuns(log, distributionModuleAddress)
+	if len(runs) == 0 {
+		return nil, ""
+	}
+	var touched []string
+	seen := map[string]bool{}
+	owner := ""
+	for _, bm := range batch {
+		inner, err := unpackAuthzInner(bm.any)
+		if err != nil {
+			return nil, bm.path + ": " + err.Error()
+		}
+		var delegator string
+		var validators []string
+		switch m := inner.(type) {
+		case *stakingtypes.MsgDelegate:
+			delegator, validators = m.DelegatorAddress, []string{m.ValidatorAddress}
+		case *stakingtypes.MsgUndelegate:
+			delegator, validators = m.DelegatorAddress, []string{m.ValidatorAddress}
+		case *stakingtypes.MsgBeginRedelegate:
+			delegator, validators = m.DelegatorAddress, []string{m.ValidatorSrcAddress, m.ValidatorDstAddress}
+		default:
+			continue
+		}
+		if bm.granted || (owner != "" && delegator != owner) {
+			return nil, "payments without withdraw_rewards events in a batch for several delegators"
+		}
+		owner = delegator
+		for _, v := range validators {
+			if seen[v] {
+				return nil, "payments without withdraw_rewards events and a validator touched twice"
+			}
+			seen[v] = true
+			touched = append(touched, v)
+		}
+	}
+	if len(runs) != len(touched) {
+		return nil, fmt.Sprintf("%d distribution payments without withdraw_rewards events for %d validators", len(runs), len(touched))
+	}
+	groups := make([]icaGroup, 0, len(runs))
+	for i, r := range runs {
+		if !r.coins.IsAllPositive() {
+			return nil, "a distribution payment without withdraw_rewards events is not positive"
+		}
+		groups = append(groups, icaGroup{kind: eventWithdrawRewards, attrs: map[string]string{
+			attributeValidator: touched[i], attributeDelegator: owner, attributeAmount: r.coins.String(),
+		}})
+	}
+	return groups, ""
 }
 
 // splitAttributeGroups splits a staking event into one attribute group per
@@ -207,6 +378,12 @@ func icaPrincipalMatches(kind string, g map[string]string, validators []string, 
 			return false
 		}
 	}
+	if kind != string(CategoryDelegate) {
+		// Undelegating a few base units can round to zero tokens.
+		if zero, err := sdk.ParseCoinNormalized(g[attributeAmount]); err == nil && zero.Denom == amount.Denom && zero.IsZero() {
+			return true
+		}
+	}
 	coins, err := stakingCoins(g[attributeAmount], amount.Denom)
 	if err != nil || len(coins) != 1 || coins[0].Denom != amount.Denom {
 		return false
@@ -215,7 +392,8 @@ func icaPrincipalMatches(kind string, g map[string]string, validators []string, 
 		return coins[0].Amount.Equal(amount.Amount)
 	}
 	// Undelegating and redelegating convert the amount to shares and back, so
-	// the event can carry a few base units less than the message asked for.
+	// the event can carry a few base units less than the message asked for,
+	// down to zero.
 	return coins[0].Amount.IsPositive() && coins[0].Amount.LTE(amount.Amount)
 }
 

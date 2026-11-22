@@ -59,6 +59,9 @@ func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classi
 		if rows, applies := icaStakingBatch(tx.Messages, log, state, depth); applies {
 			return rows
 		}
+		if rows, applies := icaLiquidBatch(tx.Messages, log, state, depth); applies {
+			return rows
+		}
 	}
 	var out []TaxableEvent
 	for i, a := range tx.Messages {
