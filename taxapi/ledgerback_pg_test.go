@@ -120,8 +120,8 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 		return scan.FeeGrantsFrom
 	}
 
-	_, _, err = s.ExtendLedgerScanBack(apiMainnet, node, 8694999, 2, 2, LedgerBackOptions{}, t.Logf)
-	require.ErrorContains(t, err, "before Gaia v6")
+	_, _, err = s.ExtendLedgerScanBack(apiMainnet, node, hubGenesisHeight-1, 2, 2, LedgerBackOptions{}, t.Logf)
+	require.ErrorContains(t, err, "first block of cosmoshub-4")
 
 	planPath := filepath.Join(t.TempDir(), "dry-run.jsonl")
 	from, sum, err := s.ExtendLedgerScanBack(apiMainnet, node, 9000000, 2, 2, LedgerBackOptions{BackupPath: planPath}, t.Logf)

@@ -185,3 +185,97 @@ func TestSettlePreEventBlock(t *testing.T) {
 	require.Equal(t, 1, st.CleanMismatch)
 	require.Equal(t, []int64{9000001}, st.MismatchHeights)
 }
+
+func transferEvent(sender, recipient, amount, mode string, base64Attrs bool) rpcEvent {
+	attrs := []rpcAttr{{Key: "recipient", Value: recipient}, {Key: "sender", Value: sender}, {Key: apiAmount, Value: amount}}
+	if mode != "" {
+		attrs = append(attrs, rpcAttr{Key: "mode", Value: mode})
+	}
+	if base64Attrs {
+		for i, a := range attrs {
+			attrs[i] = rpcAttr{Key: b64(a.Key), Value: b64(a.Value)}
+		}
+	}
+	return rpcEvent{Type: eventTransfer, Attributes: attrs}
+}
+
+// Before Gaia v6 the fee collector's BeginBlock moves show only as transfer
+// events: the mint module pays it the new coins, then the distribution module
+// takes its whole balance.
+func TestCollectedFeesFromTransfers(t *testing.T) {
+	fc := feeCollectorAddress()
+	mint, distr := backTestSigner, backTestGranter
+	b := readFeeCollectorBegin([]rpcEvent{
+		transferEvent(mint, fc, testMintAmount, "", true),
+		transferEvent(backTestSigner, distr, "5uatom", "", true),
+		transferEvent(fc, distr, "1150uatom", "", true),
+	}, nil)
+	got, err := b.collectedFees()
+	require.NoError(t, err)
+	require.Equal(t, "150uatom", got.String())
+
+	// Coin events win when a block has them: Gaia v6 emits both, and the
+	// transfers must not be counted a second time.
+	b = readFeeCollectorBegin([]rpcEvent{
+		fcEvent(eventCoinReceived, fc, testMintAmount, "", true),
+		transferEvent(mint, fc, testMintAmount, "", true),
+		fcEvent(eventCoinSpent, fc, "1150uatom", "", true),
+		transferEvent(fc, distr, "1150uatom", "", true),
+	}, nil)
+	got, err = b.collectedFees()
+	require.NoError(t, err)
+	require.Equal(t, "150uatom", got.String())
+
+	// EndBlock transfers on newer nodes are not the previous block's fees.
+	b = readFeeCollectorBegin(nil, []rpcEvent{
+		transferEvent(mint, fc, testMintAmount, "BeginBlock", false),
+		transferEvent(fc, distr, "1150uatom", "BeginBlock", false),
+		transferEvent(mint, fc, "7uatom", "EndBlock", false),
+	})
+	got, err = b.collectedFees()
+	require.NoError(t, err)
+	require.Equal(t, "150uatom", got.String())
+
+	// Two payouts in one BeginBlock are refused, not guessed at.
+	b = readFeeCollectorBegin([]rpcEvent{
+		transferEvent(mint, fc, testMintAmount, "", true),
+		transferEvent(fc, distr, "1100uatom", "", true),
+		transferEvent(fc, distr, "50uatom", "", true),
+	}, nil)
+	_, err = b.collectedFees()
+	require.ErrorContains(t, err, "moved 2 times out")
+
+	b = readFeeCollectorBegin([]rpcEvent{transferEvent(mint, distr, "9uatom", "", true)}, nil)
+	got, err = b.collectedFees()
+	require.NoError(t, err)
+	require.True(t, got.IsZero())
+}
+
+// A fee granter in a failed transaction's bytes is recorded only from Gaia
+// v5, where the feegrant module began; before it the fee payer paid.
+func TestSettlePreEventGranterFromV5(t *testing.T) {
+	fc := feeCollectorAddress()
+	next := readFeeCollectorBegin([]rpcEvent{
+		transferEvent(backTestSigner, fc, testMintAmount, "", true),
+		transferEvent(fc, backTestGranter, "1050uatom", "", true),
+	}, nil)
+	block := func() scannedBlock {
+		return scannedBlock{
+			txs: []nodeTx{{Code: 0}, {Code: 19}},
+			raw: []rawTxInfo{
+				{Fee: coins(t, "20uatom"), FeeDecoded: true},
+				{Codespace: apiStaking, Fee: coins(t, "30uatom"), FeeDecoded: true, FeeGranter: backTestGranter},
+			},
+		}
+	}
+	before := block()
+	st := settlePreEventBlock(hubFeeGrantsFrom-1, before, next)
+	require.Equal(t, 1, st.FailedCharged)
+	require.Equal(t, "30uatom", before.txs[1].Charged)
+	require.Empty(t, before.txs[1].Granter)
+
+	after := block()
+	st = settlePreEventBlock(hubFeeGrantsFrom, after, next)
+	require.Equal(t, 1, st.FailedCharged)
+	require.Equal(t, backTestGranter, after.txs[1].Granter)
+}

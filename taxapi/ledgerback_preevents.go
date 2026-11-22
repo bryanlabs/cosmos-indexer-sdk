@@ -20,6 +20,18 @@ import (
 // ones.
 const hubFailedTxEventsFrom = 10085397
 
+// hubGenesisHeight is cosmoshub-4's first block. Below Gaia v6 (block
+// 8695000) the fee collector's BeginBlock movements show only as transfer
+// events, so the scan reads those instead of coin_received and coin_spent.
+const hubGenesisHeight = 5200791
+
+// hubFeeGrantsFrom is the Gaia v5 upgrade block (SDK 0.44), where the
+// feegrant module started. Before it a fee granter written into a
+// transaction's bytes paid nothing: the fee payer paid.
+const hubFeeGrantsFrom = 6910000
+
+const eventTransfer = "transfer"
+
 // maxFeeSubsetSearch bounds the failed transactions of one block whose
 // charges are searched combination by combination.
 const maxFeeSubsetSearch = 20
@@ -113,7 +125,78 @@ func feeCollectorAddress() string {
 // readFeeCollectorBegin collects the fee collector's coin_received and
 // coin_spent events from a block's BeginBlock events (older results) or the
 // BeginBlock part of its finalize events (newer nodes serving old blocks).
+//
+// Blocks before Gaia v6 carry no coin events. There the fee collector's
+// movements are read from transfer events: what it was sent (the minted
+// coins) and what it sent (to the distribution module). A block whose
+// BeginBlock has any coin event for the fee collector is read from those
+// alone, since Gaia v6 and later emit a transfer event for each send too.
 func readFeeCollectorBegin(begin, finalize []rpcEvent) feeCollectorBegin {
+	out := readFeeCollectorCoins(begin, finalize)
+	if out.err != nil || len(out.received) > 0 || len(out.spent) > 0 {
+		return out
+	}
+	return readFeeCollectorTransfers(begin, finalize)
+}
+
+// readFeeCollectorTransfers reads the fee collector's BeginBlock transfer
+// events, in order, for blocks with no coin events.
+func readFeeCollectorTransfers(begin, finalize []rpcEvent) feeCollectorBegin {
+	var out feeCollectorBegin
+	fc := feeCollectorAddress()
+	events := begin
+	fromFinalize := len(begin) == 0
+	if fromFinalize {
+		events = finalize
+	}
+	for _, e := range events {
+		if e.Type != eventTransfer {
+			continue
+		}
+		var sender, recipient, amount, mode string
+		for _, a := range e.Attributes {
+			k, v := eventKV(a)
+			switch k {
+			case "sender":
+				sender = v
+			case "recipient":
+				recipient = v
+			case apiAmount:
+				amount = v
+			case attrMode:
+				mode = v
+			}
+		}
+		if fromFinalize && mode != "BeginBlock" {
+			continue
+		}
+		if sender != fc && recipient != fc {
+			continue
+		}
+		if sender == recipient {
+			out.err = fmt.Errorf("fee collector transfer to itself")
+			return out
+		}
+		coins, err := sdk.ParseCoinsNormalized(amount)
+		if err != nil {
+			out.err = fmt.Errorf("fee collector transfer amount %q: %w", amount, err)
+			return out
+		}
+		if recipient == fc {
+			if len(out.spent) == 0 && len(out.received) == 0 {
+				out.receivedFirst = true
+			}
+			out.received = append(out.received, coins)
+		} else {
+			out.spent = append(out.spent, coins)
+		}
+	}
+	return out
+}
+
+// readFeeCollectorCoins reads the fee collector's BeginBlock coin_received
+// and coin_spent events, in order.
+func readFeeCollectorCoins(begin, finalize []rpcEvent) feeCollectorBegin {
 	var out feeCollectorBegin
 	fc := feeCollectorAddress()
 	events := begin
@@ -298,14 +381,14 @@ func resolvePreEventFees(txs []nodeTx, raw []rawTxInfo, collected sdk.Coins) ([]
 // settlePreEventBlock marks each failed transaction of a block from before
 // failed transactions had events as charged its declared fee, rejected, or
 // unknown, using the fees the block collected (read from the next block).
-// A failed transaction's fee grant is read from its bytes.
+// A failed transaction's fee grant is read from its bytes, from Gaia v5 on.
 func settlePreEventBlock(height int64, b scannedBlock, next feeCollectorBegin) preEventStats {
 	st := preEventStats{Blocks: 1}
 	failed := 0
 	for i, t := range b.txs {
 		if t.Code != 0 {
 			failed++
-			if b.txs[i].Granter == "" && b.raw[i].FeeDecoded {
+			if b.txs[i].Granter == "" && b.raw[i].FeeDecoded && height >= hubFeeGrantsFrom {
 				b.txs[i].Granter = b.raw[i].FeeGranter
 			}
 		}
