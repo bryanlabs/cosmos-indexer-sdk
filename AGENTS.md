@@ -28,7 +28,14 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   embedded `stakingdata/inflation_daily.json`, built from raw block results by
   `scripts/staking-inflation/` (extract, merge with its checks, export; README
   there); replace the file and rebuild to extend it until the daily job writes
-  a table).
+  a table). `mystaking.go` (`GET /staking/my-staking`, INF-749): one
+  holder's wallets per validator for a period. Rewards are the `/income`
+  rows (same filter, `reconciliation` proves the sum), commission paid is an
+  estimate from `tax_staking_validator_days`, yield from those days over
+  `tax_validator_rates` tokens, votes from `proposal_vote` events (two reads,
+  the second with seqscan and hashjoin off) against the node's proposal
+  list, commission changes from create and edit validator messages.
+  Slashing stays null until the ledger records it. Private: no cache.
 - Methodology v8 surfaces (2026-10-15): `tax/catalog.go` (everything the
   indexer watches, served as `GET /catalog`; the website renders it as
   `/tax/coverage`, so a new category, contract or tag belongs here first),
