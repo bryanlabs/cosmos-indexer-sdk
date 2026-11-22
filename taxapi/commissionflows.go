@@ -286,8 +286,10 @@ funded AS (
 	FROM moves m WHERE m.other = 0)
 SELECT (SELECT count(*) FROM senders) AS examined,
 	(SELECT count(*) FROM funded WHERE received > 0 AND swept >= received * CAST(@forward AS numeric) AND swept <= received) AS deposits`,
-		map[string]any{"addr": addr, "transfer": apiTransfer, "denom": s.native.Denom, "start": start, "end": end, "withdraw": tax.TriggerWithdrawAddress,
-			"sample": flowSweepSample, "senders": flowSweepSenders, "per": flowSweepPerSender, "forward": flowSweepForwardMin}).Scan(&row).Error
+		map[string]any{
+			"addr": addr, "transfer": apiTransfer, "denom": s.native.Denom, "start": start, "end": end, "withdraw": tax.TriggerWithdrawAddress,
+			"sample": flowSweepSample, "senders": flowSweepSenders, "per": flowSweepPerSender, "forward": flowSweepForwardMin,
+		}).Scan(&row).Error
 	return row.Examined, row.Deposits, err
 }
 

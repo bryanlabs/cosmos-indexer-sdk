@@ -82,12 +82,14 @@ func (l *prefetchFlowLedger) prefetch(addr string, day, end time.Time, follow, n
 	l.hinted[addr], l.open[addr] = true, true
 	l.maxOpen = max(l.maxOpen, len(l.open))
 }
+
 func (l *prefetchFlowLedger) release(addr string) {
 	if l.open[addr] {
 		l.released++
 	}
 	delete(l.open, addr)
 }
+
 func (l *prefetchFlowLedger) opening(addr string, day time.Time) (flowHoldings, bool, error) {
 	l.calls = append(l.calls, "opening|"+addr+"|"+day.String())
 	if l.open[addr] {
@@ -95,10 +97,12 @@ func (l *prefetchFlowLedger) opening(addr string, day time.Time) (flowHoldings, 
 	}
 	return l.fakeFlowLedger.opening(addr, day)
 }
+
 func (l *prefetchFlowLedger) events(addr string, start, end time.Time) ([]flowEvent, error) {
 	l.calls = append(l.calls, "events|"+addr+"|"+start.String())
 	return l.fakeFlowLedger.events(addr, start, end)
 }
+
 func (l *prefetchFlowLedger) stop(addr string, start, end time.Time) (flowStop, error) {
 	l.calls = append(l.calls, "stop|"+addr)
 	return l.fakeFlowLedger.stop(addr, start, end)
@@ -114,10 +118,12 @@ func (l *recordingFlowLedger) opening(addr string, day time.Time) (flowHoldings,
 	l.calls = append(l.calls, "opening|"+addr+"|"+day.String())
 	return l.fakeFlowLedger.opening(addr, day)
 }
+
 func (l *recordingFlowLedger) events(addr string, start, end time.Time) ([]flowEvent, error) {
 	l.calls = append(l.calls, "events|"+addr+"|"+start.String())
 	return l.fakeFlowLedger.events(addr, start, end)
 }
+
 func (l *recordingFlowLedger) stop(addr string, start, end time.Time) (flowStop, error) {
 	l.calls = append(l.calls, "stop|"+addr)
 	return l.fakeFlowLedger.stop(addr, start, end)
