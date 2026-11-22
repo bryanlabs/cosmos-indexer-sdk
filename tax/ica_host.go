@@ -28,10 +28,11 @@ const (
 
 // icaHostEvents classifies a successful EXECUTE_TX packet as if the ICA account
 // had signed its inner message itself. The stored log merges same-type events
-// across messages, so a packet with several inner messages cannot be split per
-// message and is reported as unresolved instead, except for bank sends, which
-// are classified from the message alone, and ICS-20 transfers, which are
-// classified from the message and the one send_packet that carries exactly it.
+// across messages, so a packet with several inner messages is split per message
+// only where each message's share can be proven: staking batches are split by
+// icaStakingBatch, bank sends are classified from the message alone, and ICS-20
+// transfers from the message and the one send_packet that carries exactly it.
+// Any other batch is reported as unresolved.
 func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classificationState, depth int) []TaxableEvent {
 	executed, known := icaHostExecuted(log)
 	if !known {
@@ -53,6 +54,11 @@ func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classi
 	if err := proto.Unmarshal(data, &tx); err != nil {
 		state.issues = append(state.issues, fmt.Sprintf("ica host packet: decode CosmosTx: %v", err))
 		return nil
+	}
+	if len(tx.Messages) > 1 {
+		if rows, applies := icaStakingBatch(tx.Messages, log, state, depth); applies {
+			return rows
+		}
 	}
 	var out []TaxableEvent
 	for i, a := range tx.Messages {

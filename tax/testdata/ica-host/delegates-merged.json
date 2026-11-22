@@ -1,0 +1,553 @@
+{
+ "source": "cosmoshub-4 icahost MsgRecvPacket, addresses replaced",
+ "message_type": "/ibc.core.channel.v1.MsgRecvPacket",
+ "height": 14354472,
+ "code": 0,
+ "events": [
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1rr3c7d7uuuce50hk5656gfhvuv0zywqap5w4qw"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "amount",
+     "value": "808uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1rr3c7d7uuuce50hk5656gfhvuv0zywqap5w4qw"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1rr3c7d7uuuce50hk5656gfhvuv0zywqap5w4qw"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "amount",
+     "value": "757uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1rr3c7d7uuuce50hk5656gfhvuv0zywqap5w4qw"
+    },
+    {
+     "key": "amount",
+     "value": "17463uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "amount",
+     "value": "861uatom"
+    },
+    {
+     "key": "receiver",
+     "value": "cosmos1rr3c7d7uuuce50hk5656gfhvuv0zywqap5w4qw"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "808uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "757uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "amount",
+     "value": "17463uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "861uatom"
+    },
+    {
+     "key": "spender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    }
+   ]
+  },
+  {
+   "type": "delegate",
+   "attributes": [
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1r2yku5a8ldyyqta58a46f9ytysny0tuzpq2ak6"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "new_shares",
+     "value": "17407.000000000000000000"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1sr6kxz54pw7eqgw2v42qj7t3y46vwrlxyvepaj"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "new_shares",
+     "value": "17407.000000000000000000"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1ps6frfwgutx7y9eqysxalyyxvjv8f2g6s3sdsj"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "new_shares",
+     "value": "17407.000000000000000000"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1mt8pf48jzgflgawy8lqlq0wmscx5dc05p9z78h"
+    },
+    {
+     "key": "amount",
+     "value": "17463uatom"
+    },
+    {
+     "key": "new_shares",
+     "value": "17463.000000000000000000"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper18fam0wrevpahqcdhxt4kjyx4reyt9g4qtu0883"
+    },
+    {
+     "key": "amount",
+     "value": "17407uatom"
+    },
+    {
+     "key": "new_shares",
+     "value": "17408.740869433876842716"
+    }
+   ]
+  },
+  {
+   "type": "ics27_packet",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "interchainaccounts"
+    },
+    {
+     "key": "error",
+     "value": ""
+    },
+    {
+     "key": "host_channel_id",
+     "value": "channel-528"
+    },
+    {
+     "key": "success",
+     "value": "true"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/ibc.core.channel.v1.MsgRecvPacket"
+    },
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "module",
+     "value": "staking"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "module",
+     "value": "staking"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "module",
+     "value": "staking"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "module",
+     "value": "staking"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "module",
+     "value": "staking"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos102qp2mg0zvdy6gdm4tu5lpyt2unk8j7h02qp2mg0zvdy6gdm4tu5s0hww7"
+    },
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    }
+   ]
+  },
+  {
+   "type": "recv_packet",
+   "attributes": [
+    {
+     "key": "packet_data",
+     "value": "{\"data\":\"CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxcjJ5a3U1YThsZHl5cXRhNThhNDZmOXl0eXNueTB0dXpwcTJhazYaDgoFdWF0b20SBTE3NDA3CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxc3I2a3h6NTRwdzdlcWd3MnY0MnFqN3QzeTQ2dndybHh5dmVwYWoaDgoFdWF0b20SBTE3NDA3CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxcHM2ZnJmd2d1dHg3eTllcXlzeGFseXl4dmp2OGYyZzZzM3Nkc2oaDgoFdWF0b20SBTE3NDA3CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxbXQ4cGY0OGp6Z2ZsZ2F3eThscWxxMHdtc2N4NWRjMDVwOXo3OGgaDgoFdWF0b20SBTE3NDYzCrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxOGZhbTB3cmV2cGFocWNkaHh0NGtqeXg0cmV5dDlnNHF0dTA4ODMaDgoFdWF0b20SBTE3NDA3\",\"memo\":\"93390294A7C3F5C0ABA8966EFD6100E664D0192E73AA3955A0EF26F44A6F7BE2\",\"type\":\"TYPE_EXECUTE_TX\"}"
+    },
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a224372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a584978636a4a3561335531595468735a486c35635852684e5468684e445a6d4f586c3065584e75655442306458707763544a68617a596144676f466457463062323053425445334e4441334372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a58497863334932613368364e545277647a646c635764334d6e59304d6e46714e33517a65545132646e647962486835646d567759576f6144676f466457463062323053425445334e4441334372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a58497863484d325a6e4a6d643264316448673365546c6c63586c7a6547467365586c34646d70324f4759795a7a5a7a4d334e6b63326f6144676f466457463062323053425445334e4441334372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a58497862585134634759304f4770365a325a735a32463365546873635778784d48647463324e344e57526a4d4456774f586f334f47676144676f466457463062323053425445334e44597a4372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a5849784f475a6862544233636d56326347466f63574e6b614868304e47747165586730636d563564446c6e4e484630645441344f444d6144676f466457463062323053425445334e444133222c226d656d6f223a2239333339303239344137433346354330414241383936364546443631303045363634443031393245373341413339353541304546323646343441364637424532222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1678220952691150085"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "31927"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-cosmoshub-4.delegate"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-15"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-528"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_ORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-709"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "808uatom"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "757uatom"
+    },
+    {
+     "key": "recipient",
+     "value": "cosmos12cs524v8fktavj50l4q9z9mnwxfvsu3t2cs524v8fktavj50l4q903v9m4"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "861uatom"
+    }
+   ]
+  },
+  {
+   "type": "withdraw_rewards",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1r2yku5a8ldyyqta58a46f9ytysny0tuzpq2ak6"
+    },
+    {
+     "key": "amount",
+     "value": "808uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1sr6kxz54pw7eqgw2v42qj7t3y46vwrlxyvepaj"
+    },
+    {
+     "key": "amount",
+     "value": "775uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1ps6frfwgutx7y9eqysxalyyxvjv8f2g6s3sdsj"
+    },
+    {
+     "key": "amount",
+     "value": "757uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1mt8pf48jzgflgawy8lqlq0wmscx5dc05p9z78h"
+    },
+    {
+     "key": "amount",
+     "value": "861uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper18fam0wrevpahqcdhxt4kjyx4reyt9g4qtu0883"
+    }
+   ]
+  },
+  {
+   "type": "write_acknowledgement",
+   "attributes": [
+    {
+     "key": "packet_data",
+     "value": "{\"data\":\"CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxcjJ5a3U1YThsZHl5cXRhNThhNDZmOXl0eXNueTB0dXpwcTJhazYaDgoFdWF0b20SBTE3NDA3CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxc3I2a3h6NTRwdzdlcWd3MnY0MnFqN3QzeTQ2dndybHh5dmVwYWoaDgoFdWF0b20SBTE3NDA3CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxcHM2ZnJmd2d1dHg3eTllcXlzeGFseXl4dmp2OGYyZzZzM3Nkc2oaDgoFdWF0b20SBTE3NDA3CrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxbXQ4cGY0OGp6Z2ZsZ2F3eThscWxxMHdtc2N4NWRjMDVwOXo3OGgaDgoFdWF0b20SBTE3NDYzCrEBCiMvY29zbW9zLnN0YWtpbmcudjFiZXRhMS5Nc2dEZWxlZ2F0ZRKJAQpBY29zbW9zMTAycXAybWcwenZkeTZnZG00dHU1bHB5dDJ1bms4ajdoMDJxcDJtZzB6dmR5NmdkbTR0dTVzMGh3dzcSNGNvc21vc3ZhbG9wZXIxOGZhbTB3cmV2cGFocWNkaHh0NGtqeXg0cmV5dDlnNHF0dTA4ODMaDgoFdWF0b20SBTE3NDA3\",\"memo\":\"93390294A7C3F5C0ABA8966EFD6100E664D0192E73AA3955A0EF26F44A6F7BE2\",\"type\":\"TYPE_EXECUTE_TX\"}"
+    },
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a224372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a584978636a4a3561335531595468735a486c35635852684e5468684e445a6d4f586c3065584e75655442306458707763544a68617a596144676f466457463062323053425445334e4441334372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a58497863334932613368364e545277647a646c635764334d6e59304d6e46714e33517a65545132646e647962486835646d567759576f6144676f466457463062323053425445334e4441334372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a58497863484d325a6e4a6d643264316448673365546c6c63586c7a6547467365586c34646d70324f4759795a7a5a7a4d334e6b63326f6144676f466457463062323053425445334e4441334372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a58497862585134634759304f4770365a325a735a32463365546873635778784d48647463324e344e57526a4d4456774f586f334f47676144676f466457463062323053425445334e44597a4372454243694d765932397a6257397a4c6e4e3059577470626d6375646a46695a5852684d53354e633264455a57786c5a3246305a524b4a415170425932397a6257397a4d5441796358417962576377656e5a6b65545a6e5a473030644855316248423564444a31626d7334616a646f4d444a7863444a745a7a4236646d52354e6d646b625452306454567a4d476833647a63534e474e766332317663335a68624739775a5849784f475a6862544233636d56326347466f63574e6b614868304e47747165586730636d563564446c6e4e484630645441344f444d6144676f466457463062323053425445334e444133222c226d656d6f223a2239333339303239344137433346354330414241383936364546443631303045363634443031393245373341413339353541304546323646343441364637424532222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1678220952691150085"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "31927"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-cosmoshub-4.delegate"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-15"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-528"
+    },
+    {
+     "key": "packet_ack",
+     "value": "{\"result\":\"CiUKIy9jb3Ntb3Muc3Rha2luZy52MWJldGExLk1zZ0RlbGVnYXRlCiUKIy9jb3Ntb3Muc3Rha2luZy52MWJldGExLk1zZ0RlbGVnYXRlCiUKIy9jb3Ntb3Muc3Rha2luZy52MWJldGExLk1zZ0RlbGVnYXRlCiUKIy9jb3Ntb3Muc3Rha2luZy52MWJldGExLk1zZ0RlbGVnYXRlCiUKIy9jb3Ntb3Muc3Rha2luZy52MWJldGExLk1zZ0RlbGVnYXRl\"}"
+    },
+    {
+     "key": "packet_ack_hex",
+     "value": "7b22726573756c74223a224369554b4979396a62334e7462334d756333526861326c755a7935324d574a6c644745784c6b317a5a30526c6247566e5958526c4369554b4979396a62334e7462334d756333526861326c755a7935324d574a6c644745784c6b317a5a30526c6247566e5958526c4369554b4979396a62334e7462334d756333526861326c755a7935324d574a6c644745784c6b317a5a30526c6247566e5958526c4369554b4979396a62334e7462334d756333526861326c755a7935324d574a6c644745784c6b317a5a30526c6247566e5958526c4369554b4979396a62334e7462334d756333526861326c755a7935324d574a6c644745784c6b317a5a30526c6247566e5958526c227d"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-709"
+    }
+   ]
+  }
+ ]
+}
