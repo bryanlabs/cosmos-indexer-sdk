@@ -60,8 +60,12 @@ const (
 	// Up to this many unindexed blocks at the tip are the live indexer's
 	// in-flight edge (about 20 minutes of Hub blocks), not a gap.
 	coverageTipSlack = int64(200)
-	// Pause between bucket queries so a full pass never competes with the
-	// indexer's writes for long.
+	// Least pause between bucket queries. Each pause is at least as long as
+	// the read before it, so a pass keeps one database backend busy at most
+	// half the time. A bucket read is one index range scan of about 0.4 s
+	// (measured 2026-11-22), and the first pass after a start reads every
+	// bucket, so it takes about twice its query time instead of competing
+	// with the indexer and the report jobs at full speed.
 	coverageBucketPause = 20 * time.Millisecond
 	// Bucket reads between snapshots published during a pass.
 	coveragePublishEvery = 25
@@ -340,6 +344,7 @@ func (sc *indexCoverageScanner) Refresh(ctx context.Context) error {
 	}
 	reads := 0
 	for _, lo := range keys {
+		began := time.Now()
 		read, err := sc.refreshBucket(ctx, lo, tip, now)
 		if err != nil {
 			// Keep what this pass did read: publish it before giving up, on a
@@ -364,7 +369,7 @@ func (sc *indexCoverageScanner) Refresh(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(sc.pause):
+			case <-time.After(max(sc.pause, time.Since(began))):
 			}
 		}
 	}
@@ -1151,7 +1156,14 @@ func (g *gormCoverageSource) runs(ctx context.Context, lo, hi int64, filter stri
 		T0, T1 *time.Time
 		Events int64
 	}
-	if err := g.db.WithContext(ctx).Raw(fmt.Sprintf(runsSQL, filter), ids, lo, hi).Scan(&rows).Error; err != nil {
+	// One backend per read: no parallel workers, whatever the planner's
+	// estimate for a large bucket.
+	if err := g.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("SET LOCAL max_parallel_workers_per_gather = 0").Error; err != nil {
+			return err
+		}
+		return tx.Raw(fmt.Sprintf(runsSQL, filter), ids, lo, hi).Scan(&rows).Error
+	}); err != nil {
 		return nil, err
 	}
 	out := make([]heightRun, 0, len(rows))
