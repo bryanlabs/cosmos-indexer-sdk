@@ -225,17 +225,16 @@ func TestWhereFileAddsUpToNode(t *testing.T) {
 		t.Fatalf("window misses the node: %s uatom, allowed %s to %s", win, lo, hi)
 	}
 
-	// The full history from genesis misses by more than the fractions
-	// explain. The method text states the excess; this fails if it grows,
-	// or if the chain ever sits above the replay.
-	_, full := whereCheck(f, infl, f.FirstDay, f.UnclaimedOpen, whereWithdrawn(f))
-	lo, hi = bounds(f.Withdrawals, days["all"])
-	excess := new(big.Int).Sub(lo, full)
-	t.Logf("history %s..%s: chain - replay = %s uatom over %d withdrawals (allowed %s to %s, excess %s)", f.FirstDay, f.LastDay, full, f.Withdrawals, lo, hi, excess)
-	if full.Cmp(hi) > 0 {
-		t.Fatalf("chain above the replay by %s uatom", full)
+	// The full history from genesis, with the payouts the chain made outside
+	// any transaction counted as withdrawn, must close within tolerance too.
+	outU, outN := whereOutsideTxIn(f)
+	if outU != 5_619_738_501 || outN != 4 {
+		t.Fatalf("payouts outside transactions %d uatom in %d, want the v15 upgrade's 5619738501 in 4", outU, outN)
 	}
-	if excess.Cmp(big.NewInt(whereUnexplainedHistoryUatom)) > 0 {
-		t.Fatalf("history misses the node by %s uatom beyond tolerance, more than the %d stated in the method text", excess, whereUnexplainedHistoryUatom)
+	_, full := whereCheck(f, infl, f.FirstDay, f.UnclaimedOpen, whereWithdrawn(f)+outU)
+	lo, hi = bounds(f.Withdrawals+outN, days["all"])
+	t.Logf("history %s..%s: chain - replay = %s uatom over %d withdrawals (allowed %s to %s)", f.FirstDay, f.LastDay, full, f.Withdrawals+outN, lo, hi)
+	if full.Cmp(lo) < 0 || full.Cmp(hi) > 0 {
+		t.Fatalf("history misses the node: %s uatom, allowed %s to %s", full, lo, hi)
 	}
 }

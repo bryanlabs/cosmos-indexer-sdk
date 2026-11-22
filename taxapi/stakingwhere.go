@@ -160,20 +160,20 @@ type whereRow struct {
 var whereMethod = map[string]string{
 	"question":       "What happened to the staking rewards delegators withdrew each month: where each withdrawn ATOM went on its first move out of the wallet that received it.",
 	"source":         "Every cosmoshub-4 block from its first block (2021-02-18), read from our own copy of the chain's block results. A transaction counts only when it succeeded. Every liquid ATOM movement of every account is replayed in order from the cosmoshub-4 genesis balances.",
-	"withdrawn":      "Every reward payout from the distribution module to a delegator's withdraw address in a successful transaction, including the automatic withdrawals the chain makes when a delegator delegates more, undelegates or redelegates, and withdrawals by interchain accounts that arrive in relayed packets. Commission withdrawals are not included. A reward belongs to the month of the block that paid it.",
+	"withdrawn":      "Every reward payout from the distribution module to a delegator's withdraw address in a successful transaction, including the automatic withdrawals the chain makes when a delegator delegates more, undelegates or redelegates, and withdrawals by interchain accounts that arrive in relayed packets. Commission withdrawals are not included, nor the commission the chain pays the operator when a transaction removes a validator (11 payouts, 77.279026 ATOM in all). A reward belongs to the month of the block that paid it.",
 	"rules":          "A wallet holds coins from many sources, so which coins left first is a choice. Under first in first out the oldest coins leave first. Under pro-rata every outflow takes from each source in proportion to its share of the balance. Under both rules, an outflow later in the same transaction as a withdrawal takes that withdrawal's rewards first (a withdraw-and-delegate transaction restakes its rewards). The difference between the two rules is the uncertainty, shown as low_atom and high_atom.",
 	"restaked":       "Delegated again: sent to the staking module's bonded or not-bonded pool.",
 	"liquid_staking": "Turned into liquid staking: sent over IBC in a transfer that asks the receiving chain to liquid-stake it (Stride autopilot), delegated in a transaction that also tokenizes delegation shares, or sent to the Hub's liquid staking module.",
 	"ibc":            "Moved to another chain over IBC, by destination chain from the channel's light client.",
 	"exchange":       "Sent to a labelled exchange address. Exchange labels are pending review, so this category is empty and those sends are counted in other_sends until labels are published. No exchange is named.",
-	"fees":           "Paid as transaction fees.",
+	"fees":           "Paid as transaction fees, including the tip the fee market had the sender pay straight to the block proposer from block 21,330,500 to 21,835,199 (July and August 2024).",
 	"other_modules":  "Sent to another module: governance deposits, community pool funding and similar.",
 	"other_sends":    "Sent to any other account.",
 	"left_in_wallet": "Still in the wallet that received it at the end of the data.",
 	"not_followed":   "Rewards received by a wallet whose replayed balance did not match the chain's balance at the check height, or that the replay could not follow (a payment larger than the replayed balance). They are shown instead of being guessed. A wallet stops being followed for all of its rewards.",
 	"minted":         "minted_atom is new ATOM from inflation and to_community_pool_atom is the community tax on it, from the inflation data.",
 	"credited":       "credited_to_delegators_atom is every validator's block rewards minus its commission, and validator_commission_atom is the commission. Both include delegators' and validators' share of transaction fees, not only new ATOM, because the chain pays fees and inflation out together.",
-	"unclaimed":      "credited_to_delegators_atom minus rewards withdrawn. unclaimed_end_atom starts from the delegators' unclaimed rewards in the cosmoshub-4 genesis. coverage.unclaimed_check compares it at check_height with the chain's own outstanding delegator rewards. When a reward is withdrawn the chain pays whole uatom and moves the fraction under 1 uatom to the community pool, so the chain's figure should be lower by under 1 uatom per withdrawal. Over recent_window, the days our node holds full state for, it is lower by 0.50 uatom per withdrawal on average, as expected. Over the full history it is lower by about 5,569 ATOM (0.0025% of rewards credited), at least 5,516 ATOM more than those fractions can explain; where in the history that comes from is not yet found, so unclaimed_end_atom carries that uncertainty. The first-hop shares do not depend on it.",
+	"unclaimed":      "credited_to_delegators_atom minus rewards withdrawn. unclaimed_end_atom starts from the delegators' unclaimed rewards in the cosmoshub-4 genesis. coverage.unclaimed_check compares it at check_height with the chain's own outstanding delegator rewards. When a reward is withdrawn the chain pays whole uatom and moves the fraction under 1 uatom to the community pool, so the chain's figure should be lower by under 1 uatom per withdrawal. Rewards the chain paid outside any transaction are not in the withdrawn rows, and the check counts them as withdrawn; there is one: at block 19,639,600 (2024-03-20) the Gaia v15 upgrade clawed back a vesting account and withdrew its 5,619.738501 ATOM of rewards in 4 payouts. With it, the full history and recent_window, the days our node holds full state for, are both lower by 0.50 uatom per withdrawal on average, as expected.",
 	"first_hop":      "Only the first move is counted. Coins that came back later (an IBC transfer that timed out, an unbonding that completed) count as new coins of their own and are not reclassified.",
 	"scope":          "cosmoshub-4 only. Monthly rows follow UTC months; the last month ends at last_day.",
 }
@@ -257,10 +257,31 @@ func (s *Server) handleWhereAtomGoes(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// whereUnexplainedHistoryUatom is how far the full-history unclaimed check
-// misses the node beyond the per-withdrawal fractions (measured on the file
-// built 2026-11-22 from replay pass 2). The method text states it.
-const whereUnexplainedHistoryUatom = 5_516_300_577
+// whereOutsideTx are delegator rewards the chain paid outside any
+// transaction, so the withdrawn rows leave them out. The full-history check
+// counts them as withdrawn. Each was found by bisecting the check against an
+// archive node down to one block, where the chain's unclaimed rewards fell by
+// the amount plus under 1 uatom per payout beyond that block's rewards.
+var whereOutsideTx = []struct {
+	Height  int64
+	Day     string
+	Uatom   int64
+	Payouts int64
+	What    string
+}{
+	{19639600, "2024-03-20", 5_619_738_501, 4, "The Gaia v15 upgrade clawed back a vesting account and withdrew its rewards from its 4 validators into the account."},
+}
+
+// whereOutsideTxIn sums the whereOutsideTx payouts in the file's days.
+func whereOutsideTxIn(f *whereFile) (uatom, payouts int64) {
+	for _, o := range whereOutsideTx {
+		if o.Day >= f.FirstDay && o.Day <= f.LastDay {
+			uatom += o.Uatom
+			payouts += o.Payouts
+		}
+	}
+	return uatom, payouts
+}
 
 // whereCheck replays delegators' unclaimed rewards from an opening value:
 // open plus credited minus withdrawn over the inflation days from first
@@ -287,14 +308,22 @@ func whereWithdrawn(f *whereFile) int64 {
 }
 
 func whereCheckJSON(f *whereFile, infl *inflationData) map[string]any {
-	full, fullDiff := whereCheck(f, infl, f.FirstDay, f.UnclaimedOpen, whereWithdrawn(f))
+	outU, outN := whereOutsideTxIn(f)
+	full, fullDiff := whereCheck(f, infl, f.FirstDay, f.UnclaimedOpen, whereWithdrawn(f)+outU)
+	var outside []map[string]any
+	for _, o := range whereOutsideTx {
+		if o.Day >= f.FirstDay && o.Day <= f.LastDay {
+			outside = append(outside, map[string]any{"height": o.Height, "day": o.Day, "atom": uatomString(o.Uatom), "payouts": o.Payouts, "what": o.What})
+		}
+	}
 	win, winDiff := whereCheck(f, infl, f.WindowFirstDay, f.WindowOpen, f.WindowWithdrawn)
 	return map[string]any{
-		"open_atom":              uatomString(f.UnclaimedOpen),
-		"replayed_at_check_atom": atomString(full),
-		"chain_at_check_atom":    uatomString(f.UnclaimedCloseNode),
-		"difference_atom":        atomString(fullDiff),
-		"withdrawals":            f.Withdrawals,
+		"open_atom":                      uatomString(f.UnclaimedOpen),
+		"replayed_at_check_atom":         atomString(full),
+		"chain_at_check_atom":            uatomString(f.UnclaimedCloseNode),
+		"difference_atom":                atomString(fullDiff),
+		"withdrawals":                    f.Withdrawals + outN,
+		"withdrawn_outside_transactions": outside,
 		"recent_window": map[string]any{
 			"first_day":              f.WindowFirstDay,
 			"first_height":           f.WindowFirstHeight,
