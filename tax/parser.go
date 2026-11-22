@@ -910,7 +910,7 @@ func redeemOwnRewardEvents(log *indexerTxTypes.LogMessage, delegator string, raw
 func redeemRecordPayee(log *indexerTxTypes.LogMessage, redeemer string) string {
 	payee := ""
 	for _, ev := range log.Events {
-		if ev.Type != "withdraw_tokenize_share_reward" {
+		if ev.Type != eventWithdrawTokenizeShareReward {
 			continue
 		}
 		for _, a := range ev.Attributes {
@@ -1004,7 +1004,7 @@ func tokenizeShareRewardEvents(log *indexerTxTypes.LogMessage, owner, recordVali
 	total := sdk.NewCoins()
 	payees := map[string]bool{}
 	for _, ev := range log.Events {
-		if ev.Type != "withdraw_tokenize_share_reward" {
+		if ev.Type != eventWithdrawTokenizeShareReward {
 			continue
 		}
 		for _, a := range ev.Attributes {

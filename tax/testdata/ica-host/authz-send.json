@@ -1,0 +1,430 @@
+{
+ "source": "cosmoshub-4 icahost MsgRecvPacket, addresses replaced",
+ "message_type": "/ibc.core.channel.v1.MsgRecvPacket",
+ "height": 25268083,
+ "code": 0,
+ "events": [
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "action",
+     "value": "/ibc.core.channel.v1.MsgRecvPacket"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1s8cv8wkpsxqfd9zlwqxuvtw9s98n4wga2v0msx"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "recv_packet",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a2243727742436877765932397a6257397a4c6d4a68626d7375646a46695a5852684d53354e633264545a57356b45707342436b466a62334e7462334d786447467a616e4e365a54526a4f48513162545a365a57777a626e423364586733636a6b354d6e4a6d5958463059584e716333706c4e474d34644456744e6e706c62444e75634734334f47527464684a425932397a6257397a4d54646c626e6331593251326347746f626e63345a47316c636a64346432633464475a734d336c354e6d45344e325675647a566a5a445a7761326875647a686b625756794e3368714e6a5a755932736145776f466457463062323053436a49794e6a6b304d6a41304e446b4b6e67494b4853396a62334e7462334d755958563061486f75646a46695a5852684d53354e633264466547566a45767742436b466a62334e7462334d786447467a616e4e365a54526a4f48513162545a365a57777a626e423364586733636a6b354d6e4a6d5958463059584e716333706c4e474d34644456744e6e706c62444e75634734334f47527464684b3241516f6a4c324e76633231766379357a644746726157356e4c6e5978596d56305954457554584e6e524756735a576468644755536a67454b51574e7663323176637a45335a5735334e574e6b4e6e4272614735334f4752745a5849336548646e4f48526d62444e3565545a684f44646c626e6331593251326347746f626e63345a47316c636a6434616a5932626d4e72456a526a62334e7462334e3259577876634756794d5845774d324d33616d513461324e75625864744d33426f5a576731636a4232644452775a6a5633644755305a58517a5a44647347684d4b425856686447397445676f794d6a59354e4449774e445135222c226d656d6f223a22222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1745762608818247640"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "985"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-neutron1yzjff96x4c7xgmddszkgctxtcssm245fyzjff96x4c7xgmddszkgd4tjct.drop_STAKER"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-4771"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-960"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_ORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-809"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-809"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1tasjsze4c8t5m6zel3npwux7r992rfaqtasjsze4c8t5m6zel3npn78dmv"
+    },
+    {
+     "key": "amount",
+     "value": "2269420449uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos17enw5cd6pkhnw8dmer7xwg8tfl3yy6a87enw5cd6pkhnw8dmer7xj66nck"
+    },
+    {
+     "key": "amount",
+     "value": "2269420449uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos17enw5cd6pkhnw8dmer7xwg8tfl3yy6a87enw5cd6pkhnw8dmer7xj66nck"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1tasjsze4c8t5m6zel3npwux7r992rfaqtasjsze4c8t5m6zel3npn78dmv"
+    },
+    {
+     "key": "amount",
+     "value": "2269420449uatom"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1tasjsze4c8t5m6zel3npwux7r992rfaqtasjsze4c8t5m6zel3npn78dmv"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "30920uatom"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos18nps0fz52s4zu9wxgrxx2x6zcr03ghhp8nps0fz52s4zu9wxgrxxal58g4"
+    },
+    {
+     "key": "amount",
+     "value": "30920uatom"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "transfer",
+   "attributes": [
+    {
+     "key": "recipient",
+     "value": "cosmos18nps0fz52s4zu9wxgrxx2x6zcr03ghhp8nps0fz52s4zu9wxgrxxal58g4"
+    },
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "amount",
+     "value": "30920uatom"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "sender",
+     "value": "cosmos1jv65s3grqf6v6jl3dp4t6c9t9rk99cd88lyufl"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "withdraw_rewards",
+   "attributes": [
+    {
+     "key": "amount",
+     "value": "30920uatom"
+    },
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1q03c7jd8kcnmwm3pheh5r0vt4pf5wte4et3d7l"
+    },
+    {
+     "key": "delegator",
+     "value": "cosmos17enw5cd6pkhnw8dmer7xwg8tfl3yy6a87enw5cd6pkhnw8dmer7xj66nck"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_spent",
+   "attributes": [
+    {
+     "key": "spender",
+     "value": "cosmos17enw5cd6pkhnw8dmer7xwg8tfl3yy6a87enw5cd6pkhnw8dmer7xj66nck"
+    },
+    {
+     "key": "amount",
+     "value": "2269420449uatom"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "coin_received",
+   "attributes": [
+    {
+     "key": "receiver",
+     "value": "cosmos1rr3c7d7uuuce50hk5656gfhvuv0zywqap5w4qw"
+    },
+    {
+     "key": "amount",
+     "value": "2269420449uatom"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "delegate",
+   "attributes": [
+    {
+     "key": "validator",
+     "value": "cosmosvaloper1q03c7jd8kcnmwm3pheh5r0vt4pf5wte4et3d7l"
+    },
+    {
+     "key": "delegator",
+     "value": "cosmos17enw5cd6pkhnw8dmer7xwg8tfl3yy6a87enw5cd6pkhnw8dmer7xj66nck"
+    },
+    {
+     "key": "amount",
+     "value": "2269420449uatom"
+    },
+    {
+     "key": "new_shares",
+     "value": "2269420449.000000000000000000"
+    },
+    {
+     "key": "authz_msg_index",
+     "value": "0"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "ics27_packet",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "interchainaccounts"
+    },
+    {
+     "key": "host_channel_id",
+     "value": "channel-960"
+    },
+    {
+     "key": "success",
+     "value": "true"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "write_acknowledgement",
+   "attributes": [
+    {
+     "key": "packet_data_hex",
+     "value": "7b2264617461223a2243727742436877765932397a6257397a4c6d4a68626d7375646a46695a5852684d53354e633264545a57356b45707342436b466a62334e7462334d786447467a616e4e365a54526a4f48513162545a365a57777a626e423364586733636a6b354d6e4a6d5958463059584e716333706c4e474d34644456744e6e706c62444e75634734334f47527464684a425932397a6257397a4d54646c626e6331593251326347746f626e63345a47316c636a64346432633464475a734d336c354e6d45344e325675647a566a5a445a7761326875647a686b625756794e3368714e6a5a755932736145776f466457463062323053436a49794e6a6b304d6a41304e446b4b6e67494b4853396a62334e7462334d755958563061486f75646a46695a5852684d53354e633264466547566a45767742436b466a62334e7462334d786447467a616e4e365a54526a4f48513162545a365a57777a626e423364586733636a6b354d6e4a6d5958463059584e716333706c4e474d34644456744e6e706c62444e75634734334f47527464684b3241516f6a4c324e76633231766379357a644746726157356e4c6e5978596d56305954457554584e6e524756735a576468644755536a67454b51574e7663323176637a45335a5735334e574e6b4e6e4272614735334f4752745a5849336548646e4f48526d62444e3565545a684f44646c626e6331593251326347746f626e63345a47316c636a6434616a5932626d4e72456a526a62334e7462334e3259577876634756794d5845774d324d33616d513461324e75625864744d33426f5a576731636a4232644452775a6a5633644755305a58517a5a44647347684d4b425856686447397445676f794d6a59354e4449774e445135222c226d656d6f223a22222c2274797065223a22545950455f455845435554455f5458227d"
+    },
+    {
+     "key": "packet_timeout_height",
+     "value": "0-0"
+    },
+    {
+     "key": "packet_timeout_timestamp",
+     "value": "1745762608818247640"
+    },
+    {
+     "key": "packet_sequence",
+     "value": "985"
+    },
+    {
+     "key": "packet_src_port",
+     "value": "icacontroller-neutron1yzjff96x4c7xgmddszkgctxtcssm245fyzjff96x4c7xgmddszkgd4tjct.drop_STAKER"
+    },
+    {
+     "key": "packet_src_channel",
+     "value": "channel-4771"
+    },
+    {
+     "key": "packet_dst_port",
+     "value": "icahost"
+    },
+    {
+     "key": "packet_dst_channel",
+     "value": "channel-960"
+    },
+    {
+     "key": "packet_ack_hex",
+     "value": "7b22726573756c74223a224569594b4a43396a62334e7462334d75596d4675617935324d574a6c644745784c6b317a5a314e6c626d52535a584e776232357a5a524972436955765932397a6257397a4c6d4631644768364c6e5978596d56305954457554584e6e5258686c59314a6c63334276626e4e6c4567494b41413d3d227d"
+    },
+    {
+     "key": "packet_channel_ordering",
+     "value": "ORDER_ORDERED"
+    },
+    {
+     "key": "packet_connection",
+     "value": "connection-809"
+    },
+    {
+     "key": "connection_id",
+     "value": "connection-809"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "attributes": [
+    {
+     "key": "module",
+     "value": "ibc_channel"
+    },
+    {
+     "key": "msg_index",
+     "value": "1"
+    }
+   ]
+  }
+ ]
+}
