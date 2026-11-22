@@ -21,8 +21,8 @@ func TestTxUpsertKeepsSuccessfulCopy(t *testing.T) {
 	sql := stmt.SQL.String()
 	for _, want := range []string{
 		`ON CONFLICT ("hash") DO UPDATE SET`,
-		`"code"=CASE WHEN txes.code = 0 AND EXCLUDED.code <> 0 THEN txes.code ELSE EXCLUDED.code END`,
-		`"block_id"=CASE WHEN txes.code = 0 AND EXCLUDED.code <> 0 THEN txes.block_id ELSE EXCLUDED.block_id END`,
+		`"code"=CASE WHEN EXCLUDED.block_id = txes.block_id OR (EXCLUDED.code = 0 AND txes.code <> 0) THEN EXCLUDED.code ELSE txes.code END`,
+		`"block_id"=CASE WHEN EXCLUDED.block_id = txes.block_id OR (EXCLUDED.code = 0 AND txes.code <> 0) THEN EXCLUDED.block_id ELSE txes.block_id END`,
 		`RETURNING "id"`,
 	} {
 		if !strings.Contains(sql, want) {

@@ -67,10 +67,25 @@ func TestTxUpsertKeepsSuccessfulCopyPostgres(t *testing.T) {
 	require.Equal(t, uint32(0), code)
 	require.Equal(t, uint(201), block)
 
-	// Two failed copies: the newer write wins, as before.
+	// Two failed copies: the stored copy stays, so re-indexing one block
+	// cannot move a transaction stored at another height.
 	upsert("BOTH", 32, 300)
 	upsert("BOTH", 5, 301)
 	code, block = stored("BOTH")
-	require.Equal(t, uint32(5), code)
-	require.Equal(t, uint(301), block)
+	require.Equal(t, uint32(32), code)
+	require.Equal(t, uint(300), block)
+
+	// A second successful copy in another block cannot replace the stored one.
+	upsert("ONCE", 0, 400)
+	upsert("ONCE", 0, 402)
+	code, block = stored("ONCE")
+	require.Equal(t, uint32(0), code)
+	require.Equal(t, uint(400), block)
+
+	// A re-index of the block the row already names takes the new result.
+	upsert("SAME", 0, 500)
+	upsert("SAME", 11, 500)
+	code, block = stored("SAME")
+	require.Equal(t, uint32(11), code)
+	require.Equal(t, uint(500), block)
 }
