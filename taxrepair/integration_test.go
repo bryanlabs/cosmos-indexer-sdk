@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,11 +17,72 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	staking "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/ory/dockertest/v3"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func scratch(t *testing.T) *gorm.DB {
 	t.Helper()
+	db := scratchConn(t)
+	sql := `CREATE TABLE blocks(id bigint primary key,height bigint,time_stamp timestamptz);
+ CREATE TABLE txes(id bigint primary key,block_id bigint,hash text,code bigint);
+ CREATE TABLE message_types(id bigint primary key,message_type text);
+ CREATE TABLE messages(id bigint primary key,tx_id bigint,message_type_id bigint,message_index bigint,message_bytes bytea);
+ CREATE TABLE message_event_types(id bigserial primary key,type text);
+ CREATE TABLE message_event_attribute_keys(id bigserial primary key,key text);
+ CREATE TABLE message_events(id bigserial primary key,message_id bigint,index bigint,message_event_type_id bigint);
+ CREATE TABLE message_event_attributes(id bigserial primary key,message_event_id bigint,index bigint,message_event_attribute_key_id bigint,value text);
+ CREATE TABLE taxable_events(id bigserial primary key,message_id bigint REFERENCES messages(id),sub_index bigint,category text,amount text,denom text,asset text,from_addr text,to_addr text,block_height bigint,timestamp timestamptz,tx_hash text,validator_address text,reward_trigger text,detail text,UNIQUE(message_id,sub_index));
+ CREATE TABLE message_parsers(id bigserial primary key,identifier text UNIQUE);
+ CREATE TABLE message_parser_errors(id bigserial primary key,message_parser_id bigint REFERENCES message_parsers(id),message_id bigint REFERENCES messages(id),error text);`
+	if err := db.Exec(sql).Error; err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+// scratchConn opens an empty database: a throwaway container through Docker,
+// or, when COSMOS_TAX_TEST_DSN names a disposable server (an agents-namespace
+// pod), a fresh schema on it that is dropped afterwards.
+func scratchConn(t *testing.T) *gorm.DB {
+	t.Helper()
+	if dsn := os.Getenv("COSMOS_TAX_TEST_DSN"); dsn != "" {
+		open := func(dsn string) *gorm.DB {
+			db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return db
+		}
+		admin := open(dsn)
+		schema := fmt.Sprintf("taxrepair_test_%d", time.Now().UnixNano())
+		if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
+			t.Fatal(err)
+		}
+		// Every pooled connection gets the schema, so tests that hold locks
+		// on one connection and wait on another still work. The DSN may be a
+		// URL or key=value pairs.
+		withSchema := dsn + " search_path=" + schema
+		if strings.Contains(dsn, "://") {
+			sep := "?"
+			if strings.Contains(dsn, "?") {
+				sep = "&"
+			}
+			withSchema = dsn + sep + "search_path=" + schema
+		}
+		db := open(withSchema)
+		t.Cleanup(func() {
+			if conn, err := db.DB(); err == nil {
+				conn.Close()
+			}
+			admin.Exec("DROP SCHEMA " + schema + " CASCADE")
+			if conn, err := admin.DB(); err == nil {
+				conn.Close()
+			}
+		})
+		return db
+	}
 	pool, err := dockertest.NewPool("")
 	if err != nil {
 		t.Fatal(err)
@@ -40,18 +103,6 @@ func scratch(t *testing.T) *gorm.DB {
 		return e
 	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	sql := `CREATE TABLE blocks(id bigint primary key,height bigint,time_stamp timestamptz);
- CREATE TABLE txes(id bigint primary key,block_id bigint,hash text,code bigint);
- CREATE TABLE message_types(id bigint primary key,message_type text);
- CREATE TABLE messages(id bigint primary key,tx_id bigint,message_type_id bigint,message_index bigint,message_bytes bytea);
- CREATE TABLE message_event_types(id bigserial primary key,type text);
- CREATE TABLE message_event_attribute_keys(id bigserial primary key,key text);
- CREATE TABLE message_events(id bigserial primary key,message_id bigint,index bigint,message_event_type_id bigint);
- CREATE TABLE message_event_attributes(id bigserial primary key,message_event_id bigint,index bigint,message_event_attribute_key_id bigint,value text);
- CREATE TABLE taxable_events(id bigserial primary key,message_id bigint REFERENCES messages(id),sub_index bigint,category text,amount text,denom text,asset text,from_addr text,to_addr text,block_height bigint,timestamp timestamptz,tx_hash text,validator_address text,reward_trigger text,detail text,UNIQUE(message_id,sub_index));`
-	if err := db.Exec(sql).Error; err != nil {
 		t.Fatal(err)
 	}
 	return db
