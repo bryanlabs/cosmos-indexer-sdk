@@ -237,4 +237,24 @@ func TestWhereFileAddsUpToNode(t *testing.T) {
 	if full.Cmp(lo) < 0 || full.Cmp(hi) > 0 {
 		t.Fatalf("history misses the node: %s uatom, allowed %s to %s", full, lo, hi)
 	}
+
+	// The served rows must carry the same payouts: the last unclaimed_end is
+	// the replayed figure the check compares, and the month of each payout
+	// shows it.
+	replayed, _ := whereCheck(f, infl, f.FirstDay, f.UnclaimedOpen, whereWithdrawn(f)+outU)
+	for _, view := range []string{"monthly", "yearly"} {
+		rows := whereRows(f, infl, view)
+		if got := rows[len(rows)-1].UnclaimedEnd; got != atomString(replayed) {
+			t.Fatalf("%s: last unclaimed_end %s, check replays %s", view, got, atomString(replayed))
+		}
+	}
+	for _, r := range whereRows(f, infl, "monthly") {
+		want := "0.000000"
+		if r.Period == "2024-03" {
+			want = "5619.738501"
+		}
+		if r.OutsideTx != want {
+			t.Fatalf("%s: withdrawn outside transactions %s, want %s", r.Period, r.OutsideTx, want)
+		}
+	}
 }
