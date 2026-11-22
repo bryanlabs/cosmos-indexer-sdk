@@ -12,6 +12,7 @@ import (
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	"github.com/cosmos/gogoproto/proto"
 	icatypes "github.com/cosmos/ibc-go/v7/modules/apps/27-interchain-accounts/types"
+	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
@@ -29,7 +30,8 @@ const (
 // had signed its inner message itself. The stored log merges same-type events
 // across messages, so a packet with several inner messages cannot be split per
 // message and is reported as unresolved instead, except for bank sends, which
-// are classified from the message alone.
+// are classified from the message alone, and ICS-20 transfers, which are
+// classified from the message and the one send_packet that carries exactly it.
 func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classificationState, depth int) []TaxableEvent {
 	executed, known := icaHostExecuted(log)
 	if !known {
@@ -61,6 +63,10 @@ func icaHostEvents(packet chantypes.Packet, log *txlog.LogMessage, state *classi
 			return nil
 		}
 		if len(tx.Messages) > 1 {
+			if transfer, ok := inner.(*transfertypes.MsgTransfer); ok {
+				out = append(out, classifyWithState(inner, icaTransferPacketLog(log, transfer), state, depth+1, path)...)
+				continue
+			}
 			if !messageOnlyClassification(a.TypeUrl) {
 				state.issues = append(state.issues, fmt.Sprintf("ica host packet: %d inner messages share one event log (%s; coins moved %t)", len(tx.Messages), icaTypeSummary(tx.Messages), authzMovedCoins(log)))
 				return nil
@@ -185,4 +191,55 @@ func icaPacketTx(raw []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("packet data bytes: %w", err)
 	}
 	return data, true, nil
+}
+
+// icaTransferPacketLog returns the log a transfer inside a batch is classified
+// with: only the committed send_packet whose source port and channel and whose
+// ICS-20 data (sender, receiver, amount, denom, memo) are exactly this
+// transfer's, so the row carries that packet's key and a later refund can be
+// matched to it. With no such packet, or with two (identical transfers in one
+// batch, or a coalesced event), the row is booked without a packet key.
+func icaTransferPacketLog(log *txlog.LogMessage, m *transfertypes.MsgTransfer) *txlog.LogMessage {
+	empty := &txlog.LogMessage{}
+	if log == nil {
+		return empty
+	}
+	var match []txlog.LogMessageEvent
+	for _, ev := range log.Events {
+		if ev.Type != eventSendPacket || !ibcCommittedEvent(ev) {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, attr := range ev.Attributes {
+			if seen[attr.Key] {
+				return empty
+			}
+			seen[attr.Key] = true
+		}
+		a := attrMap(ev)
+		if a[attributeIBCSrcPort] != m.SourcePort || a[attributeIBCSrcChannel] != m.SourceChannel {
+			continue
+		}
+		raw := []byte(a[attributePacketData])
+		if h, err := hex.DecodeString(a[attributePacketDataHex]); err == nil && len(h) != 0 {
+			raw = h
+		}
+		var data transfertypes.FungibleTokenPacketData
+		if len(raw) == 0 || json.Unmarshal(raw, &data) != nil {
+			continue
+		}
+		if data.Sender != m.Sender || data.Receiver != m.Receiver || data.Amount != m.Token.Amount.String() || data.Memo != m.Memo {
+			continue
+		}
+		for _, denom := range ibcRefundCandidates(data.Denom) {
+			if denom == m.Token.Denom {
+				match = append(match, ev)
+				break
+			}
+		}
+	}
+	if len(match) != 1 {
+		return empty
+	}
+	return &txlog.LogMessage{Events: match}
 }
