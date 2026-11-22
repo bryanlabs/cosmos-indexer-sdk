@@ -54,10 +54,16 @@ func TestReportFeesSkipUnchargedFailedTxsPostgres(t *testing.T) {
 		"INSERT INTO blocks(id,chain_id,proposer_cons_address_id,height,time_stamp,tx_indexed) VALUES (1,1,1,31802699,'2026-05-01T12:00:00Z',true)",
 		// 1 succeeded; 2 and 4 the ante handler rejected (wrong sequence,
 		// insufficient funds for the fee); 3 passed the ante handler and
-		// failed in its message; 5 failed with no recorded outcome yet.
-		"INSERT INTO txes(id,block_id,hash,code) VALUES (1,1,'OKTX',0),(2,1,'SEQTX',32),(3,1,'MSGFAILTX',5),(4,1,'ANTEFUNDSTX',5),(5,1,'UNRECORDEDTX',11)",
-		"INSERT INTO fees(tx_id,amount,denomination_id,payer_address_id) VALUES (1,100,1,1),(2,200,1,1),(3,300,1,1),(4,400,1,1),(5,500,1,1)",
-		"INSERT INTO tax_failed_tx_fees(tx_id,charged) VALUES (2,''),(3,'300uatom'),(4,'')",
+		// failed in its message; 5 failed with no recorded outcome yet. 6 is
+		// a rejected copy whose same bytes ran in another block, stored on
+		// the rejected copy's row with the decoded message of the copy that
+		// ran (OPS-821), so its fee was charged. 7 was rejected and keeps
+		// only an opaque message, which proves nothing ran.
+		"INSERT INTO txes(id,block_id,hash,code) VALUES (1,1,'OKTX',0),(2,1,'SEQTX',32),(3,1,'MSGFAILTX',5),(4,1,'ANTEFUNDSTX',5),(5,1,'UNRECORDEDTX',11),(6,1,'RANELSEWHERETX',32),(7,1,'OPAQUESEQTX',32)",
+		"INSERT INTO fees(tx_id,amount,denomination_id,payer_address_id) VALUES (1,100,1,1),(2,200,1,1),(3,300,1,1),(4,400,1,1),(5,500,1,1),(6,600,1,1),(7,700,1,1)",
+		"INSERT INTO tax_failed_tx_fees(tx_id,charged) VALUES (2,''),(3,'300uatom'),(4,''),(6,''),(7,'')",
+		"INSERT INTO message_types(id,message_type) VALUES (1,'/ibc.core.channel.v1.MsgRecvPacket'),(2,'/unknown.v1.MsgOpaque')",
+		"INSERT INTO messages(tx_id,message_index,message_type_id,opaque) VALUES (6,0,1,false),(7,0,2,true)",
 	} {
 		require.NoError(t, database.Exec(q).Error, q)
 	}
@@ -74,7 +80,7 @@ func TestReportFeesSkipUnchargedFailedTxsPostgres(t *testing.T) {
 	s := NewServer(database, NewOracle(oracle.URL, ""), DefaultNativeAsset)
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
-	want := []string{"OKTX", "MSGFAILTX", "UNRECORDEDTX"}
+	want := []string{"OKTX", "MSGFAILTX", "UNRECORDEDTX", "RANELSEWHERETX"}
 	sort.Strings(want)
 
 	// The database read every report, export, saved report and commission
@@ -107,7 +113,7 @@ func TestReportFeesSkipUnchargedFailedTxsPostgres(t *testing.T) {
 		require.Equal(t, apiFee, e.Category)
 		total += e.Amount.IntPart()
 	}
-	require.Equal(t, int64(100+300+500), total)
+	require.Equal(t, int64(100+300+500+600), total)
 }
 
 // Before Gaia v6 the block results carry no fee events, so the backfill

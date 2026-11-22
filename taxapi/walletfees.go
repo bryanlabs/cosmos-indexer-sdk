@@ -13,9 +13,16 @@ import (
 // tax_failed_tx_fees holds the outcome read from the chain's block results,
 // with an empty charged column for nothing charged. The balance ledger applies
 // the same rule (ledgerFees).
+//
+// The chain can include the same bytes twice, a rejected copy beside the copy
+// that ran, and the index keeps one row per hash. A failed row with decoded
+// messages is such a copy: the indexer stores decoded messages only for a
+// transaction that ran, so those bytes paid their fee in another block even
+// though the outcome recorded at the stored block is nothing (OPS-821).
 const feeChargedCondition = `(txes.code = 0 OR NOT EXISTS (
  SELECT 1 FROM tax_failed_tx_fees uncharged
- WHERE uncharged.tx_id = fees.tx_id AND uncharged.charged = ''))`
+ WHERE uncharged.tx_id = fees.tx_id AND uncharged.charged = '')
+ OR EXISTS (SELECT 1 FROM messages ran WHERE ran.tx_id = fees.tx_id AND NOT ran.opaque))`
 
 // walletFees loads every payer-side fee the chain charged in [start,end),
 // including fees on failed transactions that passed the ante handler and
