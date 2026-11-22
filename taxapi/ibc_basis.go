@@ -27,6 +27,11 @@ const (
 	ibcRefundReconciled   = "ibc_refund_reconciled"
 	ibcRefundRoleSend     = "send"
 	ibcRefundRoleReturned = "refund"
+	// A refund a router contract received and paid straight on to the user is
+	// booked as that transfer, marked refund_passed_through with the packet
+	// identity. It returns the router's own send the same way a refund does.
+	ibcRefundRolePassedThrough = "passed_through"
+	ibcRefundPassedThrough     = "refund_passed_through"
 )
 
 func normalizedWalletScope(addresses []string) []string {
@@ -44,6 +49,25 @@ func normalizedWalletScope(addresses []string) []string {
 
 func isIBCRefund(trigger string) bool {
 	return trigger == ibcTimeoutRefund || trigger == ibcErrorAckRefund
+}
+
+// isIBCRefundPassThrough reports a transfer that carried a refund on from the
+// account the packet returned to (its FromAddr) to the account it paid.
+func isIBCRefundPassThrough(e tax.TaxableEvent) bool {
+	if e.Category != string(tax.CategoryTransfer) || !strings.Contains(e.Detail, ibcRefundPassedThrough) {
+		return false
+	}
+	var d map[string]string
+	return json.Unmarshal([]byte(e.Detail), &d) == nil && d[ibcRefundPassedThrough] == apiTrue
+}
+
+// ibcReturnOwner is the account a refund or a passed-through refund returned
+// to, the owner of the send it can reconcile.
+func ibcReturnOwner(e tax.TaxableEvent) string {
+	if isIBCRefundPassThrough(e) {
+		return e.FromAddr
+	}
+	return e.ToAddr
 }
 
 // ibcRefundDenom identifies a voucher by the hash of its complete ICS-20
@@ -73,15 +97,19 @@ func ibcRefundDenom(denom string) string {
 // matched send never left the wallet, so undoing it keeps the original lots
 // with their dates and cost. Two refunds or two sends for one packet, a coin
 // that differs, or a row without an id is left unmatched and keeps blocking.
+// A refund passed through to another account pairs the same way, keyed by the
+// account that paid it on; any refund or second pass-through for the same
+// packet makes the pair ambiguous and neither is matched.
 // The result maps taxable event id to its role in the pair.
 func matchIBCRefunds(events []tax.TaxableEvent) map[uint]string {
 	refunds := map[string][]tax.TaxableEvent{}
 	sends := map[string][]tax.TaxableEvent{}
 	for _, e := range events {
 		switch {
-		case isIBCRefund(e.RewardTrigger):
+		case isIBCRefund(e.RewardTrigger) || isIBCRefundPassThrough(e):
 			if key := tax.IBCPacketKey(e.Detail); key != "" {
-				refunds[e.ToAddr+":"+key] = append(refunds[e.ToAddr+":"+key], e)
+				owner := ibcReturnOwner(e) + ":" + key
+				refunds[owner] = append(refunds[owner], e)
 			}
 		case e.Category == string(tax.CategoryIBCOut):
 			if key := tax.IBCPacketKey(e.Detail); key != "" {
@@ -100,7 +128,11 @@ func matchIBCRefunds(events []tax.TaxableEvent) map[uint]string {
 			continue
 		}
 		pairs[o.ID] = ibcRefundRoleSend
-		pairs[r.ID] = ibcRefundRoleReturned
+		if isIBCRefundPassThrough(r) {
+			pairs[r.ID] = ibcRefundRolePassedThrough
+		} else {
+			pairs[r.ID] = ibcRefundRoleReturned
+		}
 	}
 	return pairs
 }
@@ -108,7 +140,9 @@ func matchIBCRefunds(events []tax.TaxableEvent) map[uint]string {
 // reconcileIBCRefunds rewrites matched pairs as the escrow round trip they
 // were: the send a record-only protocol deposit, the refund a record-only
 // withdrawal. Neither is a disposal or an acquisition, so the FIFO engines
-// keep the original lots in place.
+// keep the original lots in place. A passed-through refund stays the transfer
+// it was: the coins came back and left again to the account it paid, so only
+// the send is undone.
 func reconcileIBCRefunds(events []tax.TaxableEvent, pairs map[uint]string) {
 	for i := range events {
 		switch pairs[events[i].ID] {
@@ -130,8 +164,33 @@ func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness
 	refunds := map[string]bool{}
 	refundOwners := map[string]bool{}
 	unknownRefundOwners := map[string]bool{}
+	passOwners := map[string]bool{}
 	blocked := map[string]bool{}
 	reasons := map[string]bool{}
+	sendKeys := map[string]bool{}
+	for _, e := range events {
+		if e.Category == string(tax.CategoryIBCOut) {
+			if key := tax.IBCPacketKey(e.Detail); key != "" {
+				sendKeys[e.FromAddr+":"+key] = true
+			}
+		}
+	}
+	for _, e := range events {
+		if !isIBCRefundPassThrough(e) || pairs[e.ID] != "" {
+			continue
+		}
+		// The paying account owns a send for this packet that the transfer
+		// could not be matched to (a second send, a second return, another
+		// coin or an earlier time): refuse rather than net the two. With no
+		// send of its own for the packet, the send was booked to the account
+		// that started it and the transfer alone is the return.
+		passOwners[e.FromAddr] = true
+		key := tax.IBCPacketKey(e.Detail)
+		if (key == "" || sendKeys[e.FromAddr+":"+key]) && e.Timestamp.Before(end) {
+			blocked[e.FromAddr+":passed-through:"+key+":"+e.TxHash] = true
+			reasons[ibcRefundBasisRequired] = true
+		}
+	}
 	for _, e := range events {
 		if !isIBCRefund(e.RewardTrigger) || pairs[e.ID] != "" {
 			continue
@@ -160,7 +219,7 @@ func ibcBasisReadiness(events []tax.TaxableEvent, end time.Time) ReportReadiness
 		case key != "" && refunds[e.FromAddr+":"+key]:
 			blocked[e.FromAddr+":"+key] = true
 			reasons[ibcRefundBasisRequired] = true
-		case key == "" && refundOwners[e.FromAddr]:
+		case key == "" && (refundOwners[e.FromAddr] || passOwners[e.FromAddr]):
 			// Legacy rows need retained packet evidence or replay. Do not guess
 			// a match from identical coin quantities, memos or nearby timestamps.
 			blocked[e.FromAddr+":missing:"+e.TxHash] = true
@@ -189,7 +248,7 @@ func (s *Server) ibcBasisCheck(chain string, addresses []string, end time.Time) 
 	var events []tax.TaxableEvent
 	if err := s.scopedTaxEvents(chain).Select("taxable_events.*").
 		Where("(from_addr IN ? OR to_addr IN ?)", addresses, addresses).
-		Where("category = ? OR reward_trigger IN ?", string(tax.CategoryIBCOut), []string{ibcTimeoutRefund, ibcErrorAckRefund}).
+		Where("category = ? OR reward_trigger IN ? OR (category = ? AND detail LIKE ?)", string(tax.CategoryIBCOut), []string{ibcTimeoutRefund, ibcErrorAckRefund}, string(tax.CategoryTransfer), "%"+ibcRefundPassedThrough+"%").
 		Find(&events).Error; err != nil {
 		return nil, err
 	}
@@ -212,8 +271,8 @@ func (s *Server) ibcBasisCheck(chain string, addresses []string, end time.Time) 
 func (s *Server) retainLegacyOutboundIdentities(events []tax.TaxableEvent) error {
 	owners := map[string]bool{}
 	for _, e := range events {
-		if isIBCRefund(e.RewardTrigger) {
-			owners[e.ToAddr] = true
+		if isIBCRefund(e.RewardTrigger) || isIBCRefundPassThrough(e) {
+			owners[ibcReturnOwner(e)] = true
 		}
 	}
 	var ids []uint
