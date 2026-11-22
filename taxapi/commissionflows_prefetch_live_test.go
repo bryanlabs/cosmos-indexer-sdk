@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,8 @@ import (
 //	COMMISSION_PREFETCH_LIVE_SLOTS read-ahead slots, 0 for serial
 //	COMMISSION_PREFETCH_LIVE_WALLETS openings before the trace is stopped
 //	COMMISSION_PREFETCH_LIVE_CLOSING closing reads to compare after the stop
+//	COMMISSION_PREFETCH_LIVE_HOPS  hop limit, 0 for flowMaxHops
+//	COMMISSION_PREFETCH_LIVE_CORRECTIONS_SHA256 digest of source-corrections.json
 //	COMMISSION_PREFETCH_LIVE_OUT   output file for the digests and timings
 
 var errLiveCap = errors.New("live check wallet cap reached")
@@ -143,6 +146,8 @@ func TestCommissionPrefetchLive(t *testing.T) {
 	slots, _ := strconv.Atoi(os.Getenv("COMMISSION_PREFETCH_LIVE_SLOTS"))
 	capN, _ := strconv.Atoi(os.Getenv("COMMISSION_PREFETCH_LIVE_WALLETS"))
 	closingN, _ := strconv.Atoi(os.Getenv("COMMISSION_PREFETCH_LIVE_CLOSING"))
+	hops, _ := strconv.Atoi(os.Getenv("COMMISSION_PREFETCH_LIVE_HOPS"))
+	correctionsSHA := os.Getenv("COMMISSION_PREFETCH_LIVE_CORRECTIONS_SHA256")
 	require.Positive(t, capN)
 	read := func(name string) string {
 		b, err := os.ReadFile(filepath.Join(dir, name))
@@ -165,7 +170,7 @@ func TestCommissionPrefetchLive(t *testing.T) {
 
 	profile, err := LoadCommissionPrivateProfile(filepath.Join(dir, "profile.json"), "53da2904e3a6893e92745b1db9766b356da09042f52ec5384d0beb11a46aa913")
 	require.NoError(t, err)
-	corrections, err := LoadCommissionSourceCorrections(filepath.Join(dir, "source-corrections.json"), "40d6961721383adb2aa8bf4ad19ac9b8df7f834a3687dd1cd63a144bef654eb4")
+	corrections, err := LoadCommissionSourceCorrections(filepath.Join(dir, "source-corrections.json"), cmp.Or(correctionsSHA, "40d6961721383adb2aa8bf4ad19ac9b8df7f834a3687dd1cd63a144bef654eb4"))
 	require.NoError(t, err)
 	node, err := NewLedgerNode()
 	require.NoError(t, err)
@@ -187,7 +192,7 @@ func TestCommissionPrefetchLive(t *testing.T) {
 	derived := derivedFlowLabels(chain, validators)
 	var labels []AddressLabel
 	require.NoError(t, s.db.Where("chain = ?", chain).Find(&labels).Error)
-	base := &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: true, prefetchN: slots}
+	base := &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: true, maxHops: hops, prefetchN: slots}
 	base.archive, err = newFlowArchive(rpc[1])
 	require.NoError(t, err)
 	for _, l := range labels {
@@ -224,6 +229,7 @@ func TestCommissionPrefetchLive(t *testing.T) {
 	capped := &liveCapLoader{dbFlowLoader: loader, cap: capN, start: time.Now()}
 	tr := newFlowTrace(validator, from, asOf, capped)
 	tr.strict = true
+	tr.maxHops = loader.maxHops
 	runErr := tr.run(group)
 	traceTime := time.Since(capped.start)
 	require.ErrorIs(t, runErr, errLiveCap, "the trace must stop at the cap, not on another error")
