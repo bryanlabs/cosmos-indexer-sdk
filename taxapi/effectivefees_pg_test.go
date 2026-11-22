@@ -308,11 +308,12 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 	})
 	t.Run("legacy_public_declared_payer_fees_unchanged", func(t *testing.T) {
 		// Partial-day bounds avoid exercising the independent legacy day-boundary
-		// optimization. Compare against the exact pre-change public query.
+		// optimization. Compare against the exact public query, which since
+		// ca83b57 leaves out failed transactions recorded as charged nothing.
 		lo, hi := parse("2026-01-02T00:00:01Z"), parse("2026-01-06T23:59:59Z")
-		for _, address := range []string{"proof-owner", "proof-grantee", "proof-unregistered-granter"} {
-			var want []feeRec
-			require.NoError(t, database.Table("fees").
+		declared := func(address string, charged bool) []feeRec {
+			var rows []feeRec
+			q := database.Table("fees").
 				Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
 				Joins("JOIN addresses ON addresses.id=fees.payer_address_id").
 				Joins("JOIN denoms ON denoms.id=fees.denomination_id").
@@ -320,17 +321,40 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 				Joins("JOIN blocks ON blocks.id=txes.block_id").
 				Joins("JOIN chains ON chains.id=blocks.chain_id").
 				Where("chains.chain_id IN ?", chainIDs(apiMainnet)).
-				Where("addresses.address=? AND blocks.time_stamp>=? AND blocks.time_stamp<?", address, lo, hi).
-				Order("blocks.time_stamp asc,fees.id asc").Scan(&want).Error)
-			for i := range want {
-				want[i].Ts = want[i].Ts.UTC()
+				Where("addresses.address=? AND blocks.time_stamp>=? AND blocks.time_stamp<?", address, lo, hi)
+			if charged {
+				q = q.Where(feeChargedCondition)
 			}
+			require.NoError(t, q.Order("blocks.time_stamp asc,fees.id asc").Scan(&rows).Error)
+			for i := range rows {
+				rows[i].Ts = rows[i].Ts.UTC()
+			}
+			return rows
+		}
+		for _, address := range []string{"proof-owner", "proof-grantee", "proof-unregistered-granter"} {
+			want := declared(address, true)
 			got, err := read(t, apiMainnet, address, lo, hi, false, false)
 			require.NoError(t, err, "legacy reads must not fail closed on unresolved or malformed outcomes")
+			for _, fee := range got {
+				require.NotEqual(t, "failed-nocharge", fee.Hash, "a failed transaction recorded as charged nothing must not be a public fee")
+			}
+			// Every other declared payer fee still matches exactly.
+			var others []feeRec
+			for _, fee := range declared(address, false) {
+				if fee.Hash != "failed-nocharge" {
+					others = append(others, fee)
+				}
+			}
+			require.Len(t, want, len(others))
+			if len(others) > 0 {
+				require.Equal(t, others, want)
+			}
 			require.Len(t, got, len(want))
 			if len(want) > 0 {
 				require.Equal(t, want, got)
 			}
 		}
+		owner := declared("proof-owner", false)
+		require.Contains(t, owner, feeRec{Amount: "900", Denom: "uatom", Hash: "failed-nocharge", Ts: parse("2026-01-02T12:00:00Z")}, "the fixture must declare the uncharged fee the read leaves out")
 	})
 }
