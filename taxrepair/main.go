@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,8 +37,17 @@ import (
 // from the stored rows with the operator address verified) and the pre-v24
 // SDK fork's tokenize-share reward messages, which are always stored with
 // their bytes.
-var urls = append(append([]string{}, tax.ReplayableTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec",
+var urls = append(append(append([]string{}, tax.ReplayableTypeURLs...), refundLifecycleTypeURLs...), "/cosmos.distribution.v1beta1.MsgWithdrawValidatorCommission", "/cosmos.authz.v1beta1.MsgExec",
 	tax.LegacyTypeURLRedeemTokensForShares, tax.LegacyTypeURLWithdrawTokenizeShareReward, tax.LegacyTypeURLWithdrawAllTokenizeShareReward)
+
+// refundLifecycleTypeURLs are the IBC timeout and acknowledgement messages that
+// book refunds. ReconstructMsg cannot rebuild them from events, so they are
+// replayed only from a stored body (message-bodies-load recovers missing
+// ones); a bodiless one is skipped and its rows are left alone.
+var refundLifecycleTypeURLs = []string{"/ibc.core.channel.v1.MsgTimeout", "/ibc.core.channel.v1.MsgTimeoutOnClose", "/ibc.core.channel.v1.MsgAcknowledgement",
+	tax.TypeURLV2Timeout, tax.TypeURLV2Acknowledgement}
+
+const skipNoStoredBody = "no stored body"
 
 type row struct {
 	models.Message
@@ -606,6 +616,10 @@ func planBatchParsed(db *gorm.DB, codec codectypes.AnyUnpacker, rows []row) ([]b
 		}
 		var expected []tax.TaxableEvent
 		fromBody := false
+		if len(r.MessageBytes) == 0 && slices.Contains(refundLifecycleTypeURLs, r.Type) {
+			skips = append(skips, skip{r.ID, r.Type, skipNoStoredBody})
+			continue
+		}
 		if len(r.MessageBytes) == 0 {
 			expected, err = fromStoredLog(r.Type, logs[r.ID], old[r.ID])
 		} else {
