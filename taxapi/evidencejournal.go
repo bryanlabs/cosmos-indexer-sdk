@@ -53,8 +53,11 @@ const (
 	// is checked apart from the pattern: a bounded repeat costs Postgres
 	// about 80 microseconds per value, the plain class almost nothing.
 	evidenceAddressPattern = `^[a-z][a-z0-9]*$`
-	evidenceAddressMinLen  = 8
-	evidenceAddressMaxLen  = 128
+	// evidenceBulkSetting, set to on in a session, marks every journaled
+	// write of that session global instead of tracing it row by row.
+	evidenceBulkSetting   = "report_evidence.bulk"
+	evidenceAddressMinLen = 8
+	evidenceAddressMaxLen = 128
 )
 
 var evidenceAddressRe = regexp.MustCompile(evidenceAddressPattern)
@@ -244,7 +247,10 @@ BEGIN
 		INSERT INTO {s}.report_evidence_log (xid, block_id) VALUES (pg_current_xact_id(), NULL) ON CONFLICT DO NOTHING;
 		RETURN NULL;
 	END IF;
-	IF TG_OP = 'TRUNCATE' THEN
+	-- A bulk writer (replay or correction Job) sets report_evidence.bulk
+	-- and pays one row per transaction instead of per-row work: the
+	-- global mark sends every report checked before it to the full check.
+	IF TG_OP = 'TRUNCATE' OR current_setting('` + evidenceBulkSetting + `', true) = 'on' THEN
 		INSERT INTO {s}.report_evidence_log (xid, block_id) VALUES (pg_current_xact_id(), NULL) ON CONFLICT DO NOTHING;
 		RETURN NULL;
 	END IF;
