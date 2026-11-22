@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/DefiantLabs/cosmos-indexer/tax"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -25,6 +26,10 @@ type walletRows struct {
 	// then names its chain.
 	stampChain            bool
 	CommissionCorrections []flowEvent
+	// IndexedRewardCorrections is, per message, the reward total of native
+	// corrections left out because the indexer now stores exactly those
+	// rewards; the trace must credit that message exactly this much.
+	IndexedRewardCorrections map[uint]decimal.Decimal
 }
 
 type reportInput struct {

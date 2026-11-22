@@ -541,6 +541,9 @@ func (s *Server) readFlowEvents(chain, addr string, start, end time.Time) ([]flo
 		return nil, err
 	}
 	out = reconcileRewardPayouts(addr, out, paid)
+	if err := indexedRewardCorrectionsKept(addr, out, rows.IndexedRewardCorrections); err != nil {
+		return nil, err
+	}
 	proceeds, err := s.flowSaleProceeds(addr, rows.Events)
 	if err != nil {
 		return nil, err
