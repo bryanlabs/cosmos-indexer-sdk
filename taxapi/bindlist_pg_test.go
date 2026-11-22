@@ -109,7 +109,8 @@ func TestChunkedWalletReadsMatchOneRead(t *testing.T) {
 				distinct = append(distinct, id)
 			}
 		}
-		got, err := s.redelegationRows(distinct)
+		rel, rp := s.effectiveRel()
+		got, err := s.redelegationRows(distinct, rel, rp)
 		if err != nil {
 			t.Fatal(err)
 		}

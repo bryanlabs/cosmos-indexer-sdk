@@ -41,8 +41,13 @@ type nodeTx struct {
 	Granter string
 	// Rejected is a failed transaction with no events: the ante handler
 	// turned it away, so it changed nothing, not even the fee, and the same
-	// bytes can be included again in a later block.
+	// bytes can be included again in a later block. Before Gaia v7 a failed
+	// transaction had no events even when its fee was charged; the backward
+	// scan then decides it from the fees the block collected.
 	Rejected bool
+	// ChargeUnknown is a failed transaction whose fee outcome could not be
+	// established, so no outcome is recorded for it.
+	ChargeUnknown bool
 }
 
 // failedTxResult is what the block results say about one failed
@@ -115,7 +120,7 @@ func preCoinEventsCharge(r failedTxResult) (charged string, ok bool) {
 // height's ten-thousand-block folder.
 func (n *ledgerNode) rpcResult(method string, height int64, out any) error {
 	if n.cache == "" {
-		return n.rpc.GetJSON("/"+method, url.Values{"height": {strconv.FormatInt(height, 10)}}, out)
+		return n.rpc.GetJSON("/"+method, url.Values{rpcHeightParam: {strconv.FormatInt(height, 10)}}, out)
 	}
 	f, err := os.Open(filepath.Join(n.cache, strconv.FormatInt(height/10000, 10), fmt.Sprintf("%d-%s.raw.gz", height, method)))
 	if err != nil {
@@ -136,6 +141,27 @@ func (n *ledgerNode) rpcResult(method string, height int64, out any) error {
 // each one names in its bytes or any of its events, the fee a failed one was
 // charged and the granter of a fee grant that paid.
 func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
+	b, err := n.blockScan(height, false)
+	if err != nil {
+		return nil, err
+	}
+	return b.txs, nil
+}
+
+// scannedBlock is one block as blockScan read it.
+type scannedBlock struct {
+	txs []nodeTx
+	// raw holds each transaction's codespace and, when decoded, its declared
+	// fee and fee granter, in block order.
+	raw []rawTxInfo
+	// begin is the fee collector's movements in the block's BeginBlock
+	// events.
+	begin feeCollectorBegin
+}
+
+// blockScan reads a block's transactions and results once. With decodeFees
+// it also decodes each transaction's declared fee and granter from its bytes.
+func (n *ledgerNode) blockScan(height int64, decodeFees bool) (scannedBlock, error) {
 	var blk struct {
 		Result struct {
 			Block struct {
@@ -148,38 +174,36 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 			} `json:"block"`
 		} `json:"result"`
 	}
+	var none scannedBlock
 	if err := n.rpcResult("block", height, &blk); err != nil {
-		return nil, err
+		return none, err
 	}
 	if h := blk.Result.Block.Header.Height; h != strconv.FormatInt(height, 10) {
-		return nil, fmt.Errorf("block %d: response is for height %q", height, h)
+		return none, fmt.Errorf("block %d: response is for height %q", height, h)
 	}
 	var res struct {
 		Result struct {
 			Height     string `json:"height"`
 			TxsResults []struct {
-				Code      uint32 `json:"code"`
-				Codespace string `json:"codespace"`
-				Log       string `json:"log"`
-				GasWanted string `json:"gas_wanted"`
-				Events    []struct {
-					Type       string    `json:"type"`
-					Attributes []rpcAttr `json:"attributes"`
-				} `json:"events"`
+				Code      uint32     `json:"code"`
+				Codespace string     `json:"codespace"`
+				Log       string     `json:"log"`
+				GasWanted string     `json:"gas_wanted"`
+				Events    []rpcEvent `json:"events"`
 			} `json:"txs_results"`
-			BeginBlockEvents    []struct{ Type string } `json:"begin_block_events"`
-			FinalizeBlockEvents []struct{ Type string } `json:"finalize_block_events"`
+			BeginBlockEvents    []rpcEvent `json:"begin_block_events"`
+			FinalizeBlockEvents []rpcEvent `json:"finalize_block_events"`
 		} `json:"result"`
 	}
 	if err := n.rpcResult("block_results", height, &res); err != nil {
-		return nil, err
+		return none, err
 	}
 	if h := res.Result.Height; h != strconv.FormatInt(height, 10) {
-		return nil, fmt.Errorf("block results %d: response is for height %q", height, h)
+		return none, fmt.Errorf("block results %d: response is for height %q", height, h)
 	}
 	txs, results := blk.Result.Block.Data.Txs, res.Result.TxsResults
 	if len(txs) != len(results) {
-		return nil, fmt.Errorf("block %d has %d txs and %d results", height, len(txs), len(results))
+		return none, fmt.Errorf("block %d has %d txs and %d results", height, len(txs), len(results))
 	}
 	// SDK 0.44 and later emit coin events in every block's own events (the
 	// mint at least) and on every failed transaction that paid its fee.
@@ -192,11 +216,17 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 	}
 	pat := regexp.MustCompile(sdk.GetConfig().GetBech32AccountAddrPrefix() + `1[02-9ac-hj-np-z]{38,58}`)
 	out := make([]nodeTx, 0, len(txs))
+	infos := make([]rawTxInfo, 0, len(txs))
 	for i, t := range results {
 		raw, err := base64.StdEncoding.DecodeString(txs[i])
 		if err != nil {
-			return nil, err
+			return none, err
 		}
+		info := rawTxInfo{Codespace: t.Codespace}
+		if decodeFees {
+			info.Fee, info.FeeGranter, info.FeeDecoded = decodeTxFee(raw)
+		}
+		infos = append(infos, info)
 		sum := sha256.Sum256(raw)
 		found := map[string]bool{}
 		for _, m := range pat.FindAll(raw, -1) {
@@ -242,7 +272,7 @@ func (n *ledgerNode) blockTxs(height int64) ([]nodeTx, error) {
 		sort.Strings(tx.Accounts)
 		out = append(out, tx)
 	}
-	return out, nil
+	return scannedBlock{txs: out, raw: infos, begin: readFeeCollectorBegin(res.Result.BeginBlockEvents, res.Result.FinalizeBlockEvents)}, nil
 }
 
 // declaredFee reads the fee, without zero coins, and the number of
