@@ -149,6 +149,7 @@ type whereRow struct {
 	Credited          string       `json:"credited_to_delegators_atom"`
 	Withdrawn         string       `json:"withdrawn_delegator_rewards_atom"`
 	Withdrawals       int64        `json:"withdrawals"`
+	OutsideTx         string       `json:"withdrawn_outside_transactions_atom"`
 	UnclaimedChange   string       `json:"unclaimed_change_atom"`
 	UnclaimedEnd      string       `json:"unclaimed_end_atom"`
 	FirstHop          []whereHop   `json:"first_hop"`
@@ -173,7 +174,7 @@ var whereMethod = map[string]string{
 	"not_followed":   "Rewards received by a wallet whose replayed balance did not match the chain's balance at the check height, or that the replay could not follow (a payment larger than the replayed balance). They are shown instead of being guessed. A wallet stops being followed for all of its rewards.",
 	"minted":         "minted_atom is new ATOM from inflation and to_community_pool_atom is the community tax on it, from the inflation data.",
 	"credited":       "credited_to_delegators_atom is every validator's block rewards minus its commission, and validator_commission_atom is the commission. Both include delegators' and validators' share of transaction fees, not only new ATOM, because the chain pays fees and inflation out together.",
-	"unclaimed":      "credited_to_delegators_atom minus rewards withdrawn. unclaimed_end_atom starts from the delegators' unclaimed rewards in the cosmoshub-4 genesis. coverage.unclaimed_check compares it at check_height with the chain's own outstanding delegator rewards. When a reward is withdrawn the chain pays whole uatom and moves the fraction under 1 uatom to the community pool, so the chain's figure should be lower by under 1 uatom per withdrawal. Rewards the chain paid outside any transaction are not in the withdrawn rows, and the check counts them as withdrawn; there is one: at block 19,639,600 (2024-03-20) the Gaia v15 upgrade clawed back a vesting account and withdrew its 5,619.738501 ATOM of rewards in 4 payouts. With it, the full history and recent_window, the days our node holds full state for, are both lower by 0.50 uatom per withdrawal on average, as expected.",
+	"unclaimed":      "credited_to_delegators_atom minus rewards withdrawn, in transactions and outside them (withdrawn_outside_transactions_atom). unclaimed_end_atom starts from the delegators' unclaimed rewards in the cosmoshub-4 genesis. coverage.unclaimed_check compares it at check_height with the chain's own outstanding delegator rewards. When a reward is withdrawn the chain pays whole uatom and moves the fraction under 1 uatom to the community pool, so the chain's figure should be lower by under 1 uatom per withdrawal. Rewards the chain paid outside any transaction are not in the withdrawn rows, and the check counts them as withdrawn; there is one: at block 19,639,600 (2024-03-20) the Gaia v15 upgrade clawed back a vesting account and withdrew its 5,619.738501 ATOM of rewards in 4 payouts. With it, the full history and recent_window, the days our node holds full state for, are both lower by 0.50 uatom per withdrawal on average, as expected.",
 	"first_hop":      "Only the first move is counted. Coins that came back later (an IBC transfer that timed out, an unbonding that completed) count as new coins of their own and are not reclassified.",
 	"scope":          "cosmoshub-4 only. Monthly rows follow UTC months; the last month ends at last_day.",
 }
@@ -370,7 +371,7 @@ func whereRows(f *whereFile, infl *inflationData, view string) []whereRow {
 		key                                  string
 		start, end                           string
 		minted, pool, commission, delegators *big.Int
-		withdrawn, records                   int64
+		withdrawn, records, outside          int64
 		fifo, pr                             []int64
 		ibcF, ibcP                           []int64
 	}
@@ -414,16 +415,21 @@ func whereRows(f *whereFile, infl *inflationData, view string) []whereRow {
 			a.ibcP[i] += m.IBCProRata[i]
 		}
 	}
+	for _, o := range whereOutsideTx {
+		if o.Day >= f.FirstDay && o.Day <= f.LastDay {
+			get(o.Day[:n]).outside += o.Uatom
+		}
+	}
 	sort.Strings(keys)
 	unclaimed := big.NewInt(f.UnclaimedOpen)
 	rows := make([]whereRow, 0, len(keys))
 	for _, k := range keys {
 		a := byKey[k]
-		change := new(big.Int).Sub(a.delegators, big.NewInt(a.withdrawn))
+		change := new(big.Int).Sub(a.delegators, big.NewInt(a.withdrawn+a.outside))
 		unclaimed.Add(unclaimed, change)
 		row := whereRow{Period: k, StartDate: a.start, EndDate: a.end, Minted: atomString(a.minted), ToCommunityPool: atomString(a.pool),
 			Commission: atomString(a.commission), Credited: atomString(a.delegators), Withdrawn: uatomString(a.withdrawn),
-			Withdrawals: a.records, UnclaimedChange: atomString(change), UnclaimedEnd: atomString(unclaimed), FollowedThroughTo: f.LastDay}
+			Withdrawals: a.records, OutsideTx: uatomString(a.outside), UnclaimedChange: atomString(change), UnclaimedEnd: atomString(unclaimed), FollowedThroughTo: f.LastDay}
 		share := func(v int64) *float64 {
 			x := 0.0
 			if a.withdrawn > 0 {
