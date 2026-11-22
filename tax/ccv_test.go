@@ -80,6 +80,9 @@ func TestNewlyDecodedNoEffectTypesAreReviewed(t *testing.T) {
 	for url := range IBCClientV2MsgTypes() {
 		urls = append(urls, url)
 	}
+	for url := range IBCWasmMsgTypes() {
+		urls = append(urls, url)
+	}
 	noEffect := map[string]bool{}
 	for _, url := range NoTaxEffectTypeURLs {
 		noEffect[url] = true

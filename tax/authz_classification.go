@@ -98,21 +98,18 @@ func classifyAuthz(m *authz.MsgExec, log *txlog.LogMessage, state *classificatio
 	return out
 }
 
-// Delegated governance votes, reward-address changes and grant management move
-// no coins. They are skipped only when the inner message's own events confirm
-// that.
-var authzNoTaxEffect = map[string]bool{
-	"/cosmos.gov.v1beta1.MsgVote":                        true,
-	"/cosmos.gov.v1beta1.MsgVoteWeighted":                true,
-	"/cosmos.gov.v1.MsgVote":                             true,
-	"/cosmos.gov.v1.MsgVoteWeighted":                     true,
-	"/cosmos.distribution.v1beta1.MsgSetWithdrawAddress": true,
-	"/cosmos.staking.v1beta1.MsgEditValidator":           true,
-	"/cosmos.authz.v1beta1.MsgGrant":                     true,
-	"/cosmos.authz.v1beta1.MsgRevoke":                    true,
-	"/cosmos.feegrant.v1beta1.MsgGrantAllowance":         true,
-	"/cosmos.feegrant.v1beta1.MsgRevokeAllowance":        true,
-}
+// An inner message whose type is on the reviewed no-effect list (votes,
+// reward-address changes, grant management, validator edits, unjail, code
+// uploads, provider and IBC client operations) moves no coins. It is skipped
+// only when the inner message's own events confirm that, so the top-level and
+// delegated paths make the same decision from one list.
+var authzNoTaxEffect = func() map[string]bool {
+	out := make(map[string]bool, len(NoTaxEffectTypeURLs))
+	for _, url := range NoTaxEffectTypeURLs {
+		out[url] = true
+	}
+	return out
+}()
 
 func authzMovedCoins(log *txlog.LogMessage) bool {
 	for _, ev := range log.Events {
@@ -135,7 +132,7 @@ func unpackAuthzInner(a *codectypes.Any) (sdk.Msg, error) {
 		return m, nil
 	}
 	var m sdk.Msg
-	for _, custom := range []map[string]sdk.Msg{GaiaLiquidMsgTypes(), LegacyLSMMsgTypes(), IBCChannelV2MsgTypes(), TokenFactoryMsgTypes(), ProviderMsgTypes(), LiquidityMsgTypes()} {
+	for _, custom := range []map[string]sdk.Msg{GaiaLiquidMsgTypes(), LegacyLSMMsgTypes(), IBCChannelV2MsgTypes(), TokenFactoryMsgTypes(), ProviderMsgTypes(), LiquidityMsgTypes(), IBCClientV2MsgTypes(), IBCWasmMsgTypes()} {
 		if prototype, ok := custom[a.TypeUrl]; ok {
 			m = reflect.New(reflect.TypeOf(prototype).Elem()).Interface().(sdk.Msg)
 			break
