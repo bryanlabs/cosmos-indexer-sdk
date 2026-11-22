@@ -22,7 +22,8 @@ RUN --mount=type=cache,target=/go/pkg/mod,id=cosmos-tax-sdk-go-mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxrepair ./taxrepair && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxwatch ./taxwatch && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxledger ./taxledger && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstatement ./taxstatement
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/taxstatement ./taxstatement && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/archiveshim ./archiveshim
 
 FROM build AS test
 # Pure decoder/classification and bounded-enqueue tests only; no live DB or RPC.
@@ -44,6 +45,7 @@ COPY --from=build /out/taxrepair /usr/local/bin/taxrepair
 COPY --from=build /out/taxwatch /usr/local/bin/taxwatch
 COPY --from=build /out/taxledger /usr/local/bin/taxledger
 COPY --from=build /out/taxstatement /usr/local/bin/taxstatement
+COPY --from=build /out/archiveshim /usr/local/bin/archiveshim
 USER tax
 # Default entrypoint is the API; the indexer Deployment overrides command.
 ENTRYPOINT ["/usr/local/bin/taxapid"]
