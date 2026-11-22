@@ -123,6 +123,10 @@ func main() {
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
 	srv.WarmCommissionFlows("mainnet")
+	// Trims the report evidence journal (installed by taxevidence -install)
+	// past the report age limit. Without the journal every view of a cached
+	// report runs the full check.
+	srv.StartEvidenceJournalPrune(time.Hour, log.Printf)
 	// Per-year block coverage for /index-coverage and the coverage warning
 	// on reports. TAX_COVERAGE_REQUIRE_BLOCK_EVENTS=true counts a block only
 	// once its block events are indexed too; reports read transactions only,

@@ -10,7 +10,7 @@ import "hash"
 // Messages, events and attributes are looked up by id array because Postgres
 // otherwise hash-joins the whole event tables (over 300s on the live database
 // for a wallet with 5k events).
-func (s *Server) writeClassificationFingerprint(h hash.Hash, chain string, addresses []string) error {
+func (s *Server) writeClassificationFingerprint(h hash.Hash, chain string, addresses []string, ev *evidenceCollector) error {
 	q := s.db.Table("txes t").
 		Joins("JOIN blocks b ON b.id=t.block_id").
 		Joins("JOIN chains c ON c.id=b.chain_id").
@@ -47,6 +47,11 @@ func (s *Server) writeClassificationFingerprint(h hash.Hash, chain string, addre
 			return err
 		}
 		writeFinancialFingerprintRow(h, kind, exact)
+		if ev != nil && kind == "transaction" {
+			if err := ev.transaction(exact); err != nil {
+				return err
+			}
+		}
 	}
 	return rows.Err()
 }
