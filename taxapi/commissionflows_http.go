@@ -456,14 +456,16 @@ func (s *Server) flowExpectedValidators(chain string) (map[string]time.Time, boo
 	return e.first, e.first != nil
 }
 
-// flowExpectedBy is the validators whose first withdrawal falls before asOf,
-// the exclusive end of a trace: one that first withdrew later cannot be in a
-// trace that stops at asOf, so it is not counted as missing from it. A zero
-// asOf (nothing traced yet) bounds nothing.
+// flowExpectedBy is the validators whose first withdrawal falls before the
+// end of a trace. asOf is a run's as_of, the last day the trace includes, so
+// the trace ends at the start of the next day: one that first withdrew on the
+// as_of day is in the trace, and one that first withdrew later is not counted
+// as missing from it. A zero asOf (nothing traced yet) bounds nothing.
 func flowExpectedBy(first map[string]time.Time, asOf time.Time) map[string]bool {
 	out := make(map[string]bool, len(first))
+	end := asOf.AddDate(0, 0, 1)
 	for v, at := range first {
-		if asOf.IsZero() || at.Before(asOf) {
+		if asOf.IsZero() || at.Before(end) {
 			out[v] = true
 		}
 	}
