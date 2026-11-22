@@ -517,3 +517,58 @@ func TestReportJobPollUsesEvidenceJournalPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ReportJobPending, job.Status)
 }
+
+// A reinstall must not ALTER taxable_events when its triggers already match:
+// the statement DDL guard (statement_ddl_<oid>) withdraws the validator
+// statement summary on any ALTER TABLE of it. A trigger that needs changing
+// there is refused unless the operator opts in.
+func TestEvidenceJournalReinstallSparesGuardedTablePostgres(t *testing.T) {
+	h := newEvidenceHarness(t)
+	var oid int64
+	require.NoError(t, h.db.Raw(`SELECT 'taxable_events'::regclass::oid`).Row().Scan(&oid))
+	guard := fmt.Sprintf("statement_ddl_%d", oid)
+	h.exec(`CREATE TABLE guard_hits (n int)`)
+	h.exec(`CREATE FUNCTION guard_hit() RETURNS event_trigger LANGUAGE plpgsql AS $$
+BEGIN
+	INSERT INTO guard_hits SELECT 1 FROM pg_event_trigger_ddl_commands() c WHERE c.objid = ` + fmt.Sprint(oid) + `;
+END $$`)
+	h.exec(`CREATE EVENT TRIGGER ` + guard + ` ON ddl_command_end WHEN TAG IN ('ALTER TABLE') EXECUTE FUNCTION guard_hit()`)
+	t.Cleanup(func() { _ = h.other.Exec(`DROP EVENT TRIGGER IF EXISTS ` + guard).Error })
+	hits := func() int64 {
+		var n int64
+		require.NoError(t, h.db.Raw(`SELECT count(*) FROM guard_hits`).Row().Scan(&n))
+		return n
+	}
+	install := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		return InstallEvidenceJournal(ctx, h.db, 3*time.Second, 1, t.Logf)
+	}
+
+	require.NoError(t, install())
+	require.Zero(t, hits(), "a matching reinstall leaves taxable_events alone")
+
+	h.exec(`ALTER TABLE taxable_events DISABLE TRIGGER report_evidence_ins`)
+	h.exec(`DELETE FROM guard_hits`)
+	err := install()
+	require.ErrorContains(t, err, "withdraw the validator statement summary")
+	require.Zero(t, hits(), "the refused install changed nothing")
+
+	var schema string
+	require.NoError(t, h.db.Raw(`SELECT current_schema()`).Row().Scan(&schema))
+	require.NoError(t, h.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`SET LOCAL report_evidence.allow_statement_withdraw = on`).Error; err != nil {
+			return err
+		}
+		for _, sql := range EvidenceJournalSQL(schema) {
+			if err := tx.Exec(sql).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	require.Positive(t, hits(), "the opted-in repair is the only ALTER")
+	trust, err := readEvidenceTrust(h.db)
+	require.NoError(t, err)
+	require.True(t, trust.ok(), "%+v", trust)
+}

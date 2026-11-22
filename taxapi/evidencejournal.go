@@ -353,7 +353,38 @@ func sqlTextOrNull(s string) string {
 	return quoteLiteral(s)
 }
 
-// evidenceJournalTriggers attaches the functions. Each CREATE TRIGGER takes a
+// Trigger types (pg_trigger.tgtype) of the statement-level triggers below.
+var evidenceTriggerTypes = map[string]int{evOpIns: 4, evOpDel: 8, evOpUpd: 16, evOpTrunc: 32, "guard": 34}
+
+// evidenceTriggerDDL creates one trigger and enables it ALWAYS, but only
+// when it is missing or differs. Enabling a trigger is an ALTER TABLE, and
+// an ALTER TABLE of a table watched by a statement DDL guard (the
+// statement_ddl_<oid> event on taxable_events) withdraws the validator
+// statement summary until a fresh fill and full check. So a reinstall leaves
+// matching triggers alone, and a change to a guarded table is refused unless
+// the session sets report_evidence.allow_statement_withdraw = on.
+func evidenceTriggerDDL(schema, table, name, fn, create string, tgtype int, oldRows, newRows string) string {
+	lit := func(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }
+	rel := schema + "." + table
+	return `DO $do$
+BEGIN
+	IF EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid = ` + lit(rel) + `::regclass AND t.tgname = ` + lit(name) + `
+		AND t.tgfoid = ` + lit(schema+"."+fn+"()") + `::regprocedure AND t.tgtype = ` + strconv.Itoa(tgtype) + `
+		AND t.tgenabled = 'A' AND t.tgnargs = 0 AND t.tgqual IS NULL AND cardinality(t.tgattr::int2[]) = 0
+		AND t.tgoldtable IS NOT DISTINCT FROM ` + sqlTextOrNull(oldRows) + ` AND t.tgnewtable IS NOT DISTINCT FROM ` + sqlTextOrNull(newRows) + `) THEN
+		RETURN;
+	END IF;
+	IF EXISTS (SELECT 1 FROM pg_event_trigger e WHERE e.evtname = 'statement_ddl_' || ` + lit(rel) + `::regclass::oid AND e.evtenabled <> 'D')
+		AND coalesce(current_setting('report_evidence.allow_statement_withdraw', true), '') <> 'on' THEN
+		RAISE EXCEPTION 'report evidence trigger % on % needs an ALTER TABLE that would withdraw the validator statement summary; set report_evidence.allow_statement_withdraw = on only with a statement fill and full check planned', ` + lit(name) + `, ` + lit(rel) + `;
+	END IF;
+	EXECUTE ` + lit(create) + `;
+	EXECUTE ` + lit("ALTER TABLE "+rel+" ENABLE ALWAYS TRIGGER "+name) + `;
+END
+$do$`
+}
+
+// evidenceJournalTriggers attaches the functions. Each new or changed trigger takes a
 // SHARE ROW EXCLUSIVE lock for an instant: it waits for writers in flight, so
 // every later write is journaled and every earlier one is committed before the
 // installation is.
@@ -362,18 +393,21 @@ func evidenceJournalTriggers(schema string) []string {
 	var out []string
 	attach := func(table, fn string, ops []string) {
 		for _, op := range ops {
-			var ddl string
+			var ddl, oldRows, newRows string
 			switch op {
 			case evOpIns:
 				ddl = `CREATE OR REPLACE TRIGGER report_evidence_ins AFTER INSERT ON {s}.` + table + ` REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION {s}.` + fn + `()`
+				newRows = "new_rows"
 			case evOpUpd:
 				ddl = `CREATE OR REPLACE TRIGGER report_evidence_upd AFTER UPDATE ON {s}.` + table + ` REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION {s}.` + fn + `()`
+				oldRows, newRows = "old_rows", "new_rows"
 			case evOpDel:
 				ddl = `CREATE OR REPLACE TRIGGER report_evidence_del AFTER DELETE ON {s}.` + table + ` REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION {s}.` + fn + `()`
+				oldRows = "old_rows"
 			case evOpTrunc:
 				ddl = `CREATE OR REPLACE TRIGGER report_evidence_trunc AFTER TRUNCATE ON {s}.` + table + ` FOR EACH STATEMENT EXECUTE FUNCTION {s}.` + fn + `()`
 			}
-			out = append(out, q(ddl), q(`ALTER TABLE {s}.`+table+` ENABLE ALWAYS TRIGGER report_evidence_`+op))
+			out = append(out, evidenceTriggerDDL(schema, table, "report_evidence_"+op, fn, q(ddl), evidenceTriggerTypes[op], oldRows, newRows))
 		}
 	}
 	for _, t := range evidenceJournalTables {
@@ -383,10 +417,9 @@ func evidenceJournalTriggers(schema string) []string {
 		attach(t, "report_evidence_dimension", evidenceDimensionOps)
 	}
 	for _, t := range evidenceGuardedTables {
-		out = append(out,
+		out = append(out, evidenceTriggerDDL(schema, t, "report_evidence_guard", "report_evidence_log_guard",
 			q(`CREATE OR REPLACE TRIGGER report_evidence_guard BEFORE TRUNCATE ON {s}.`+t+` FOR EACH STATEMENT EXECUTE FUNCTION {s}.report_evidence_log_guard()`),
-			q(`ALTER TABLE {s}.`+t+` ENABLE ALWAYS TRIGGER report_evidence_guard`),
-		)
+			evidenceTriggerTypes["guard"], "", ""))
 	}
 	return out
 }
