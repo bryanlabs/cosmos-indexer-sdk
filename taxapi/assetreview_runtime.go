@@ -304,6 +304,7 @@ func writeTaxError(w http.ResponseWriter, err error) {
 	var required assetReviewRequired
 	var invalid assetReviewInputError
 	var readiness reportReadinessRequired
+	var tooLarge reportTooLarge
 	if errors.As(err, &readiness) {
 		w.Header().Set(apiContentType, apiJSONContentType)
 		w.WriteHeader(http.StatusConflict)
@@ -315,6 +316,8 @@ func writeTaxError(w http.ResponseWriter, err error) {
 		code = http.StatusConflict
 	case errors.As(err, &invalid):
 		code = http.StatusBadRequest
+	case errors.As(err, &tooLarge):
+		code = http.StatusUnprocessableEntity
 	case errors.Is(err, errAwaitingCorrection):
 		code = http.StatusServiceUnavailable
 		w.Header().Set("Retry-After", "1800")

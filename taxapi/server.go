@@ -37,7 +37,10 @@ type Server struct {
 	oracle *Oracle
 	native NativeAsset
 	// Private trace readers may derive fee outcomes but never persist ledger data.
-	readOnlyLedger              bool
+	readOnlyLedger bool
+	// reportRowCap is the largest wallet history a report reads on request;
+	// zero reads every row.
+	reportRowCap                int64
 	privateReadSnapshotTimeout  time.Duration
 	readSnapshotStarted         time.Time
 	commissionPrivateProfile    *CommissionPrivateProfile

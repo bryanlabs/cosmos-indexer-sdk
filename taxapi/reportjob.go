@@ -135,6 +135,12 @@ func (s *Server) getOrStartReportJob(chain string, addresses []string, start, en
 		}
 	}
 
+	// A wallet too large to build on request is refused before its history
+	// is read; a cached report is still served above.
+	if err := s.checkReportRowCap(addresses, start, end); err != nil {
+		return nil, err
+	}
+
 	var job ReportJob
 	var found, stale bool
 	var record *evidenceRecord

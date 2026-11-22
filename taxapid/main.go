@@ -120,6 +120,13 @@ func main() {
 	// it is installed, built and passes its checks. TAX_STATEMENT_SUMMARY=off
 	// makes every statement read live rows only.
 	srv.SetStatementSummary(os.Getenv("TAX_STATEMENT_SUMMARY") != "off")
+	// Reports: the largest wallet history, in rows, built on request. Unset
+	// keeps taxapi.DefaultReportRowCap; zero or a negative value turns it off.
+	reportRows := int64(taxapi.DefaultReportRowCap)
+	if v, err := strconv.ParseInt(os.Getenv("TAX_REPORT_MAX_ROWS"), 10, 64); err == nil {
+		reportRows = v
+	}
+	srv.SetReportRowCap(reportRows)
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
 	srv.WarmCommissionFlows("mainnet")
