@@ -235,6 +235,38 @@ func TestReportEvidenceJournalPostgres(t *testing.T) {
 		})
 	})
 
+	t.Run("bulk writer", func(t *testing.T) {
+		bulk := func(stmts ...string) func() {
+			return func() {
+				require.NoError(t, h.db.Transaction(func(tx *gorm.DB) error {
+					if err := tx.Exec("SET LOCAL " + evidenceBulkSetting + " = on").Error; err != nil {
+						return err
+					}
+					for _, q := range stmts {
+						if err := tx.Exec(q).Error; err != nil {
+							return err
+						}
+					}
+					return nil
+				}))
+			}
+		}
+		h.check(end)
+		h.refused("a bulk write anywhere sends the report to the full check", end, bulk(
+			`INSERT INTO blocks (id, time_stamp, height, chain_id) VALUES (50, '2025-06-01T00:00:00Z', 450, 1)`,
+			`INSERT INTO txes (id, hash, code, block_id) VALUES (50, 'CC50', 0, 50)`,
+		))
+		fp := h.check(end)
+		h.changed("a bulk replay of a wallet block", end, fp, bulk(`UPDATE txes SET code = 7 WHERE id = 2`))
+		fp = h.check(end)
+		h.changed("a bulk delete and reinsert of a wallet taxable event", end, fp, bulk(
+			`DELETE FROM taxable_events WHERE message_id = 1`,
+			`INSERT INTO taxable_events (message_id, sub_index, category, amount, denom, block_height, "timestamp", tx_hash) VALUES (1, 0, 'transfer', '13', 'uatom', 100, '2025-03-01T00:00:00Z', 'AA01')`,
+		))
+		h.check(end)
+		require.True(t, h.fast(end), "the next check after a bulk write vouches again")
+	})
+
 	t.Run("replayed block", func(t *testing.T) {
 		fp := h.check(end)
 		h.changed("block replay changes a result code", end, fp, func() {
