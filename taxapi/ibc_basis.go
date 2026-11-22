@@ -58,7 +58,7 @@ func isIBCRefundPassThrough(e tax.TaxableEvent) bool {
 		return false
 	}
 	var d map[string]string
-	return json.Unmarshal([]byte(e.Detail), &d) == nil && d[ibcRefundPassedThrough] == "true"
+	return json.Unmarshal([]byte(e.Detail), &d) == nil && d[ibcRefundPassedThrough] == apiTrue
 }
 
 // ibcReturnOwner is the account a refund or a passed-through refund returned

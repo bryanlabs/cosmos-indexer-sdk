@@ -9,17 +9,17 @@ import (
 )
 
 const (
-	passRouter = "cosmos1router"
-	passUser   = "cosmos1user"
-	passSender = "cosmos1origin"
+	routeRouter = "cosmos1router"
+	routeUser   = "cosmos1user"
+	routeSender = "cosmos1origin"
 	// A Skip Go forward of IBC Eureka WETH through the v2 client 08-wasm-1369,
 	// the shape of the routed sends whose error acknowledgement the router's
 	// source callback paid straight on to the user.
-	passTrace   = "transfer/08-wasm-1369/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-	passPacket  = `{"ibc_generation":"v2","packet_sequence":"41","packet_source_client":"08-wasm-1369","packet_destination_client":"client-2"}`
-	passOnward  = `{"ibc_generation":"v2","packet_sequence":"41","packet_source_client":"08-wasm-1369","packet_destination_client":"client-2","refund_passed_through":"true","principal_return":"false"}`
-	passAmount  = "120000000000000000"
-	passForward = `{"protocol":"skip","routed_from_hub":"true"}`
+	routeTrace   = "transfer/08-wasm-1369/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+	routePacket  = `{"ibc_generation":"v2","packet_sequence":"41","packet_source_client":"08-wasm-1369","packet_destination_client":"client-2"}`
+	routeOnward  = `{"ibc_generation":"v2","packet_sequence":"41","packet_source_client":"08-wasm-1369","packet_destination_client":"client-2","refund_passed_through":"true","principal_return":"false"}`
+	routeAmount  = "120000000000000000"
+	routeForward = `{"protocol":"skip","routed_from_hub":"true"}`
 )
 
 // The router received the coins, forwarded them, got them back on the error
@@ -28,9 +28,9 @@ const (
 func passThroughEvents() []tax.TaxableEvent {
 	recv := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
 	return []tax.TaxableEvent{
-		{ID: 1, MessageID: 10, Category: string(tax.CategoryIBCIn), FromAddr: passSender, ToAddr: passRouter, Amount: passAmount, Denom: ibcRefundDenom(passTrace), Timestamp: recv},
-		{ID: 2, MessageID: 10, Category: string(tax.CategoryIBCOut), FromAddr: passRouter, Amount: passAmount, Denom: passTrace, Detail: passPacket, Timestamp: recv},
-		{ID: 3, MessageID: 20, Category: string(tax.CategoryTransfer), FromAddr: passRouter, ToAddr: passUser, Amount: passAmount, Denom: ibcRefundDenom(passTrace), Detail: passOnward, Timestamp: recv.Add(30 * time.Second)},
+		{ID: 1, MessageID: 10, Category: string(tax.CategoryIBCIn), FromAddr: routeSender, ToAddr: routeRouter, Amount: routeAmount, Denom: ibcRefundDenom(routeTrace), Timestamp: recv},
+		{ID: 2, MessageID: 10, Category: string(tax.CategoryIBCOut), FromAddr: routeRouter, Amount: routeAmount, Denom: routeTrace, Detail: routePacket, Timestamp: recv},
+		{ID: 3, MessageID: 20, Category: string(tax.CategoryTransfer), FromAddr: routeRouter, ToAddr: routeUser, Amount: routeAmount, Denom: ibcRefundDenom(routeTrace), Detail: routeOnward, Timestamp: recv.Add(30 * time.Second)},
 	}
 }
 
@@ -71,7 +71,7 @@ func TestPassedThroughRefundWithoutARouterSend(t *testing.T) {
 // netted against the transfer.
 func TestPassedThroughRefundRefusesAnInexactPair(t *testing.T) {
 	for name, change := range map[string]func([]tax.TaxableEvent) []tax.TaxableEvent{
-		"different amount": func(e []tax.TaxableEvent) []tax.TaxableEvent { e[2].Amount = "119000000000000000"; return e },
+		"another amount": func(e []tax.TaxableEvent) []tax.TaxableEvent { e[2].Amount = "119000000000000000"; return e },
 		"different coin": func(e []tax.TaxableEvent) []tax.TaxableEvent {
 			e[2].Denom = ibcRefundDenom("transfer/08-wasm-1370/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
 			return e
@@ -91,7 +91,7 @@ func TestPassedThroughRefundRefusesAnInexactPair(t *testing.T) {
 			return append(e, extra)
 		},
 		"a refund row for the same packet": func(e []tax.TaxableEvent) []tax.TaxableEvent {
-			return append(e, tax.TaxableEvent{ID: 6, Category: string(tax.CategoryProtocolWithdrawal), ToAddr: passRouter, Amount: passAmount, Denom: e[2].Denom, Detail: passPacket, RewardTrigger: ibcErrorAckRefund, Timestamp: e[2].Timestamp})
+			return append(e, tax.TaxableEvent{ID: 6, Category: string(tax.CategoryProtocolWithdrawal), ToAddr: routeRouter, Amount: routeAmount, Denom: e[2].Denom, Detail: routePacket, RewardTrigger: ibcErrorAckRefund, Timestamp: e[2].Timestamp})
 		},
 		"transfer without a row id": func(e []tax.TaxableEvent) []tax.TaxableEvent { e[2].ID = 0; return e },
 	} {
@@ -109,7 +109,7 @@ func TestPassedThroughRefundRefusesAnInexactPair(t *testing.T) {
 // the transfer returned, so it blocks instead of being guessed from amounts.
 func TestPassedThroughRefundRefusesAnUnidentifiedRouterSend(t *testing.T) {
 	events := passThroughEvents()
-	events[1].Detail = passForward
+	events[1].Detail = routeForward
 	require.Empty(t, matchIBCRefunds(events))
 	r := ibcBasisReadiness(events, events[0].Timestamp.AddDate(1, 0, 0))
 	require.False(t, r.ExportReady)
@@ -122,7 +122,7 @@ func TestOnlyMarkedTransfersArePassThroughs(t *testing.T) {
 	for _, e := range []tax.TaxableEvent{
 		{Category: string(tax.CategoryTransfer), Detail: `{"memo":"refund_passed_through"}`},
 		{Category: string(tax.CategoryTransfer), Detail: `{"refund_passed_through":"false"}`},
-		{Category: string(tax.CategoryIBCIn), Detail: passOnward},
+		{Category: string(tax.CategoryIBCIn), Detail: routeOnward},
 	} {
 		require.False(t, isIBCRefundPassThrough(e))
 	}
