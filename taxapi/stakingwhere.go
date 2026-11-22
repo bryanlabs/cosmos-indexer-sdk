@@ -52,6 +52,12 @@ type whereFile struct {
 	WalletsChecked     int64        `json:"wallets_checked"`
 	UnclaimedOpen      int64        `json:"unclaimed_open_uatom"`
 	UnclaimedCloseNode int64        `json:"unclaimed_close_uatom"`
+	Withdrawals        int64        `json:"withdrawals"`
+	WindowFirstDay     string       `json:"window_first_day"`
+	WindowFirstHeight  int64        `json:"window_first_height"`
+	WindowOpen         int64        `json:"window_unclaimed_open_uatom"`
+	WindowWithdrawals  int64        `json:"window_withdrawals"`
+	WindowWithdrawn    int64        `json:"window_withdrawn_uatom"`
 	ExchangeLabels     string       `json:"exchange_labels"`
 	LiquidStakingRule  string       `json:"liquid_staking_rule"`
 	Categories         []string     `json:"categories"`
@@ -139,8 +145,8 @@ type whereRow struct {
 	EndDate           string       `json:"end_date"`
 	Minted            string       `json:"minted_atom"`
 	ToCommunityPool   string       `json:"to_community_pool_atom"`
-	ToCommission      string       `json:"to_validator_commission_atom"`
-	ToDelegators      string       `json:"to_delegators_atom"`
+	Commission        string       `json:"validator_commission_atom"`
+	Credited          string       `json:"credited_to_delegators_atom"`
 	Withdrawn         string       `json:"withdrawn_delegator_rewards_atom"`
 	Withdrawals       int64        `json:"withdrawals"`
 	UnclaimedChange   string       `json:"unclaimed_change_atom"`
@@ -165,7 +171,9 @@ var whereMethod = map[string]string{
 	"other_sends":    "Sent to any other account.",
 	"left_in_wallet": "Still in the wallet that received it at the end of the data.",
 	"not_followed":   "Rewards received by a wallet whose replayed balance did not match the chain's balance at the check height, or that the replay could not follow (a payment larger than the replayed balance). They are shown instead of being guessed. A wallet stops being followed for all of its rewards.",
-	"unclaimed":      "Rewards credited to delegators (every validator's rewards minus its commission, from the inflation data) minus rewards withdrawn. unclaimed_end_atom starts from the delegators' unclaimed rewards in the cosmoshub-4 genesis.",
+	"minted":         "minted_atom is new ATOM from inflation and to_community_pool_atom is the community tax on it, from the inflation data.",
+	"credited":       "credited_to_delegators_atom is every validator's block rewards minus its commission, and validator_commission_atom is the commission. Both include delegators' and validators' share of transaction fees, not only new ATOM, because the chain pays fees and inflation out together.",
+	"unclaimed":      "credited_to_delegators_atom minus rewards withdrawn. unclaimed_end_atom starts from the delegators' unclaimed rewards in the cosmoshub-4 genesis. coverage.unclaimed_check compares it at check_height with the chain's own outstanding delegator rewards. When a reward is withdrawn the chain pays whole uatom and moves the fraction under 1 uatom to the community pool, so the chain's figure should be lower by under 1 uatom per withdrawal. Over recent_window, the days our node holds full state for, it is lower by 0.50 uatom per withdrawal on average, as expected. Over the full history it is lower by about 5,569 ATOM (0.0025% of rewards credited), at least 5,516 ATOM more than those fractions can explain; where in the history that comes from is not yet found, so unclaimed_end_atom carries that uncertainty. The first-hop shares do not depend on it.",
 	"first_hop":      "Only the first move is counted. Coins that came back later (an IBC transfer that timed out, an unbonding that completed) count as new coins of their own and are not reclassified.",
 	"scope":          "cosmoshub-4 only. Monthly rows follow UTC months; the last month ends at last_day.",
 }
@@ -176,9 +184,15 @@ func (s *Server) handleWhereAtomGoes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "where-ATOM-goes data unavailable", http.StatusInternalServerError)
 		return
 	}
-	infl, err := loadInflation()
+	infl, err := s.stakingInflation(r.Context())
 	if err != nil {
 		http.Error(w, "inflation data unavailable", http.StatusInternalServerError)
+		return
+	}
+	if err := whereInflationCovers(f, infl); err != nil {
+		// a short inflation series would understate the last periods'
+		// issuance and credited rewards without a sign
+		http.Error(w, "inflation data unavailable: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	q := r.URL.Query()
@@ -235,15 +249,85 @@ func (s *Server) handleWhereAtomGoes(w http.ResponseWriter, r *http.Request) {
 			"wallets_checked":      f.WalletsChecked,
 			"wallets_not_followed": f.WalletsNotFollowed,
 			"exchange_labels":      f.ExchangeLabels,
-			"unclaimed_check": map[string]any{
-				"open_atom":           uatomString(f.UnclaimedOpen),
-				"chain_at_check_atom": uatomString(f.UnclaimedCloseNode),
-			},
+			"unclaimed_check":      whereCheckJSON(f, infl),
 		},
 		"liquid_staking_rule": f.LiquidStakingRule,
 		"method":              whereMethod,
 		"rows":                out,
 	})
+}
+
+// whereUnexplainedHistoryUatom is how far the full-history unclaimed check
+// misses the node beyond the per-withdrawal fractions (measured on the file
+// built 2026-11-22 from replay pass 2). The method text states it.
+const whereUnexplainedHistoryUatom = 5_516_300_577
+
+// whereCheck replays delegators' unclaimed rewards from an opening value:
+// open plus credited minus withdrawn over the inflation days from first
+// through the file's last day. It returns the replayed close and the chain's
+// close minus it.
+func whereCheck(f *whereFile, infl *inflationData, first string, open, withdrawn int64) (replay, diff *big.Int) {
+	replay = big.NewInt(open)
+	for _, d := range infl.Days {
+		if d.Date < first || d.Date > f.LastDay {
+			continue
+		}
+		replay.Add(replay, new(big.Int).Sub(d.RewardsEvents, d.CommissionEvents))
+	}
+	replay.Sub(replay, big.NewInt(withdrawn))
+	return replay, new(big.Int).Sub(big.NewInt(f.UnclaimedCloseNode), replay)
+}
+
+func whereWithdrawn(f *whereFile) int64 {
+	var w int64
+	for _, m := range f.Months {
+		w += m.Withdrawn
+	}
+	return w
+}
+
+func whereCheckJSON(f *whereFile, infl *inflationData) map[string]any {
+	full, fullDiff := whereCheck(f, infl, f.FirstDay, f.UnclaimedOpen, whereWithdrawn(f))
+	win, winDiff := whereCheck(f, infl, f.WindowFirstDay, f.WindowOpen, f.WindowWithdrawn)
+	return map[string]any{
+		"open_atom":              uatomString(f.UnclaimedOpen),
+		"replayed_at_check_atom": atomString(full),
+		"chain_at_check_atom":    uatomString(f.UnclaimedCloseNode),
+		"difference_atom":        atomString(fullDiff),
+		"withdrawals":            f.Withdrawals,
+		"recent_window": map[string]any{
+			"first_day":              f.WindowFirstDay,
+			"first_height":           f.WindowFirstHeight,
+			"open_atom":              uatomString(f.WindowOpen),
+			"withdrawals":            f.WindowWithdrawals,
+			"withdrawn_atom":         uatomString(f.WindowWithdrawn),
+			"replayed_at_check_atom": atomString(win),
+			"difference_atom":        atomString(winDiff),
+		},
+	}
+}
+
+// whereInflationCovers checks that the inflation series has every day the
+// where file covers.
+func whereInflationCovers(f *whereFile, infl *inflationData) error {
+	have := map[string]bool{}
+	for _, d := range infl.Days {
+		have[d.Date] = true
+	}
+	first, err := time.Parse(time.DateOnly, f.FirstDay)
+	if err != nil {
+		return fmt.Errorf("first_day %q", f.FirstDay)
+	}
+	last, err := time.Parse(time.DateOnly, f.LastDay)
+	if err != nil {
+		return fmt.Errorf("last_day %q", f.LastDay)
+	}
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
+		if !have[d.Format(time.DateOnly)] {
+			return fmt.Errorf("no inflation day %s", d.Format(time.DateOnly))
+		}
+	}
+	return nil
 }
 
 // whereRows builds every period; unclaimed_end runs from the genesis opening
@@ -309,7 +393,7 @@ func whereRows(f *whereFile, infl *inflationData, view string) []whereRow {
 		change := new(big.Int).Sub(a.delegators, big.NewInt(a.withdrawn))
 		unclaimed.Add(unclaimed, change)
 		row := whereRow{Period: k, StartDate: a.start, EndDate: a.end, Minted: atomString(a.minted), ToCommunityPool: atomString(a.pool),
-			ToCommission: atomString(a.commission), ToDelegators: atomString(a.delegators), Withdrawn: uatomString(a.withdrawn),
+			Commission: atomString(a.commission), Credited: atomString(a.delegators), Withdrawn: uatomString(a.withdrawn),
 			Withdrawals: a.records, UnclaimedChange: atomString(change), UnclaimedEnd: atomString(unclaimed), FollowedThroughTo: f.LastDay}
 		share := func(v int64) *float64 {
 			x := 0.0
