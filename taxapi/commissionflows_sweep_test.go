@@ -51,4 +51,14 @@ func TestCommissionFlowSweepCountsAllSendersPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 250, examined)
 	require.Zero(t, deposits)
+
+	// Shared across traces in one process: the second read is a hit with the same answer.
+	s.flowShared = NewCommissionSharedHistory(1 << 20)
+	for i := 0; i < 2; i++ {
+		examined, deposits, err = s.sweepDepositSenders(hot, flowPGWindowStart, flowPGWindowEnd)
+		require.NoError(t, err)
+		require.Equal(t, [2]int{552, 301}, [2]int{examined, deposits})
+	}
+	hits, misses, _, _ := s.flowShared.Stats()
+	require.Equal(t, [2]int64{1, 1}, [2]int64{hits, misses})
 }
