@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -403,7 +404,12 @@ func (b rateBook) shown(v string, h int64, sp shareSpan) (*big.Int, *big.Int, er
 }
 
 // walkBack rebuilds the wallet at each target height (all at or below the
-// anchor). Targets are answered from the same event set.
+// anchor). Targets are answered from the same event set, newest first, and
+// the holdings at a target depend only on the anchor and the events above
+// it. So when the rebuild stops on something the index lacks (a
+// ledgerUnknown), the targets already answered above that point are
+// returned with the error and the caller refuses only the rest. Any other
+// error returns no holdings.
 func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error) {
 	events := append([]ledgerEvent(nil), in.Events...)
 	sort.SliceStable(events, func(i, j int) bool {
@@ -438,13 +444,20 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 	spent := bondSpentByMessage(in)
 	ei, fi := 0, 0
 	out := make(map[int64]ledgerHoldings, len(order))
+	stop := func(err error) (map[int64]ledgerHoldings, error) {
+		var unk ledgerUnknown
+		if errors.As(err, &unk) {
+			return out, err
+		}
+		return nil, err
+	}
 	for _, h := range order {
 		if h > in.Anchor.Height {
 			return nil, fmt.Errorf("target height %d is after the anchor %d", h, in.Anchor.Height)
 		}
 		for ei < len(events) && events[ei].Height > h {
 			if err := undoEvent(in, book, spent, events[ei], liquid, shares); err != nil {
-				return nil, err
+				return stop(err)
 			}
 			ei++
 		}
@@ -471,7 +484,7 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 			}
 			amt, bound, err := book.shown(v, h, *sp)
 			if err != nil {
-				return nil, err
+				return stop(err)
 			}
 			if amt.Sign() != 0 || bound.Sign() != 0 {
 				hold.Delegations[v] = amt
