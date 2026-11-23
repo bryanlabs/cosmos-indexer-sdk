@@ -335,6 +335,10 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 			want := declared(address, true)
 			got, err := read(t, apiMainnet, address, lo, hi, false, false)
 			require.NoError(t, err, "legacy reads must not fail closed on unresolved or malformed outcomes")
+			// Only the unresolved fixture transaction has no recorded outcome.
+			for _, fee := range got {
+				require.Equal(t, fee.Hash == "unresolved", fee.OutcomeUnknown, fee.Hash)
+			}
 			for _, fee := range got {
 				require.NotEqual(t, "failed-nocharge", fee.Hash, "a failed transaction recorded as charged nothing must not be a public fee")
 			}

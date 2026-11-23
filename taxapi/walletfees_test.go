@@ -109,6 +109,11 @@ func TestWalletFeesExactWindowPostgres(t *testing.T) {
 		if len(old) > 0 {
 			require.Equal(t, old, got)
 		}
+		// The reference reads the flag through the same column, so check it
+		// against the fixture: only the failed transaction has no outcome.
+		for _, fee := range got {
+			require.Equal(t, fee.Hash == "failed", fee.OutcomeUnknown, fee.Hash)
+		}
 		if chain == apiMainnet && start.Equal(parse("2026-01-02T00:00:00Z")) && end.Equal(parse("2026-01-03T00:00:00Z")) && payer == "payer" {
 			require.GreaterOrEqual(t, len(got), 4)
 			require.Equal(t, "failed", got[1].Hash)
