@@ -269,7 +269,9 @@ SELECT count(*) FROM (
 // movement they made in the window is a transfer to addr, and together they
 // carried between flowSweepForwardMin and all of what other wallets sent
 // them. No sample: the ratio is over all senders and all their rows, so it
-// does not depend on read order or query plan.
+// does not depend on read order or query plan. funded is materialized so
+// each sum runs once, and the swept sum's filters are wrapped so it reads
+// the sender's rows instead of intersecting them with addr's.
 func (s *Server) sweepDepositSenders(addr string, start, end time.Time) (examined, deposits int, err error) {
 	var row struct {
 		Examined int
@@ -286,11 +288,11 @@ passing AS (
 		SELECT 1 FROM taxable_events o
 		WHERE o.from_addr = s.from_addr AND o.denom = @denom AND o.timestamp >= @start AND o.timestamp < @end
 			AND NOT (o.category = @transfer AND o.to_addr = @addr))),
-funded AS (
+funded AS MATERIALIZED (
 	SELECT (
 		SELECT coalesce(sum(o.amount::numeric), 0) FROM taxable_events o
 		WHERE o.from_addr = p.from_addr AND o.denom = @denom AND o.timestamp >= @start AND o.timestamp < @end
-			AND o.category = @transfer AND o.to_addr = @addr) AS swept, (
+			AND o.category || '' = @transfer AND o.to_addr || '' = @addr) AS swept, (
 		SELECT coalesce(sum(i.amount::numeric), 0) FROM taxable_events i
 		WHERE i.to_addr = p.from_addr AND i.denom = @denom AND i.from_addr <> @addr AND i.timestamp >= @start AND i.timestamp < @end) AS received
 	FROM passing p)
