@@ -74,16 +74,19 @@ var (
 	// newer binary cannot price delegations at the height (lostBondDenom).
 	errArchiveLostDenom = errors.New("archive: delegations cannot be priced at the height")
 	// errArchiveAbsent is the archive answering, for the height asked, that
-	// a validator does not exist there.
+	// a validator does not exist there, while it serves that height's
+	// validators.
 	errArchiveAbsent = errors.New("archive: no such validator at the height")
 )
 
 // validatorQuery is the archive read of one validator's tokens and shares,
-// and sdkKeyNotFound the code, in the "sdk" codespace, it answers with for a
-// validator the height does not hold.
+// and sdkKeyNotFound the code, in the "sdk" codespace, it answers with, as a
+// gRPC NotFound, for a validator the height does not hold. A height the
+// archive has no state for answers with another code.
 const (
 	validatorQuery = "/cosmos.staking.v1beta1.Query/Validator"
 	sdkKeyNotFound = 22
+	grpcNotFound   = "rpc error: code = NotFound"
 )
 
 // archiveAbsentZeros counts the delegations balance history showed as zero
@@ -212,7 +215,7 @@ func (a *ledgerArchive) abci(b *archiveBudget, path string, data []byte, height 
 		return nil, errArchiveFailed
 	}
 	r := body.Result.Response
-	if r.Code == sdkKeyNotFound && r.Codespace == "sdk" && path == validatorQuery && r.Height == strconv.FormatInt(height, 10) {
+	if r.Code == sdkKeyNotFound && r.Codespace == "sdk" && strings.HasPrefix(r.Log, grpcNotFound) && path == validatorQuery && r.Height == strconv.FormatInt(height, 10) {
 		countArchive(archiveResultAbsent)
 		return nil, errArchiveAbsent
 	}
@@ -329,6 +332,9 @@ func (a *ledgerArchive) storeDelegations(b *archiveBudget, addr string, height i
 func (a *ledgerArchive) rate(b *archiveBudget, v string, height int64) (validatorRate, error) {
 	var r stakingtypes.QueryValidatorResponse
 	if err := a.query(b, validatorQuery, &stakingtypes.QueryValidatorRequest{ValidatorAddr: v}, &r, height); err != nil {
+		if errors.Is(err, errArchiveAbsent) && !a.servesValidators(b, height) {
+			return validatorRate{}, errArchiveFailed
+		}
 		return validatorRate{}, err
 	}
 	if r.Validator.OperatorAddress != v || r.Validator.Tokens.IsNil() || r.Validator.DelegatorShares.IsNil() {
@@ -339,6 +345,16 @@ func (a *ledgerArchive) rate(b *archiveBudget, v string, height int64) (validato
 		return validatorRate{}, errArchiveAnswer
 	}
 	return validatorRate{Tokens: r.Validator.Tokens.BigInt(), Shares: shares}, nil
+}
+
+// servesValidators says whether the archive holds the staking state at
+// height: it answers for that height with a validator of the set.
+func (a *ledgerArchive) servesValidators(b *archiveBudget, height int64) bool {
+	var r stakingtypes.QueryValidatorsResponse
+	if err := a.query(b, "/cosmos.staking.v1beta1.Query/Validators", &stakingtypes.QueryValidatorsRequest{Pagination: &query.PageRequest{Limit: 1}}, &r, height); err != nil {
+		return false
+	}
+	return len(r.Validators) == 1 && r.Validators[0].OperatorAddress != ""
 }
 
 // delegationsAt reads addr's delegations at height from the node, or from
