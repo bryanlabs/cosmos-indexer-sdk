@@ -61,6 +61,9 @@ type CommissionFlowBuildOptions struct {
 	// MaxHops overrides flowMaxHops. A version traced at another limit names
 	// it ("-hops5"), so its rows are never mixed with another limit's.
 	MaxHops int
+	// Views are lower hop limits whose results the run also keeps, in its
+	// evidence, from the same trace.
+	Views []int
 	// Labels adds a private label file's labels for this run. A version that
 	// uses one names its digest ("-labels<first 12>").
 	Labels *CommissionLabelFile
@@ -116,6 +119,11 @@ func (o CommissionFlowBuildOptions) validate() error {
 	}
 	if o.MaxHops < 0 || o.MaxHops > flowMaxHopsCeiling {
 		return fmt.Errorf("commission hop limit must be between 1 and %d", flowMaxHopsCeiling)
+	}
+	for _, v := range o.Views {
+		if o.MaxHops == 0 || v < 1 || v >= o.MaxHops {
+			return fmt.Errorf("a hop-limit view must be below the run's own hop limit")
+		}
 	}
 	if o.Labels == nil && strings.Contains(o.Version, "-labels") {
 		return fmt.Errorf("label-named generation requires its exact label file")
@@ -204,6 +212,23 @@ type CommissionFlowEvidence struct {
 	// Stops names, for every amount that left the traced wallets to a stop,
 	// the wallet it stopped at, its class and the hop it left from.
 	Stops []CommissionFlowStopEvidence `json:",omitempty"`
+	// Views are the results at lower hop limits, from the same trace.
+	Views []CommissionFlowViewEvidence `json:",omitempty"`
+}
+
+// CommissionFlowViewEvidence is the result the run would have given at a
+// lower hop limit. Exact is false when coins crossed that limit in a way
+// only a separate run at it follows; such a view needs its own run.
+type CommissionFlowViewEvidence struct {
+	MaxHops   int
+	Exact     bool
+	Conflicts int
+	Status    string
+	Wallets   int
+	Overdraw  string
+	DriftBase string
+	Rows      []CommissionFlow
+	Stops     []CommissionFlowStopEvidence `json:",omitempty"`
 }
 
 // CommissionFlowStopEvidence is one FlowStopKey of a private trace.

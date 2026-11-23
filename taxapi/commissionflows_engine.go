@@ -480,6 +480,72 @@ type flowTrace struct {
 	Stops map[FlowStopKey]decimal.Decimal
 	// slashList is every validator slash in [From, AsOf).
 	slashList []flowEvent
+	// views are the results at lower hop limits, kept from this one trace.
+	views []*flowView
+	// curHop is the hop of the wallet whose event is being applied.
+	curHop int
+	// edge is the view whose records the current route replaces with a
+	// hop-limit stop.
+	edge *flowView
+	// stopHop is the hop a failed discovery would have given each wallet
+	// it stopped.
+	stopHop map[string]int
+}
+
+// flowView is what a trace at the lower limit Hops records, taken from a
+// trace at a higher one. Below Hops the two traces apply the same events to
+// the same wallets, and a route from a hop-Hops wallet to a wallet further
+// out ends at the limit, so the view keeps the records of wallets at most
+// Hops out and turns those routes into hop-limit stops. Conflicts counts
+// routes where coins crossed the limit in a way the lower trace would not
+// see: from beyond it back inside, or from inside it to a wallet first
+// reached beyond it. A view with conflicts is not exact.
+type flowView struct {
+	Hops      int
+	Fates     map[FlowFateKey]decimal.Decimal
+	Stops     map[FlowStopKey]decimal.Decimal
+	Conflicts int
+}
+
+// withViews keeps, alongside the trace, the result at each limit in hops
+// below its own.
+func (t *flowTrace) withViews(hops []int) {
+	t.stopHop = map[string]int{}
+	for _, h := range hops {
+		if h > 0 && h < t.hopLimit() {
+			t.views = append(t.views, &flowView{Hops: h, Fates: map[FlowFateKey]decimal.Decimal{}, Stops: map[FlowStopKey]decimal.Decimal{}})
+		}
+	}
+}
+
+func (t *flowTrace) viewAt(hop int) *flowView {
+	for _, v := range t.views {
+		if v.Hops == hop {
+			return v
+		}
+	}
+	return nil
+}
+
+// crossed counts a conflict in every view a route from hop from into a
+// wallet at hop to crosses: inward from beyond the limit, or outward from
+// below it to a wallet past it. back is false when the destination is not a
+// wallet in any trace, only a stop a failed discovery left.
+func (t *flowTrace) crossed(from, to int, back bool) {
+	for _, v := range t.views {
+		if (back && from > v.Hops && to <= v.Hops) || (from < v.Hops && to > v.Hops) {
+			v.Conflicts++
+		}
+	}
+}
+
+// beyond records in v that parts stopped at v's hop limit on their way from
+// w to "to".
+func (t *flowTrace) beyond(v *flowView, w *flowWallet, to string, parts [flowRules][]flowPart) {
+	for r := 0; r < flowRules; r++ {
+		addFates(v.Fates, r, parts[r], flowBeyondHops, "")
+		addStop(v.Stops, r, parts[r], w, to, flowStop{Class: flowBeyondHops})
+	}
 }
 
 func newFlowTrace(validator string, from, asOf time.Time, load flowLoader) *flowTrace {
@@ -510,6 +576,15 @@ type FlowStopKey struct {
 
 // recordStop adds the commission parts carry to the stop from w to "to".
 func (t *flowTrace) recordStop(r int, parts []flowPart, w *flowWallet, to string, stop flowStop) {
+	addStop(t.Stops, r, parts, w, to, stop)
+	for _, v := range t.views {
+		if w.Hop <= v.Hops && v != t.edge {
+			addStop(v.Stops, r, parts, w, to, stop)
+		}
+	}
+}
+
+func addStop(m map[FlowStopKey]decimal.Decimal, r int, parts []flowPart, w *flowWallet, to string, stop flowStop) {
 	amount := decimal.Zero
 	for _, x := range parts {
 		if x.Origin != flowOriginOther && x.Amount.IsPositive() {
@@ -520,7 +595,7 @@ func (t *flowTrace) recordStop(r int, parts []flowPart, w *flowWallet, to string
 		return
 	}
 	k := FlowStopKey{Rule: r, Class: stop.Class, Detail: stop.Detail, From: w.Addr, To: to, Hop: w.Hop}
-	t.Stops[k] = t.Stops[k].Add(amount)
+	m[k] = m[k].Add(amount)
 }
 
 // run traces from the receiving wallets (hop 0) over [From, AsOf).
@@ -718,13 +793,22 @@ func (t *flowTrace) takeFrom(w *flowWallet, r int, pool *flowPool, amount decima
 }
 
 func (t *flowTrace) record(r int, parts []flowPart, class, detail string) {
+	addFates(t.Fates, r, parts, class, detail)
+	for _, v := range t.views {
+		if t.curHop <= v.Hops && v != t.edge {
+			addFates(v.Fates, r, parts, class, detail)
+		}
+	}
+}
+
+func addFates(m map[FlowFateKey]decimal.Decimal, r int, parts []flowPart, class, detail string) {
 	for _, x := range parts {
 		if x.Origin == flowOriginOther || !x.Amount.IsPositive() {
 			continue
 		}
 		month, via := splitFlowOrigin(x.Origin)
 		k := FlowFateKey{Rule: r, Month: month, Class: class, Detail: detail, ViaUnbonding: via}
-		t.Fates[k] = t.Fates[k].Add(x.Amount)
+		m[k] = m[k].Add(x.Amount)
 	}
 }
 
@@ -750,6 +834,11 @@ func markUnbonded(parts []flowPart) []flowPart {
 // outflows only leave w: nothing they carry belongs to this validator, and a
 // traced receiver already counted them as other coins.
 func (t *flowTrace) apply(w *flowWallet, e flowEvent, live bool) error {
+	if t.views != nil {
+		prev := t.curHop
+		t.curHop = w.Hop
+		defer func() { t.curHop = prev }()
+	}
 	if e.Trigger == flowStreamExit && e.Lot != "" {
 		// A finished stream spent everything its subscriber left in it on
 		// the tokens it paid out, which the row names in another denom.
@@ -989,7 +1078,14 @@ func flowEscrowedBid(detail string) bool {
 // traced wallet, to a fate when the receiver ends the trace, or into a newly
 // discovered wallet one hop further.
 func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEvent) error {
+	edge := t.viewAt(w.Hop)
 	if dst, ok := t.Wallets[e.To]; ok {
+		if t.views != nil {
+			t.crossed(w.Hop, dst.Hop, true)
+			if edge != nil && dst.Hop > w.Hop {
+				t.beyond(edge, w, e.To, parts)
+			}
+		}
 		for r := 0; r < flowRules; r++ {
 			dst.pools[r].liquid.add(parts[r])
 		}
@@ -1035,11 +1131,31 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 		if t.strict && stop.Class == flowUnresolved {
 			return fmt.Errorf("commission destination is unresolved")
 		}
+		if h, ok := t.stopHop[e.To]; ok && t.views != nil {
+			// A failed discovery at hop h left this stop; a trace whose
+			// limit is below h never tried that wallet.
+			t.crossed(w.Hop, h, false)
+			if edge != nil && h > w.Hop {
+				t.beyond(edge, w, e.To, parts)
+				prev := t.edge
+				t.edge = edge
+				defer func() { t.edge = prev }()
+			}
+		}
 		for r := 0; r < flowRules; r++ {
 			t.recordStop(r, parts[r], w, e.To, stop)
 			t.record(r, parts[r], stop.Class, stop.Detail)
 		}
 		return nil
+	}
+	if edge != nil {
+		t.beyond(edge, w, e.To, parts)
+		prev := t.edge
+		t.edge = edge
+		defer func() { t.edge = prev }()
+	}
+	if t.stopHop != nil {
+		t.stopHop[e.To] = w.Hop + 1
 	}
 	cursor := e.Key
 	if err := t.discover(e.To, w.Hop+1, e.Key.Time, &cursor); err != nil {
@@ -1067,6 +1183,9 @@ func (t *flowTrace) route(w *flowWallet, parts [flowRules][]flowPart, e flowEven
 		}
 		t.stops[e.To] = flowStop{Class: flowUnresolved}
 		return nil
+	}
+	if t.stopHop != nil {
+		delete(t.stopHop, e.To)
 	}
 	dst := t.Wallets[e.To]
 	for r := 0; r < flowRules; r++ {
@@ -1134,6 +1253,7 @@ func (t *flowTrace) sourceStop(addr string) (flowStop, error) {
 // settle records where the coins still in traced wallets sit at the as-of.
 func (t *flowTrace) settle() {
 	for _, w := range t.order {
+		t.curHop = w.Hop
 		for r := 0; r < flowRules; r++ {
 			p := w.pools[r]
 			held, staked, unbonding, locked := flowHeld, flowRestakedOwn, flowUnbonding, flowLocked
