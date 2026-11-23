@@ -119,6 +119,9 @@ type ledgerInput struct {
 	// Samples holds the recorded rates before the anchor of the validators
 	// whose rate is not one, ascending by height.
 	Samples map[string][]rateSample
+	// RateAt, when set, reads a validator's rate at the end of a block from
+	// chain state, for a point no recorded rate bounds on one side.
+	RateAt func(v string, height int64) (validatorRate, error)
 }
 
 // ledgerHoldings is the rebuilt state at one block, in base units.
@@ -235,15 +238,25 @@ var shareEpsilon = decimal.New(1, -18)
 // before a point, lowered by the full fraction of each slash in between, and
 // the oldest recorded rate after it, raised the same way, bound it. A
 // validator at exactly one token per share at the anchor with no slash in the
-// window was at one throughout.
+// window was at one throughout. A side no recorded rate covers is read from
+// chain state at the block that bounds it, when the walk can read it.
 type rateBook struct {
 	unit    map[string]bool
 	samples map[string][]rateSample
 	slashes map[string][]ledgerSlash
+	anchor  int64
+	read    func(v string, height int64) (validatorRate, error)
+	// unread is the validator rates at a height the read did not return.
+	unread map[rateRead]bool
+}
+
+type rateRead struct {
+	v      string
+	height int64
 }
 
 func newRateBook(in ledgerInput) rateBook {
-	b := rateBook{unit: map[string]bool{}, samples: map[string][]rateSample{}, slashes: map[string][]ledgerSlash{}}
+	b := rateBook{unit: map[string]bool{}, samples: map[string][]rateSample{}, slashes: map[string][]ledgerSlash{}, anchor: in.Anchor.Height, read: in.RateAt, unread: map[rateRead]bool{}}
 	for _, sl := range in.Slashes {
 		b.slashes[sl.Validator] = append(b.slashes[sl.Validator], sl)
 	}
@@ -276,6 +289,11 @@ func (b rateBook) at(v string, lastBefore, firstAfter, cut int64) (decimal.Decim
 	ss := b.samples[v]
 	i := sort.Search(len(ss), func(k int) bool { return ss[k].Height > lastBefore }) - 1
 	j := sort.Search(len(ss), func(k int) bool { return ss[k].Height >= firstAfter })
+	// A side no sample bounds is read, one side at a time, and the bounds
+	// are looked up again with the new sample.
+	if (i < 0 && b.fill(v, lastBefore)) || (i >= 0 && j >= len(ss) && b.fill(v, firstAfter)) {
+		return b.at(v, lastBefore, firstAfter, cut)
+	}
 	if i < 0 || j >= len(ss) {
 		return one, one, ledgerUnknown{fmt.Sprintf("the tokens per share of %s around height %d are not recorded", v, cut)}
 	}
@@ -305,6 +323,29 @@ func (b rateBook) at(v string, lastBefore, firstAfter, cut int64) (decimal.Decim
 		return one, one, ledgerUnknown{fmt.Sprintf("the recorded tokens per share of %s fell by more than its slashes around height %d", v, cut)}
 	}
 	return lo, hi, nil
+}
+
+// fill reads v's rate at the end of block height from chain state and adds
+// it as a sample. It reports false, and adds nothing, when the book has no
+// read, the height is outside the walk, or the read fails; a rate is never
+// guessed.
+func (b rateBook) fill(v string, height int64) bool {
+	key := rateRead{v, height}
+	if b.read == nil || height < 1 || height > b.anchor || b.unread[key] {
+		return false
+	}
+	r, err := b.read(v, height)
+	if err != nil || r.Tokens == nil {
+		b.unread[key] = true
+		return false
+	}
+	ss := b.samples[v]
+	at := sort.Search(len(ss), func(k int) bool { return ss[k].Height >= height })
+	ss = append(ss, rateSample{})
+	copy(ss[at+1:], ss[at:])
+	ss[at] = rateSample{height, r}
+	b.samples[v] = ss
+	return true
 }
 
 // sharesFor bounds the shares that tokens between tlo and thi bought or were

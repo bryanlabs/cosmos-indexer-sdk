@@ -284,39 +284,8 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 	if err != nil {
 		return a, fmt.Errorf("bank balances: %w", err)
 	}
-	err = n.paged("/cosmos/staking/v1beta1/delegations/"+addr, height, func(get func(any) error) (pageResp, error) {
-		var body struct {
-			DelegationResponses []struct {
-				Delegation struct {
-					ValidatorAddress string `json:"validator_address"`
-					Shares           string `json:"shares"`
-				} `json:"delegation"`
-				Balance balCoin `json:"balance"`
-			} `json:"delegation_responses"`
-			Pagination pageResp `json:"pagination"`
-		}
-		if err := get(&body); err != nil {
-			return pageResp{}, err
-		}
-		for _, d := range body.DelegationResponses {
-			v, err := parseInt(d.Balance.Amount)
-			if err != nil {
-				return pageResp{}, err
-			}
-			sh, err := decimal.NewFromString(d.Delegation.Shares)
-			if err != nil {
-				return pageResp{}, fmt.Errorf("delegation shares %q: %w", d.Delegation.Shares, err)
-			}
-			addInt(a.Delegations, d.Delegation.ValidatorAddress, v)
-			a.Shares[d.Delegation.ValidatorAddress] = a.Shares[d.Delegation.ValidatorAddress].Add(sh)
-		}
-		return body.Pagination, nil
-	})
-	if lostBondDenom(err) {
-		a.Delegations, a.Shares, err = n.storeDelegations(addr, height)
-	}
-	if err != nil {
-		return a, fmt.Errorf("delegations: %w", err)
+	if a.Delegations, a.Shares, err = n.delegations(addr, height); err != nil {
+		return a, err
 	}
 	err = n.paged("/cosmos/staking/v1beta1/delegators/"+addr+"/unbonding_delegations", height, func(get func(any) error) (pageResp, error) {
 		var body struct {
@@ -353,6 +322,47 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 	return a, nil
 }
 
+// delegations reads addr's delegations at height, in tokens as the chain
+// shows them and in delegator shares.
+func (n *ledgerNode) delegations(addr string, height int64) (map[string]*big.Int, map[string]decimal.Decimal, error) {
+	amounts, shares := map[string]*big.Int{}, map[string]decimal.Decimal{}
+	err := n.paged("/cosmos/staking/v1beta1/delegations/"+addr, height, func(get func(any) error) (pageResp, error) {
+		var body struct {
+			DelegationResponses []struct {
+				Delegation struct {
+					ValidatorAddress string `json:"validator_address"`
+					Shares           string `json:"shares"`
+				} `json:"delegation"`
+				Balance balCoin `json:"balance"`
+			} `json:"delegation_responses"`
+			Pagination pageResp `json:"pagination"`
+		}
+		if err := get(&body); err != nil {
+			return pageResp{}, err
+		}
+		for _, d := range body.DelegationResponses {
+			v, err := parseInt(d.Balance.Amount)
+			if err != nil {
+				return pageResp{}, err
+			}
+			sh, err := decimal.NewFromString(d.Delegation.Shares)
+			if err != nil {
+				return pageResp{}, fmt.Errorf("delegation shares %q: %w", d.Delegation.Shares, err)
+			}
+			addInt(amounts, d.Delegation.ValidatorAddress, v)
+			shares[d.Delegation.ValidatorAddress] = shares[d.Delegation.ValidatorAddress].Add(sh)
+		}
+		return body.Pagination, nil
+	})
+	if lostBondDenom(err) {
+		amounts, shares, err = n.storeDelegations(addr, height)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("delegations: %w", err)
+	}
+	return amounts, shares, nil
+}
+
 // validatorRates reads every validator's bonded tokens and delegator shares.
 func (n *ledgerNode) validatorRates(height int64) (map[string]validatorRate, error) {
 	out := map[string]validatorRate{}
@@ -382,6 +392,33 @@ func (n *ledgerNode) validatorRates(height int64) (map[string]validatorRate, err
 		return body.Pagination, nil
 	})
 	return out, err
+}
+
+// rateAt reads one validator's bonded tokens and delegator shares at
+// the end of block height.
+func (n *ledgerNode) rateAt(v string, height int64) (validatorRate, error) {
+	var body struct {
+		Validator struct {
+			OperatorAddress string `json:"operator_address"`
+			Tokens          string `json:"tokens"`
+			DelegatorShares string `json:"delegator_shares"`
+		} `json:"validator"`
+	}
+	if err := n.at("/cosmos/staking/v1beta1/validators/"+v, nil, height, &body); err != nil {
+		return validatorRate{}, err
+	}
+	if body.Validator.OperatorAddress != v {
+		return validatorRate{}, fmt.Errorf("the node answered for validator %q", body.Validator.OperatorAddress)
+	}
+	tokens, err := parseInt(body.Validator.Tokens)
+	if err != nil {
+		return validatorRate{}, err
+	}
+	shares, err := decimal.NewFromString(body.Validator.DelegatorShares)
+	if err != nil {
+		return validatorRate{}, err
+	}
+	return validatorRate{Tokens: tokens, Shares: shares}, nil
 }
 
 // consensusOperators maps every validator's consensus address to its operator.
@@ -692,6 +729,14 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 // plus the wallet's redelegations, and the highest height of a redelegation
 // that cannot be attributed.
 func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
+	events, unmatched, err := s.ledgerStakeEvents(ids, addr, operator, lo, hi)
+	return events, lastHeight(unmatched), err
+}
+
+// ledgerStakeEvents is ledgerEvents with each staking record that may be the
+// wallet's but cannot be attributed returned as its own event, as
+// attributeStakes gives it.
+func (s *Server) ledgerStakeEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, []ledgerEvent, error) {
 	// A transaction's events are dated at its effective inclusion.
 	rel, rp := s.effectiveRel()
 	params := withParams(rp, map[string]any{qpAddr: addr, "op": operator, "types": ledgerMessageTypes, qpIDs: ids, "lo": lo, "hi": hi})
@@ -750,23 +795,23 @@ SELECT message_id FROM cand c WHERE ` + walletStakeMessage("c")
 	}
 	var msgRows []ledgerAttrRow
 	if err := s.db.Raw(msgQuery, params).Scan(&msgRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("message events: %w", err)
+		return nil, nil, fmt.Errorf("message events: %w", err)
 	}
 	var blockRows []ledgerAttrRow
 	if err := s.db.Raw(blockQuery, withParams(params, map[string]any{"types": ledgerBlockTypes})).Scan(&blockRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("block events: %w", err)
+		return nil, nil, fmt.Errorf("block events: %w", err)
 	}
 	var redelMsgs []uint64
 	if err := s.db.Raw(redelQuery, params).Scan(&redelMsgs).Error; err != nil {
-		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
+		return nil, nil, fmt.Errorf("redelegation messages: %w", err)
 	}
 	redelRows, err := s.redelegationRows(redelMsgs, rel, rp)
 	if err != nil {
-		return nil, 0, err
+		return nil, nil, err
 	}
-	redelegations, unattributed := attributeRedelegations(redelRows, addr)
+	redelegations, unmatched := attributeStakes(redelRows, addr)
 	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
-	return append(events, redelegations...), unattributed, nil
+	return append(events, redelegations...), unmatched, nil
 }
 
 // unnamedStakingEvent is a subquery on the message msg's redelegate,
@@ -878,8 +923,25 @@ func (s *Server) redelegationRows(msgs []uint64, rel string, rp map[string]any) 
 // it are refused. Events that name their delegator are read with the
 // wallet's other events and skipped here.
 func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, int64) {
-	var out []ledgerEvent
-	var unattributed int64
+	out, unnamed := attributeStakes(rows, addr)
+	return out, lastHeight(unnamed)
+}
+
+// lastHeight is the highest height of events, 0 for none.
+func lastHeight(events []ledgerEvent) int64 {
+	var h int64
+	for _, ev := range events {
+		h = max(h, ev.Height)
+	}
+	return h
+}
+
+// attributeStakes is attributeRedelegations with each record that may be the
+// wallet's but cannot be matched returned as its own event, in the form it
+// would take as the wallet's, for settleUnnamedStakes to settle from chain
+// state.
+func attributeStakes(rows []ledgerAttrRow, addr string) ([]ledgerEvent, []ledgerEvent) {
+	var out, unmatched []ledgerEvent
 	for start := 0; start < len(rows); {
 		end := start
 		for end < len(rows) && rows[end].MessageID == rows[start].MessageID {
@@ -888,7 +950,8 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		events := groupLedgerRows(rows[start:end])
 		start = end
 		delegators := map[string]bool{}
-		unnamed := int64(0)
+		paid := unbondPaid(events)
+		var unnamed []ledgerEvent
 		for _, ev := range events {
 			switch ev.Type {
 			case "withdraw_rewards":
@@ -903,8 +966,8 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 				}
 			case "redelegate", "delegate", "unbond":
 				for _, rec := range ev.records() {
-					if rec["delegator"] == "" && ev.Height > unnamed {
-						unnamed = ev.Height
+					if rec["delegator"] == "" {
+						unnamed = append(unnamed, ownedEvent(ev, rec, paid, addr))
 					}
 				}
 			}
@@ -912,15 +975,12 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		if len(delegators) == 0 {
 			// The message names the wallet, but nothing in it says whose
 			// stake moved: refuse rather than guess either way.
-			if unnamed > unattributed {
-				unattributed = unnamed
-			}
+			unmatched = append(unmatched, unnamed...)
 			continue
 		}
 		if !delegators[addr] {
 			continue
 		}
-		paid := unbondPaid(events)
 		withdrawn := map[string]map[string]bool{}
 		for _, ev := range events {
 			switch ev.Type {
@@ -952,30 +1012,14 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 						}
 					}
 					if owner == "" {
-						if ev.Height > unattributed {
-							unattributed = ev.Height
-						}
+						unmatched = append(unmatched, ownedEvent(ev, rec, paid, addr))
 						continue
 					}
 					withdrawn = map[string]map[string]bool{}
 					if owner != addr {
 						continue
 					}
-					if ev.Type == "unbond" {
-						// The event names the tokens asked for, which fix
-						// the shares taken; the paid amount is what the
-						// unbonding entry holds.
-						rec["requested"] = rec["amount"]
-						if paid != "" {
-							rec["amount"] = paid
-						}
-					}
-					for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "requested", "new_shares", "completion_time"} {
-						if v, ok := rec[k]; ok {
-							attrs = append(attrs, ledgerAttr{Key: k, Value: v})
-						}
-					}
-					attrs = append(attrs, ledgerAttr{Key: "delegator", Value: addr})
+					attrs = append(attrs, ownedEvent(ev, rec, paid, addr).Attrs...)
 				}
 				if len(attrs) > 0 {
 					out = append(out, ledgerEvent{ID: ev.ID, Msg: ev.Msg, Height: ev.Height, Time: ev.Time, Phase: ev.Phase, Type: ev.Type, Attrs: attrs})
@@ -983,7 +1027,33 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 			}
 		}
 	}
-	return out, unattributed
+	return out, unmatched
+}
+
+// ownedEvent is the record rec of the staking event ev as the wallet's own:
+// its attributes with the wallet as delegator. paid is the message's
+// unbondPaid.
+func ownedEvent(ev ledgerEvent, rec map[string]string, paid, addr string) ledgerEvent {
+	own := map[string]string{}
+	for k, v := range rec {
+		own[k] = v
+	}
+	if ev.Type == "unbond" {
+		// The event names the tokens asked for, which fix the shares taken;
+		// the paid amount is what the unbonding entry holds.
+		own["requested"] = own["amount"]
+		if paid != "" {
+			own["amount"] = paid
+		}
+	}
+	var attrs []ledgerAttr
+	for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "requested", "new_shares", "completion_time"} {
+		if v, ok := own[k]; ok {
+			attrs = append(attrs, ledgerAttr{Key: k, Value: v})
+		}
+	}
+	attrs = append(attrs, ledgerAttr{Key: "delegator", Value: addr})
+	return ledgerEvent{ID: ev.ID, Msg: ev.Msg, Height: ev.Height, Time: ev.Time, Phase: ev.Phase, Type: ev.Type, Attrs: attrs}
 }
 
 // unbondPaid is the tokens a message's one undelegation moved into the
@@ -1591,10 +1661,24 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		return nil, 0, fmt.Errorf("anchor state at height %d: %w", tip.Height, err)
 	}
 	anchor.Time = tip.TimeStamp
-	events, unattributed, err := s.ledgerEvents(ids, addr, operator, lowest, tip.Height)
+	events, unmatched, err := s.ledgerStakeEvents(ids, addr, operator, lowest, tip.Height)
 	if err != nil {
 		return nil, 0, err
 	}
+	// A staking record no delegator is named for is settled from the
+	// wallet's delegations either side of its block, where the node still
+	// holds them; otherwise the dates before it are refused.
+	var delegationsAt func(int64) (map[string]*big.Int, error)
+	var rateAt func(string, int64) (validatorRate, error)
+	if node != nil {
+		delegationsAt = func(h int64) (map[string]*big.Int, error) {
+			d, _, err := node.delegations(addr, h)
+			return d, err
+		}
+		rateAt = node.rateAt
+	}
+	owned, unattributed := settleUnnamedStakes(delegationsAt, addr, operator, s.native.Denom, events, unmatched)
+	events = append(events, owned...)
 	if unattributed > 0 {
 		kept := usable[:0]
 		for _, i := range usable {
@@ -1637,7 +1721,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	for _, i := range usable {
 		heights = append(heights, targets[i].Height)
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, heights)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, RateAt: rateAt}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {
