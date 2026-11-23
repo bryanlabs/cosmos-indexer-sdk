@@ -717,6 +717,26 @@ var fallbackEvidence = map[string]struct {
 	"cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r": {752, "Inflow ATOM Vault"},
 	"cosmos1d2hrvjvrvqvzdcffy2cy0p2gnytj48e2yg0lvnxk6knhmnt7cqvqetf09u": {752, "Inflow ATOM Vault"},
 	"cosmos1nhu3aqrlf3adlffvx3z5pyxntgulgj9dhfskwlp8fksx5mf7v9qqfjpgpd": {691, "Governance Score Rewards"},
+	"cosmos10c2h0v8p5szs43fu6fm5n4t3ddtcly72tw3663l9tgqaxzw96lxsj2pcfj": {192, "dao-voting-token-staked"},
+	"cosmos10ugv48wsjp024fuj0ntd45qjzll5468a3z7q829pvn9ksse7w29qf0gtq9": {192, "dao-voting-token-staked"},
+	"cosmos19v9yjq7swms9cs8haeklh8fvmayw6d8tu5hufegz63pmscu7n2vsz6zdej": {192, "dao-voting-token-staked"},
+	"cosmos1d0flhtmllz6lvfsrjw544crg7ah02fj7xwxeergt05lmugh9rftqyapmya": {192, "dao-voting-token-staked"},
+	"cosmos1kdt9aaju9zyp65dr7ztr58tmxh9cejw6mh8tywdujwwvzy66d0tq88ly5m": {192, "dao-voting-token-staked"},
+	"cosmos1pzurh5vm7sl597u7gwpkfxjgw0d58ry78yewedv9sn4kcuyacwrqkc3dal": {36, "dao-voting-token-staked"},
+	"cosmos172x6q0v849r2rsa8kqnrkvuza4lw8tjd77acc4gkzues4vkjlzjsve2pf8": {689, "Inflow Shares Converter"},
+}
+
+// fallbackCodeBuilds are the published release builds whose sha256 equals
+// our own node's checksum for a code that fallbackEvidence pins. A pin on one
+// of these codes is backed by the project's verified source, not by its
+// on-chain label.
+var fallbackCodeBuilds = map[uint64]struct {
+	checksum string
+	build    string
+}{
+	192: {"1441f2bc94d70c7cd781a32c85bfa1576108a3b27efef12f0d223b02c9d04a94", "DA0-DA0/dao-contracts v2.7.1 dao_voting_token_staked-default.wasm"},
+	36:  {"c61a851c3561f4683812d43f7ccb7c8e85eb60de7fcb8b7d2f38727fa63adfdb", "DA0-DA0/dao-contracts v2.6.0 dao_voting_token_staked.wasm"},
+	689: {"115f4df4bb8d0f66eaa0081bef89c8f916e4f08d17afb0afdb37690ca158088c", "informalsystems/hydro v3.6.12 shares_converter.wasm"},
 }
 
 // bankFallbackEvents records the coin a wallet gained or lost in a contract
