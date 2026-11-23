@@ -314,7 +314,7 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 		declared := func(address string, charged bool) []feeRec {
 			var rows []feeRec
 			q := database.Table("fees").
-				Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
+				Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash, "+feeOutcomeUnknownColumn).
 				Joins("JOIN addresses ON addresses.id=fees.payer_address_id").
 				Joins("JOIN denoms ON denoms.id=fees.denomination_id").
 				Joins("JOIN txes ON txes.id=fees.tx_id").
