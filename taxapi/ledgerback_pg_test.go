@@ -101,6 +101,9 @@ func TestExtendLedgerScanBackPreEventsPostgres(t *testing.T) {
 		"CREATE TEMP TABLE tax_failed_tx_fees (tx_id bigint PRIMARY KEY, charged text)",
 		"CREATE TEMP TABLE tax_fee_grants (tx_id bigint PRIMARY KEY, granter text)",
 		"CREATE TEMP TABLE tax_ledger_scans (chain text PRIMARY KEY, fee_grants_from bigint, fee_grants_to bigint)",
+		"CREATE TEMP TABLE addresses (id bigint, address text)",
+		"CREATE TEMP TABLE fees (tx_id bigint, payer_address_id bigint)",
+		"CREATE TEMP TABLE report_jobs (key text, chain text, addresses text, status text, computed_through timestamptz, updated_at timestamptz)",
 		tempHubChainRow,
 		"INSERT INTO blocks VALUES (1,1,9000000,true,true),(2,1,9000001,true,true),(3,1,9000002,true,true),(4,1,9000003,true,true)",
 		"INSERT INTO txes VALUES (1,3,'" + txHash(string(okA)) + "',0),(2,3,'" + txHash(string(failB)) + "',19),(3,3,'" + txHash(string(seqC)) + "',32)," +
