@@ -2,12 +2,12 @@ package taxapi
 
 import (
 	"math/big"
-	"math/bits"
 	"sort"
 )
 
-// maxUnnamedPerBlock bounds the unmatched staking records of one block whose
-// combinations settleUnnamedStakes tries; a block with more stays refused.
+// maxUnnamedPerBlock bounds the unmatched staking records of one block, among
+// those that move a shared validator, whose combinations settleUnnamedStakes
+// tries; a block with a larger such group stays refused.
 const maxUnnamedPerBlock = 12
 
 // settleUnnamedStakes settles from chain state the staking records that do
@@ -18,7 +18,9 @@ const maxUnnamedPerBlock = 12
 // change the wallet's own named staking events in H account for is taken
 // off, and what is left must be explained by exactly one combination of the
 // unmatched records: none of them (they are someone else's, and are dropped)
-// or a single one (it is the wallet's and is returned as its event). Any
+// or a single one (it is the wallet's and is returned as its event). Records
+// that move no validator in common are tried apart, since each validator is
+// explained on its own; every group must have exactly one fit. Any
 // other outcome, a read that fails, or no read at all leaves H unattributed,
 // and H is returned so that every date before it is refused as before.
 func settleUnnamedStakes(delegationsAt func(height int64) (map[string]*big.Int, error), addr, operator, bondDenom string, events, unmatched []ledgerEvent) ([]ledgerEvent, int64) {
@@ -55,8 +57,26 @@ func settleUnnamedStakes(delegationsAt func(height int64) (map[string]*big.Int, 
 // wallet's named events in h. It returns the records that are the wallet's
 // (none or one) and whether h is settled.
 func settleBlock(delegationsAt func(height int64) (map[string]*big.Int, error), addr, operator, bondDenom string, h int64, named, cands []ledgerEvent) ([]ledgerEvent, bool) {
-	if delegationsAt == nil || len(cands) > maxUnnamedPerBlock {
+	if delegationsAt == nil {
 		return nil, false
+	}
+	effects := make([]map[string]*big.Int, len(cands))
+	for i, c := range cands {
+		recs := c.records()
+		if len(recs) != 1 {
+			return nil, false
+		}
+		eff, mine, ok := stakeEffect(c.Type, recs[0], addr, operator, bondDenom)
+		if !ok || !mine {
+			return nil, false
+		}
+		effects[i] = eff
+	}
+	groups := stakeGroups(effects)
+	for _, g := range groups {
+		if len(g) > maxUnnamedPerBlock {
+			return nil, false
+		}
 	}
 	before, err := delegationsAt(h - 1)
 	if err != nil {
@@ -91,39 +111,97 @@ func settleBlock(delegationsAt func(height int64) (map[string]*big.Int, error), 
 			}
 		}
 	}
-	effects := make([]map[string]*big.Int, len(cands))
-	for i, c := range cands {
-		recs := c.records()
-		if len(recs) != 1 {
-			return nil, false
-		}
-		eff, mine, ok := stakeEffect(c.Type, recs[0], addr, operator, bondDenom)
-		if !ok || !mine {
-			return nil, false
-		}
-		effects[i] = eff
+	// What is left on a validator no record moves must be explained by none
+	// of them.
+	free := map[string]*big.Int{}
+	for v, l := range left {
+		free[v] = l
+	}
+	for _, eff := range effects {
 		for v := range eff {
-			if _, ok := left[v]; !ok {
-				left[v] = new(big.Int)
+			delete(free, v)
+		}
+	}
+	if !explains(free, touched, nil, 0) {
+		return nil, false
+	}
+	// Every combination of each group's records is tried on the validators
+	// they move; exactly one may explain what is left on them.
+	var owned []ledgerEvent
+	for _, g := range groups {
+		sub, part := make([]map[string]*big.Int, len(g)), map[string]*big.Int{}
+		for i, c := range g {
+			sub[i] = effects[c]
+			for v := range effects[c] {
+				if part[v] = left[v]; part[v] == nil {
+					part[v] = new(big.Int)
+				}
+			}
+		}
+		fits, fit := 0, uint(0)
+		for mask := uint(0); mask < 1<<len(g); mask++ {
+			if explains(part, touched, sub, mask) {
+				fits++
+				fit = mask
+			}
+		}
+		if fits != 1 {
+			return nil, false
+		}
+		for i := range g {
+			if fit&(1<<i) != 0 {
+				owned = append(owned, cands[g[i]])
 			}
 		}
 	}
-	// Every combination of the records is tried; exactly one may explain
-	// what is left on every validator.
-	fits, fit := 0, uint(0)
-	for mask := uint(0); mask < 1<<len(cands); mask++ {
-		if explains(left, touched, effects, mask) {
-			fits++
-			fit = mask
-		}
-	}
-	if fits != 1 || bits.OnesCount(fit) > 1 {
+	if len(owned) > 1 {
 		return nil, false
 	}
-	if fit == 0 {
-		return nil, true
+	return owned, true
+}
+
+// stakeGroups splits records, by the validators their effects move, into
+// groups that share none: the indexes of each group ascending, and groups in
+// the order of their first record.
+func stakeGroups(effects []map[string]*big.Int) [][]int {
+	parent := make([]int, len(effects))
+	for i := range parent {
+		parent[i] = i
 	}
-	return []ledgerEvent{cands[bits.TrailingZeros(fit)]}, true
+	root := func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	first := map[string]int{}
+	for i, eff := range effects {
+		for v := range eff {
+			if j, ok := first[v]; ok {
+				a, b := root(i), root(j)
+				if a > b {
+					a, b = b, a
+				}
+				parent[b] = a
+			} else {
+				first[v] = i
+			}
+		}
+	}
+	var groups [][]int
+	at := map[int]int{}
+	for i := range effects {
+		r := root(i)
+		k, ok := at[r]
+		if !ok {
+			k = len(groups)
+			at[r] = k
+			groups = append(groups, nil)
+		}
+		groups[k] = append(groups[k], i)
+	}
+	return groups
 }
 
 // explains says whether the records in mask account for what is left on

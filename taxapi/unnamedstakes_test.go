@@ -144,6 +144,81 @@ func TestSettleUnnamedStakes(t *testing.T) {
 	require.Equal(t, []ledgerEvent{low}, owned)
 }
 
+// Records that move no validator in common are tried apart, so a block with
+// more records than the cap settles when each group is within it, has exactly
+// one fit, and at most one record is the wallet's in all.
+func TestSettleUnnamedStakesByGroup(t *testing.T) {
+	const h = 150
+	val := func(i int) string { return fmt.Sprintf("cosmosvaloper1g%d", i) }
+	var spread []ledgerEvent
+	for i := 0; i <= maxUnnamedPerBlock; i++ {
+		spread = append(spread, unmatchedStake(uint64(30+i), h, "delegate", "validator", val(i), "amount", fmt.Sprintf("%duatom", 100+i)))
+	}
+	settle := func(before, after map[string]int64, unmatched []ledgerEvent) ([]ledgerEvent, int64, []int64) {
+		var read []int64
+		owned, unattributed := settleUnnamedStakes(delegationsBy(map[int64]map[string]int64{h - 1: before, h: after}, &read), ledgerTestAddr, "", "uatom", nil, unmatched)
+		return owned, unattributed, read
+	}
+	base := map[string]int64{ledgerTestVal: 1000}
+
+	owned, unattributed, read := settle(base, map[string]int64{ledgerTestVal: 1000, val(3): 103}, spread)
+	require.Zero(t, unattributed)
+	require.Equal(t, []ledgerEvent{spread[3]}, owned)
+	require.Equal(t, []int64{h - 1, h}, read)
+	owned, unattributed, _ = settle(base, base, spread)
+	require.Zero(t, unattributed)
+	require.Empty(t, owned)
+
+	// One record in each of two groups is two of the wallet's records.
+	owned, unattributed, _ = settle(base, map[string]int64{ledgerTestVal: 1000, val(3): 103, val(5): 105}, spread)
+	require.Equal(t, int64(h), unattributed)
+	require.Empty(t, owned)
+	// Two fits in one group, beside groups that fit once.
+	split := append([]ledgerEvent{
+		unmatchedStake(11, h, "delegate", "validator", ledgerTestVal, "amount", "100uatom"),
+		unmatchedStake(12, h, "delegate", "validator", ledgerTestVal, "amount", "60uatom"),
+		unmatchedStake(13, h, "delegate", "validator", ledgerTestVal, "amount", "40uatom"),
+	}, spread...)
+	_, unattributed, _ = settle(base, map[string]int64{ledgerTestVal: 1100}, split)
+	require.Equal(t, int64(h), unattributed)
+	// What is left on a validator no record moves still refuses.
+	_, unattributed, _ = settle(base, map[string]int64{ledgerTestVal: 1005}, spread)
+	require.Equal(t, int64(h), unattributed)
+
+	// A group over the cap refuses before any read; one at the cap is tried.
+	var same []ledgerEvent
+	for i := 0; i <= maxUnnamedPerBlock; i++ {
+		same = append(same, unmatchedStake(uint64(60+i), h, "delegate", "validator", ledgerTestVal, "amount", fmt.Sprintf("%duatom", 100<<i)))
+	}
+	owned, unattributed, read = settle(base, map[string]int64{ledgerTestVal: 1000 + 100<<maxUnnamedPerBlock}, same)
+	require.Equal(t, int64(h), unattributed)
+	require.Empty(t, owned)
+	require.Empty(t, read)
+	owned, unattributed, _ = settle(base, map[string]int64{ledgerTestVal: 1000 + 100<<(maxUnnamedPerBlock-1)}, same[:maxUnnamedPerBlock])
+	require.Zero(t, unattributed)
+	require.Equal(t, []ledgerEvent{same[maxUnnamedPerBlock-1]}, owned)
+	// A redelegation joins its source and destination into one group.
+	redel := unmatchedStake(9, h, "redelegate", "source_validator", val(1), "destination_validator", ledgerTestVal, "amount", "300uatom")
+	owned, unattributed, read = settle(base, base, append(same, redel))
+	require.Equal(t, int64(h), unattributed)
+	require.Empty(t, read)
+}
+
+func TestStakeGroups(t *testing.T) {
+	eff := func(vs ...string) map[string]*big.Int {
+		m := map[string]*big.Int{}
+		for _, v := range vs {
+			m[v] = bi(1)
+		}
+		return m
+	}
+	require.Equal(t, [][]int{{0, 2, 3}, {1}, {4}}, stakeGroups([]map[string]*big.Int{
+		eff("a"), eff("b"), eff("c"), eff("c", "a"), eff("d"),
+	}))
+	require.Equal(t, [][]int{{0, 1, 2}}, stakeGroups([]map[string]*big.Int{eff("a"), eff("b"), eff("b", "a")}))
+	require.Nil(t, stakeGroups(nil))
+}
+
 // attributeStakes returns each record it cannot match in the form it takes
 // as the wallet's, and attributeRedelegations still refuses at the highest.
 func TestAttributeStakesReturnsUnmatchedRecords(t *testing.T) {
