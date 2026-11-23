@@ -824,6 +824,7 @@ WHERE m.id IN @msgs {{OWN}}`, rel) + `
     SELECT me.id, me.index, t.type FROM message_events me
     JOIN message_event_types t ON t.id = me.message_event_type_id
     WHERE me.message_id = d.message_id AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message', 'transfer')
+    OFFSET 0
   ) e
 )
 SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, 1 AS phase, ev.type, k.key, a.value
@@ -831,6 +832,7 @@ FROM ev
 CROSS JOIN LATERAL (
   SELECT a.index, a.message_event_attribute_key_id, a.value FROM message_event_attributes a
   WHERE a.message_event_id = ev.id
+  OFFSET 0
 ) a
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
 ORDER BY ev.height, ev.message_id, ev.index, a.index`
