@@ -248,9 +248,11 @@ JOIN block_event_attribute_keys k ON k.id = x.key_id
 ORDER BY ev.height, ev.id, x.index`
 	redelQuery = `
 WITH ` + events("t.type IN ('withdraw_rewards', 'message')") + `
-SELECT DISTINCT ev.message_id FROM ev JOIN attrs x ON x.id = ev.id
-WHERE x.value = @addr
-AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = ev.message_id AND rt.type IN ('redelegate', 'delegate', 'unbond'))`
+, cand AS MATERIALIZED (
+  SELECT DISTINCT ev.message_id FROM ev JOIN attrs x ON x.id = ev.id
+  WHERE x.value = @addr
+  AND EXISTS (` + unnamedStakingEvent("ev.message_id") + `)
+)
+SELECT message_id FROM cand c WHERE ` + walletStakeMessage("c")
 	return msgQuery, blockQuery, redelQuery
 }
