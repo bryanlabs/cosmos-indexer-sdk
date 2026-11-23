@@ -11,10 +11,12 @@ import (
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
 	bank "github.com/cosmos/cosmos-sdk/x/bank/types"
 	dist "github.com/cosmos/cosmos-sdk/x/distribution/types"
 	govv1beta1 "github.com/cosmos/cosmos-sdk/x/gov/types/v1beta1"
+	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
 )
 
@@ -404,39 +406,67 @@ func TestSafetyAuthzGrantHasNoTaxEffect(t *testing.T) {
 }
 
 // The in-SDK transfer module before ibc-go wrote success=false on a credited
-// receive. Only a result ack for the same packet makes that a receive.
+// receive. Only a result ack for the same packet makes that a receive, and only
+// the exact bank transfer from the channel escrow (native return) or the
+// transfer module account (voucher mint) credits it.
 func TestSafetyV1ReceiveInvertedSuccessBeforeIBCGo(t *testing.T) {
-	ack := func(seq, body string) txlog.LogMessageEvent {
-		return ev("write_acknowledgement", [2]string{attributeIBCPacketSequence, seq}, [2]string{attributeIBCSrcPort, string(CategoryTransfer)}, [2]string{attributeIBCSrcChannel, safetySourceChannel}, [2]string{attributeIBCDstPort, string(CategoryTransfer)}, [2]string{attributeIBCDstChannel, "channel-141"}, [2]string{"packet_ack", body})
+	ack := func(seq, body string) []txlog.LogMessageEvent {
+		return []txlog.LogMessageEvent{ev("write_acknowledgement", [2]string{attributeIBCPacketSequence, seq}, [2]string{attributeIBCSrcPort, string(CategoryTransfer)}, [2]string{attributeIBCSrcChannel, safetySourceChannel}, [2]string{attributeIBCDstPort, string(CategoryTransfer)}, [2]string{attributeIBCDstChannel, "channel-141"}, [2]string{"packet_ack", body})}
+	}
+	result, failure := `{"result":"AQ=="}`, `{"error":"insufficient funds"}`
+	escrow := escrowAddress(string(CategoryTransfer), "channel-141")
+	mint := authtypes.NewModuleAddress(transfertypes.ModuleName).String()
+	send := func(sender, receiver, coins string) []txlog.LogMessageEvent {
+		return []txlog.LogMessageEvent{
+			ev(eventCoinReceived, [2]string{attributeReceiver, receiver}, [2]string{attributeAmount, coins}),
+			ev(string(CategoryTransfer), [2]string{attributeRecipient, receiver}, [2]string{attributeSender, sender}, [2]string{attributeAmount, coins}),
+		}
+	}
+	join := func(parts ...[]txlog.LogMessageEvent) []txlog.LogMessageEvent {
+		var out []txlog.LogMessageEvent
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
 	}
 	for _, tc := range []struct {
-		name, packetDenom, bankDenom, success string
-		credit                                bool
-		ack                                   []txlog.LogMessageEvent
+		name, packetDenom, wantDenom, success string
+		events                                []txlog.LogMessageEvent
 		want                                  int
 		incomplete                            bool
 	}{
-		{"native_return_result_ack", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, []txlog.LogMessageEvent{ack("23", `{"result":"AQ=="}`)}, 1, false},
-		{"voucher_result_ack", fixtureOsmosisDenom, safetyVoucher, attributeFalse, true, []txlog.LogMessageEvent{ack("23", `{"result":"AQ=="}`)}, 1, false},
-		{"result_ack_without_credit", fixtureOsmosisDenom, safetyVoucher, attributeFalse, false, []txlog.LogMessageEvent{ack("23", `{"result":"AQ=="}`)}, 0, true},
-		{"error_ack_with_credit", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, []txlog.LogMessageEvent{ack("23", `{"error":"insufficient funds"}`)}, 0, false},
-		{"old_module_rejection", safetyNativeReturn, fixtureNativeDenom, attributeTrue, true, []txlog.LogMessageEvent{ack("23", `{"error":"insufficient funds"}`)}, 0, false},
-		{"result_ack_for_other_sequence", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, []txlog.LogMessageEvent{ack("24", `{"result":"AQ=="}`)}, 0, false},
-		{"no_ack", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, nil, 0, false},
+		// The four success and ack combinations.
+		{"false_result_native_from_escrow", safetyNativeReturn, fixtureNativeDenom, attributeFalse, join(send(escrow, del, "100"+fixtureNativeDenom), ack("23", result)), 1, false},
+		{"false_result_voucher_from_mint", fixtureOsmosisDenom, safetyVoucher, attributeFalse, join(send(mint, del, "100"+safetyVoucher), ack("23", result)), 1, false},
+		{"false_error", safetyNativeReturn, "", attributeFalse, join(send(escrow, del, "100"+fixtureNativeDenom), ack("23", failure)), 0, false},
+		{"true_result_ibc_go_shape", safetyNativeReturn, fixtureNativeDenom, attributeTrue, join(send(escrow, del, "100"+fixtureNativeDenom), ack("23", result)), 1, false},
+		{"true_error_old_module_rejection", safetyNativeReturn, "", attributeTrue, join(send(escrow, del, "100"+fixtureNativeDenom), ack("23", failure)), 0, false},
+		// The credit must be the exact transfer from escrow or mint.
+		{"false_result_without_credit", fixtureOsmosisDenom, "", attributeFalse, ack("23", result), 0, true},
+		{"false_result_native_from_other_sender", safetyNativeReturn, "", attributeFalse, join(send(other, del, "100"+fixtureNativeDenom), ack("23", result)), 0, true},
+		{"false_result_native_from_mint", safetyNativeReturn, "", attributeFalse, join(send(mint, del, "100"+fixtureNativeDenom), ack("23", result)), 0, true},
+		{"false_result_voucher_from_escrow", fixtureOsmosisDenom, "", attributeFalse, join(send(escrow, del, "100"+safetyVoucher), ack("23", result)), 0, true},
+		{"false_result_larger_amount", safetyNativeReturn, "", attributeFalse, join(send(escrow, del, "150"+fixtureNativeDenom), ack("23", result)), 0, true},
+		{"false_result_wrong_denom", fixtureOsmosisDenom, "", attributeFalse, join(send(mint, del, "100"+fixtureNativeDenom), ack("23", result)), 0, true},
+		{"false_result_other_receiver", safetyNativeReturn, "", attributeFalse, join(send(escrow, other, "100"+fixtureNativeDenom), ack("23", result)), 0, true},
+		{"false_result_two_exact_transfers", safetyNativeReturn, "", attributeFalse, join(send(escrow, del, "100"+fixtureNativeDenom), send(escrow, del, "100"+fixtureNativeDenom), ack("23", result)), 0, true},
+		{"false_result_credit_only_coin_received", safetyNativeReturn, "", attributeFalse, join([]txlog.LogMessageEvent{ev(eventCoinReceived, [2]string{attributeReceiver, del}, [2]string{attributeAmount, "100" + fixtureNativeDenom})}, ack("23", result)), 0, true},
+		// The ack must be this packet's.
+		{"false_result_for_other_sequence", safetyNativeReturn, "", attributeFalse, join(send(escrow, del, "100"+fixtureNativeDenom), ack("24", result)), 0, false},
+		{"false_no_ack", safetyNativeReturn, "", attributeFalse, send(escrow, del, "100"+fixtureNativeDenom), 0, false},
+		// After Vega: success=true with any committed credit, as before.
+		{"post_vega_true_result_coin_received_only", fixtureOsmosisDenom, safetyVoucher, attributeTrue, join([]txlog.LogMessageEvent{ev(eventCoinReceived, [2]string{attributeReceiver, del}, [2]string{attributeAmount, "100" + safetyVoucher})}, ack("23", result)), 1, false},
+		{"post_vega_true_no_ack_event", fixtureOsmosisDenom, safetyVoucher, attributeTrue, send(other, del, "100"+safetyVoucher), 1, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
+			log := &txlog.LogMessage{Events: append([]txlog.LogMessageEvent{
 				ev(eventFungibleTokenPacket, [2]string{attributeReceiver, del}, [2]string{attributeSender, other}, [2]string{attributeDenom, tc.packetDenom}, [2]string{attributeAmount, "100"}, [2]string{attributeSuccess, tc.success}),
-			}}
-			if tc.credit {
-				log.Events = append(log.Events, safetyCredit(del, tc.bankDenom)...)
-			}
-			log.Events = append(log.Events, tc.ack...)
+			}, tc.events...)}
 			out := safetyParseReceive(t, &chantypes.MsgRecvPacket{Packet: safetyPacket(t, tc.packetDenom)}, log, tc.incomplete)
 			if len(out) != tc.want {
 				t.Fatalf("want %d, got %+v", tc.want, out)
 			}
-			if tc.want == 1 && (out[0].Denom != tc.bankDenom || out[0].Amount != "100" || out[0].Category != string(CategoryIBCIn) || out[0].FromAddr != other || out[0].ToAddr != del) {
+			if tc.want == 1 && (out[0].Denom != tc.wantDenom || out[0].Amount != "100" || out[0].Category != string(CategoryIBCIn) || out[0].FromAddr != other || out[0].ToAddr != del) {
 				t.Fatalf("wrong receive: %+v", out)
 			}
 		})
