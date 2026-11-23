@@ -789,6 +789,9 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 		out = append(out, e)
 	}
 	seen := map[string]bool{}
+	// Decided fees follow every other fallback row, so the rows before them
+	// keep the positions an earlier repair gave them.
+	var fees []TaxableEvent
 	for _, k0 := range otherOrder {
 		w := k0.wallet
 		if seen[w] || other[k0].net.IsZero() {
@@ -809,6 +812,23 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 			})
 			flows, rows, contracts = append(flows, f), append(rows, e), append(contracts, contract)
 		}
+		if !nativeRow[w] {
+			if row, fee, ok := skipBridgeRows(log, sender, w, flows, rows, contracts); ok {
+				out = append(out, row)
+				if fee != nil {
+					fees = append(fees, *fee)
+				}
+				continue
+			}
+			if trigger, extra, ok := daoProposalClass(log, flows, contracts); ok {
+				for i := range rows {
+					rows[i].Category, rows[i].RewardTrigger = string(CategoryIncome), trigger
+					rows[i].Detail = contractDetail(contracts[i], extra)
+				}
+				out = append(out, rows...)
+				continue
+			}
+		}
 		category, review := CategoryTransfer, true
 		if !nativeRow[w] {
 			category, review = fallbackClass(flows, contracts)
@@ -824,7 +844,7 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 		}
 		out = append(out, rows...)
 	}
-	return out
+	return append(out, fees...)
 }
 
 // fallbackClass decides one wallet's fallback rows in a message from the
