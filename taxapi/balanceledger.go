@@ -1,8 +1,11 @@
 package taxapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"strconv"
@@ -468,6 +471,14 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		}
 		tiny := shareEpsilon.Mul(decimal.NewFromInt(1000))
 		for v, sp := range shares {
+			if sp.hi.LessThanOrEqual(tiny.Neg()) {
+				// Fewer than no shares: the index lacks an event that added
+				// them (an undelegation it never saw, say). Later days were
+				// rebuilt from the same gap and may show 0 for a delegation
+				// that existed, so the whole wallet refuses.
+				log.Printf("balance ledger: negative share span at height %d on validator %s [%s, %s]", h, hashLabel(v), sp.lo, sp.hi)
+				return nil, ledgerInconsistent{fmt.Sprintf("rebuilt shares at height %d are below zero (%s to %s), so the index is missing an event", h, sp.lo, sp.hi)}
+			}
 			if sp.lo.Sign() <= 0 && sp.hi.LessThan(tiny) {
 				// Emptied: no tokens at any rate, so no rate is needed.
 				continue
@@ -805,4 +816,10 @@ func unbondingAt(in ledgerInput, h int64) (map[string]*big.Int, map[string]*big.
 		}
 	}
 	return out, bounds
+}
+
+// hashLabel names a validator in logs without printing its address.
+func hashLabel(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:4])
 }
