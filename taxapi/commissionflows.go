@@ -273,6 +273,17 @@ SELECT count(*) FROM (
 // each sum runs once, and the swept sum's filters are wrapped so it reads
 // the sender's rows instead of intersecting them with addr's.
 func (s *Server) sweepDepositSenders(addr string, start, end time.Time) (examined, deposits int, err error) {
+	if s.flowShared != nil {
+		n, err := s.sharedCount(flowSharedKey{kind: flowSharedSweep, addr: addr, start: start, end: end}, func() (int64, error) {
+			examined, deposits, err := s.readSweepDepositSenders(addr, start, end)
+			return int64(examined)<<32 | int64(deposits), err
+		})
+		return int(n >> 32), int(n & 0xffffffff), err
+	}
+	return s.readSweepDepositSenders(addr, start, end)
+}
+
+func (s *Server) readSweepDepositSenders(addr string, start, end time.Time) (examined, deposits int, err error) {
 	var row struct {
 		Examined int
 		Deposits int
