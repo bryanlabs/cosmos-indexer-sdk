@@ -59,7 +59,7 @@ func startLedgerArchive(probe string) error {
 	if origin == "" {
 		return errors.New("the archive configuration has no RPC endpoint")
 	}
-	return taxapi.StartLedgerArchive(origin, log.Printf)
+	return taxapi.StartLedgerArchive(origin, os.Getenv, log.Printf)
 }
 
 func main() {
@@ -145,8 +145,9 @@ func main() {
 	}
 	srv.SetReportRowCap(reportRows)
 	// Balance history reads what the serving node no longer holds from the
-	// archive RPC in LEDGER_ARCHIVE_PROBE, the archive Secret's probe.toml.
-	// Unset reads the serving node only. The origin is a credential and is
+	// archive RPC in LEDGER_ARCHIVE_PROBE, the archive Secret's probe.toml, at
+	// LEDGER_ARCHIVE_RPS calls a second (LEDGER_ARCHIVE_BURST at once). Either
+	// unset reads the serving node only. The origin is a credential and is
 	// never logged.
 	if probe := os.Getenv("LEDGER_ARCHIVE_PROBE"); probe != "" {
 		if err := startLedgerArchive(probe); err != nil {
