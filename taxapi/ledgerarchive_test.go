@@ -39,8 +39,10 @@ type fakeArchive struct {
 	rates     map[int64]map[string][2]int64
 	// answerAt, when set, is the height every answer claims.
 	answerAt int64
-	// codespace is the codespace of the answer for a validator it lacks.
+	// codespace is the codespace of the answer for a validator it lacks, and
+	// pruned the heights it holds no state for.
 	codespace string
+	pruned    map[int64]bool
 }
 
 func (f *fakeArchive) serve(t *testing.T) *httptest.Server {
@@ -71,7 +73,13 @@ func (f *fakeArchive) serve(t *testing.T) *httptest.Server {
 			require.NoError(t, err)
 			return bz
 		}
+		if f.pruned[h] {
+			answer(38, "failed to load state at height "+strconv.FormatInt(h, 10)+"; no commit info found: not found", nil)
+			return
+		}
 		switch path {
+		case "/cosmos.staking.v1beta1.Query/Validators":
+			answer(0, "", marshal(&stakingtypes.QueryValidatorsResponse{Validators: []stakingtypes.Validator{{OperatorAddress: "cosmosvaloper1set", Tokens: math.NewInt(1), DelegatorShares: math.LegacyNewDec(1)}}}))
 		case "/cosmos.staking.v1beta1.Query/DelegatorDelegations":
 			var req stakingtypes.QueryDelegatorDelegationsRequest
 			require.NoError(t, req.Unmarshal(data))
@@ -108,7 +116,7 @@ func (f *fakeArchive) serve(t *testing.T) *httptest.Server {
 			require.NoError(t, req.Unmarshal(data))
 			r, ok := f.rates[h][req.ValidatorAddr]
 			if !ok {
-				answer(22, "validator not found", nil)
+				answer(22, "rpc error: code = NotFound desc = validator not found: key not found", nil)
 				return
 			}
 			answer(0, "", marshal(&stakingtypes.QueryValidatorResponse{Validator: stakingtypes.Validator{OperatorAddress: req.ValidatorAddr, Tokens: math.NewInt(r[0]), DelegatorShares: math.LegacyNewDec(r[1])}}))
@@ -219,18 +227,88 @@ func TestLedgerArchiveDelegations(t *testing.T) {
 	_, err = a.rate(newArchiveBudget(), v2, 50)
 	require.ErrorIs(t, err, errArchiveFailed, "a not-found answer outside the sdk codespace")
 
-	// The SDK's not-found for the height asked says the validator did not
-	// exist there; the same answer for another height says nothing.
+	// The SDK's gRPC NotFound for the height asked, from an archive that
+	// serves that height's validator set, says the validator did not exist
+	// there; the same answer for another height says nothing.
 	fake.codespace = "sdk"
 	absent := archiveCount(archiveResultAbsent)
+	fake.calls = nil
 	_, err = a.rate(newArchiveBudget(), v2, 50)
 	require.ErrorIs(t, err, errArchiveAbsent)
 	require.Equal(t, absent+1, archiveCount(archiveResultAbsent))
+	require.Equal(t, []string{
+		"/cosmos.staking.v1beta1.Query/Validator@50",
+		"/cosmos.staking.v1beta1.Query/Validators@50",
+	}, fake.calls)
 	fake.answerAt = 51
 	_, err = a.rate(newArchiveBudget(), v2, 50)
 	require.ErrorIs(t, err, errArchiveFailed)
-	require.NotErrorIs(t, err, errArchiveAbsent)
 	require.Equal(t, absent+1, archiveCount(archiveResultAbsent))
+	fake.answerAt = 0
+}
+
+// Only the validator query's own gRPC NotFound, for a height whose state the
+// archive serves, reads as a validator that did not exist. A height it has no
+// state for, or any other error, refuses, and the walk then refuses a span
+// that allows zero as it would without the archive.
+func TestLedgerArchiveAbsentNeedsTheHeightServed(t *testing.T) {
+	fake := &fakeArchive{codespace: "sdk", pruned: map[int64]bool{}}
+	srv := fake.serve(t)
+	defer srv.Close()
+	a := testArchive(t, srv, 100)
+	walk := func() (map[int64]ledgerHoldings, error) {
+		in := absentInput(nil)
+		in.RateAt = func(v string, h int64) (validatorRate, error) { return a.rate(newArchiveBudget(), v, h) }
+		return walkBack(in, []int64{50, 20})
+	}
+
+	got, err := walk()
+	require.NoError(t, err)
+	require.NotContains(t, got[20].Delegations, ledgerTestVal)
+
+	// A pruned height answers every query with its own not-found.
+	fake.pruned[20] = true
+	_, err = a.rate(newArchiveBudget(), ledgerTestVal, 20)
+	require.ErrorIs(t, err, errArchiveFailed)
+	got, err = walk()
+	var unk ledgerUnknown
+	require.ErrorAs(t, err, &unk)
+	require.NotContains(t, got, int64(20))
+
+	// The validator's NotFound with the set unreadable at the height.
+	delete(fake.pruned, 20)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Query().Get("path"), "Query/Validators") {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer srv2.Close()
+	a2 := testArchive(t, srv2, 100)
+	_, err = a2.rate(newArchiveBudget(), ledgerTestVal, 20)
+	require.ErrorIs(t, err, errArchiveFailed)
+
+	// A not-found that is not the gRPC NotFound status, and an empty set.
+	for _, c := range []struct{ validator, set string }{
+		{`{"code":22,"codespace":"sdk","log":"key not found","height":"20"}`, ""},
+		{"", `{"code":0,"height":"20"}`},
+	} {
+		srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			answer := c.validator
+			if strings.Contains(r.URL.Query().Get("path"), "Query/Validators") {
+				answer = c.set
+			}
+			if answer == "" {
+				srv.Config.Handler.ServeHTTP(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(`{"result":{"response":` + answer + `}}`))
+		}))
+		_, err = testArchive(t, srv3, 100).rate(newArchiveBudget(), ledgerTestVal, 20)
+		srv3.Close()
+		require.ErrorIs(t, err, errArchiveFailed)
+	}
 }
 
 // An accepted zero is counted and logged, and a refused one only logged; the
