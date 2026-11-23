@@ -100,6 +100,7 @@ func main() {
 	daysRebuildSHA := flag.String("days-rebuild-sha256", "", "exact digest of -days-rebuild")
 	daysRebuildOut := flag.String("days-rebuild-out", "", "new directory for the rebuild's before.jsonl, after.jsonl and rollback.sql")
 	daysRebuildWrite := flag.Bool("days-rebuild-write", false, "replace the rows; without it the rebuild only writes its files")
+	daysRebuildUatomOnly := flag.String("days-rebuild-uatom-only", "", "comma-separated address ids from -days-rebuild whose rows may change only in liquid uatom; any other change writes nothing")
 	flows := flag.Bool("commission-flows", false, "trace where each validator's commission went")
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
@@ -219,7 +220,7 @@ func main() {
 		return
 	}
 	if *daysRebuild != "" {
-		rebuildDays(db, *chain, *daysRebuild, *daysRebuildSHA, *daysRebuildOut, *daysWorkers, *daysRebuildWrite)
+		rebuildDays(db, *chain, *daysRebuild, *daysRebuildSHA, *daysRebuildOut, *daysRebuildUatomOnly, *daysWorkers, *daysRebuildWrite)
 		return
 	}
 	if *daysFrom != "" {
@@ -319,7 +320,7 @@ func buildDays(db *gorm.DB, chain, fromText, toText string, batch, workers int) 
 	}
 }
 
-func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir string, workers int, write bool) {
+func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir, uatomOnlyList string, workers int, write bool) {
 	raw, err := os.ReadFile(idsPath)
 	if err != nil {
 		log.Fatal(err)
@@ -334,6 +335,17 @@ func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir string, workers in
 			log.Fatalf("-days-rebuild: bad address id %q", line)
 		}
 		ids = append(ids, id)
+	}
+	var uatomOnly []int64
+	for _, f := range strings.Split(uatomOnlyList, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(f, 10, 64)
+		if err != nil || id <= 0 {
+			log.Fatalf("-days-rebuild-uatom-only: bad address id %q", f)
+		}
+		uatomOnly = append(uatomOnly, id)
 	}
 	if outDir == "" {
 		log.Fatal("-days-rebuild requires -days-rebuild-out")
@@ -354,7 +366,7 @@ func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir string, workers in
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
-	r, err := srv.RebuildBalanceDaysFor(chain, "cosmos", node, ids, workers, write, before, after, rollback, log.Printf)
+	r, err := srv.RebuildBalanceDaysFor(chain, "cosmos", node, ids, uatomOnly, workers, write, before, after, rollback, log.Printf)
 	for _, f := range []*os.File{before, after, rollback} {
 		if cerr := f.Close(); cerr != nil && err == nil {
 			err = cerr

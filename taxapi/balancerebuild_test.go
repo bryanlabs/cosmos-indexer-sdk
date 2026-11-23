@@ -96,3 +96,65 @@ func TestRebuildRollbackPostgres(t *testing.T) {
 	require.Equal(t, want, snapshot())
 	require.True(t, strings.HasPrefix(script.String(), "BEGIN;\n") && strings.HasSuffix(script.String(), "COMMIT;\n"))
 }
+
+func TestDaysChangedBeyondUatom(t *testing.T) {
+	day := func(n int) time.Time { return time.Date(2025, 3, n, 0, 0, 0, 0, time.UTC) }
+	var days []time.Time
+	for n := 1; n <= 6; n++ {
+		days = append(days, day(n))
+	}
+	row := func(a string, n int, h int64, holdings string) BalanceDay {
+		return BalanceDay{Chain: "mainnet", Address: a, Day: day(n), Height: h, AnchorHeight: 900, Holdings: holdings}
+	}
+	const deleg = `"delegations":{"v":"700"},"delegation_error":{"v":"2"}`
+	old := []BalanceDay{
+		row("a", 1, 100, `{"liquid":{"uatom":"50"},`+deleg+`}`),
+		row("a", 4, 400, `{"liquid":{"uatom":"30","ibc/x":"9"},`+deleg+`}`),
+		row("b", 1, 100, `{"liquid":{"uatom":"1"}}`),
+	}
+	// A fee moved off the wallet: uatom differs, a row is added on day 2, and
+	// the anchor moved. Nothing else changed.
+	same := []BalanceDay{
+		row("a", 1, 100, `{`+deleg+`,"liquid":{"uatom":"55"}}`),
+		row("a", 2, 200, `{"liquid":{"uatom":"60"},`+deleg+`}`),
+		row("a", 4, 400, `{"liquid":{"ibc/x":"9","uatom":"40"},`+deleg+`}`),
+	}
+	for i := range same {
+		same[i].AnchorHeight = 950
+	}
+	n, first, err := daysChangedBeyondUatom("a", old, same, days)
+	require.NoError(t, err)
+	require.Zero(t, n, first)
+
+	moved := append([]BalanceDay(nil), same...)
+	moved[2] = row("a", 4, 400, `{"liquid":{"ibc/x":"9","uatom":"40"},"delegations":{"v":"701"},"delegation_error":{"v":"2"}}`)
+	n, first, err = daysChangedBeyondUatom("a", old, moved, days)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.Equal(t, "2025-03-04", first)
+
+	refused := append([]BalanceDay(nil), same...)
+	refused[1].Status, refused[1].Reason = "unknown", "the rate is missing"
+	n, first, err = daysChangedBeyondUatom("a", old, refused, days)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, "2025-03-02", first)
+
+	dropped := []BalanceDay{same[0], same[1]}
+	n, first, err = daysChangedBeyondUatom("a", old, dropped, days)
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+	require.Equal(t, "2025-03-04", first)
+
+	shifted := append([]BalanceDay(nil), same...)
+	shifted[0].Height = 101
+	n, first, err = daysChangedBeyondUatom("a", old, shifted, days)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Equal(t, "2025-03-01", first)
+
+	onlyUatom := []BalanceDay{row("b", 1, 100, `{}`)}
+	n, _, err = daysChangedBeyondUatom("b", old, onlyUatom, days)
+	require.NoError(t, err)
+	require.Zero(t, n)
+}

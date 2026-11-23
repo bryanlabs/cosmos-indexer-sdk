@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -46,10 +47,15 @@ type balanceDayLine struct {
 // rebuild replaces and after each row it stores, as JSON lines, and rollback
 // a SQL script that puts the before rows back; all three are written ahead of
 // the commit. A wallet too heavy to rebuild stops it before anything is
-// written.
-func (s *Server) RebuildBalanceDaysFor(chain, prefix string, node *ledgerNode, addressIDs []int64, workers int, write bool, before, after, rollback io.Writer, logf func(string, ...any)) (BalanceRebuild, error) {
+// written. Each of uatomOnly, ids from addressIDs, must keep every stored
+// value but its liquid uatom on every day of the span, or nothing is written.
+func (s *Server) RebuildBalanceDaysFor(chain, prefix string, node *ledgerNode, addressIDs, uatomOnly []int64, workers int, write bool, before, after, rollback io.Writer, logf func(string, ...any)) (BalanceRebuild, error) {
 	var out BalanceRebuild
 	addrs, err := s.rebuildAddresses(prefix, addressIDs)
+	if err != nil {
+		return out, err
+	}
+	held, err := s.uatomOnlyAddresses(addressIDs, uatomOnly)
 	if err != nil {
 		return out, err
 	}
@@ -152,6 +158,20 @@ func (s *Server) RebuildBalanceDaysFor(chain, prefix string, node *ledgerNode, a
 				}
 			}
 		}
+		for i, a := range addrs {
+			id, ok := held[a]
+			if !ok {
+				continue
+			}
+			n, first, err := daysChangedBeyondUatom(a, old, rows[i], days)
+			if err != nil {
+				return fmt.Errorf("address id %d: %w", id, err)
+			}
+			logf("balance rebuild: address id %d changes values other than liquid uatom on %d of %d days", id, n, len(days))
+			if n > 0 {
+				return fmt.Errorf("address id %d changes values other than liquid uatom, first on %s", id, first)
+			}
+		}
 		if !write {
 			return nil
 		}
@@ -232,6 +252,119 @@ func (s *Server) rebuildAddresses(prefix string, ids []int64) ([]string, error) 
 	}
 	sort.Strings(addrs)
 	return addrs, nil
+}
+
+// uatomOnlyAddresses maps the address of each of ids, which must all be in
+// the rebuild's list, to its id.
+func (s *Server) uatomOnlyAddresses(list, ids []int64) (map[string]int64, error) {
+	listed := map[int64]bool{}
+	for _, id := range list {
+		listed[id] = true
+	}
+	for _, id := range ids {
+		if !listed[id] {
+			return nil, fmt.Errorf("address id %d is not in the rebuild's list", id)
+		}
+	}
+	out := map[string]int64{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var found []struct {
+		ID      int64
+		Address string
+	}
+	if err := s.db.Table("addresses").Select("id, address").Where("id IN ?", ids).Find(&found).Error; err != nil {
+		return nil, err
+	}
+	for _, f := range found {
+		out[f.Address] = f.ID
+	}
+	if len(out) != len(ids) {
+		return nil, fmt.Errorf("%d of %d uatom-only address ids exist", len(out), len(ids))
+	}
+	return out, nil
+}
+
+// daysChangedBeyondUatom counts the days of the span on which addr's rebuilt
+// rows, read the way the API reads them (the latest row on or before the
+// day), differ from the stored ones in status, reason or any holding other
+// than liquid uatom, and names the first. Every stored row must also have a
+// rebuilt row on its day at the same height.
+func daysChangedBeyondUatom(addr string, old, rebuilt []BalanceDay, days []time.Time) (int, string, error) {
+	var was []BalanceDay
+	for _, r := range old {
+		if r.Address == addr {
+			was = append(was, r)
+		}
+	}
+	sort.Slice(was, func(i, j int) bool { return was[i].Day.Before(was[j].Day) })
+	now := append([]BalanceDay(nil), rebuilt...)
+	sort.Slice(now, func(i, j int) bool { return now[i].Day.Before(now[j].Day) })
+	byDay := map[string]BalanceDay{}
+	for _, r := range now {
+		byDay[r.Day.Format(apiDateLayout)] = r
+	}
+	n, first := 0, ""
+	mark := func(d string) {
+		if n == 0 {
+			first = d
+		}
+		n++
+	}
+	for _, r := range was {
+		d := r.Day.Format(apiDateLayout)
+		if nr, ok := byDay[d]; !ok || nr.Height != r.Height {
+			mark(d)
+		}
+	}
+	held := func(rs []BalanceDay, d time.Time) *BalanceDay {
+		i := sort.Search(len(rs), func(i int) bool { return rs[i].Day.After(d) })
+		if i == 0 {
+			return nil
+		}
+		return &rs[i-1]
+	}
+	for _, d := range days {
+		a, b := held(was, d), held(now, d)
+		if (a == nil) != (b == nil) {
+			mark(d.Format(apiDateLayout))
+			continue
+		}
+		if a == nil {
+			continue
+		}
+		ha, err := holdingsWithoutUatom(a.Holdings)
+		if err != nil {
+			return 0, "", err
+		}
+		hb, err := holdingsWithoutUatom(b.Holdings)
+		if err != nil {
+			return 0, "", err
+		}
+		if a.Status != b.Status || a.Reason != b.Reason || !reflect.DeepEqual(ha, hb) {
+			mark(d.Format(apiDateLayout))
+		}
+	}
+	return n, first, nil
+}
+
+// holdingsWithoutUatom decodes a holdings document and drops liquid uatom,
+// and liquid itself when nothing else is left in it.
+func holdingsWithoutUatom(raw string) (map[string]any, error) {
+	h := map[string]any{}
+	if raw != "" && raw != "null" {
+		if err := json.Unmarshal([]byte(raw), &h); err != nil {
+			return nil, err
+		}
+	}
+	if liq, ok := h["liquid"].(map[string]any); ok {
+		delete(liq, "uatom")
+		if len(liq) == 0 {
+			delete(h, "liquid")
+		}
+	}
+	return h, nil
 }
 
 func writeDayLines(w io.Writer, rows []BalanceDay) error {
