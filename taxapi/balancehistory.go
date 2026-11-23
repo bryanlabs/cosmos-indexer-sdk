@@ -806,6 +806,36 @@ func walletStakeMessage(ev string) string {
     WINDOW w AS (PARTITION BY we.id ORDER BY wa.index)) d)`
 }
 
+// redelegationRowsQuery is redelegationRows' read of one chunk @msgs. The
+// messages are dated first, then each one's events and each event's
+// attributes are read by id. The materialized steps and lateral reads keep
+// the planner from hashing the attribute table.
+func redelegationRowsQuery(rel string) string {
+	return `
+WITH dated AS MATERIALIZED (` + datedBranches(`
+SELECT m.id AS message_id, b.height, b.time_stamp
+FROM messages m
+JOIN txes x ON x.id = m.tx_id
+{{BLOCK}}
+WHERE m.id IN @msgs {{OWN}}`, rel) + `
+), ev AS MATERIALIZED (
+  SELECT e.id, d.message_id, d.height, d.time_stamp, e.index, e.type FROM dated d
+  CROSS JOIN LATERAL (
+    SELECT me.id, me.index, t.type FROM message_events me
+    JOIN message_event_types t ON t.id = me.message_event_type_id
+    WHERE me.message_id = d.message_id AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message', 'transfer')
+  ) e
+)
+SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, 1 AS phase, ev.type, k.key, a.value
+FROM ev
+CROSS JOIN LATERAL (
+  SELECT a.index, a.message_event_attribute_key_id, a.value FROM message_event_attributes a
+  WHERE a.message_event_id = ev.id
+) a
+JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
+ORDER BY ev.height, ev.message_id, ev.index, a.index`
+}
+
 // redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards,
 // message and transfer events of the messages msgs, in height, message, event and attribute order. The
 // messages are read in chunks, since a wallet can name more than one
@@ -815,17 +845,7 @@ func (s *Server) redelegationRows(msgs []uint64, rel string, rp map[string]any) 
 	var rows []ledgerAttrRow
 	if err := inChunks(msgs, func(chunk []uint64) error {
 		var part []ledgerAttrRow
-		if err := s.db.Raw(`SELECT * FROM (`+datedBranches(`
-SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value, me.index AS event_index, a.index AS attr_index
-FROM message_events me
-JOIN message_event_types t ON t.id = me.message_event_type_id
-JOIN messages m ON m.id = me.message_id
-JOIN txes x ON x.id = m.tx_id
-{{BLOCK}}
-JOIN message_event_attributes a ON a.message_event_id = me.id
-JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message', 'transfer') {{OWN}}`, rel)+`) u
-ORDER BY height, message_id, event_index, attr_index`,
+		if err := s.db.Raw(redelegationRowsQuery(rel),
 			withParams(rp, map[string]any{"msgs": chunk})).
 			Scan(&part).Error; err != nil {
 			return fmt.Errorf("redelegation events: %w", err)
