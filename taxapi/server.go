@@ -97,6 +97,9 @@ type Server struct {
 	// earlyMessages, when set, is the first early-stop window's message
 	// count in place of earlyStopMessages.
 	earlyMessages int
+	// stakeChunk, when set, is how many messages attributeStakeRows reads at
+	// a time, in place of stakeRowsChunk; tests set it.
+	stakeChunk int
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {

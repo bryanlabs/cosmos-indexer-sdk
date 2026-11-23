@@ -756,11 +756,10 @@ func (s *Server) ledgerStakeEvents(ids []int64, addr, operator string, lo, hi in
 	if err := s.db.Raw(redelQuery, params).Scan(&redelMsgs).Error; err != nil {
 		return nil, nil, fmt.Errorf("redelegation messages: %w", err)
 	}
-	redelRows, err := s.redelegationRows(redelMsgs, rel, rp)
+	redelegations, unmatched, err := s.attributeStakeRows(redelMsgs, rel, rp, addr)
 	if err != nil {
 		return nil, nil, err
 	}
-	redelegations, unmatched := attributeStakes(redelRows, addr)
 	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
 	return append(events, redelegations...), unmatched, nil
 }
@@ -919,6 +918,114 @@ func (s *Server) redelegationRows(msgs []uint64, rel string, rp map[string]any) 
 		return rows[i].MessageID < rows[j].MessageID
 	})
 	return rows, nil
+}
+
+// stakeRowsChunk is how many candidate messages attributeStakeRows reads at
+// a time: an authz exec before Gaia v15 can carry hundreds of rows.
+const stakeRowsChunk = 500
+
+// stakeRun is one message's rows at one height in the single read's order.
+type stakeRun struct {
+	height int64
+	msg    uint64
+}
+
+// attributeStakeRows is attributeStakes over redelegationRows(msgs), read
+// chunk by chunk so that only one chunk's rows are held at a time. In the
+// single read, attributeStakes takes each run of one message's rows as a
+// group. A message dated once is a group of its own there, so its rows are
+// attributed with their chunk. Whether the datings of a message dated more
+// than once form one group depends on the rows of other chunks between
+// them, so its rows are kept until every chunk is read and then grouped as
+// the single read's order groups them. What each group gives is then put in
+// that order, by height and message, as the single read returns it.
+func (s *Server) attributeStakeRows(msgs []uint64, rel string, rp map[string]any, addr string) ([]ledgerEvent, []ledgerEvent, error) {
+	size := stakeRowsChunk
+	if s.stakeChunk > 0 {
+		size = s.stakeChunk
+	}
+	var out, unmatched, got, left []ledgerEvent
+	var runs []stakeRun
+	var held []ledgerAttrRow
+	for start := 0; start < len(msgs); start += size {
+		var part []ledgerAttrRow
+		if err := s.db.Raw(redelegationRowsQuery(rel),
+			withParams(rp, map[string]any{"msgs": msgs[start:min(start+size, len(msgs))]})).
+			Scan(&part).Error; err != nil {
+			return nil, nil, fmt.Errorf("redelegation events: %w", err)
+		}
+		at, multi := map[uint64]int64{}, map[uint64]bool{}
+		for i, r := range part {
+			if i == 0 || r.Height != part[i-1].Height || r.MessageID != part[i-1].MessageID {
+				runs = append(runs, stakeRun{r.Height, r.MessageID})
+			}
+			if h, ok := at[r.MessageID]; ok && h != r.Height {
+				multi[r.MessageID] = true
+			}
+			at[r.MessageID] = r.Height
+		}
+		once := part[:0:0]
+		for _, r := range part {
+			if multi[r.MessageID] {
+				held = append(held, r)
+			} else {
+				once = append(once, r)
+			}
+		}
+		got, left = attributeStakes(once, addr)
+		out, unmatched = append(out, got...), append(unmatched, left...)
+	}
+	if len(held) > 0 {
+		byRun := func(rs []stakeRun) {
+			sort.SliceStable(rs, func(i, j int) bool {
+				if rs[i].height != rs[j].height {
+					return rs[i].height < rs[j].height
+				}
+				return rs[i].msg < rs[j].msg
+			})
+		}
+		byRun(runs)
+		// A run joins the group before it when the single read puts it
+		// right after a run of the same message.
+		group := make(map[stakeRun]int, len(runs))
+		for i, r := range runs {
+			if i > 0 && runs[i-1].msg == r.msg {
+				group[r] = group[runs[i-1]]
+			} else {
+				group[r] = i
+			}
+		}
+		sort.SliceStable(held, func(i, j int) bool {
+			if held[i].Height != held[j].Height {
+				return held[i].Height < held[j].Height
+			}
+			return held[i].MessageID < held[j].MessageID
+		})
+		for start := 0; start < len(held); {
+			g := group[stakeRun{held[start].Height, held[start].MessageID}]
+			end := start + 1
+			for end < len(held) && group[stakeRun{held[end].Height, held[end].MessageID}] == g {
+				end++
+			}
+			got, left = attributeStakes(held[start:end], addr)
+			out, unmatched = append(out, got...), append(unmatched, left...)
+			start = end
+		}
+	}
+	return singleReadOrder(out), singleReadOrder(unmatched), nil
+}
+
+// singleReadOrder sorts what attributeStakes gave, group by group, into the
+// order of the single read: by height, then message, each run's events
+// keeping their order.
+func singleReadOrder(evs []ledgerEvent) []ledgerEvent {
+	sort.SliceStable(evs, func(i, j int) bool {
+		if evs[i].Height != evs[j].Height {
+			return evs[i].Height < evs[j].Height
+		}
+		return evs[i].Msg < evs[j].Msg
+	})
+	return evs
 }
 
 // attributeRedelegations gives the wallet the staking events that do not name
