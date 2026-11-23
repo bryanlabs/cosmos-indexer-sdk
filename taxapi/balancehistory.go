@@ -182,6 +182,9 @@ type ledgerNode struct {
 	// cache, when set, is a block cache directory that RPC reads come from
 	// instead of the node.
 	cache string
+	// archive, when set, answers balance history's delegation and rate reads
+	// below the lowest height the node holds.
+	archive *ledgerArchive
 }
 
 func newLedgerNode() (*ledgerNode, error) {
@@ -207,7 +210,7 @@ func newLedgerNode() (*ledgerNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ledgerNode{rest: rest, rpc: rpc}, nil
+	return &ledgerNode{rest: rest, rpc: rpc, archive: servingArchive.Load()}, nil
 }
 
 func (n *ledgerNode) at(path string, q url.Values, height int64, out any) error {
@@ -1666,16 +1669,14 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		return nil, 0, err
 	}
 	// A staking record no delegator is named for is settled from the
-	// wallet's delegations either side of its block, where the node still
-	// holds them; otherwise the dates before it are refused.
+	// wallet's delegations either side of its block, where the node or the
+	// archive still holds them; otherwise the dates before it are refused.
 	var delegationsAt func(int64) (map[string]*big.Int, error)
 	var rateAt func(string, int64) (validatorRate, error)
 	if node != nil {
-		delegationsAt = func(h int64) (map[string]*big.Int, error) {
-			d, _, err := node.delegations(addr, h)
-			return d, err
-		}
-		rateAt = node.rateAt
+		budget := newArchiveBudget()
+		delegationsAt = func(h int64) (map[string]*big.Int, error) { return node.delegationsAt(addr, h, budget) }
+		rateAt = func(v string, h int64) (validatorRate, error) { return node.rateAtHeight(v, h, budget) }
 	}
 	owned, unattributed := settleUnnamedStakes(delegationsAt, addr, operator, s.native.Denom, events, unmatched)
 	events = append(events, owned...)

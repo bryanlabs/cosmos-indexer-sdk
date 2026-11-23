@@ -103,6 +103,7 @@ func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) { writeArchiveMetrics(w) })
 	mux.HandleFunc("GET /events", s.withPeriodCoverage(s.handleEvents))
 	mux.HandleFunc("GET /report-job", s.withPeriodCoverage(s.handleReportJob))
 	mux.HandleFunc("GET /asset-review", s.withPeriodCoverage(s.handleAssetReview))
