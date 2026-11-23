@@ -97,6 +97,133 @@ func (e statementTooLarge) Error() string {
 		approxCount(e.Rows), approxCount(e.Limit))
 }
 
+// statementRefreshing is returned instead of statementTooLarge when the
+// period fits the limit once the summary holds the months it is recomputing
+// after a correction to earlier records: the request can succeed in a few
+// minutes as it is, so the caller is told to wait, not to shorten it.
+type statementRefreshing struct {
+	Rows       int64
+	Limit      int64
+	Months     int
+	RetryAfter time.Duration
+}
+
+func (e statementRefreshing) Error() string {
+	return fmt.Sprintf("This validator's reward and commission history is being updated after a correction to earlier records (%d month(s) in the chosen period are being recomputed), so its statement cannot be read right now. Try again in about %d minutes.",
+		e.Months, e.retryMinutes())
+}
+
+func (e statementRefreshing) retryMinutes() int {
+	return int((e.RetryAfter + time.Minute - 1) / time.Minute)
+}
+
+// statementOverLimit says why a read over the row limit is refused. When
+// months being recomputed by the refresh are what puts it over, and the
+// period fits without them, it is statementRefreshing with the refresh's
+// expected wait; otherwise the period itself is too large.
+func statementOverLimit(tx *gorm.DB, val string, plan statementReadPlan, estimate, limit int64, now time.Time) error {
+	tooLarge := statementTooLarge{Rows: estimate, Limit: limit}
+	if !plan.Summary || len(plan.Dirty) == 0 {
+		return tooLarge
+	}
+	clean, err := plan.withoutDirty().liveRowEstimate(tx, val)
+	if err != nil {
+		return err
+	}
+	if clean > limit {
+		return tooLarge
+	}
+	st, err := readStatementRefreshState(tx, val, plan.Dirty)
+	if err != nil {
+		return err
+	}
+	return statementRefreshing{Rows: estimate, Limit: limit, Months: len(plan.Dirty), RetryAfter: st.wait(now)}
+}
+
+// The statement refresh (CronJob cosmos-tax-statement-refresh) runs every
+// statementRefreshCadence; a run that is still going when a slot passes is
+// followed by the next one as soon as it ends. Recent runs after a
+// correction took 16 to 20 minutes, and are stopped at 30. The largest
+// validators go first, and one of them took about two minutes for 23
+// months, so statementRefreshOne is the allowance for one validator.
+const (
+	statementRefreshCadence  = 15 * time.Minute
+	statementRefreshRun      = 20 * time.Minute
+	statementRefreshDeadline = 30 * time.Minute
+	statementRefreshOne      = 5 * time.Minute
+	statementRefreshMaxWait  = time.Hour
+)
+
+// statementRefreshState is what the database says about the refresh, read in
+// the request's snapshot.
+type statementRefreshState struct {
+	// Unclaimed: a changed month of this validator waits for the next run.
+	Unclaimed bool
+	// OldestDirty is the age of the oldest of those changed months' marks.
+	OldestDirty time.Duration
+	// ClaimHeld: a run claimed changed months and has not finished them;
+	// ClaimAge is how long ago (statement_state is not written otherwise
+	// while a claim is held).
+	ClaimHeld bool
+	ClaimAge  time.Duration
+}
+
+func readStatementRefreshState(tx *gorm.DB, val string, months []string) (statementRefreshState, error) {
+	var st statementRefreshState
+	var oldest, claimAge float64
+	if err := tx.Raw(`SELECT COALESCE(bool_or(NOT claimed), false), COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(logged_at)), 0)
+		FROM statement_dirty WHERE validator_address = ? AND to_char(month, 'YYYY-MM-DD') IN ?`, val, months).Row().Scan(&st.Unclaimed, &oldest); err != nil {
+		return st, err
+	}
+	if err := tx.Raw(`SELECT claim_horizon IS NOT NULL, COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - updated_at), 0) FROM statement_state`).Row().Scan(&st.ClaimHeld, &claimAge); err != nil {
+		return st, err
+	}
+	st.OldestDirty = time.Duration(oldest * float64(time.Second))
+	st.ClaimAge = time.Duration(claimAge * float64(time.Second))
+	return st, nil
+}
+
+// wait is how long until the refresh has recomputed this validator's
+// changed months, rounded up to a whole minute, between one minute and an
+// hour.
+func (st statementRefreshState) wait(now time.Time) time.Duration {
+	running := st.ClaimHeld && st.ClaimAge < statementRefreshDeadline
+	var wait time.Duration
+	switch {
+	case running && !st.Unclaimed:
+		// The running refresh holds every changed month; it ends within
+		// its usual run time.
+		wait = max(statementRefreshRun-st.ClaimAge, statementRefreshOne)
+	case !running && st.OldestDirty > statementRefreshCadence+statementRefreshDeadline:
+		// A month has waited longer than a whole refresh cycle: the refresh
+		// is held up (it waits for long transactions to end), so no better
+		// guess than one full cycle.
+		wait = statementRefreshCadence + statementRefreshRun
+	default:
+		// The next run takes them: right after the running one ends if a
+		// slot passed meanwhile, else at the next slot.
+		next := nextRefreshSlot(now)
+		if running {
+			began := now.Add(-st.ClaimAge)
+			end := now.Add(max(statementRefreshRun-st.ClaimAge, 0))
+			next = nextRefreshSlot(began)
+			if next.Before(end) {
+				next = end
+			} else {
+				next = nextRefreshSlot(end)
+			}
+		}
+		wait = next.Sub(now) + statementRefreshOne
+	}
+	wait = min(max(wait, time.Minute), statementRefreshMaxWait)
+	return (wait + time.Minute - 1).Truncate(time.Minute)
+}
+
+// nextRefreshSlot is the first schedule slot after t.
+func nextRefreshSlot(t time.Time) time.Time {
+	return t.Truncate(statementRefreshCadence).Add(statementRefreshCadence)
+}
+
 func approxCount(n int64) string {
 	switch {
 	case n >= 1_000_000:
@@ -284,7 +411,7 @@ func (s *Server) readStatement(ctx context.Context, val string, start, end time.
 				return err
 			}
 			if limit := s.statementRowLimit(); limit > 0 && out.Estimate > limit {
-				return statementTooLarge{Rows: out.Estimate, Limit: limit}
+				return statementOverLimit(tx, val, out.Plan, out.Estimate, limit, nowUTC())
 			}
 			if !measure {
 				return nil
@@ -383,7 +510,8 @@ func (s *Server) statementNote(c statementCoverage) string {
 // Aggregated in the database by day, category and denom, with the distinct
 // reward recipients per month and overall, in one statement that reads the
 // validator's rows once (readStatementAggregates). A period too large to
-// read on request is refused with 422 before any row is read, and the
+// read on request is refused with 422 before any row is read (503 while
+// it is too large only because of months being recomputed), and the
 // database work is cancelled when the time limit passes or the caller goes
 // away (504).
 func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request) {
@@ -562,12 +690,18 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// writeStatementError answers a failed statement read: 422 for a period too
-// large to read on request, 504 when the time limit passed or the caller
-// went away, 500 otherwise.
+// writeStatementError answers a failed statement read: 503 with Retry-After
+// while months the summary is recomputing after a correction are what puts
+// the period over the row limit, 422 for a period too large to read on
+// request, 504 when the time limit passed or the caller went away, 500
+// otherwise.
 func writeStatementError(ctx context.Context, w http.ResponseWriter, val string, limit time.Duration, err error) {
 	var tooLarge statementTooLarge
+	var refreshing statementRefreshing
 	switch {
+	case errors.As(err, &refreshing):
+		w.Header().Set("Retry-After", fmt.Sprint(int64(refreshing.RetryAfter/time.Second)))
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 	case errors.As(err, &tooLarge):
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 	case ctx.Err() != nil:

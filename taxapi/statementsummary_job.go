@@ -31,6 +31,12 @@ type StatementSummaryOptions struct {
 	Logf func(string, ...any)
 	// Validators restricts a fill to these operators (tests).
 	Validators []string
+	// RunBudget bounds a refresh by time. Once a run has used it, the run
+	// starts no further validator: the claimed months left keep their claim
+	// and the next run recomputes them before it claims anything new. While
+	// time is left, a run that has finished its claim claims the months
+	// changed since and goes on. Zero means no bound and one claim per run.
+	RunBudget time.Duration
 }
 
 func (o StatementSummaryOptions) drainTimeout() time.Duration {
@@ -442,6 +448,11 @@ type StatementSummaryRefreshResult struct {
 	// Nothing is wrong: the marked months are still read live, and the next
 	// run goes on from here.
 	Waiting string
+	// Left counts the validators whose claimed months the run left for the
+	// next one when its RunBudget ran out.
+	Left int
+	// Claims counts the claims the run worked through.
+	Claims int
 }
 
 // RefreshStatementSummary recomputes every marked (validator, month) from
@@ -467,33 +478,62 @@ func RefreshStatementSummary(ctx context.Context, db *gorm.DB, opts StatementSum
 		res.BuiltBefore = built
 		builtDay := built.Format(summaryDayLayout)
 
-		// Claim. A claim left by an earlier run that had to wait is kept, with
-		// its horizon, so the wait is not started over.
-		var horizon *string
-		if err := conn.WithContext(ctx).Raw("SELECT claim_horizon FROM statement_state").Row().Scan(&horizon); err != nil {
-			return err
-		}
-		if horizon == nil {
-			if err := conn.WithContext(ctx).Exec("UPDATE statement_dirty SET claimed = true WHERE NOT claimed AND month < ?::text::date", builtDay).Error; err != nil {
+		target := monthFloor(opts.now())
+		began := time.Now()
+		spent := func() bool { return opts.RunBudget > 0 && time.Since(began) >= opts.RunBudget }
+		for pass := 0; ; pass++ {
+			// Claim. A claim left by an earlier run that had to wait or ran out
+			// of time is kept, with its horizon, so the wait is not started
+			// over and its months are recomputed before anything new.
+			var horizon *string
+			if err := conn.WithContext(ctx).Raw("SELECT claim_horizon FROM statement_state").Row().Scan(&horizon); err != nil {
 				return err
 			}
-			var claimed bool
-			if err := conn.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM statement_dirty WHERE claimed)").Row().Scan(&claimed); err != nil {
-				return err
-			}
-			if claimed {
-				h, err := summaryHorizon(ctx, conn)
-				if err != nil {
+			if horizon == nil && pass > 0 {
+				// Another claim in the same run: only with a time budget and
+				// time left, and not while a month is waiting to be built.
+				if opts.RunBudget <= 0 || spent() || built.Before(target) {
+					break
+				}
+				var more bool
+				if err := conn.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM statement_dirty WHERE NOT claimed AND month < ?::text::date)", builtDay).Row().Scan(&more); err != nil {
 					return err
 				}
-				if err := conn.WithContext(ctx).Exec("UPDATE statement_state SET claim_horizon = ?, updated_at = now()", h).Error; err != nil {
+				if !more {
+					break
+				}
+			}
+			if horizon == nil {
+				if err := conn.WithContext(ctx).Exec("UPDATE statement_dirty SET claimed = true WHERE NOT claimed AND month < ?::text::date", builtDay).Error; err != nil {
 					return err
 				}
-				horizon = &h
+				var claimed bool
+				if err := conn.WithContext(ctx).Raw("SELECT EXISTS (SELECT 1 FROM statement_dirty WHERE claimed)").Row().Scan(&claimed); err != nil {
+					return err
+				}
+				if claimed {
+					h, err := summaryHorizon(ctx, conn)
+					if err != nil {
+						return err
+					}
+					if err := conn.WithContext(ctx).Exec("UPDATE statement_state SET claim_horizon = ?, updated_at = now()", h).Error; err != nil {
+						return err
+					}
+					horizon = &h
+				}
 			}
-		}
-		if horizon != nil {
-			waiting, err := summaryDrain(ctx, conn, *horizon, opts)
+			if horizon == nil {
+				break
+			}
+			res.Claims++
+			drainOpts := opts
+			if opts.RunBudget > 0 && pass > 0 {
+				// A later claim waits no longer than the time the run has left.
+				if left := opts.RunBudget - time.Since(began); left < drainOpts.drainTimeout() {
+					drainOpts.DrainTimeout = max(left, time.Second)
+				}
+			}
+			waiting, err := summaryDrain(ctx, conn, *horizon, drainOpts)
 			if err != nil {
 				return err
 			}
@@ -502,8 +542,43 @@ func RefreshStatementSummary(ctx context.Context, db *gorm.DB, opts StatementSum
 				opts.logf("statement-summary refresh: %s", res.Waiting)
 				return nil
 			}
+			// Largest first: a statement for a validator whose changed months
+			// hold the most rows is the one the API cannot read live, so it
+			// clears first. The order changes nothing else; the address
+			// sweep after it recomputes any claimed validator the ordered
+			// list did not hold.
+			order, err := summaryRefreshOrder(conn.WithContext(ctx))
+			if err != nil {
+				return err
+			}
+			done := make(map[string]bool, len(order))
+			refresh := func(val string) error {
+				done[val] = true
+				start := time.Now()
+				cells, err := summaryRefreshValidator(ctx, conn, val)
+				if err != nil {
+					return fmt.Errorf("%s: %w", val, err)
+				}
+				res.Cells += cells
+				res.Validators++
+				opts.logf("statement-summary refresh %s: %d changed month(s) recomputed, %s", val, cells, time.Since(start).Round(time.Millisecond))
+				return nil
+			}
+			// Each validator is recomputed whole, in one transaction, so the
+			// budget is checked between validators and every run recomputes
+			// at least one.
+			out := false
+			for _, val := range order {
+				if res.Validators > 0 && spent() {
+					out = true
+					break
+				}
+				if err := refresh(val); err != nil {
+					return err
+				}
+			}
 			last := ""
-			for {
+			for !out {
 				var val string
 				err := conn.WithContext(ctx).Raw("SELECT validator_address FROM statement_dirty WHERE claimed AND validator_address > ? ORDER BY validator_address LIMIT 1", last).Row().Scan(&val)
 				if errors.Is(err, sql.ErrNoRows) {
@@ -513,20 +588,29 @@ func RefreshStatementSummary(ctx context.Context, db *gorm.DB, opts StatementSum
 					return err
 				}
 				last = val
-				cells, err := summaryRefreshValidator(ctx, conn, val)
-				if err != nil {
-					return fmt.Errorf("%s: %w", val, err)
+				if done[val] {
+					continue
 				}
-				res.Cells += cells
-				res.Validators++
-				opts.logf("statement-summary refresh %s: %d changed month(s) recomputed", val, cells)
+				if res.Validators > 0 && spent() {
+					out = true
+					break
+				}
+				if err := refresh(val); err != nil {
+					return err
+				}
+			}
+			if out {
+				if err := conn.WithContext(ctx).Raw("SELECT count(DISTINCT validator_address) FROM statement_dirty WHERE claimed").Row().Scan(&res.Left); err != nil {
+					return err
+				}
+				opts.logf("statement-summary refresh: run time of %s used; %d validator(s) with claimed months left for the next run, which takes them first", opts.RunBudget, res.Left)
+				return nil
 			}
 			if err := conn.WithContext(ctx).Exec("UPDATE statement_state SET claim_horizon = NULL, updated_at = now()").Error; err != nil {
 				return err
 			}
 		}
 
-		target := monthFloor(opts.now())
 		if !built.Before(target) {
 			return nil
 		}
@@ -563,6 +647,39 @@ func RefreshStatementSummary(ctx context.Context, db *gorm.DB, opts StatementSum
 		return nil
 	})
 	return res, err
+}
+
+// summaryRefreshOrder lists the validators with claimed marks, those whose
+// claimed months hold the most reward and commission rows first, then by
+// all their rows, then by address. The counts are the summary's own (the
+// changed months' stored counts from before the change), read from
+// statement_days only, never from taxable_events.
+func summaryRefreshOrder(conn *gorm.DB) ([]string, error) {
+	rows, err := conn.Raw(`WITH cells AS (
+		SELECT DISTINCT validator_address, month FROM statement_dirty WHERE claimed
+	), v AS (
+		SELECT DISTINCT validator_address FROM cells
+	)
+	SELECT v.validator_address
+	FROM v
+	ORDER BY COALESCE((SELECT sum(s.events) FROM cells c JOIN statement_days s
+			ON s.validator_address = c.validator_address AND s.day >= c.month AND s.day < (c.month + interval '1 month')::date
+			WHERE c.validator_address = v.validator_address), 0) DESC,
+		COALESCE((SELECT sum(s.events) FROM statement_days s WHERE s.validator_address = v.validator_address), 0) DESC,
+		v.validator_address`).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var val string
+		if err := rows.Scan(&val); err != nil {
+			return nil, err
+		}
+		out = append(out, val)
+	}
+	return out, rows.Err()
 }
 
 // summaryRefreshHook, when set by a test, runs after a validator's changed

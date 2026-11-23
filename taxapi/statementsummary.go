@@ -646,6 +646,39 @@ ORDER BY 1, 2`
 	return sqlText, args
 }
 
+// withoutDirty is the plan as it will be once the refresh has recomputed the
+// changed months: they come from the summary and only the rest is live.
+func (p statementReadPlan) withoutDirty() statementReadPlan {
+	q := p
+	q.Dirty, q.Live = nil, nil
+	for _, r := range p.Live {
+		pieces := []statementRange{r}
+		for _, d := range p.Dirty {
+			m, err := time.Parse(summaryDayLayout, d)
+			if err != nil {
+				continue
+			}
+			lo, hi := m, m.AddDate(0, 1, 0)
+			var kept []statementRange
+			for _, piece := range pieces {
+				if !piece.From.Before(hi) || !lo.Before(piece.To) {
+					kept = append(kept, piece)
+					continue
+				}
+				if piece.From.Before(lo) {
+					kept = append(kept, statementRange{piece.From, lo})
+				}
+				if hi.Before(piece.To) {
+					kept = append(kept, statementRange{hi, piece.To})
+				}
+			}
+			pieces = kept
+		}
+		q.Live = append(q.Live, pieces...)
+	}
+	return q
+}
+
 // liveRowEstimate asks the planner how many rows the live part of the plan
 // reads.
 func (p statementReadPlan) liveRowEstimate(tx *gorm.DB, val string) (int64, error) {
