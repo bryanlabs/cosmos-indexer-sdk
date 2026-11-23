@@ -116,6 +116,9 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		if r.UserTag != "" {
 			memo += " tagged " + r.UserTag
 		}
+		if r.SemanticDecision != nil {
+			memo += " [classified " + r.SemanticDecision.Classification + " by the user, parser booked " + r.ClassifiedFrom + "]"
+		}
 		if r.PriceMissing {
 			memo += " [no USD price: quantity only]"
 		}

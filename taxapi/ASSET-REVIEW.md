@@ -41,7 +41,9 @@ decided the receipt or a rule did. `applied_from` is server-set and rejected on
 input. An unknown record ID is rejected (400) because it is stale or foreign. An
 idle `denom:` or `policy:` key is accepted and listed in
 `unmatched_decision_keys` of `/asset-review`, so a remembered rule can be sent
-with every report.
+with every report. Rows waiting on classification review have a fourth key
+kind, `<record_id>:semantic:<hash>`, described under "Classifying rows held for
+semantic review" below.
 
 Each entry is one of:
 
@@ -70,8 +72,8 @@ record, both manually entered and nonnegative. Explicit zero is valid; omission
 is not zero. The acquisition date must be valid and no later than the receipt.
 Plain decimals are bounded to 38 digits and 18 decimal places. At most 500
 non-price decisions, 25,000 `price:` keys and 4 MiB of decision JSON are
-accepted; narrow the report range when necessary. No excess rows or decisions
-are silently discarded.
+accepted, plus 10,000 semantic classification keys; narrow the report range
+when necessary. No excess rows or decisions are silently discarded.
 
 ## User-entered prices for missing-price rows
 
@@ -169,8 +171,68 @@ Unknown contract claims retain observed transfer legs, `unknown_claim` as the
 source trigger, and `review_required="true"` with
 `review_reason="unknown_claim_semantics"` in detail. These rows are not certified
 as income or returned principal. Asset exclusions, price overrides, denom rules,
-spam policy and user tags do not resolve this semantic blocker. Actual classifier
-review and successful reindexing are required; no tax-policy override is inferred.
+spam policy and user tags do not resolve this semantic blocker. A person resolves
+it row by row with a classification decision (next section), or a classifier
+change and reindex resolves it for everyone; no tax-policy override is inferred.
+
+### Classifying rows held for semantic review
+
+Every row the parser held for classification review (an unknown claim, an
+unnamed contract movement, an unsettled block movement or gov deposit outcome,
+any detail with `review_required="true"`) carries a `SemanticRecordID` in
+`semantic_reviews`. A flagged receipt that also waits on classification uses its
+asset `RecordID` instead, so one decision carries both. The ID is the row's
+`chain|wallet|message|sub` plus `:semantic:` and a hash of the row's own facts
+(hash, denom, amount, time, category, direction, counterparties, trigger,
+detail, review reason); identical rows of one wallet get `#2`, `#3`. A reindex
+that changes any of those facts changes the ID, and the old decision is refused
+as stale rather than applied to different evidence.
+
+The decision rides in the same `asset_decisions` map:
+
+```json
+{"<SemanticRecordID>":{"classification":"income","value_usd":"12.50"}}
+{"<SemanticRecordID>":{"classification":"transfer_in","cost_basis_usd":"8","acquired_date":"2025-01-02"}}
+{"<asset RecordID>":{"mode":"exclude","classification":"exclude"}}
+```
+
+`/asset-review` lists the vocabulary in `classifications`:
+
+| Classification | Row direction | Booked as |
+| --- | --- | --- |
+| `income` | in | income at the row's value |
+| `payment` | in or out | transfer tagged `payment` (taxable disposal when out) |
+| `transfer_in` | in | transfer in; may carry `cost_basis_usd` and `acquired_date` |
+| `transfer_out` | out | transfer out |
+| `swap` | in or out | swap leg |
+| `expense` | out | expense |
+| `protocol_deposit` | out | protocol_deposit (record only) |
+| `protocol_withdrawal` | in | protocol_withdrawal (record only) |
+| `exclude` | in or out | excluded, zero value and basis |
+
+A classification whose direction does not fit the row is rejected (400). A
+semantic key takes no `mode`, `token`, `quantity` or `unit_value_usd`;
+`exclude` takes no value or basis; basis is accepted only on `transfer_in`, and
+its date may not be after the receipt. On an asset record key the
+classification sits beside the identity `mode` (`exclude` needs mode
+`exclude`), and it is refused on a receipt that waits on no classification. A
+`denom:`, `policy:` or `price:` key never takes a classification. An unknown
+semantic key is refused like an unknown record ID.
+
+`value_usd` fills only a missing price: a row with a reference, pegged or
+implied price keeps it, and the decision's value is dropped. A filled value is
+labelled user-supplied with the decision key as `user_price_key`, exactly like a
+`price:` value. A classified row keeps the parser's category and detail beside
+the user's: the Generic CSV `user_treatment` reads `classified:<class>` (after
+the identity mode when both apply), its description adds
+`user_classification=<class> parser_category=<category>`, and the journal memo
+adds "[classified <class> by the user, parser booked <category>]".
+
+Two reasons can never be classified away: an IBC refund waiting on its send's
+basis, and a withdraw-address move with no stored message. They keep blocking
+downloads until the data is fixed. Decisions do not change the evidence
+fingerprint, so a cached report recomputes only when the decisions or the
+indexed facts change.
 
 `/asset-review` returns `semantic_reviews` plus a `readiness` object containing
 `export_ready`, `parser_decode_complete`, `pending_asset_reviews`,
