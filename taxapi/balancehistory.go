@@ -743,7 +743,32 @@ func (s *Server) ledgerStakeEvents(ids []int64, addr, operator string, lo, hi in
 	// A transaction's events are dated at its effective inclusion.
 	rel, rp := s.effectiveRel()
 	params := withParams(rp, map[string]any{qpAddr: addr, "op": operator, "types": ledgerMessageTypes, qpIDs: ids, "lo": lo, "hi": hi})
-	msgQuery := `SELECT * FROM (` + datedBranches(`
+	msgQuery, blockQuery, redelQuery := s.ledgerQueries(rel)
+	var msgRows []ledgerAttrRow
+	if err := s.db.Raw(msgQuery, params).Scan(&msgRows).Error; err != nil {
+		return nil, nil, fmt.Errorf("message events: %w", err)
+	}
+	var blockRows []ledgerAttrRow
+	if err := s.db.Raw(blockQuery, withParams(params, map[string]any{"types": ledgerBlockTypes})).Scan(&blockRows).Error; err != nil {
+		return nil, nil, fmt.Errorf("block events: %w", err)
+	}
+	var redelMsgs []uint64
+	if err := s.db.Raw(redelQuery, params).Scan(&redelMsgs).Error; err != nil {
+		return nil, nil, fmt.Errorf("redelegation messages: %w", err)
+	}
+	redelRows, err := s.redelegationRows(redelMsgs, rel, rp)
+	if err != nil {
+		return nil, nil, err
+	}
+	redelegations, unmatched := attributeStakes(redelRows, addr)
+	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
+	return append(events, redelegations...), unmatched, nil
+}
+
+// ledgerQueries are ledgerStakeEvents' reads of a wallet's message events,
+// block events and candidate unattributed staking messages in (@lo, @hi].
+func (s *Server) ledgerQueries(rel string) (msgQuery, blockQuery, redelQuery string) {
+	msgQuery = `SELECT * FROM (` + datedBranches(`
 SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value, a.index AS attr_index
 FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
@@ -765,7 +790,7 @@ AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi {{OWN}}`, rel, `me
 		`(EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me.id AND a0.value = @addr)
   OR (t.type = 'create_validator' AND EXISTS (SELECT 1 FROM message_event_attributes a1 WHERE a1.message_event_id = me.id AND a1.value = @op)))`) + `) u
 ORDER BY height, event_id, attr_index`
-	blockQuery := `
+	blockQuery = `
 SELECT be.id AS event_id, b.height, b.time_stamp, CASE WHEN be.lifecycle_position = 0 THEN 0 ELSE 2 END AS phase, t.type, k.key, a.value
 FROM block_events be
 JOIN block_event_types t ON t.id = be.block_event_type_id
@@ -781,7 +806,7 @@ ORDER BY b.height, be.id, a.index`
 	// Only messages with a staking event that does not name its delegator,
 	// whose delegators include the wallet or are not named at all, are read:
 	// attributeRedelegations adds nothing and refuses nothing for any other.
-	redelQuery := `WITH cand AS MATERIALIZED (SELECT DISTINCT message_id FROM (` + datedBranches(`
+	redelQuery = `WITH cand AS MATERIALIZED (SELECT DISTINCT message_id FROM (` + datedBranches(`
 SELECT me0.message_id FROM message_events me0
 JOIN message_event_types t0 ON t0.id = me0.message_event_type_id
 JOIN messages m ON m.id = me0.message_id
@@ -796,25 +821,7 @@ SELECT message_id FROM cand c WHERE ` + walletStakeMessage("c")
 	if s.blockReads {
 		msgQuery, blockQuery, redelQuery = blockReadQueries(rel)
 	}
-	var msgRows []ledgerAttrRow
-	if err := s.db.Raw(msgQuery, params).Scan(&msgRows).Error; err != nil {
-		return nil, nil, fmt.Errorf("message events: %w", err)
-	}
-	var blockRows []ledgerAttrRow
-	if err := s.db.Raw(blockQuery, withParams(params, map[string]any{"types": ledgerBlockTypes})).Scan(&blockRows).Error; err != nil {
-		return nil, nil, fmt.Errorf("block events: %w", err)
-	}
-	var redelMsgs []uint64
-	if err := s.db.Raw(redelQuery, params).Scan(&redelMsgs).Error; err != nil {
-		return nil, nil, fmt.Errorf("redelegation messages: %w", err)
-	}
-	redelRows, err := s.redelegationRows(redelMsgs, rel, rp)
-	if err != nil {
-		return nil, nil, err
-	}
-	redelegations, unmatched := attributeStakes(redelRows, addr)
-	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
-	return append(events, redelegations...), unmatched, nil
+	return msgQuery, blockQuery, redelQuery
 }
 
 // unnamedStakingEvent is a subquery on the message msg's redelegate,
@@ -1664,6 +1671,17 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		return nil, 0, fmt.Errorf("anchor state at height %d: %w", tip.Height, err)
 	}
 	anchor.Time = tip.TimeStamp
+	// When every date is below the height the walk would stop at, on a staking
+	// record no delegator is named for, the dates are refused as the walk
+	// refuses them, without reading the rest of the wallet's history.
+	if stop, err := s.unnamedStopAbove(ids, addr, operator, maxTargetHeight(targets, usable), tip.Height, node); err != nil {
+		return nil, 0, err
+	} else if stop > 0 {
+		for _, i := range usable {
+			out[i].Status, out[i].Reason = balanceIncompleteS, unattributedReason(stop)
+		}
+		return out, tip.Height, nil
+	}
 	events, unmatched, err := s.ledgerStakeEvents(ids, addr, operator, lowest, tip.Height)
 	if err != nil {
 		return nil, 0, err
@@ -1689,7 +1707,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		for _, i := range usable {
 			if targets[i].Height < unattributed {
 				out[i].Status = balanceIncompleteS
-				out[i].Reason = fmt.Sprintf("a staking event at height %d after this date that does not name its delegator cannot be attributed to one delegator", unattributed)
+				out[i].Reason = unattributedReason(unattributed)
 				continue
 			}
 			kept = append(kept, i)
