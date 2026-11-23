@@ -24,7 +24,7 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v23"
+	MethodologyVersion = "v24"
 	MethodologyDate    = "2026-11-23"
 )
 
@@ -52,9 +52,10 @@ func currentMethodology() Methodology {
 			"asset review first: suspected-spam receipts remain unreviewed until the user explicitly excludes them or supplies token identity, quantity, value and basis; no default exclusion or override",
 			"for an explicit override, use the user's exact total USD value and basis with their chosen token and acquisition date, not a guessed native ATOM price",
 			"wasm-indexer oracle price for the exact denom and day",
-			"documented $1 USD peg for exact allowlisted USDC denominations when the oracle has no price",
+			"documented $1 USD peg for exact allowlisted USDC denominations when the oracle has no price: Noble's native USDC on the Hub (ibc/F663521B..., transfer/channel-536/uusdc) and through Elys (ibc/27BCBC09..., transfer/channel-1266/transfer/channel-2/uusdc). Other bridged USDC, such as Axelar's USDC through Neutron (ibc/FA33D22E...), is a different asset and is not pegged",
+			"a USD unit price the user entered for that row, or for that denomination and UTC day, only when the oracle, the peg and the other swap leg give no price; it never replaces a reference price and is labelled user-supplied wherever it appears",
 			"no synthetic fallback for any other asset: the row is flagged price_missing rather than valued at $0",
 		},
-		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated. A Form 8949 line whose sale date has no price says so in its description and in the Proceeds unknown column (X-Proceeds-Unknown-Count, Schedule D unknown_proceeds_lines) instead of showing a confirmed 0.00, and an acquisition with no price at receipt is basis unknown",
+		MissingPriceHandling: "rows without a price are flagged price_missing and excluded from USD totals rather than counted as a real zero; report and export summaries surface a count so a gap is never silently understated. A Form 8949 line whose sale date has no price says so in its description and in the Proceeds unknown column (X-Proceeds-Unknown-Count, Schedule D unknown_proceeds_lines) instead of showing a confirmed 0.00, and an acquisition with no price at receipt is basis unknown. A person can fill a missing price with their own USD unit price per row or per denomination and UTC day (price: asset decisions, which apply only to that report). Such a value is user-supplied, not an oracle price: the preview and Generic CSV mark it price_source=user with the decision key, other CSV descriptions and the journal memo say user-supplied price, and a Form 8949 line says user-supplied sale price or user-supplied receipt price",
 	}
 }
