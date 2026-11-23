@@ -146,5 +146,21 @@ SELECT me.id, 'f' || me.id || '/' || i, i, i + 1 FROM message_events me, generat
 		}
 		require.Contains(t, text, "message_event_attributes_message_event_id_index_key")
 		require.Contains(t, text, "message_events_message_id_index_key")
+
+		// On prod the planner pulled an unfenced lateral up into a hash join
+		// over every attribute row. Discouraging nested loops reproduces that
+		// choice here; the fenced reads must still go by id.
+		require.NoError(t, s.db.Transaction(func(tx *gorm.DB) error {
+			require.NoError(t, tx.Exec("SET LOCAL enable_nestloop = off").Error)
+			plan = nil
+			require.NoError(t, tx.Raw("EXPLAIN (COSTS OFF) "+redelegationRowsQuery(rel), withParams(rp, map[string]any{"msgs": msgs})).Scan(&plan).Error)
+			return nil
+		}))
+		text = strings.Join(plan, "\n")
+		for _, line := range plan {
+			if strings.Contains(line, "Seq Scan on message_events ") || strings.Contains(line, "Seq Scan on message_event_attributes ") {
+				t.Fatalf("event or attribute table scanned without nested loops:\n%s", text)
+			}
+		}
 	})
 }
