@@ -122,6 +122,9 @@ type ledgerInput struct {
 	// RateAt, when set, reads a validator's rate at the end of a block from
 	// chain state, for a point no recorded rate bounds on one side.
 	RateAt func(v string, height int64) (validatorRate, error)
+	// OnAbsent, when set, hears of each delegation RateAt found no validator
+	// for at a target, and whether it was shown as zero.
+	OnAbsent func(v string, height int64, sp shareSpan, accepted bool)
 }
 
 // ledgerHoldings is the rebuilt state at one block, in base units.
@@ -246,8 +249,10 @@ type rateBook struct {
 	slashes map[string][]ledgerSlash
 	anchor  int64
 	read    func(v string, height int64) (validatorRate, error)
-	// unread is the validator rates at a height the read did not return.
+	// unread is the validator rates at a height the read did not return,
+	// and absent those it answered the validator did not exist for.
 	unread map[rateRead]bool
+	absent map[rateRead]bool
 }
 
 type rateRead struct {
@@ -256,7 +261,7 @@ type rateRead struct {
 }
 
 func newRateBook(in ledgerInput) rateBook {
-	b := rateBook{unit: map[string]bool{}, samples: map[string][]rateSample{}, slashes: map[string][]ledgerSlash{}, anchor: in.Anchor.Height, read: in.RateAt, unread: map[rateRead]bool{}}
+	b := rateBook{unit: map[string]bool{}, samples: map[string][]rateSample{}, slashes: map[string][]ledgerSlash{}, anchor: in.Anchor.Height, read: in.RateAt, unread: map[rateRead]bool{}, absent: map[rateRead]bool{}}
 	for _, sl := range in.Slashes {
 		b.slashes[sl.Validator] = append(b.slashes[sl.Validator], sl)
 	}
@@ -337,6 +342,9 @@ func (b rateBook) fill(v string, height int64) bool {
 	r, err := b.read(v, height)
 	if err != nil || r.Tokens == nil {
 		b.unread[key] = true
+		if errors.Is(err, errArchiveAbsent) {
+			b.absent[key] = true
+		}
 		return false
 	}
 	ss := b.samples[v]
@@ -535,6 +543,24 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 				continue
 			}
 			amt, bound, err := book.shown(v, h, *sp)
+			if err != nil && book.absent[rateRead{v, h}] {
+				// The archive answered that v did not exist at h, so no one
+				// held a delegation on it. That is the wallet's figure only
+				// if its own rebuild allows zero and none of its staking
+				// records on v leaves a delegator or validator unnamed.
+				switch {
+				case sp.lo.GreaterThan(tiny) || sp.hi.LessThan(tiny.Neg()):
+					if in.OnAbsent != nil {
+						in.OnAbsent(v, h, *sp, false)
+					}
+					return stop(ledgerInconsistent{fmt.Sprintf("the rebuilt delegation on %s at height %d is not zero, but the validator did not exist then", v, h)})
+				case stakeRecordsNamed(events[:ei], v):
+					if in.OnAbsent != nil {
+						in.OnAbsent(v, h, *sp, true)
+					}
+					continue
+				}
+			}
 			if err != nil {
 				return stop(err)
 			}
@@ -555,6 +581,31 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		out[h] = hold
 	}
 	return out, nil
+}
+
+// stakeRecordsNamed says whether every staking record in events that may
+// touch v names its delegator, and every one names a validator, so that none
+// of them can be a change to the wallet's shares on v that the walk skipped.
+func stakeRecordsNamed(events []ledgerEvent, v string) bool {
+	for _, ev := range events {
+		switch ev.Type {
+		case "delegate", "unbond", "redelegate", "cancel_unbonding_delegation", "tokenize_shares", "redeem_shares":
+		default:
+			continue
+		}
+		for _, rec := range ev.records() {
+			vals := []string{rec["validator"], rec["source_validator"], rec["destination_validator"]}
+			named, touches := false, false
+			for _, x := range vals {
+				named = named || x != ""
+				touches = touches || x == v
+			}
+			if !named || (touches && rec["delegator"] == "") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // undoEvent reverses one event's effect on the wallet's liquid balance and

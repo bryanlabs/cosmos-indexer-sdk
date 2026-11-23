@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 
 	"github.com/DefiantLabs/cosmos-indexer/taxapi/internal/servicehttp"
@@ -37,6 +39,8 @@ type fakeArchive struct {
 	rates     map[int64]map[string][2]int64
 	// answerAt, when set, is the height every answer claims.
 	answerAt int64
+	// codespace is the codespace of the answer for a validator it lacks.
+	codespace string
 }
 
 func (f *fakeArchive) serve(t *testing.T) *httptest.Server {
@@ -56,9 +60,11 @@ func (f *fakeArchive) serve(t *testing.T) *httptest.Server {
 			if f.answerAt != 0 {
 				at = f.answerAt
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"response": map[string]any{
-				"code": code, "log": log, "value": base64.StdEncoding.EncodeToString(value), "height": strconv.FormatInt(at, 10),
-			}}})
+			resp := map[string]any{"code": code, "log": log, "value": base64.StdEncoding.EncodeToString(value), "height": strconv.FormatInt(at, 10)}
+			if code == sdkKeyNotFound {
+				resp["codespace"] = f.codespace
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"response": resp}})
 		}
 		marshal := func(m interface{ Marshal() ([]byte, error) }) []byte {
 			bz, err := m.Marshal()
@@ -211,7 +217,44 @@ func TestLedgerArchiveDelegations(t *testing.T) {
 	require.ErrorIs(t, err, errArchiveHeight)
 	fake.answerAt = 0
 	_, err = a.rate(newArchiveBudget(), v2, 50)
-	require.ErrorIs(t, err, errArchiveFailed, "a validator the archive does not have")
+	require.ErrorIs(t, err, errArchiveFailed, "a not-found answer outside the sdk codespace")
+
+	// The SDK's not-found for the height asked says the validator did not
+	// exist there; the same answer for another height says nothing.
+	fake.codespace = "sdk"
+	absent := archiveCount(archiveResultAbsent)
+	_, err = a.rate(newArchiveBudget(), v2, 50)
+	require.ErrorIs(t, err, errArchiveAbsent)
+	require.Equal(t, absent+1, archiveCount(archiveResultAbsent))
+	fake.answerAt = 51
+	_, err = a.rate(newArchiveBudget(), v2, 50)
+	require.ErrorIs(t, err, errArchiveFailed)
+	require.NotErrorIs(t, err, errArchiveAbsent)
+	require.Equal(t, absent+1, archiveCount(archiveResultAbsent))
+}
+
+// An accepted zero is counted and logged, and a refused one only logged; the
+// log names the validator by a short hash.
+func TestLedgerArchiveNoteAbsent(t *testing.T) {
+	val := bech(t, "cosmosvaloper", 4)
+	var lines []string
+	a := &ledgerArchive{logf: func(f string, args ...any) { lines = append(lines, fmt.Sprintf(f, args...)) }}
+	before := archiveAbsentZeros.Load()
+	sp := shareSpan{decimal.RequireFromString("-0.000082"), decimal.RequireFromString("1.0001")}
+	a.noteAbsent(val, 20, sp, true)
+	a.noteAbsent(val, 21, sp, false)
+	require.Equal(t, before+1, archiveAbsentZeros.Load())
+	require.Len(t, lines, 2)
+	require.Contains(t, lines[0], "height 20")
+	require.Contains(t, lines[0], "shown as zero")
+	require.Contains(t, lines[1], "refused")
+	for _, l := range lines {
+		require.NotContains(t, l, val)
+	}
+
+	rec := httptest.NewRecorder()
+	NewServer(nil, nil, DefaultNativeAsset).Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Contains(t, rec.Body.String(), "archive_absent_zero_total "+strconv.FormatInt(archiveAbsentZeros.Load(), 10)+"\n")
 }
 
 // No archive error names the archive's origin or anything in it, whatever

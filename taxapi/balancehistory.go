@@ -1673,10 +1673,14 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	// archive still holds them; otherwise the dates before it are refused.
 	var delegationsAt func(int64) (map[string]*big.Int, error)
 	var rateAt func(string, int64) (validatorRate, error)
+	var onAbsent func(string, int64, shareSpan, bool)
 	if node != nil {
 		budget := newArchiveBudget()
 		delegationsAt = func(h int64) (map[string]*big.Int, error) { return node.delegationsAt(addr, h, budget) }
 		rateAt = func(v string, h int64) (validatorRate, error) { return node.rateAtHeight(v, h, budget) }
+		if node.archive != nil {
+			onAbsent = node.archive.noteAbsent
+		}
 	}
 	owned, unattributed := settleUnnamedStakes(delegationsAt, addr, operator, s.native.Denom, events, unmatched)
 	events = append(events, owned...)
@@ -1722,7 +1726,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	for _, i := range usable {
 		heights = append(heights, targets[i].Height)
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, RateAt: rateAt}, heights)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, RateAt: rateAt, OnAbsent: onAbsent}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {
