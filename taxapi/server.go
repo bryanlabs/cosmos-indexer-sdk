@@ -535,6 +535,7 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		}
 	}
 	out := make([]Row, 0, len(events)+len(fees))
+	semanticSeen := map[string]int{}
 	for _, e := range events {
 		dir := eventDirection(e, addr)
 		denom, amount := e.Denom, e.Amount
@@ -554,6 +555,7 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 		row.MessageID = e.MessageID
 		row.SubIndex = e.SubIndex
 		attachSpamEvidence(&row, e, chain, addr, memos[e.TxHash])
+		assignSemanticRecordID(&row, e, chain, addr, semanticSeen)
 		row.ChainID = rowChainID(input.stampChain, e.ChainID)
 		out = append(out, row)
 	}
