@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -29,9 +30,6 @@ import (
 // credential: no error, log line or metric names it, and every error says
 // only "archive".
 const (
-	// archiveRate and archiveBurst bound this process's archive calls.
-	archiveRate  = 2.0
-	archiveBurst = 4
 	// archiveCallLimit bounds the archive calls of one wallet's walk; past it
 	// the dates stay refused as they would be without the archive.
 	archiveCallLimit = 20
@@ -106,20 +104,57 @@ type ledgerArchive struct {
 	logf  func(string, ...any)
 }
 
-func newLedgerArchive(origin string, timeout time.Duration) (*ledgerArchive, error) {
+// archivePace bounds this process's archive calls: rate calls a second, and
+// burst at once.
+type archivePace struct {
+	rate  float64
+	burst int
+}
+
+// archivePaceFromEnv reads the pace from LEDGER_ARCHIVE_RPS and
+// LEDGER_ARCHIVE_BURST (default 1). The archive is off unless the rate is set
+// above zero; a value that does not read as a positive number also leaves it
+// off, with an error that names the variable.
+func archivePaceFromEnv(getenv func(string) string) (archivePace, error) {
+	rps := getenv("LEDGER_ARCHIVE_RPS")
+	if rps == "" {
+		return archivePace{}, errors.New("archive: off, LEDGER_ARCHIVE_RPS is not set")
+	}
+	rate, err := strconv.ParseFloat(rps, 64)
+	if err != nil || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return archivePace{}, errors.New("archive: off, LEDGER_ARCHIVE_RPS is not a number")
+	}
+	if rate <= 0 {
+		return archivePace{}, errors.New("archive: off, LEDGER_ARCHIVE_RPS is not above zero")
+	}
+	burst := 1
+	if b := getenv("LEDGER_ARCHIVE_BURST"); b != "" {
+		if burst, err = strconv.Atoi(b); err != nil || burst < 1 {
+			return archivePace{}, errors.New("archive: off, LEDGER_ARCHIVE_BURST is not a whole number above zero")
+		}
+	}
+	return archivePace{rate: rate, burst: burst}, nil
+}
+
+func newLedgerArchive(origin string, timeout time.Duration, pace archivePace) (*ledgerArchive, error) {
 	rpc, err := servicehttp.New(&http.Client{Timeout: timeout}, origin)
 	if err != nil {
 		return nil, errArchiveConfig
 	}
-	return &ledgerArchive{rpc: rpc, bucket: newTokenBucket(archiveRate, archiveBurst)}, nil
+	return &ledgerArchive{rpc: rpc, bucket: newTokenBucket(pace.rate, pace.burst)}, nil
 }
 
 // StartLedgerArchive makes balance history read below the serving node's
-// lowest height from the archive RPC at origin. It reads that height from the
-// serving node's RPC now and every archiveFloorEvery after, and the archive
-// is not read while it is unknown.
-func StartLedgerArchive(origin string, logf func(string, ...any)) error {
-	a, err := newLedgerArchive(origin, archiveTimeout)
+// lowest height from the archive RPC at origin, at the pace getenv gives
+// (archivePaceFromEnv); without one the archive stays off. It reads that
+// height from the serving node's RPC now and every archiveFloorEvery after,
+// and the archive is not read while it is unknown.
+func StartLedgerArchive(origin string, getenv func(string) string, logf func(string, ...any)) error {
+	pace, err := archivePaceFromEnv(getenv)
+	if err != nil {
+		return err
+	}
+	a, err := newLedgerArchive(origin, archiveTimeout, pace)
 	if err != nil {
 		return err
 	}

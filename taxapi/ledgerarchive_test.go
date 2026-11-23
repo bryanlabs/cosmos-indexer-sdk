@@ -127,9 +127,8 @@ func (f *fakeArchive) serve(t *testing.T) *httptest.Server {
 }
 
 func testArchive(t *testing.T, srv *httptest.Server, floor int64) *ledgerArchive {
-	a, err := newLedgerArchive(srv.URL+"/"+archiveSecret, 2*time.Second)
+	a, err := newLedgerArchive(srv.URL+"/"+archiveSecret, 2*time.Second, archivePace{rate: 1000, burst: 1000})
 	require.NoError(t, err)
-	a.bucket = newTokenBucket(1000, 1000)
 	a.floor.Store(floor)
 	return a
 }
@@ -351,7 +350,7 @@ func TestLedgerArchiveErrorsNeverNameTheOrigin(t *testing.T) {
 	}
 	reads := func(t *testing.T, origin string, timeout time.Duration) {
 		t.Helper()
-		a, err := newLedgerArchive(origin, timeout)
+		a, err := newLedgerArchive(origin, timeout, archivePace{rate: 1000, burst: 1000})
 		require.NoError(t, err)
 		a.floor.Store(100)
 		_, err = a.delegations(newArchiveBudget(), wallet, 50)
@@ -416,9 +415,9 @@ func TestLedgerArchiveErrorsNeverNameTheOrigin(t *testing.T) {
 	})
 	t.Run("origin", func(t *testing.T) {
 		for _, origin := range []string{"https://user:" + archiveSecret + "@archive.example/x", "https://archive.example/" + archiveSecret + "?k=1", "ftp://archive.example/" + archiveSecret, "https://archive.example/%zz" + archiveSecret} {
-			_, err := newLedgerArchive(origin, time.Second)
+			_, err := newLedgerArchive(origin, time.Second, archivePace{rate: 1, burst: 1})
 			leak(t, origin, err)
-			leak(t, origin, StartLedgerArchive(origin, t.Logf))
+			leak(t, origin, StartLedgerArchive(origin, envOf("LEDGER_ARCHIVE_RPS", "1"), t.Logf))
 		}
 	})
 }
@@ -468,6 +467,67 @@ func TestLedgerArchiveCallLimitAndCounts(t *testing.T) {
 		require.Contains(t, rec.Body.String(), "archive_calls_total{result=\""+r+"\"} "+strconv.FormatInt(archiveCount(r), 10)+"\n")
 	}
 	require.NotContains(t, rec.Body.String(), wallet)
+}
+
+func envOf(kv ...string) func(string) string {
+	m := map[string]string{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		m[kv[i]] = kv[i+1]
+	}
+	return func(k string) string { return m[k] }
+}
+
+// The archive is off unless LEDGER_ARCHIVE_RPS sets a rate above zero, and a
+// value that does not read leaves it off too: no archive is made, whatever
+// the probe. At one call a second with a burst of one, two calls are a
+// second apart.
+func TestLedgerArchivePaceFromEnv(t *testing.T) {
+	wallet, val := bech(t, "cosmos", 1), bech(t, "cosmosvaloper", 2)
+	fake := &fakeArchive{delegations: map[int64]map[string]int64{50: {val: 700}}}
+	srv := fake.serve(t)
+	defer srv.Close()
+	var at []time.Time
+	timed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		at = append(at, time.Now())
+		srv.Config.Handler.ServeHTTP(w, r)
+	}))
+	defer timed.Close()
+	origin := timed.URL + "/" + archiveSecret
+
+	before := servingArchive.Load()
+	for name, getenv := range map[string]func(string) string{
+		"unset":         envOf(),
+		"burst only":    envOf("LEDGER_ARCHIVE_BURST", "4"),
+		"zero":          envOf("LEDGER_ARCHIVE_RPS", "0"),
+		"negative":      envOf("LEDGER_ARCHIVE_RPS", "-2"),
+		"garbage":       envOf("LEDGER_ARCHIVE_RPS", "fast"),
+		"not finite":    envOf("LEDGER_ARCHIVE_RPS", "NaN"),
+		"garbage burst": envOf("LEDGER_ARCHIVE_RPS", "1", "LEDGER_ARCHIVE_BURST", "many"),
+		"zero burst":    envOf("LEDGER_ARCHIVE_RPS", "1", "LEDGER_ARCHIVE_BURST", "0"),
+	} {
+		err := StartLedgerArchive(origin, getenv, t.Logf)
+		require.Error(t, err, name)
+		require.True(t, strings.HasPrefix(err.Error(), "archive: off"), "%s: %v", name, err)
+		require.NotContains(t, err.Error(), timed.URL, name)
+		require.True(t, servingArchive.Load() == before, "%s: an archive was made", name)
+	}
+	require.Empty(t, at)
+
+	pace, err := archivePaceFromEnv(envOf("LEDGER_ARCHIVE_RPS", "2"))
+	require.NoError(t, err)
+	require.Equal(t, archivePace{rate: 2, burst: 1}, pace, "the burst defaults to one")
+	pace, err = archivePaceFromEnv(envOf("LEDGER_ARCHIVE_RPS", "1", "LEDGER_ARCHIVE_BURST", "1"))
+	require.NoError(t, err)
+	require.Equal(t, archivePace{rate: 1, burst: 1}, pace)
+	a, err := newLedgerArchive(origin, 2*time.Second, pace)
+	require.NoError(t, err)
+	for range 2 {
+		got, err := a.delegations(newArchiveBudget(), wallet, 50)
+		require.NoError(t, err)
+		require.Equal(t, "700", got[val].String())
+	}
+	require.Len(t, at, 2)
+	require.GreaterOrEqual(t, at[1].Sub(at[0]), 990*time.Millisecond)
 }
 
 // The bucket lets a burst through at once, then one call per 1/rate, and
