@@ -5,10 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 )
+
+// StatusError is a response other than 200. Message is the service's own
+// JSON error message, when it sent one; the error text leaves it out, since
+// it can echo request values.
+type StatusError struct {
+	Code    int
+	Message string
+}
+
+func (e *StatusError) Error() string { return fmt.Sprintf("service HTTP status %d", e.Code) }
 
 // Endpoint separates trusted configuration from request-controlled resource
 // paths and query values. Private cluster origins are intentional.
@@ -56,7 +67,12 @@ func (e *Endpoint) GetJSONWithHeaders(path string, query url.Values, headers map
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("service HTTP status %d", resp.StatusCode)
+		var body struct {
+			Message string `json:"message"`
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = json.Unmarshal(raw, &body)
+		return &StatusError{Code: resp.StatusCode, Message: body.Message}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

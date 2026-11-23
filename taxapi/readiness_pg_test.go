@@ -39,7 +39,7 @@ func TestReadinessRetainedEvidencePostgres(t *testing.T) {
 		"CREATE TEMP TABLE message_parser_errors (message_id bigint)",
 		"CREATE TEMP TABLE failed_messages (tx_id bigint)",
 		"CREATE TEMP TABLE failed_txes (block_id bigint, hash text)",
-		"CREATE TEMP TABLE addresses (id bigint, address text)",
+		tempAddressesTable,
 		"CREATE TEMP TABLE tx_signer_addresses (tx_id bigint, address_id bigint)",
 		"CREATE TEMP TABLE fees (tx_id bigint, payer_address_id bigint)",
 		"CREATE TEMP TABLE taxable_events (message_id bigint, from_addr text, to_addr text, validator_address text)",

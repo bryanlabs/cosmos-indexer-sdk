@@ -318,6 +318,30 @@ func (b rateBook) sharesFor(v string, h int64, tlo, thi decimal.Decimal) (decima
 	return shareTrunc(tlo.DivRound(rhi, rateDigits)), shareTrunc(thi.DivRound(rlo, rateDigits)), nil
 }
 
+// requestedShareTokens is the bond tokens an unbond asked for, when the
+// record names them apart from the tokens it paid.
+func requestedShareTokens(rec map[string]string, bondDenom string) (decimal.Decimal, bool) {
+	if rec["requested"] == "" {
+		return decimal.Zero, false
+	}
+	coins, err := ledgerCoins(rec["requested"], bondDenom)
+	if err != nil {
+		return decimal.Zero, false
+	}
+	n := bondAmount(coins, bondDenom)
+	if n == nil || n.Sign() <= 0 {
+		return decimal.Zero, false
+	}
+	return decimal.NewFromBigInt(n, 0), true
+}
+
+// sharesLeft says the wallet certainly still holds shares on v at this point
+// of the walk back, after the event being undone.
+func sharesLeft(shares map[string]*shareSpan, v string) bool {
+	sp, ok := shares[v]
+	return ok && sp.lo.GreaterThan(shareEpsilon)
+}
+
 // shareTrunc truncates a computed quotient to the chain's 18 share places,
 // first rounding off the last digits so a quotient that is exact on chain
 // is not carried below itself by the division's own rounding.
@@ -537,6 +561,19 @@ func undoEvent(in ledgerInput, book rateBook, spent map[uint64]*big.Int, ev ledg
 				// rounded down.
 				if book.unit[v] {
 					add(v, amt, amt)
+					continue
+				}
+				if req, ok := requestedShareTokens(rec, in.BondDenom); ok && sharesLeft(shares, v) {
+					// Before Gaia v15 the tokens asked for are known. The
+					// chain takes them over the rate, truncated, and caps
+					// that at the delegation's shares only when it takes
+					// the whole delegation; shares left after the unbond
+					// rule the cap out.
+					lo, hi, err := book.sharesFor(v, ev.Height, req, req)
+					if err != nil {
+						return wrap(err)
+					}
+					add(v, lo, hi)
 					continue
 				}
 				lo, hi, err := book.sharesFor(v, ev.Height, amt, amt.Add(one))
