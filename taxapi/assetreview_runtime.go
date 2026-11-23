@@ -132,14 +132,23 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 		row.DecimalsAssumed = false
 		row.Excluded = false
 	}
+	classified, err := applySemanticDecisions(out, decisions, used)
+	if err != nil {
+		return nil, err
+	}
 	applyUserPrices(out, decisions)
 	// A record ID that matches nothing is a stale or foreign decision and is
-	// refused. A denom, policy or price key that matches nothing is harmless:
+	// refused, and so is a classification on a record that waits on no
+	// classification review. A denom, policy or price key that matches nothing is harmless:
 	// the token did not appear in this period, or a reference price has since
 	// covered the row, so a remembered rule can be sent with every report.
 	for key := range decisions {
-		if !used[key] && decisionKeyKind(key) == apiRecord {
+		kind := decisionKeyKind(key)
+		if !used[key] && (kind == apiRecord || kind == decisionKindSemantic) {
 			return nil, fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", key)
+		}
+		if kind == apiRecord && decisions[key].Classification != "" && !classified[key] {
+			return nil, fmt.Errorf("asset decision %q: classification on a receipt that waits on no classification review", key)
 		}
 	}
 	return out, nil
@@ -224,6 +233,9 @@ func UnmatchedDecisionKeys(rows []Row, decisions AssetDecisions) []string {
 		}
 		if r.UserPriceKey != "" {
 			used[r.UserPriceKey] = true
+		}
+		if r.SemanticDecision != nil {
+			used[r.SemanticRecordID] = true
 		}
 	}
 	var out []string
@@ -455,7 +467,9 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 			"record_id":           "one receipt; override carries quantity, value_usd, cost_basis_usd and acquired_date totals",
 			"denom:<raw>":         "every flagged receipt of that token in the report; override carries token and unit_value_usd, each receipt is priced quantity times unit on its own date",
 			DecisionKeySpamPolicy: "every receipt flagged as suspected spam without a more specific decision; exclude only (spam_policy=valueless is the same thing)",
+			"semantic_record_id":  "one row of semantic_reviews, keyed by its SemanticRecordID; carries classification and no mode, with value_usd for an unpriced row and cost_basis_usd and acquired_date for a transfer_in. A flagged receipt's SemanticRecordID is its record_id, where classification rides beside the mode",
 		},
+		"classifications": ClassificationVocabulary(),
 	})
 }
 

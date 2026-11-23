@@ -65,6 +65,13 @@ type Row struct {
 	// UserPriceKey is the decision key that supplied it.
 	PriceUserSupplied bool
 	UserPriceKey      string
+	// SemanticRecordID is the decision key that classifies a row waiting on
+	// classification review, SemanticDecision the classification applied
+	// and ClassifiedFrom the parser's category before it
+	// (semantic_decision.go). All three are empty on every other row.
+	SemanticRecordID string         `json:",omitempty"`
+	SemanticDecision *AssetDecision `json:",omitempty"`
+	ClassifiedFrom   string         `json:",omitempty"`
 	// Detail is the parser's protocol context JSON (contract, protocol name,
 	// proposal id, Skip destination, ...). Empty for plain rows.
 	Detail string
@@ -192,6 +199,9 @@ func (r Row) description() string {
 	if r.UserTag != "" {
 		d += " | user_tag=" + r.UserTag
 	}
+	if r.SemanticDecision != nil {
+		d += " | user_classification=" + r.SemanticDecision.Classification + " parser_category=" + r.ClassifiedFrom
+	}
 	if r.PriceImplied {
 		d += " (price implied from the other swap leg)"
 	}
@@ -220,10 +230,10 @@ const userPriceNote = " (user-supplied price, not an oracle price)"
 // priceSource names where a row's USD price came from: reference (the oracle
 // or the documented USDC peg), implied (the other leg of the swap), user (a
 // price the user entered), asset_review (an identity decision's own value or
-// exclusion), or missing.
+// exclusion, or a row the user classified exclude), or missing.
 func priceSource(r Row) string {
 	switch {
-	case r.AssetDecision != nil:
+	case r.AssetDecision != nil, r.SemanticDecision != nil && r.SemanticDecision.Classification == ClassExclude:
 		return "asset_review"
 	case r.PriceUserSupplied:
 		return "user"
@@ -482,16 +492,25 @@ func (r Row) reviewIdentity() *AssetIdentity {
 	return &identity
 }
 
+// reviewMode is the user_treatment column: the identity decision's mode, and
+// classified:<classification> for a row the user classified.
 func reviewMode(r Row) string {
-	if r.AssetDecision == nil {
-		return ""
+	mode := ""
+	if r.AssetDecision != nil {
+		mode = r.AssetDecision.Mode
 	}
-	return r.AssetDecision.Mode
+	if r.SemanticDecision != nil {
+		if mode != "" {
+			mode += ";"
+		}
+		mode += "classified:" + r.SemanticDecision.Classification
+	}
+	return mode
 }
 
 func manualField(r Row, field string) string {
 	if r.AssetDecision == nil {
-		return ""
+		return semanticManualField(r, field)
 	}
 	if r.AssetDecision.Mode == AssetDecisionExclude {
 		if field == apiValue || field == apiBasis {
@@ -509,6 +528,33 @@ func manualField(r Row, field string) string {
 		return r.AssetDecision.CostBasisUSD
 	case apiDate:
 		return r.AssetDecision.AcquiredDate
+	}
+	return ""
+}
+
+// semanticManualField is manualField for a row only a classification
+// decided: the value_usd it applied, its transfer-in basis and acquisition
+// date, or zero value and basis for classification exclude.
+func semanticManualField(r Row, field string) string {
+	d := r.SemanticDecision
+	if d == nil {
+		return ""
+	}
+	if d.Classification == ClassExclude {
+		if field == apiValue || field == apiBasis {
+			return decimal.Zero.String()
+		}
+		return ""
+	}
+	switch field {
+	case apiValue:
+		return d.ValueUSD
+	case apiBasis:
+		return d.CostBasisUSD
+	case apiDate:
+		if d.CostBasisUSD != "" && r.ManualAcquiredDate != nil {
+			return r.ManualAcquiredDate.UTC().Format(apiDateLayout)
+		}
 	}
 	return ""
 }
@@ -591,15 +637,22 @@ func ctcType(r Row) string {
 	}
 }
 
+// userValued reports whether the row's value is the user's own: a user
+// price, an identity decision, or a classification that left the row out.
+func userValued(r Row) bool {
+	return r.PriceUserSupplied || (r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude)) ||
+		(r.SemanticDecision != nil && r.SemanticDecision.Classification == ClassExclude)
+}
+
 func rowPriceText(r Row) string {
-	if r.PriceUserSupplied || (r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude)) {
+	if userValued(r) {
 		return r.PriceUSD.String()
 	}
 	return refPrice(r.PriceUSD)
 }
 
 func rowValueText(r Row) string {
-	if r.PriceUserSupplied || (r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude)) {
+	if userValued(r) {
 		return r.ValueUSD.String()
 	}
 	return usd(r.ValueUSD)
