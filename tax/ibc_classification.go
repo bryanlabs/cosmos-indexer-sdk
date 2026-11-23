@@ -11,6 +11,7 @@ import (
 
 	txlog "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	transfertypes "github.com/cosmos/ibc-go/v7/modules/apps/transfer/types"
 	clienttypes "github.com/cosmos/ibc-go/v7/modules/core/02-client/types"
 	chantypes "github.com/cosmos/ibc-go/v7/modules/core/04-channel/types"
@@ -161,21 +162,24 @@ func takeIBCCredit(credits map[string]sdk.Coins, receiver, amount string, denoms
 }
 
 func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data transfertypes.FungibleTokenPacketData) ([]TaxableEvent, []string) {
-	success, anySuccess := false, false
+	success, anySuccess, invertedMatch := false, false, false
+	inverted := ibcV1ReceiveResultAck(log, packet)
 	issue := fmt.Sprintf("ibc v1 receive sequence %d receiver %s: successful application cannot reconcile unambiguous committed bank credit", packet.Sequence, data.Receiver)
 	for _, ev := range log.Events {
 		if ev.Type != eventFungibleTokenPacket || !ibcCommittedEvent(ev) {
 			continue
 		}
 		for _, a := range ibcReceiveGroups(ev) {
-			anySuccess = anySuccess || (a[attributeSuccess] == attributeTrue && a["error"] == "")
+			appSuccess := a[attributeSuccess] == attributeTrue || (inverted && a[attributeSuccess] == attributeFalse)
+			anySuccess = anySuccess || (appSuccess && a["error"] == "")
 			if a[attributeReceiver] != data.Receiver || a[attributeAmount] != data.Amount {
 				continue
 			}
-			if a[attributeSuccess] == attributeFalse || a["error"] != "" {
+			if (a[attributeSuccess] == attributeFalse && !inverted) || a["error"] != "" {
 				return nil, nil
 			}
-			success = success || a[attributeSuccess] == attributeTrue
+			success = success || appSuccess
+			invertedMatch = invertedMatch || (inverted && a[attributeSuccess] == attributeFalse)
 		}
 	}
 	if ibcV1ReceiveErrorAck(log, packet) || !anySuccess {
@@ -193,7 +197,13 @@ func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data tra
 	if packet.SourcePort == "" || packet.DestinationPort != string(CategoryTransfer) || packet.SourceChannel == "" || packet.DestinationChannel == "" || data.Denom == "" {
 		return nil, []string{issue + " (missing transfer packet context)"}
 	}
-	coin, ok := takeIBCCredit(ibcCredits(log), data.Receiver, data.Amount, ibcV1ReceiveCandidates(data.Denom, packet)...)
+	var coin sdk.Coin
+	var ok bool
+	if invertedMatch {
+		coin, ok = ibcV1InvertedReceiveCredit(log, packet, data)
+	} else {
+		coin, ok = takeIBCCredit(ibcCredits(log), data.Receiver, data.Amount, ibcV1ReceiveCandidates(data.Denom, packet)...)
+	}
 	if !ok {
 		return nil, []string{issue}
 	}
@@ -272,6 +282,76 @@ func ibcReceivePath(denom, sourcePort, sourceChannel, destinationPort, destinati
 		return strings.TrimPrefix(denom, sourcePrefix)
 	}
 	return destinationPort + "/" + destinationChannel + "/" + denom
+}
+
+// The in-SDK transfer module (SDK 0.40 to 0.42, Cosmos Hub before Vega at
+// height 8,695,000) wrote the receive's success attribute inverted: a credited
+// receive says success=false and a rejected one says true. Its written ack is
+// the reliable signal. From ibc-go on, success=false only comes with an error
+// ack, so a result ack for this exact packet sequence identifies the old
+// module. The credit itself is still proven by takeIBCCredit.
+func ibcV1ReceiveResultAck(log *txlog.LogMessage, packet chantypes.Packet) bool {
+	found := false
+	for _, ev := range log.Events {
+		if ev.Type != "write_acknowledgement" || !ibcCommittedEvent(ev) {
+			continue
+		}
+		a := ibcAttrs(ev)
+		if a[attributeIBCPacketSequence] != strconv.FormatUint(packet.Sequence, 10) ||
+			a[attributeIBCSrcPort] != packet.SourcePort || a[attributeIBCSrcChannel] != packet.SourceChannel ||
+			a[attributeIBCDstPort] != packet.DestinationPort || a[attributeIBCDstChannel] != packet.DestinationChannel {
+			continue
+		}
+		raw, _ := hex.DecodeString(a["packet_ack_hex"])
+		if len(raw) == 0 {
+			raw = []byte(a["packet_ack"])
+		}
+		if !isResultAcknowledgement(raw) {
+			return false
+		}
+		found = true
+	}
+	return found
+}
+
+// A receive read through the inverted success attribute is credited only by
+// the one committed bank transfer the old module makes for it: from the
+// channel's escrow when a native coin returns, or from the transfer module
+// account after minting a voucher, to the packet's receiver, for exactly the
+// packet amount in the local denomination. Anything else stays incomplete.
+func ibcV1InvertedReceiveCredit(log *txlog.LogMessage, packet chantypes.Packet, data transfertypes.FungibleTokenPacketData) (sdk.Coin, bool) {
+	amt, ok := sdk.NewIntFromString(data.Amount)
+	if !ok || !amt.IsPositive() || data.Receiver == "" {
+		return sdk.Coin{}, false
+	}
+	sender := authtypes.NewModuleAddress(transfertypes.ModuleName).String()
+	if strings.HasPrefix(data.Denom, packet.SourcePort+"/"+packet.SourceChannel+"/") {
+		sender = escrowAddress(packet.DestinationPort, packet.DestinationChannel)
+	}
+	denoms := map[string]bool{}
+	for _, d := range ibcV1ReceiveCandidates(data.Denom, packet) {
+		denoms[d] = true
+	}
+	var found []sdk.Coin
+	for _, ev := range log.Events {
+		if ev.Type != string(CategoryTransfer) || !ibcCommittedEvent(ev) {
+			continue
+		}
+		for _, a := range ibcAttributeGroups(ev, attributeRecipient, attributeSender, attributeAmount) {
+			if a[attributeSender] != sender || a[attributeRecipient] != data.Receiver {
+				continue
+			}
+			coins, err := sdk.ParseCoinsNormalized(a[attributeAmount])
+			if err != nil || len(coins) != 1 || !coins[0].Amount.Equal(amt) || !denoms[coins[0].Denom] {
+				continue
+			}
+			found = append(found, coins[0])
+		}
+	}
+	if len(found) != 1 {
+		return sdk.Coin{}, false
+	}
+	return found[0], true
 }
 
 // A v1 error acknowledgement discards the entire application's receive cache.
@@ -424,6 +504,14 @@ func isErrorAcknowledgement(raw []byte) bool {
 		Result string `json:"result"`
 	}
 	return json.Unmarshal(raw, &ack) == nil && ack.Error != "" && ack.Result == ""
+}
+
+func isResultAcknowledgement(raw []byte) bool {
+	var ack struct {
+		Error  string `json:"error"`
+		Result string `json:"result"`
+	}
+	return json.Unmarshal(raw, &ack) == nil && ack.Result != "" && ack.Error == ""
 }
 
 func isV2ErrorAcknowledgement(raw []byte) bool {
