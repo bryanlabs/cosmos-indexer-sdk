@@ -775,6 +775,9 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 	top := firstContract(log)
 	var out []TaxableEvent
 	nativeRow := map[string]bool{}
+	// nativeDAO marks a wallet whose native fallback row is a payout of a
+	// pinned DAO proposal; its other coins from the same payout follow it.
+	nativeDAO := map[string]bool{}
 	for _, k := range nativeOrder {
 		f := native[k]
 		if f.net.IsZero() {
@@ -786,6 +789,11 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 			return ok || (nativeNamed[flowKey{cp, fixtureNativeDenom}] && wallet(cp))
 		})
 		e.Detail = contractDetail(contract, map[string]string{detailFallback: fallbackBank})
+		if trigger, extra, ok := daoProposalClass(log, []*fallbackFlow{f}, []string{contract}); ok {
+			e.Category, e.RewardTrigger = string(CategoryIncome), trigger
+			e.Detail = contractDetail(contract, extra)
+			nativeDAO[k.wallet] = true
+		}
 		out = append(out, e)
 	}
 	seen := map[string]bool{}
@@ -820,6 +828,8 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 				}
 				continue
 			}
+		}
+		if !nativeRow[w] || nativeDAO[w] {
 			if trigger, extra, ok := daoProposalClass(log, flows, contracts); ok {
 				for i := range rows {
 					rows[i].Category, rows[i].RewardTrigger = string(CategoryIncome), trigger
