@@ -126,7 +126,7 @@ func TestBlockTxsBeforeCoinEvents(t *testing.T) {
 			t.Errorf("tx %d read as charged %q known %v, want %q %v", i, txs[i].Charged, txs[i].ChargeKnown, w.charged, w.known)
 		}
 	}
-	charges, err := node.failedTxCharges(height)
+	charges, err := node.failedTxCharges(height, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,8 +147,9 @@ func TestBlockTxsBeforeCoinEvents(t *testing.T) {
 	}
 }
 
-// From Gaia v6 the block's own events carry coin events, and a failed
-// transaction with none paid nothing whatever its log says.
+// From Gaia v6 the block's own events carry coin events. Where failed
+// transactions carry events too (Gaia v7 on mainnet, every other chain), one
+// with none paid nothing whatever its log says.
 func TestBlockTxsWithCoinEvents(t *testing.T) {
 	dir := t.TempDir()
 	const height = 9000000
@@ -172,6 +173,20 @@ func TestBlockTxsWithCoinEvents(t *testing.T) {
 	}
 	if txs[0].Charged != "" || !txs[0].ChargeKnown || !txs[0].Rejected {
 		t.Fatalf("read as %+v", txs[0])
+	}
+	// On cosmoshub-4 before Gaia v7 a failed transaction had no events even
+	// when it paid: the fee reader settles it from its result instead, here
+	// a message that ran out of gas well past the ante handler's share.
+	node := &ledgerNode{cache: dir}
+	charges, err := node.failedTxCharges(height, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(charges) != 1 || charges[txHash(tx)] != testFee2500 {
+		t.Fatalf("pre-v7 charges %v", charges)
+	}
+	if charges, err = node.failedTxCharges(height, false); err != nil || len(charges) != 1 || charges[txHash(tx)] != "" {
+		t.Fatalf("charges %v %v", charges, err)
 	}
 }
 

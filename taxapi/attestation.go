@@ -195,16 +195,7 @@ func (s *Server) scanAttestationsOnce() (int, error) {
 		Signer  string
 	}
 	var hits []hit
-	err := s.db.Raw(`
-		SELECT txes.id AS tx_id, txes.hash, txes.memo, blocks.height, blocks.time_stamp AS time,
-		       chains.chain_id, addresses.address AS signer
-		FROM txes
-		JOIN blocks ON blocks.id = txes.block_id
-		JOIN chains ON chains.id = blocks.chain_id
-		JOIN tx_signer_addresses tsa ON tsa.tx_id = txes.id
-		JOIN addresses ON addresses.id = tsa.address_id
-		WHERE txes.code = 0 AND txes.memo LIKE ? AND txes.id > ?
-		ORDER BY txes.id`, AttestationMemoPrefix+"%", cursor).Scan(&hits).Error
+	err := s.db.Raw(attestationScanQuery, AttestationMemoPrefix+"%", cursor).Scan(&hits).Error
 	if err != nil {
 		return 0, err
 	}
@@ -436,6 +427,22 @@ func (s *Server) handleAttestationCheck(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, resp)
 }
+
+// attestationScanQuery reads attestation memos after the cursor. The literal
+// LIKE repeats idx_txes_attestation_memo's predicate word for word: the
+// planner can use a partial index only when the query implies its predicate,
+// and it cannot prove that from a bound parameter, so without the literal
+// every run scans all of txes.
+const attestationScanQuery = `
+		SELECT txes.id AS tx_id, txes.hash, txes.memo, blocks.height, blocks.time_stamp AS time,
+		       chains.chain_id, addresses.address AS signer
+		FROM txes
+		JOIN blocks ON blocks.id = txes.block_id
+		JOIN chains ON chains.id = blocks.chain_id
+		JOIN tx_signer_addresses tsa ON tsa.tx_id = txes.id
+		JOIN addresses ON addresses.id = tsa.address_id
+		WHERE txes.memo LIKE 'bryanlabs-tax:%' AND txes.code = 0 AND txes.memo LIKE ? AND txes.id > ?
+		ORDER BY txes.id`
 
 // attestationsMigrate owns the table and the partial index that makes the
 // scanner's memo-prefix query cheap on a multi-million-row txes table.

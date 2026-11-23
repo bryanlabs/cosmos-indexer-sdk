@@ -41,6 +41,14 @@ const basisUnknownNote = " (basis unknown, complete in your aggregator)"
 
 const proceedsUnknownNote = " (no USD price on the sale date, proceeds unknown)"
 
+// userSalePriceNote and userReceiptPriceNote mark a line whose proceeds or
+// basis rest on a USD price the user entered for a day the reference prices
+// did not cover.
+const (
+	userSalePriceNote    = " (user-supplied sale price)"
+	userReceiptPriceNote = " (user-supplied receipt price)"
+)
+
 // stargazeBasisNote marks the sale of an NFT that arrived in Stargaze's
 // March 2026 migration. Its basis and acquired date are the holder's Stargaze
 // purchase, which Cosmos Hub does not show.
@@ -52,6 +60,7 @@ type lot struct {
 	date         time.Time
 	manual       bool
 	basisUnknown bool   // true when this lot's cost is a receipt-time price guess, not a known acquisition cost (see INF-205)
+	userPriced   bool   // true when this lot's cost is a receipt-time price the user entered
 	msgID        uint   // the message a reward lot was booked in, 0 for any other lot
 	denom        string // the on-chain denom, which a withdraw-address move matches
 }
@@ -71,7 +80,7 @@ func lotAsset(r Row) string {
 // moveLot is the lot a withdraw address receives from a reward move: the
 // reward's receipt-time value is its basis and the receipt its acquisition.
 func moveLot(r Row) lot {
-	l := lot{qty: r.Amount, cost: r.PriceUSD, date: r.Time, basisUnknown: r.PriceMissing, denom: r.Denom}
+	l := lot{qty: r.Amount, cost: r.PriceUSD, date: r.Time, basisUnknown: r.PriceMissing, userPriced: r.PriceUserSupplied, denom: r.Denom}
 	if r.ManualBasisUSD != nil && r.ManualAcquiredDate != nil && r.Amount.IsPositive() {
 		l.cost, l.date, l.basisUnknown, l.manual = r.ManualBasisUSD.DivRound(r.Amount, 64), *r.ManualAcquiredDate, false, true
 	}
@@ -152,7 +161,7 @@ func Build8949(rows []Row) []Form8949Row {
 	for _, r := range sorted {
 		stamp()
 		rowChain = r.ChainID
-		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+		if r.Excluded || r.FeeOutcomeUnknown || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
 		// A reward paid to the withdraw address is no disposal: the delegator
@@ -178,7 +187,7 @@ func Build8949(rows []Row) []Form8949Row {
 		}
 		// NFT acquisition via mint: establishes the NFT's cost basis.
 		if r.Category == apiNFTMint {
-			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
+			nftLots[r.Asset] = append(nftLots[r.Asset], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time, userPriced: r.PriceUserSupplied})
 			continue
 		}
 
@@ -188,11 +197,13 @@ func Build8949(rows []Row) []Form8949Row {
 			desc := "NFT " + r.Asset
 			switch r.Direction {
 			case "in": // buyer acquires the NFT; basis = USD paid
-				nftLots[key] = append(nftLots[key], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time})
+				nftLots[key] = append(nftLots[key], lot{qty: decimal.NewFromInt(1), cost: r.ValueUSD, date: r.Time, userPriced: r.PriceUserSupplied})
 			case apiOut:
 				proceeds := r.ValueUSD
 				if r.PriceMissing {
 					desc += proceedsUnknownNote
+				} else if r.PriceUserSupplied {
+					desc += userSalePriceNote
 				}
 				q := nftLots[key]
 				if len(q) == 0 {
@@ -223,6 +234,9 @@ func Build8949(rows []Row) []Form8949Row {
 					})
 					nftLots[key] = q[1:]
 				} else {
+					if l.userPriced {
+						desc += userReceiptPriceNote
+					}
 					out = append(out, Form8949Row{
 						Description:     desc,
 						DateAcquired:    l.date.UTC().Format(apiUSDateLayout),
@@ -254,6 +268,7 @@ func Build8949(rows []Row) []Form8949Row {
 			l := lot{
 				qty: r.Amount, cost: cost, date: acquired,
 				basisUnknown: unknown, manual: r.ManualBasisUSD != nil, denom: r.Denom,
+				userPriced: r.PriceUserSupplied && r.ManualBasisUSD == nil,
 			}
 			if r.Category == apiReward {
 				l.msgID = r.MessageID
@@ -293,6 +308,8 @@ func Build8949(rows []Row) []Form8949Row {
 			priceNote := ""
 			if proceedsUnknown {
 				priceNote = proceedsUnknownNote
+			} else if r.PriceUserSupplied && r.Category != "gov_deposit_burn" {
+				priceNote = userSalePriceNote
 			}
 			for remaining.IsPositive() {
 				q := lots[asset]
@@ -318,6 +335,9 @@ func Build8949(rows []Row) []Form8949Row {
 				desc := take.String() + " " + asset
 				if l.manual {
 					desc += " (user-supplied basis)"
+				}
+				if l.userPriced && !l.basisUnknown {
+					desc += userReceiptPriceNote
 				}
 				var cost, gain decimal.Decimal
 				if l.basisUnknown {

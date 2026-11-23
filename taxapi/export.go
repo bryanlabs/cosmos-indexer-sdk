@@ -53,6 +53,18 @@ type Row struct {
 	// same swap (same transaction) because the oracle had no price for this
 	// asset: the user gave up X USD of ATOM, so the shares received are worth X.
 	PriceImplied bool
+	// FeeOutcomeUnknown marks a fee row of a failed transaction whose charge
+	// the index has not recorded: the chain charged either DeclaredFee or
+	// nothing. Amount and ValueUSD are 0 and the row is left out of totals,
+	// tax-software imports, Form 8949, positions and the journal; the
+	// generic CSV, the preview and readiness show it (OPS-810).
+	FeeOutcomeUnknown bool
+	DeclaredFee       string
+	// PriceUserSupplied is true when PriceUSD is the user's own entry from a
+	// price: decision (assetreview.go), not an oracle or pegged price.
+	// UserPriceKey is the decision key that supplied it.
+	PriceUserSupplied bool
+	UserPriceKey      string
 	// Detail is the parser's protocol context JSON (contract, protocol name,
 	// proposal id, Skip destination, ...). Empty for plain rows.
 	Detail string
@@ -124,6 +136,15 @@ func takeRewardLots(q []lot, r Row) (kept, taken []lot) {
 	return kept, taken
 }
 
+// markFeeOutcomeUnknown counts the fee row as nothing and keeps its declared
+// amount beside the flag.
+func (r *Row) markFeeOutcomeUnknown() {
+	r.FeeOutcomeUnknown = true
+	r.DeclaredFee = r.Amount.String()
+	r.Amount = decimal.Zero
+	r.ValueUSD = decimal.Zero
+}
+
 // isTaxable mirrors tax.Category.Taxable; fees count as taxable spends.
 // Record-only rows stay in the preview, Generic CSV and journal and are kept
 // out of tax-software imports and Form 8949.
@@ -134,7 +155,7 @@ func (r Row) isTaxable() bool {
 // taxImportable reports whether a row belongs in a tax-software import.
 // Record-only rows and rows the user tagged spam or protocol_deposit do not.
 func (r Row) taxImportable() bool {
-	if !r.isTaxable() {
+	if !r.isTaxable() || r.FeeOutcomeUnknown {
 		return false
 	}
 	switch r.UserTag {
@@ -150,7 +171,11 @@ func (r Row) taxImportable() bool {
 // silently reporting a possibly-wrong amount.
 func (r Row) description() string {
 	d := r.Category
-	if (r.Category == apiNFTSale || r.Category == apiNFTMint || r.Category == apiNFTTransfer) && r.Asset != "" {
+	if r.Category == TagIncome && r.RewardTrigger == TagAirdrop {
+		// The indexer books an airdrop as income; the label lets a user
+		// find it without a new category.
+		d = "Airdrop (income)"
+	} else if (r.Category == apiNFTSale || r.Category == apiNFTMint || r.Category == apiNFTTransfer) && r.Asset != "" {
 		d = r.Category + " " + r.Asset
 	} else if r.IsIBC {
 		d = "ibc " + r.Denom
@@ -170,6 +195,9 @@ func (r Row) description() string {
 	if r.PriceImplied {
 		d += " (price implied from the other swap leg)"
 	}
+	if r.PriceUserSupplied {
+		d += userPriceNote
+	}
 	if r.AssetIdentity != nil {
 		metadata, _ := json.Marshal(r.reviewIdentity())
 		d += " | asset_identity=" + string(metadata)
@@ -177,10 +205,35 @@ func (r Row) description() string {
 	if r.DecimalsAssumed {
 		d += " (decimals unknown, amount may be wrong)"
 	}
+	if r.FeeOutcomeUnknown {
+		d += " (fee outcome unknown, declared " + r.DeclaredFee + " " + r.Symbol + ", counted as 0)"
+	}
 	if r.PriceMissing {
 		d += " (price missing)"
 	}
 	return d
+}
+
+// userPriceNote marks a row valued at a price the user entered.
+const userPriceNote = " (user-supplied price, not an oracle price)"
+
+// priceSource names where a row's USD price came from: reference (the oracle
+// or the documented USDC peg), implied (the other leg of the swap), user (a
+// price the user entered), asset_review (an identity decision's own value or
+// exclusion), or missing.
+func priceSource(r Row) string {
+	switch {
+	case r.AssetDecision != nil:
+		return "asset_review"
+	case r.PriceUserSupplied:
+		return "user"
+	case r.PriceMissing:
+		return "missing"
+	case r.PriceImplied:
+		return "implied"
+	default:
+		return "reference"
+	}
 }
 
 // label maps our category to a human/tax label.
@@ -254,12 +307,12 @@ func WritePreviewCSV(out io.Writer, format string, rows []Row) error {
 	for _, row := range rows {
 		withChain = withChain || row.ChainID != ""
 	}
-	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", apiTaxable, apiPreviewDetail, "Price Implied", "User Tag", "Source")
+	records[0] = append(records[0], "Asset Identity Metadata", "Staking Metadata", "Category", apiTaxable, apiPreviewDetail, "Price Implied", "User Tag", "Source", "Fee Outcome Unknown", "Declared Fee", "Denom", "Row Key", "Price Source", "User Price Key")
 	if withChain {
 		records[0] = append(records[0], "Chain ID")
 	}
 	for i, row := range rows {
-		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, previewTaxableText(row), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger)
+		records[i+1] = append(records[i+1], assetIdentityJSON(row.reviewIdentity()), stakingMetadataJSON(row), row.Category, previewTaxableText(row), row.Detail, boolStr(row.PriceImplied), row.UserTag, row.RewardTrigger, boolStr(row.FeeOutcomeUnknown), row.DeclaredFee, row.Denom, row.rowKey(), priceSource(row), row.UserPriceKey)
 		if withChain {
 			records[i+1] = append(records[i+1], row.ChainID)
 		}
@@ -359,7 +412,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 	case apiGeneric:
 		// Universal, fully-typed enterprise CSV: every field, USD basis. Any tool
 		// or accountant can map it; also the recommended import for Trace Finance.
-		_ = w.Write([]string{apiDateUTC, apiTxHash, apiCategory, "direction", apiAsset, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, "from", "to", "nft_asset", apiChain, "decimals_assumed", apiPriceMissing, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", apiDetail}) //nolint:lll
+		_ = w.Write([]string{apiDateUTC, apiTxHash, apiCategory, "direction", apiAsset, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, "from", "to", "nft_asset", apiChain, "decimals_assumed", apiPriceMissing, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", apiDetail, apiFeeOutcomeUnknown, "declared_fee", "price_source", "user_price_key", "row_key"}) //nolint:lll
 		for _, r := range rows {
 			_ = w.Write([]string{
 				r.Time.UTC().Format(time.RFC3339), r.TxHash, r.Category, r.Direction,
@@ -367,6 +420,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 				r.From, r.To, r.Asset, rowCSVChain(r), boolStr(r.DecimalsAssumed), boolStr(r.PriceMissing),
 				r.ValidatorAddress, spreadsheetLabel(r.ValidatorMoniker), r.RewardTrigger, assetIdentityJSON(r.reviewIdentity()), reviewMode(r), manualField(r, apiValue), manualField(r, apiBasis), manualField(r, apiDate),
 				boolStr(r.isTaxable()), boolStr(r.PriceImplied), r.UserTag, r.Detail,
+				boolStr(r.FeeOutcomeUnknown), r.DeclaredFee, priceSource(r), r.UserPriceKey, r.rowKey(),
 			})
 		}
 
@@ -538,14 +592,14 @@ func ctcType(r Row) string {
 }
 
 func rowPriceText(r Row) string {
-	if r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude) {
+	if r.PriceUserSupplied || (r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude)) {
 		return r.PriceUSD.String()
 	}
 	return refPrice(r.PriceUSD)
 }
 
 func rowValueText(r Row) string {
-	if r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude) {
+	if r.PriceUserSupplied || (r.AssetDecision != nil && (r.AssetDecision.Mode == AssetDecisionOverride || r.AssetDecision.Mode == AssetDecisionExclude)) {
 		return r.ValueUSD.String()
 	}
 	return usd(r.ValueUSD)
