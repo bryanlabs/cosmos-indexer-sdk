@@ -313,10 +313,41 @@ func TestUnnamedStopAboveMatchesTheWalkPostgres(t *testing.T) {
 					}
 					got, err := s.unnamedStopAbove([]int64{1}, w, "", floor, earlyTip, delegationsBy(states, &er))
 					require.NoError(t, err)
+					if got == 0 && multiDated(c.blocks) {
+						// A message dated twice leaves the wallet to the walk.
+						continue
+					}
 					require.Equal(t, want, got, "floor %d block reads %t messages %d", floor, s.blockReads, s.earlyMessages)
 				}
 			}
 		})
+	}
+}
+
+// multiDated says whether a fixture dates a message at more than one height.
+func multiDated(blocks []earlyBlock) bool {
+	for _, b := range blocks {
+		if len(b.placed) > 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// A message the pre-check reads at two heights leaves the wallet to the walk,
+// even where the walk stops above every date.
+func TestUnnamedStopAboveLeavesTwiceDatedToTheWalkPostgres(t *testing.T) {
+	database, w, states := earlyFixture(t, []earlyBlock{
+		{h: 960_000, unnamed: 50, named: 30, clean: true},
+		{h: 10, unnamed: 20, clean: true, placed: []int64{940_000, 600_000}, dirty: 600_000},
+		{h: 400_000, unnamed: 9, clean: false},
+	})
+	for _, s := range earlyServers(database) {
+		var wr, er []int64
+		require.Equal(t, int64(600_000), walkStop(t, s, w, 1, delegationsBy(states, &wr)))
+		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, delegationsBy(states, &er))
+		require.NoError(t, err)
+		require.Zero(t, got, "block reads %t messages %d", s.blockReads, s.earlyMessages)
 	}
 }
 

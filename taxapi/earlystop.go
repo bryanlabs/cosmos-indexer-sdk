@@ -154,6 +154,17 @@ func (s *Server) unnamedStopAbove(ids []int64, addr, operator string, floor, hi 
 			if err != nil {
 				return 0, err
 			}
+			// A message dated more than once may form one group with its
+			// other datings in the walk's single read, or not, as the
+			// rows of messages outside this window fall between them; the
+			// walk decides those wallets.
+			at := map[uint64]int64{}
+			for _, r := range rows {
+				if h, ok := at[r.MessageID]; ok && h != r.Height {
+					return 0, nil
+				}
+				at[r.MessageID] = r.Height
+			}
 			got, left := attributeStakes(rows, addr)
 			for _, ev := range got {
 				attributed[ev.Height] = append(attributed[ev.Height], ev)
