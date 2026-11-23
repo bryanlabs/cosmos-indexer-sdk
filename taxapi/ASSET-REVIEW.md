@@ -23,8 +23,9 @@ never updated by this feature.
 
 The optional `asset_decisions` query parameter is a JSON object. The web
 application uses the camel-case `assetDecisions` request-body field and forwards
-it to the SDK. Keys come in three kinds, and the most specific one wins for each
-receipt:
+it to the SDK. Keys for flagged receipts come in three kinds, and the most
+specific one wins for each receipt (user prices, below, have their own `price:`
+keys):
 
 | Key | Reaches | Override shape |
 | --- | --- | --- |
@@ -68,8 +69,40 @@ Quantity is positive. USD value and basis are separate TOTAL amounts for the
 record, both manually entered and nonnegative. Explicit zero is valid; omission
 is not zero. The acquisition date must be valid and no later than the receipt.
 Plain decimals are bounded to 38 digits and 18 decimal places. At most 500
-decisions and 256 KiB of decision JSON are accepted; narrow the report range
-when necessary. No excess rows or decisions are silently discarded.
+non-price decisions, 25,000 `price:` keys and 4 MiB of decision JSON are
+accepted; narrow the report range when necessary. No excess rows or decisions
+are silently discarded.
+
+## User-entered prices for missing-price rows
+
+A row the oracle, the exact USDC peg and the other swap leg could not price is
+`price_missing`. A person can fill it with their own USD value through the same
+`asset_decisions` map, using `mode: "override"` and the existing value fields:
+
+| Key | Reaches | Shape |
+| --- | --- | --- |
+| `price:<raw_denom>@<YYYY-MM-DD>` | every price-missing row of that on-chain denom on that UTC day | `{"mode":"override","unit_value_usd":"0.42"}` |
+| `price:<HASH>#<message_index>#<sub_index>` | that one row (the preview's `Row Key`, uppercase hash) | `{"mode":"override","value_usd":"12.50"}`, the row's total |
+
+The row key wins over the denom and day key. A user price sets the value only:
+the row keeps its token, quantity, date and category, and its basis follows the
+methodology (the value for income, unknown for a transfer in), so `token`,
+`quantity`, `cost_basis_usd` and `acquired_date` are rejected on a `price:` key.
+It never replaces an oracle, pegged or implied price and never reaches a
+flagged receipt, which is valued through its identity decision. Any denom
+works, including `factory/...` and `cw20:...` tokens; the denom may not contain
+`@`. Explicit zero is valid. An idle `price:` key is accepted and listed in
+`unmatched_decision_keys`.
+
+The value is user-supplied, not an oracle price, and is labelled that way in
+every output: the preview and Generic CSV carry `Price Source`/`price_source`
+`user` and the `User Price Key`/`user_price_key` that set it (both also carry
+each row's key, `Row Key`/`row_key`, for building a row price), other CSV
+descriptions add "(user-supplied price, not an oracle price)", the journal memo
+adds "[user-supplied USD price]", and a Form 8949 line adds "(user-supplied sale
+price)" or "(user-supplied receipt price)". The preview's `Price Source` is
+otherwise `reference`, `implied`, `asset_review` or `missing`, and its `Denom`
+and `Row Key` columns give the keys to use.
 
 ## Reason codes and groups
 
@@ -208,5 +241,7 @@ pending gates, retained previews, explicit exclusion, arbitrary token overrides,
 manual basis/date FIFO, exact zero values, source immutability, unknown-ID
 rejection, cache separation, and (`TestDenomAndPolicyDecisionsFanOutToReceipts`)
 denom and policy fan-out, precedence, `spam_policy` shorthand, groups, and the
-reason glossary. Frontend Node/SSR tests verify no selected mode
+reason glossary. `userprice_http_test.go` covers user prices through
+`/report-job`, `/events` and `/asset-review`, the Noble USDC peg and the
+unpegged Axelar USDC. Frontend Node/SSR tests verify no selected mode
 or default token, escaped memos, metadata integrity, and explicit manual values.

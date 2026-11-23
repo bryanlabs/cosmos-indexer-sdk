@@ -225,6 +225,13 @@ func (s *Server) computeReportJob(key, chain string, addresses []string, start, 
 		s.failReportJob(key, err)
 		return
 	}
+	// The preview's Row Key column lets a person price or tag one row.
+	if !messageIndexesLoaded(all) {
+		if err := s.loadMessageIndexes(all); err != nil {
+			s.failReportJob(key, err)
+			return
+		}
+	}
 	var buf strings.Builder
 	if err := WritePreviewCSV(&buf, format, all); err != nil {
 		s.db.Model(&ReportJob{}).Where(apiKey, key).

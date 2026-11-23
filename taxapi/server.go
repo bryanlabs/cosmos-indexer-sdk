@@ -161,12 +161,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
+	preview := q.Get("preview") == "1" && format == apiCryptotaxcalculator
+	// The Generic CSV and the preview carry each row's key, which a price:
+	// decision for one row names; it needs the message index.
+	if (preview || format == apiGeneric) && !messageIndexesLoaded(rows) {
+		if err := s.loadMessageIndexes(rows); err != nil {
+			writeTaxError(w, err)
+			return
+		}
+	}
 	w.Header().Set(apiContentType, apiCSVContentType)
 	w.Header().Set(apiContentDisposition, "attachment; filename=cosmos-tax-"+format+".csv")
 	// preview=1 is the same transport the report job uses: every row kept,
 	// with the category, taxable flag, detail and user tag appended, for the
 	// site's public JSON API rather than a tax-software import.
-	if q.Get("preview") == "1" && format == apiCryptotaxcalculator {
+	if preview {
 		_ = WritePreviewCSV(w, format, rows)
 		return
 	}
