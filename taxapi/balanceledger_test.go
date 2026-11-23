@@ -190,6 +190,48 @@ func TestWalkBackSharesAtRecordedRates(t *testing.T) {
 	}
 }
 
+func TestWalkBackUnknownRateKeepsLaterTargets(t *testing.T) {
+	in := ledgerInput{
+		Address:   ledgerTestAddr,
+		BondDenom: "uatom",
+		Anchor: ledgerAnchor{
+			Height:      100,
+			Bank:        map[string]*big.Int{},
+			Delegations: map[string]*big.Int{ledgerTestVal: bi(99)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal: decimal.NewFromInt(100)},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(999, 1000)},
+		},
+		// The rate is recorded from height 50 on, so a target below the first
+		// record cannot be shown.
+		Samples: map[string][]rateSample{ledgerTestVal: {{50, rate(990, 1000)}, {80, rate(998, 1000)}}},
+	}
+	got, err := walkBack(in, []int64{90, 80, 60, 40, 30})
+	var unk ledgerUnknown
+	if !errors.As(err, &unk) {
+		t.Fatalf("a target before the first recorded rate must be unknown, got %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("the targets above the gap are answered, got %d", len(got))
+	}
+	intsEqual(t, "h90", got[90].Delegations, map[string]int64{ledgerTestVal: 99})
+	intsEqual(t, "h80", got[80].Delegations, map[string]int64{ledgerTestVal: 99})
+	intsEqual(t, "h60", got[60].Delegations, map[string]int64{ledgerTestVal: 99})
+	if _, ok := got[40]; ok {
+		t.Fatal("a target below the gap is not answered")
+	}
+
+	// A negative balance means the history above it is wrong too, so
+	// nothing is answered.
+	in.Samples = map[string][]rateSample{ledgerTestVal: {{10, rate(990, 1000)}}}
+	in.Anchor.Bank = map[string]*big.Int{"uatom": bi(10)}
+	in.Events = []ledgerEvent{ev(1, 50, phaseTx, "coin_received", "receiver", ledgerTestAddr, "amount", "30uatom")}
+	got, err = walkBack(in, []int64{90, 40})
+	var inc ledgerInconsistent
+	if !errors.As(err, &inc) || got != nil {
+		t.Fatalf("a negative rebuild answers nothing, got %v %v", got, err)
+	}
+}
+
 func TestWalkBackRedeemShares(t *testing.T) {
 	in := ledgerInput{
 		Address:   ledgerTestAddr,
