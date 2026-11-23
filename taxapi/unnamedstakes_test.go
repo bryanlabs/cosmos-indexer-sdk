@@ -204,6 +204,45 @@ func TestSettleUnnamedStakesByGroup(t *testing.T) {
 	require.Empty(t, read)
 }
 
+// A redelegation moves its source and destination together, so it is tried
+// in one group with every record on either; its two ends are never settled
+// apart, even where each end alone would have one fit.
+func TestSettleUnnamedRedelegationAcrossGroups(t *testing.T) {
+	const h = 150
+	a, b := ledgerTestVal, ledgerTestVal2
+	cands := []ledgerEvent{
+		unmatchedStake(40, h, "redelegate", "source_validator", a, "destination_validator", b, "amount", "300uatom"),
+		unmatchedStake(41, h, "unbond", "validator", a, "amount", "50uatom"),
+		unmatchedStake(42, h, "delegate", "validator", b, "amount", "70uatom"),
+	}
+	settle := func(after map[string]int64) ([]ledgerEvent, int64) {
+		var read []int64
+		return settleUnnamedStakes(delegationsBy(map[int64]map[string]int64{h - 1: {a: 1000, b: 500}, h: after}, &read), ledgerTestAddr, "", "uatom", nil, cands)
+	}
+	require.Equal(t, [][]int{{0, 1, 2}}, stakeGroups([]map[string]*big.Int{{a: bi(-300), b: bi(300)}, {a: bi(-50)}, {b: bi(70)}}))
+
+	// The joint answer: the redelegation alone moved both.
+	owned, unattributed := settle(map[string]int64{a: 700, b: 800})
+	require.Zero(t, unattributed)
+	require.Equal(t, []ledgerEvent{cands[0]}, owned)
+	// The source fell by the redelegation and the destination did not move:
+	// apart, the source would take the redelegation and the destination
+	// nothing, but no combination explains both.
+	owned, unattributed = settle(map[string]int64{a: 700, b: 500})
+	require.Equal(t, int64(h), unattributed)
+	require.Empty(t, owned)
+	// The same with the destination: it rose by the redelegation and the
+	// source by the unbond's amount.
+	owned, unattributed = settle(map[string]int64{a: 950, b: 800})
+	require.Equal(t, int64(h), unattributed)
+	require.Empty(t, owned)
+	// With no other record on the destination, it is still checked.
+	var read []int64
+	owned, unattributed = settleUnnamedStakes(delegationsBy(map[int64]map[string]int64{h - 1: {a: 1000, b: 500}, h: {a: 700, b: 500}}, &read), ledgerTestAddr, "", "uatom", nil, cands[:2])
+	require.Equal(t, int64(h), unattributed)
+	require.Empty(t, owned)
+}
+
 func TestStakeGroups(t *testing.T) {
 	eff := func(vs ...string) map[string]*big.Int {
 		m := map[string]*big.Int{}
