@@ -39,6 +39,46 @@ type FailedTxFee struct {
 
 func (FailedTxFee) TableName() string { return "tax_failed_tx_fees" }
 
+// staleReportTime is the computed_through a fee outcome writer gives a ready
+// report it changes: older than reportMaxAge, so the next view builds again.
+var staleReportTime = time.Unix(0, 0).UTC()
+
+// recordFailedTxFees inserts the fee outcomes not yet recorded and, in the
+// caller's transaction, marks stale every ready report of a wallet that paid
+// or granted one of the fees it inserted. Report fingerprints hash the outcomes,
+// but the evidence journal does not see this table, so a ready report would
+// otherwise keep serving the fee as it was before.
+func recordFailedTxFees(db *gorm.DB, fees []FailedTxFee, batch int) error {
+	for len(fees) > 0 {
+		n := min(batch, len(fees))
+		part := fees[:n]
+		fees = fees[n:]
+		values := make([]string, len(part))
+		args := make([]any, 0, 2*len(part))
+		for i, f := range part {
+			values[i] = "(?, ?)"
+			args = append(args, f.TxID, f.Charged)
+		}
+		var added []uint
+		if err := db.Raw("INSERT INTO tax_failed_tx_fees (tx_id, charged) VALUES "+strings.Join(values, ", ")+
+			" ON CONFLICT DO NOTHING RETURNING tx_id", args...).Scan(&added).Error; err != nil {
+			return err
+		}
+		if len(added) == 0 {
+			continue
+		}
+		if err := db.Model(&ReportJob{}).
+			Where("status = ? AND computed_through > ?", ReportJobReady, staleReportTime).
+			Where(`string_to_array(addresses, ',') && ARRAY(
+ SELECT a.address FROM fees f JOIN addresses a ON a.id = f.payer_address_id WHERE f.tx_id IN ?
+ UNION SELECT g.granter FROM tax_fee_grants g WHERE g.tx_id IN ?)`, added, added).
+			Update("computed_through", staleReportTime).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // FeeGrantUse records a transaction whose fee a fee grant paid. The ante
 // handler then deducts the granter's balance, but blocks indexed before the
 // indexer read the granter stored the signer as the payer, so these rows,
@@ -1067,7 +1107,9 @@ func (s *Server) resolveFailedFees(chain string, rows []ledgerFeeRow, node *ledg
 				continue
 			}
 			if !s.readOnlyLedger {
-				if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&FailedTxFee{TxID: r.TxID, Charged: charged}).Error; err != nil {
+				if err := s.db.Transaction(func(tx *gorm.DB) error {
+					return recordFailedTxFees(tx, []FailedTxFee{{TxID: r.TxID, Charged: charged}}, 1)
+				}); err != nil {
 					continue
 				}
 			}

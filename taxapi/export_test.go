@@ -91,8 +91,8 @@ func TestWriteCSVImportContractsAndEscaping(t *testing.T) {
 			width:  8, desc: 7,
 		},
 		apiGeneric: {
-			header: []string{apiDateUTC, apiTxHash, apiCategory, "direction", apiAsset, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, "from", "to", "nft_asset", apiChain, "decimals_assumed", apiPriceMissing, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", apiDetail},
-			width:  27, desc: -1,
+			header: []string{apiDateUTC, apiTxHash, apiCategory, "direction", apiAsset, apiDenom, apiAmount, apiUnitPriceUSD, apiValueUSD, "from", "to", "nft_asset", apiChain, "decimals_assumed", apiPriceMissing, apiValidatorAddress, apiValidatorMoniker, apiRewardTrigger, "asset_identity", "user_treatment", "manual_value_usd", "manual_cost_basis_usd", "manual_acquired_date", "taxable", "price_implied", "user_tag", apiDetail, apiFeeOutcomeUnknown, "declared_fee"},
+			width:  29, desc: -1,
 		},
 	}
 

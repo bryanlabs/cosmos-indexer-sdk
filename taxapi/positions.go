@@ -41,7 +41,7 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 	lots := map[string][]lot{}
 	denoms := map[string]string{}
 	for _, r := range sorted {
-		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+		if r.Excluded || r.FeeOutcomeUnknown || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
 		// A reward move takes exactly the reward lot to the withdraw address
