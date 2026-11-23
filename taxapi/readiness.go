@@ -41,7 +41,19 @@ type ReportReadiness struct {
 	FeeOutcomeUnknown int `json:"fee_outcome_unknown"`
 }
 
+// semanticReviewReason is the review a row still waits on: its
+// rawSemanticReviewReason, unless the person's classification settled it.
 func semanticReviewReason(row Row) string {
+	reason := rawSemanticReviewReason(row)
+	if row.SemanticDecision != nil && semanticClassifiable(reason) {
+		return ""
+	}
+	return reason
+}
+
+// rawSemanticReviewReason is the review the indexed row asks for, before any
+// decision.
+func rawSemanticReviewReason(row Row) string {
 	if isIBCRefund(row.RewardTrigger) {
 		return ibcRefundBasisRequired
 	}

@@ -22,7 +22,7 @@ func reviewFingerprint(rows []Row) string {
 		if row.AssetIdentity != nil {
 			ids = append(ids, row.AssetIdentity.RecordID)
 		}
-		if reason := semanticReviewReason(row); reason != "" {
+		if reason := rawSemanticReviewReason(row); reason != "" {
 			ids = append(ids, "semantic:"+row.TxHash+":"+row.Direction+":"+row.Denom+":"+reason+":"+row.Detail)
 		}
 	}
