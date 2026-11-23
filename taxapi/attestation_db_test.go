@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	dbpkg "github.com/DefiantLabs/cosmos-indexer/db"
@@ -143,5 +144,41 @@ func TestAttestationScanner(t *testing.T) {
 	}
 	if chk[apiValid] != true || chk["must_be_signed_by"] != account || chk[apiStatus] != apiJailed {
 		t.Fatalf("check %+v", chk)
+	}
+}
+
+// TestAttestationScanUsesTheMemoIndex checks that the scan can use the
+// partial index: the planner matches a partial index only when the query
+// carries its predicate literally, never from a bound parameter.
+func TestAttestationScanUsesTheMemoIndex(t *testing.T) {
+	if !strings.Contains(attestationScanQuery, "txes.memo LIKE 'bryanlabs-tax:%'") {
+		t.Fatal("the scan query must repeat idx_txes_attestation_memo's predicate literally")
+	}
+	db := isolatedAPIFixtureDB(t)
+	if err := dbpkg.MigrateModels(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := AttestationsMigrate(db); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		"INSERT INTO addresses(id,address) VALUES(1,'cosmos1proposer')",
+		"INSERT INTO chains(id,chain_id) VALUES(1,'cosmoshub-4')",
+		"INSERT INTO blocks(id,chain_id,proposer_cons_address_id,height,time_stamp,tx_indexed) VALUES(1,1,1,33000001,'2026-10-01T00:00:00Z',true)",
+		"INSERT INTO txes(id,block_id,hash,code,memo) SELECT g, 1, 'H' || g, 0, 'ordinary memo ' || g FROM generate_series(1, 50000) g",
+		"INSERT INTO txes(id,block_id,hash,code,memo) VALUES(50001,1,'ATTEST',0,'bryanlabs-tax:jurisdiction v1 country=US')",
+		"ANALYZE txes",
+	} {
+		if err := db.Exec(q).Error; err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	var plan []string
+	if err := db.Raw("EXPLAIN (COSTS OFF) "+attestationScanQuery, AttestationMemoPrefix+"%", 0).Scan(&plan).Error; err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(plan, "\n")
+	if !strings.Contains(text, "idx_txes_attestation_memo") {
+		t.Fatalf("the scan does not use idx_txes_attestation_memo:\n%s", text)
 	}
 }
