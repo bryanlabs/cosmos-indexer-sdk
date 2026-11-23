@@ -188,6 +188,10 @@ func main() {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		// asset_decisions rides in the query string; a full set of user
+		// prices (taxapi.MaxAssetDecisionsJSONBytes, URL-encoded) needs more
+		// than the 1 MiB default.
+		MaxHeaderBytes: 8 << 20,
 	}
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("serve: %v", err)

@@ -175,5 +175,12 @@ func (s *Server) reviewedInputRows(chain string, addresses []string, input repor
 	for i, addr := range addresses {
 		rows = append(rows, s.priceWalletRows(chain, addr, input.Wallets[i])...)
 	}
+	// A user price for one row is keyed by its row key, which needs the
+	// message index.
+	if hasUserPriceRowKeys(decisions) {
+		if err := s.loadMessageIndexes(rows); err != nil {
+			return nil, err
+		}
+	}
 	return applyReviewedRows(rows, decisions, allowPending)
 }
