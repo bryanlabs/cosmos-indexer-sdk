@@ -690,7 +690,10 @@ WHERE be.id IN (
 AND t.type IN @types
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 ORDER BY b.height, be.id, a.index`
-	redelQuery := `SELECT DISTINCT message_id FROM (` + datedBranches(`
+	// Only messages with a staking event that does not name its delegator,
+	// whose delegators include the wallet or are not named at all, are read:
+	// attributeRedelegations adds nothing and refuses nothing for any other.
+	redelQuery := `WITH cand AS MATERIALIZED (SELECT DISTINCT message_id FROM (` + datedBranches(`
 SELECT me0.message_id FROM message_events me0
 JOIN message_event_types t0 ON t0.id = me0.message_event_type_id
 JOIN messages m ON m.id = me0.message_id
@@ -698,10 +701,10 @@ JOIN txes x ON x.id = m.tx_id
 {{BLOCK}}
 WHERE {{HIT}} AND t0.type IN ('withdraw_rewards', 'message')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = me0.message_id AND rt.type IN ('redelegate', 'delegate', 'unbond')) {{OWN}}`, rel,
+AND EXISTS (`+unnamedStakingEvent("me0.message_id")+`) {{OWN}}`, rel,
 		`me0.id IN (SELECT a0.message_event_id FROM message_event_attributes a0 WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr)`,
-		`EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me0.id AND a0.value = @addr)`) + `) u`
+		`EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me0.id AND a0.value = @addr)`) + `) u)
+SELECT message_id FROM cand c WHERE ` + walletStakeMessage("c")
 	if s.blockReads {
 		msgQuery, blockQuery, redelQuery = blockReadQueries(rel)
 	}
@@ -724,6 +727,43 @@ AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id 
 	redelegations, unattributed := attributeRedelegations(redelRows, addr)
 	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
 	return append(events, redelegations...), unattributed, nil
+}
+
+// unnamedStakingEvent is a subquery on the message msg's redelegate,
+// delegate and unbond events that carry no delegator attribute: the only
+// events attributeRedelegations attributes or refuses on. A record without a
+// delegator never shares an event with one that has it, since one SDK wrote
+// the message.
+func unnamedStakingEvent(msg string) string {
+	return `SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
+            WHERE r.message_id = ` + msg + ` AND rt.type IN ('redelegate', 'delegate', 'unbond')
+            AND NOT EXISTS (SELECT 1 FROM message_event_attributes ra
+              JOIN message_event_attribute_keys rk ON rk.id = ra.message_event_attribute_key_id
+              WHERE ra.message_event_id = r.id AND rk.key = 'delegator')`
+}
+
+// walletStakeMessage is a condition on the message of ev: its delegators, as
+// attributeRedelegations reads them, include @addr, or it names none. The
+// delegators are the withdraw_rewards delegators and the sender right after
+// module=staking in a message event (the next attribute by index, as
+// stakingMessageSenders reads it). A message whose delegators are all others
+// (an authz exec a wallet sends for its granters) gives @addr no event and no
+// refusal, so it is not read. It is one scalar subquery on the message's own
+// events, applied to the materialized candidate messages, so it runs once per
+// candidate on the message and attribute indexes.
+func walletStakeMessage(ev string) string {
+	return `(SELECT coalesce(bool_or(d.delegator = @addr), false) OR NOT coalesce(bool_or(d.delegator <> ''), false) FROM (
+    SELECT CASE
+      WHEN wt.type = 'withdraw_rewards' AND wk.key = 'delegator' THEN wa.value
+      WHEN wt.type = 'message' AND wk.key = 'module' AND wa.value = 'staking'
+        AND lead(wk.key) OVER w = 'sender' THEN lead(wa.value) OVER w
+    END AS delegator
+    FROM message_events we
+    JOIN message_event_types wt ON wt.id = we.message_event_type_id
+    JOIN message_event_attributes wa ON wa.message_event_id = we.id
+    JOIN message_event_attribute_keys wk ON wk.id = wa.message_event_attribute_key_id
+    WHERE we.message_id = ` + ev + `.message_id AND wt.type IN ('withdraw_rewards', 'message')
+    WINDOW w AS (PARTITION BY we.id ORDER BY wa.index)) d)`
 }
 
 // redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards,
@@ -1540,10 +1580,19 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			return refuse("the indexed history does not reconcile with chain state: " + inc.msg)
 		}
 		var unk ledgerUnknown
-		if errors.As(err, &unk) {
-			return refuse(unk.msg)
+		if !errors.As(err, &unk) {
+			return nil, 0, err
 		}
-		return nil, 0, err
+		// The days walked before the rebuild stopped are served; only
+		// the days at or below where it stopped are refused.
+		for _, i := range usable {
+			if h, ok := held[targets[i].Height]; ok {
+				out[i].Holdings = h
+			} else {
+				out[i].Status, out[i].Reason = balanceIncompleteS, unk.msg
+			}
+		}
+		return out, tip.Height, nil
 	}
 	for _, i := range usable {
 		out[i].Holdings = held[targets[i].Height]

@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -652,5 +653,53 @@ func TestUndoPreV15UnbondFromRequestedTokens(t *testing.T) {
 	}
 	if shares["val"].hi.Sub(shares["val"].lo).LessThan(decimal.NewFromInt(1)) {
 		t.Fatalf("emptied delegation used the requested tokens: %s..%s", shares["val"].lo, shares["val"].hi)
+	}
+}
+
+// A rate the index lacks below some targets refuses only those: the targets
+// walked before the rebuild stopped come back exactly as a walk that stops
+// above the gap gives them.
+func TestWalkBackKeepsTargetsAboveUnknownRate(t *testing.T) {
+	in := ledgerInput{
+		Address:   ledgerTestAddr,
+		BondDenom: "uatom",
+		Anchor: ledgerAnchor{
+			Height:      100,
+			Bank:        map[string]*big.Int{},
+			Delegations: map[string]*big.Int{ledgerTestVal: bi(150), ledgerTestVal2: bi(10)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal: decimal.RequireFromString("150.505050505050505050"), ledgerTestVal2: decimal.NewFromInt(10)},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(999, 1000), ledgerTestVal2: unitRate(500)},
+		},
+		// Nothing is recorded for ledgerTestVal before height 25.
+		Samples: map[string][]rateSample{ledgerTestVal: {{25, rate(990, 1000)}, {50, rate(998, 1000)}}},
+		Events: []ledgerEvent{
+			ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "50uatom", "new_shares", "50.505050505050505050"),
+			ev(2, 20, phaseTx, "unbond", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "1000uatom"),
+		},
+	}
+	above, err := walkBack(in, []int64{50, 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := walkBack(in, []int64{50, 25, 12})
+	var unk ledgerUnknown
+	if !errors.As(err, &unk) {
+		t.Fatalf("the undelegation at 20 needs a rate below 25, want unknown, got %v", err)
+	}
+	if _, ok := got[12]; ok || len(got) != 2 {
+		t.Fatalf("only the targets above the gap are returned, got %d targets", len(got))
+	}
+	for _, h := range []int64{50, 25} {
+		if fmt.Sprint(got[h]) != fmt.Sprint(above[h]) {
+			t.Fatalf("target %d differs from the walk that stops above the gap: %v vs %v", h, got[h], above[h])
+		}
+	}
+
+	// Any other failure returns nothing.
+	in.Anchor.Bank = map[string]*big.Int{"uatom": bi(-1)}
+	got, err = walkBack(in, []int64{50})
+	var inc ledgerInconsistent
+	if !errors.As(err, &inc) || got != nil {
+		t.Fatalf("a history that goes negative returns no holdings, got %v %v", got, err)
 	}
 }
