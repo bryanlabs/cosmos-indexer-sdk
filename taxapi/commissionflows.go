@@ -182,7 +182,6 @@ func (s *Server) seedAddressLabels(chain string, validators []string) error {
 // different senders, each tagging the transfer with a short account code.
 const (
 	flowMemoHeuristic   = "heuristic:memo-deposit/v1"
-	flowMemoSample      = 3000
 	flowMemoMinSenders  = 100
 	flowMemoMinLen      = 4
 	flowMemoMaxLen      = 40
@@ -228,6 +227,14 @@ const (
 )
 
 var flowMemoShape = regexp.MustCompile(`^[0-9A-Za-z_-]+$`)
+
+// flowMemoSpace is every character strings.TrimSpace removes, and
+// flowMemoSQL is depositMemo as a Postgres pattern: optional spaces, then 4
+// to 40 shape characters. The shape characters are ASCII, so lengths agree.
+const (
+	flowMemoSpace = `\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000`
+	flowMemoSQL   = `^[` + flowMemoSpace + `]*[0-9A-Za-z_-]{4,40}[` + flowMemoSpace + `]*$`
+)
 
 func depositMemo(memo string) bool {
 	memo = strings.TrimSpace(memo)
@@ -305,10 +312,9 @@ SELECT (SELECT count(*) FROM senders) AS examined,
 }
 
 // memoDepositSenders counts the distinct senders that paid addr with a
-// deposit-style memo, in its first flowMemoSample memo receipts before end.
-// The bound and the total order make the count a function of the index
-// before end: receipts after a trace's as-of date, or a different query plan,
-// cannot change it.
+// deposit-style memo over all its memo receipts before end, stopping at
+// flowMemoMinSenders: the rule needs only that many, and a count capped there
+// does not depend on read order, query plan or anything after the as-of date.
 func (s *Server) memoDepositSenders(addr string, end time.Time) (int, error) {
 	end = end.UTC()
 	if s.flowShared != nil {
@@ -322,32 +328,20 @@ func (s *Server) memoDepositSenders(addr string, end time.Time) (int, error) {
 }
 
 func (s *Server) readMemoDepositSenders(addr string, end time.Time) (int, error) {
-	var rows []struct {
-		FromAddr string
-		Memo     string
-	}
-	// OFFSET 0 keeps the receipt read on the to_addr index; the sort is over
-	// addr's receipts only.
-	if err := s.db.Raw(`
-SELECT te.from_addr, t.memo FROM (
-  SELECT id, message_id, from_addr, timestamp FROM taxable_events
-  WHERE to_addr = @addr AND category IN ('transfer', 'ibc_in') AND coalesce(reward_trigger, '') <> @withdraw
-    AND timestamp < @end
-  OFFSET 0) te
-JOIN messages m ON m.id = te.message_id
-JOIN txes t ON t.id = m.tx_id
-WHERE t.memo <> ''
-ORDER BY te.timestamp, te.id
-LIMIT @sample`, map[string]any{"addr": addr, "withdraw": tax.TriggerWithdrawAddress, "end": end, "sample": flowMemoSample}).Scan(&rows).Error; err != nil {
-		return 0, err
-	}
-	senders := map[string]bool{}
-	for _, r := range rows {
-		if r.FromAddr != "" && depositMemo(r.Memo) {
-			senders[r.FromAddr] = true
-		}
-	}
-	return len(senders), nil
+	var n int
+	// OFFSET 0 keeps the receipt read on the to_addr index.
+	err := s.db.Raw(`
+SELECT count(*) FROM (
+  SELECT DISTINCT te.from_addr FROM (
+    SELECT message_id, from_addr FROM taxable_events
+    WHERE to_addr = @addr AND category IN ('transfer', 'ibc_in') AND coalesce(reward_trigger, '') <> @withdraw
+      AND timestamp < @end AND from_addr <> ''
+    OFFSET 0) te
+  JOIN messages m ON m.id = te.message_id
+  JOIN txes t ON t.id = m.tx_id
+  WHERE t.memo ~ @shape AND t.memo ~ '[0-9]'
+  LIMIT @min) senders`, map[string]any{"addr": addr, "withdraw": tax.TriggerWithdrawAddress, "end": end, "shape": flowMemoSQL, "min": flowMemoMinSenders}).Scan(&n).Error
+	return n, err
 }
 
 // flowSkipSwap is the trigger on an IBC send whose memo asks Skip Go to swap.
@@ -1167,7 +1161,7 @@ func (l *dbFlowLoader) stop(addr string, start, end time.Time) (flowStop, error)
 	if n >= flowMemoMinSenders {
 		lab := AddressLabel{
 			Chain: l.chain, Address: addr, Name: "deposit-style address", Kind: labelExchangeLike, Source: flowMemoHeuristic,
-			Evidence: fmt.Sprintf("inferred; conditions met: memo-deposit; %d distinct senders with deposit-style memos in a sample of %d receipts", n, flowMemoSample), CreatedAt: nowUTC(),
+			Evidence: fmt.Sprintf("inferred; conditions met: memo-deposit; at least %d distinct senders with deposit-style memos before the as-of date", n), CreatedAt: nowUTC(),
 		}
 		if !l.private {
 			if err := l.s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&lab).Error; err != nil {

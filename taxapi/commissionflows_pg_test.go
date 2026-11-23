@@ -278,7 +278,7 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	var inferred AddressLabel
 	require.NoError(t, s.db.Where("chain = ? AND address = ?", apiMainnet, flowPGDeposit).First(&inferred).Error)
 	require.Equal(t, labelExchangeLike, inferred.Kind, "the inferred label is stored with its evidence")
-	require.Contains(t, inferred.Evidence, "120 distinct senders")
+	require.Contains(t, inferred.Evidence, "at least 100 distinct senders")
 
 	receivers, err := s.commissionReceivers(apiMainnet, flowPGValidator)
 	require.NoError(t, err)
@@ -589,6 +589,9 @@ func TestCommissionFlowWithdrawAddressMovesPostgres(t *testing.T) {
 		"INSERT INTO txes VALUES (900, 5, 'W', 0, 'acct900001')",
 		"INSERT INTO messages VALUES (900, 900)",
 		"INSERT INTO taxable_events (message_id, category, amount, denom, from_addr, to_addr, timestamp, reward_trigger) VALUES (900, 'transfer', '7', 'uatom', 'cosmos1anotherdelegator', '" + flowPGDeposit + "', '2025-03-01T00:00:00Z', '" + tax.TriggerWithdrawAddress + "')",
+		"INSERT INTO txes VALUES (901, 5, 'X', 0, 'acct900002'), (902, 5, 'Y', 0, 'acct900003')",
+		"INSERT INTO messages VALUES (901, 901), (902, 902)",
+		"INSERT INTO taxable_events (message_id, category, amount, denom, from_addr, to_addr, timestamp, reward_trigger) VALUES (901, 'transfer', '7', 'uatom', 'cosmos1paying', 'cosmos1smalldeposit', '2025-03-01T00:00:00Z', NULL), (902, 'transfer', '7', 'uatom', 'cosmos1withdrawing', 'cosmos1smalldeposit', '2025-03-01T00:00:00Z', '" + tax.TriggerWithdrawAddress + "')",
 	} {
 		require.NoError(t, s.db.Exec(sql).Error, sql)
 	}
@@ -597,5 +600,8 @@ func TestCommissionFlowWithdrawAddressMovesPostgres(t *testing.T) {
 	require.Equal(t, 5, n)
 	senders, err := s.memoDepositSenders(flowPGDeposit, flowPGWindowEnd)
 	require.NoError(t, err)
-	require.Equal(t, 120, senders)
+	require.Equal(t, flowMemoMinSenders, senders)
+	senders, err = s.memoDepositSenders("cosmos1smalldeposit", flowPGWindowEnd)
+	require.NoError(t, err)
+	require.Equal(t, 1, senders)
 }
