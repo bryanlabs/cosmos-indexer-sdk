@@ -166,7 +166,11 @@ func (r Row) taxImportable() bool {
 // silently reporting a possibly-wrong amount.
 func (r Row) description() string {
 	d := r.Category
-	if (r.Category == apiNFTSale || r.Category == apiNFTMint || r.Category == apiNFTTransfer) && r.Asset != "" {
+	if r.Category == TagIncome && r.RewardTrigger == TagAirdrop {
+		// The indexer books an airdrop as income; the label lets a user
+		// find it without a new category.
+		d = "Airdrop (income)"
+	} else if (r.Category == apiNFTSale || r.Category == apiNFTMint || r.Category == apiNFTTransfer) && r.Asset != "" {
 		d = r.Category + " " + r.Asset
 	} else if r.IsIBC {
 		d = "ibc " + r.Denom
