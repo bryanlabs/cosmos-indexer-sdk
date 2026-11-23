@@ -22,6 +22,10 @@ const (
 	// MaxUserPrices bounds the price: keys, which do not count toward
 	// MaxAssetDecisions: one wallet can have thousands of unpriced days.
 	MaxUserPrices = 25000
+	// MaxSemanticDecisions bounds the semantic record IDs, which do not count
+	// toward MaxAssetDecisions: one wallet can hold thousands of contract
+	// rows waiting on classification.
+	MaxSemanticDecisions = 10000
 )
 
 const (
@@ -48,6 +52,9 @@ const (
 //	                     on that UTC day
 //	price:<HASH>#<m>#<s> an override with value_usd: the user's total USD value
 //	                     for one unpriced row, keyed like a row tag
+//	<semantic_record_id> one row waiting on classification review
+//	                     (semantic_decision.go); it carries classification and
+//	                     no mode
 //
 // A price: decision only fills a price the reference sources left missing; it
 // never replaces an oracle, pegged or implied price, and it never reaches a
@@ -57,21 +64,26 @@ const (
 // transfer in), so it carries no token, quantity, cost_basis_usd or
 // acquired_date.
 //
+// Classification settles the semantic review of the row its record key
+// names: on a semantic record ID, or on a flagged receipt's record ID beside
+// its mode. Denom, policy and price keys never carry it (semantic_decision.go).
+//
 // AppliedFrom is set by the server on the materialized per-receipt decision to
 // say which key produced it; a request must not set it.
 type AssetDecision struct {
-	Mode         string `json:"mode"`
-	Token        string `json:"token,omitempty"`
-	Quantity     string `json:"quantity,omitempty"`
-	ValueUSD     string `json:"value_usd,omitempty"`
-	CostBasisUSD string `json:"cost_basis_usd,omitempty"`
-	AcquiredDate string `json:"acquired_date,omitempty"`
-	UnitValueUSD string `json:"unit_value_usd,omitempty"`
-	AppliedFrom  string `json:"applied_from,omitempty"`
+	Mode           string `json:"mode"`
+	Token          string `json:"token,omitempty"`
+	Quantity       string `json:"quantity,omitempty"`
+	ValueUSD       string `json:"value_usd,omitempty"`
+	CostBasisUSD   string `json:"cost_basis_usd,omitempty"`
+	AcquiredDate   string `json:"acquired_date,omitempty"`
+	UnitValueUSD   string `json:"unit_value_usd,omitempty"`
+	Classification string `json:"classification,omitempty"`
+	AppliedFrom    string `json:"applied_from,omitempty"`
 }
 
-// AssetDecisions is keyed by record ID, denom:<raw_denom>, policy:spam or
-// price:<raw_denom>@<day> and price:<row key>.
+// AssetDecisions is keyed by record ID, denom:<raw_denom>, policy:spam,
+// price:<raw_denom>@<day> and price:<row key>, or a semantic record ID.
 // This package deliberately does not infer record IDs or asset values.
 type AssetDecisions map[string]AssetDecision
 
@@ -82,8 +94,8 @@ const (
 	decisionKindPrice      = "price"
 )
 
-// decisionKeyKind classifies a decision key: "record", "denom", "policy" or
-// "price".
+// decisionKeyKind classifies a decision key: "record", "denom", "policy",
+// "price" or "semantic".
 func decisionKeyKind(key string) string {
 	switch {
 	case key == DecisionKeySpamPolicy:
@@ -92,6 +104,8 @@ func decisionKeyKind(key string) string {
 		return decisionKindPrice
 	case strings.HasPrefix(key, DecisionKeyDenomPrefix):
 		return apiDenom
+	case strings.Contains(key, semanticRecordMarker):
+		return decisionKindSemantic
 	default:
 		return apiRecord
 	}
@@ -119,14 +133,12 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("decode asset decisions: expected JSON object")
 	}
-	nonPrice := 0
+	keys := make([]string, 0, len(raw))
 	for key := range raw {
-		if decisionKeyKind(key) != decisionKindPrice {
-			nonPrice++
-		}
+		keys = append(keys, key)
 	}
-	if nonPrice > MaxAssetDecisions {
-		return nil, fmt.Errorf("asset decisions exceed %d entries", MaxAssetDecisions)
+	if err := checkDecisionCounts(keys); err != nil {
+		return nil, err
 	}
 
 	out := make(AssetDecisions, len(raw))
@@ -156,6 +168,29 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// checkDecisionCounts bounds each key family: the identity keys by
+// MaxAssetDecisions and the semantic record IDs by MaxSemanticDecisions. The
+// price: keys are bounded by checkUserPriceDays.
+func checkDecisionCounts(keys []string) error {
+	identity, semantic := 0, 0
+	for _, key := range keys {
+		switch decisionKeyKind(key) {
+		case decisionKindPrice:
+		case decisionKindSemantic:
+			semantic++
+		default:
+			identity++
+		}
+	}
+	if identity > MaxAssetDecisions {
+		return fmt.Errorf("asset decisions exceed %d entries", MaxAssetDecisions)
+	}
+	if semantic > MaxSemanticDecisions {
+		return fmt.Errorf("semantic decisions exceed %d entries", MaxSemanticDecisions)
+	}
+	return nil
 }
 
 // checkUserPriceDays bounds the price: keys.
@@ -195,6 +230,9 @@ func normalizeUserPrice(key string, decision AssetDecision) (AssetDecision, erro
 	target := strings.TrimPrefix(key, DecisionKeyPricePrefix)
 	if target == "" {
 		return AssetDecision{}, fmt.Errorf("price key needs <raw_denom>@<YYYY-MM-DD> or a row key after %q", DecisionKeyPricePrefix)
+	}
+	if decision.Classification != "" {
+		return AssetDecision{}, fmt.Errorf("a price: key sets a value only; classification belongs on the row's record ID")
 	}
 	if decision.Mode != AssetDecisionOverride {
 		return AssetDecision{}, fmt.Errorf("a price: key takes mode %q", AssetDecisionOverride)
@@ -236,8 +274,14 @@ func normalizeUserPrice(key string, decision AssetDecision) (AssetDecision, erro
 // price, and the spam policy can only exclude.
 func NormalizeKeyedDecision(key string, decision AssetDecision) (AssetDecision, error) {
 	kind := decisionKeyKind(key)
-	if kind == decisionKindPrice {
+	switch kind {
+	case decisionKindPrice:
 		return normalizeUserPrice(key, decision)
+	case decisionKindSemantic:
+		return normalizeSemanticDecision(decision)
+	}
+	if kind != apiRecord && decision.Classification != "" {
+		return AssetDecision{}, fmt.Errorf("classification belongs on one row's record ID, not on a %s rule", kind)
 	}
 	switch kind {
 	case "policy":
@@ -276,13 +320,21 @@ func NormalizeKeyedDecision(key string, decision AssetDecision) (AssetDecision, 
 // exactly as supplied after validation so manually entered totals retain
 // their explicit precision. AppliedFrom passes through untouched.
 func NormalizeAssetDecision(decision AssetDecision) (AssetDecision, error) {
-	applied := decision.AppliedFrom
+	applied, class := decision.AppliedFrom, decision.Classification
+	if class != "" {
+		if err := validateClassification(class); err != nil {
+			return AssetDecision{}, err
+		}
+		if class == ClassExclude && decision.Mode != AssetDecisionExclude {
+			return AssetDecision{}, fmt.Errorf("a flagged receipt is left out with mode %q; classification %q goes with it", AssetDecisionExclude, ClassExclude)
+		}
+	}
 	switch decision.Mode {
 	case AssetDecisionExclude:
 		if decision.Token != "" || decision.Quantity != "" || decision.ValueUSD != "" || decision.CostBasisUSD != "" || decision.AcquiredDate != "" || decision.UnitValueUSD != "" {
 			return AssetDecision{}, fmt.Errorf("exclude must not include override fields")
 		}
-		return AssetDecision{Mode: AssetDecisionExclude, AppliedFrom: applied}, nil
+		return AssetDecision{Mode: AssetDecisionExclude, Classification: class, AppliedFrom: applied}, nil
 	case AssetDecisionOverride:
 		if decision.UnitValueUSD != "" {
 			return AssetDecision{}, fmt.Errorf("unit_value_usd belongs on a denom: key")
@@ -313,14 +365,12 @@ func NormalizeAssetDecision(decision AssetDecision) (AssetDecision, error) {
 // mutate it; callers that need normalized tokens should use ParseAssetDecisions
 // or NormalizeAssetDecision.
 func ValidateAssetDecisions(decisions AssetDecisions) error {
-	nonPrice := 0
+	keys := make([]string, 0, len(decisions))
 	for key := range decisions {
-		if decisionKeyKind(key) != decisionKindPrice {
-			nonPrice++
-		}
+		keys = append(keys, key)
 	}
-	if nonPrice > MaxAssetDecisions {
-		return fmt.Errorf("asset decisions exceed %d entries", MaxAssetDecisions)
+	if err := checkDecisionCounts(keys); err != nil {
+		return err
 	}
 	if err := checkUserPriceDays(decisions); err != nil {
 		return err
