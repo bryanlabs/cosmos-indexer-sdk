@@ -2,9 +2,11 @@ package tax
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	sdkmath "cosmossdk.io/math"
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
@@ -768,7 +770,8 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 	}
 	legs := transfersIn(log)
 	native, nativeOrder := fallbackFlows(legs, func(d string) bool { return d == fixtureNativeDenom }, wallet, nativeNamed)
-	other, otherOrder := fallbackFlows(legs, func(d string) bool { return d != fixtureNativeDenom }, wallet, named)
+	otherWallet := func(addr string) bool { return wallet(addr) && !transferEscrows()[addr] }
+	other, otherOrder := fallbackFlows(legs, func(d string) bool { return d != fixtureNativeDenom }, otherWallet, named)
 	top := firstContract(log)
 	var out []TaxableEvent
 	nativeRow := map[string]bool{}
@@ -802,7 +805,7 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 			}
 			e, contract := fallbackRow(log, f, top, func(cp string) bool {
 				_, ok := other[flowKey{cp, k.denom}]
-				return ok || (named[flowKey{cp, k.denom}] && wallet(cp))
+				return ok || (named[flowKey{cp, k.denom}] && otherWallet(cp))
 			})
 			flows, rows, contracts = append(flows, f), append(rows, e), append(contracts, contract)
 		}
@@ -925,6 +928,28 @@ func fallbackExcluded(log *indexerTxTypes.LogMessage) map[string]bool {
 		}
 	}
 	return out
+}
+
+// transferEscrowChannels bounds the transfer channels whose escrow accounts
+// are known up front. Hub channel numbers are far below it.
+const transferEscrowChannels = 10000
+
+var (
+	transferEscrowOnce sync.Once
+	transferEscrowSet  map[string]bool
+)
+
+// transferEscrows are the escrow accounts of transfer/channel-0 onward. An
+// escrow is never the wallet side of a contract's other coins, even in a
+// message without the send_packet that would name its channel.
+func transferEscrows() map[string]bool {
+	transferEscrowOnce.Do(func() {
+		transferEscrowSet = make(map[string]bool, transferEscrowChannels)
+		for n := 0; n < transferEscrowChannels; n++ {
+			transferEscrowSet[escrowAddress(transfertypes.PortID, fmt.Sprintf("channel-%d", n))] = true
+		}
+	})
+	return transferEscrowSet
 }
 
 func escrowAddress(port, channel string) string {
