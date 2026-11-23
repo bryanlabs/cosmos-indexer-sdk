@@ -55,6 +55,7 @@ func run() int {
 	lockTimeout := flag.Duration("lock-timeout", 3*time.Second, "longest wait for the lock on taxable_events per attempt (-install, -drop)")
 	attempts := flag.Int("attempts", 20, "attempts to get that lock (-install)")
 	drain := flag.Duration("drain-timeout", 20*time.Minute, "longest wait for open transactions before a month is built")
+	runBudget := flag.Duration("run-budget", 20*time.Minute, "-refresh starts no further validator after this long and leaves the rest of its claim to the next run, which takes it first (0 = no bound)")
 	asOf := flag.String("as-of", "", "build only the months before this day (YYYY-MM-DD, not in the future; for tests)")
 	flag.Parse()
 	if !*install && !*fill && !*refresh && *check < 0 && !*status && !*drop {
@@ -75,7 +76,7 @@ func run() int {
 		log.Printf("db connect: %v", err)
 		return 1
 	}
-	opts := taxapi.StatementSummaryOptions{DrainTimeout: *drain, Logf: log.Printf}
+	opts := taxapi.StatementSummaryOptions{DrainTimeout: *drain, Logf: log.Printf, RunBudget: *runBudget}
 	if *asOf != "" {
 		day, err := time.Parse("2006-01-02", *asOf)
 		if err != nil || day.After(time.Now()) {
@@ -125,8 +126,8 @@ func run() int {
 		if err != nil {
 			fail("refresh", err)
 		} else {
-			log.Printf("statement-summary refresh: %d changed month(s) of %d validator(s) recomputed, advanced=%t, built before %s, %s",
-				res.Cells, res.Validators, res.Advanced, res.BuiltBefore.Format("2006-01-02"), time.Since(began).Round(time.Millisecond))
+			log.Printf("statement-summary refresh: %d changed month(s) of %d validator(s) recomputed in %d claim(s), %d validator(s) left for the next run, advanced=%t, built before %s, %s",
+				res.Cells, res.Validators, res.Claims, res.Left, res.Advanced, res.BuiltBefore.Format("2006-01-02"), time.Since(began).Round(time.Millisecond))
 		}
 	}
 	if !failed && *check >= 0 {
