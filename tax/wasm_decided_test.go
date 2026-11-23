@@ -167,6 +167,34 @@ func TestDAOProposalClass(t *testing.T) {
 	if got := summary(parseExecute(t, signer, log)); strings.Count(got, ReviewUnclassifiedContractMovement) != 1 || !strings.Contains(got, TriggerDAOPayment) {
 		t.Errorf("paid coin:\n%s", got)
 	}
+
+	// Native ATOM a pinned proposal pays is income too, and so are the
+	// wallet's other coins from the same payout.
+	both := proposalLog(module, dao, "7", payee, "12"+token)
+	both.Events = append(both.Events, transferEv(dao, payee, "5"+fixtureNativeDenom))
+	want := decidedLine(income, "5", fixtureNativeDenom, dao, payee, TriggerDAOPayment, dao, pinned("7", "Process payments", nil)) +
+		decidedLine(income, "12", token, dao, payee, TriggerDAOPayment, dao, pinned("7", "Process payments", nil))
+	if got := summary(parseExecute(t, signer, both)); got != want {
+		t.Errorf("native and token payout:\ngot:\n%swant:\n%s", got, want)
+	}
+	if got, want := summary(parseExecute(t, signer, proposalLog(module, dao, "7", payee, "5"+fixtureNativeDenom))),
+		decidedLine(income, "5", fixtureNativeDenom, dao, payee, TriggerDAOPayment, dao, pinned("7", "Process payments", nil)); got != want {
+		t.Errorf("native payout:\ngot:\n%swant:\n%s", got, want)
+	}
+	// Native ATOM under an unpinned proposal stays the plain transfer it
+	// always was, and the wallet's other coins stay flagged.
+	unpinned := proposalLog(module, dao, "10", payee, "12"+token)
+	unpinned.Events = append(unpinned.Events, transferEv(dao, payee, "5"+fixtureNativeDenom))
+	if got := summary(parseExecute(t, signer, unpinned)); strings.Contains(got, string(CategoryIncome)) || strings.Count(got, ReviewUnclassifiedContractMovement) != 1 {
+		t.Errorf("unpinned native payout:\n%s", got)
+	}
+	// A wallet that paid the DAO ATOM in the message gets no income from it,
+	// and its other coins stay flagged.
+	paid := proposalLog(module, dao, "7", payee, "12"+token)
+	paid.Events = append(paid.Events, transferEv(payee, dao, "5"+fixtureNativeDenom))
+	if got := summary(parseExecute(t, signer, paid)); strings.Contains(got, string(CategoryIncome)) || strings.Count(got, ReviewUnclassifiedContractMovement) != 1 {
+		t.Errorf("paid native:\n%s", got)
+	}
 }
 
 // The pinned proposals are well formed: one per module and id, every one
