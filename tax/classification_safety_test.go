@@ -402,3 +402,43 @@ func TestSafetyAuthzGrantHasNoTaxEffect(t *testing.T) {
 		t.Fatalf("delegated grant was not a clean no-op: %v / %v", data, err)
 	}
 }
+
+// The in-SDK transfer module before ibc-go wrote success=false on a credited
+// receive. Only a result ack for the same packet makes that a receive.
+func TestSafetyV1ReceiveInvertedSuccessBeforeIBCGo(t *testing.T) {
+	ack := func(seq, body string) txlog.LogMessageEvent {
+		return ev("write_acknowledgement", [2]string{attributeIBCPacketSequence, seq}, [2]string{attributeIBCSrcPort, string(CategoryTransfer)}, [2]string{attributeIBCSrcChannel, safetySourceChannel}, [2]string{attributeIBCDstPort, string(CategoryTransfer)}, [2]string{attributeIBCDstChannel, "channel-141"}, [2]string{"packet_ack", body})
+	}
+	for _, tc := range []struct {
+		name, packetDenom, bankDenom, success string
+		credit                                bool
+		ack                                   []txlog.LogMessageEvent
+		want                                  int
+		incomplete                            bool
+	}{
+		{"native_return_result_ack", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, []txlog.LogMessageEvent{ack("23", `{"result":"AQ=="}`)}, 1, false},
+		{"voucher_result_ack", fixtureOsmosisDenom, safetyVoucher, attributeFalse, true, []txlog.LogMessageEvent{ack("23", `{"result":"AQ=="}`)}, 1, false},
+		{"result_ack_without_credit", fixtureOsmosisDenom, safetyVoucher, attributeFalse, false, []txlog.LogMessageEvent{ack("23", `{"result":"AQ=="}`)}, 0, true},
+		{"error_ack_with_credit", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, []txlog.LogMessageEvent{ack("23", `{"error":"insufficient funds"}`)}, 0, false},
+		{"old_module_rejection", safetyNativeReturn, fixtureNativeDenom, attributeTrue, true, []txlog.LogMessageEvent{ack("23", `{"error":"insufficient funds"}`)}, 0, false},
+		{"result_ack_for_other_sequence", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, []txlog.LogMessageEvent{ack("24", `{"result":"AQ=="}`)}, 0, false},
+		{"no_ack", safetyNativeReturn, fixtureNativeDenom, attributeFalse, true, nil, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &txlog.LogMessage{Events: []txlog.LogMessageEvent{
+				ev(eventFungibleTokenPacket, [2]string{attributeReceiver, del}, [2]string{attributeSender, other}, [2]string{attributeDenom, tc.packetDenom}, [2]string{attributeAmount, "100"}, [2]string{attributeSuccess, tc.success}),
+			}}
+			if tc.credit {
+				log.Events = append(log.Events, safetyCredit(del, tc.bankDenom)...)
+			}
+			log.Events = append(log.Events, tc.ack...)
+			out := safetyParseReceive(t, &chantypes.MsgRecvPacket{Packet: safetyPacket(t, tc.packetDenom)}, log, tc.incomplete)
+			if len(out) != tc.want {
+				t.Fatalf("want %d, got %+v", tc.want, out)
+			}
+			if tc.want == 1 && (out[0].Denom != tc.bankDenom || out[0].Amount != "100" || out[0].Category != string(CategoryIBCIn) || out[0].FromAddr != other || out[0].ToAddr != del) {
+				t.Fatalf("wrong receive: %+v", out)
+			}
+		})
+	}
+}

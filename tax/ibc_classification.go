@@ -162,20 +162,22 @@ func takeIBCCredit(credits map[string]sdk.Coins, receiver, amount string, denoms
 
 func ibcV1ReceiveEvents(log *txlog.LogMessage, packet chantypes.Packet, data transfertypes.FungibleTokenPacketData) ([]TaxableEvent, []string) {
 	success, anySuccess := false, false
+	inverted := ibcV1ReceiveResultAck(log, packet)
 	issue := fmt.Sprintf("ibc v1 receive sequence %d receiver %s: successful application cannot reconcile unambiguous committed bank credit", packet.Sequence, data.Receiver)
 	for _, ev := range log.Events {
 		if ev.Type != eventFungibleTokenPacket || !ibcCommittedEvent(ev) {
 			continue
 		}
 		for _, a := range ibcReceiveGroups(ev) {
-			anySuccess = anySuccess || (a[attributeSuccess] == attributeTrue && a["error"] == "")
+			appSuccess := a[attributeSuccess] == attributeTrue || (inverted && a[attributeSuccess] == attributeFalse)
+			anySuccess = anySuccess || (appSuccess && a["error"] == "")
 			if a[attributeReceiver] != data.Receiver || a[attributeAmount] != data.Amount {
 				continue
 			}
-			if a[attributeSuccess] == attributeFalse || a["error"] != "" {
+			if (a[attributeSuccess] == attributeFalse && !inverted) || a["error"] != "" {
 				return nil, nil
 			}
-			success = success || a[attributeSuccess] == attributeTrue
+			success = success || appSuccess
 		}
 	}
 	if ibcV1ReceiveErrorAck(log, packet) || !anySuccess {
@@ -272,6 +274,36 @@ func ibcReceivePath(denom, sourcePort, sourceChannel, destinationPort, destinati
 		return strings.TrimPrefix(denom, sourcePrefix)
 	}
 	return destinationPort + "/" + destinationChannel + "/" + denom
+}
+
+// The in-SDK transfer module (SDK 0.40 to 0.42, Cosmos Hub before Vega at
+// height 8,695,000) wrote the receive's success attribute inverted: a credited
+// receive says success=false and a rejected one says true. Its written ack is
+// the reliable signal. From ibc-go on, success=false only comes with an error
+// ack, so a result ack for this exact packet sequence identifies the old
+// module. The credit itself is still proven by takeIBCCredit.
+func ibcV1ReceiveResultAck(log *txlog.LogMessage, packet chantypes.Packet) bool {
+	found := false
+	for _, ev := range log.Events {
+		if ev.Type != "write_acknowledgement" || !ibcCommittedEvent(ev) {
+			continue
+		}
+		a := ibcAttrs(ev)
+		if a[attributeIBCPacketSequence] != strconv.FormatUint(packet.Sequence, 10) ||
+			a[attributeIBCSrcPort] != packet.SourcePort || a[attributeIBCSrcChannel] != packet.SourceChannel ||
+			a[attributeIBCDstPort] != packet.DestinationPort || a[attributeIBCDstChannel] != packet.DestinationChannel {
+			continue
+		}
+		raw, _ := hex.DecodeString(a["packet_ack_hex"])
+		if len(raw) == 0 {
+			raw = []byte(a["packet_ack"])
+		}
+		if !isResultAcknowledgement(raw) {
+			return false
+		}
+		found = true
+	}
+	return found
 }
 
 // A v1 error acknowledgement discards the entire application's receive cache.
@@ -424,6 +456,14 @@ func isErrorAcknowledgement(raw []byte) bool {
 		Result string `json:"result"`
 	}
 	return json.Unmarshal(raw, &ack) == nil && ack.Error != "" && ack.Result == ""
+}
+
+func isResultAcknowledgement(raw []byte) bool {
+	var ack struct {
+		Error  string `json:"error"`
+		Result string `json:"result"`
+	}
+	return json.Unmarshal(raw, &ack) == nil && ack.Result != "" && ack.Error == ""
 }
 
 func isV2ErrorAcknowledgement(raw []byte) bool {
