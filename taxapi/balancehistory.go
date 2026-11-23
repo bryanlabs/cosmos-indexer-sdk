@@ -1582,19 +1582,10 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			return refuse("the indexed history does not reconcile with chain state: " + inc.msg)
 		}
 		var unk ledgerUnknown
-		if !errors.As(err, &unk) {
-			return nil, 0, err
+		if errors.As(err, &unk) {
+			return refuse(unk.msg)
 		}
-		// A date the walk answered before it reached the missing record
-		// never needed it, so only the dates at or below it are refused.
-		for _, i := range usable {
-			if h, ok := held[targets[i].Height]; ok {
-				out[i].Holdings = h
-				continue
-			}
-			out[i].Status, out[i].Reason = balanceIncompleteS, unk.msg
-		}
-		return out, tip.Height, nil
+		return nil, 0, err
 	}
 	for _, i := range usable {
 		out[i].Holdings = held[targets[i].Height]

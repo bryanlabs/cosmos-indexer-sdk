@@ -3,7 +3,6 @@ package taxapi
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -407,9 +406,7 @@ func (b rateBook) shown(v string, h int64, sp shareSpan) (*big.Int, *big.Int, er
 }
 
 // walkBack rebuilds the wallet at each target height (all at or below the
-// anchor). Targets are answered from the same event set. On a ledgerUnknown
-// it also returns the targets above the point it stopped, which never needed
-// the unknown record.
+// anchor). Targets are answered from the same event set.
 func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error) {
 	events := append([]ledgerEvent(nil), in.Events...)
 	sort.SliceStable(events, func(i, j int) bool {
@@ -450,7 +447,7 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		}
 		for ei < len(events) && events[ei].Height > h {
 			if err := undoEvent(in, book, spent, events[ei], liquid, shares); err != nil {
-				return answeredOnUnknown(out, err)
+				return nil, err
 			}
 			ei++
 		}
@@ -485,7 +482,7 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 			}
 			amt, bound, err := book.shown(v, h, *sp)
 			if err != nil {
-				return answeredOnUnknown(out, err)
+				return nil, err
 			}
 			if amt.Sign() != 0 || bound.Sign() != 0 {
 				hold.Delegations[v] = amt
@@ -504,16 +501,6 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		out[h] = hold
 	}
 	return out, nil
-}
-
-// answeredOnUnknown keeps the targets already answered when the walk stops on
-// a record it does not have. Any other error answers nothing.
-func answeredOnUnknown(out map[int64]ledgerHoldings, err error) (map[int64]ledgerHoldings, error) {
-	var unk ledgerUnknown
-	if errors.As(err, &unk) {
-		return out, err
-	}
-	return nil, err
 }
 
 // undoEvent reverses one event's effect on the wallet's liquid balance and
