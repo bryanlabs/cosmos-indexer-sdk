@@ -15,6 +15,17 @@ func unattributedReason(h int64) string {
 	return fmt.Sprintf("a staking event at height %d after this date that does not name its delegator cannot be attributed to one delegator", h)
 }
 
+// earlyDelegationsAt reads addr's delegations for unnamedStopAbove from the
+// node, or the archive below its floor, with one archive budget for the whole
+// pre-check, as the walk has one for its own.
+func earlyDelegationsAt(node *ledgerNode, addr string) func(int64) (map[string]*big.Int, error) {
+	if node == nil {
+		return nil
+	}
+	budget := newArchiveBudget()
+	return func(h int64) (map[string]*big.Int, error) { return node.delegationsAt(addr, h, budget) }
+}
+
 // maxTargetHeight is the highest height among targets[usable].
 func maxTargetHeight(targets []heightTime, usable []int) int64 {
 	var h int64
@@ -29,7 +40,7 @@ func maxTargetHeight(targets []heightTime, usable []int) int64 {
 // when it does not stop above floor. It reads the same candidate messages,
 // rows and events as ledgerStakeEvents, in windows from hi down to floor, and
 // settles each window's blocks with settleUnnamedStakes, newest first, with
-// one archive budget for every window, as the walk spends its own. A block
+// one archive budget for every window (delegationsAt's), as the walk spends its own. A block
 // is settled only after every window that holds it has been read: its
 // unmatched records, the wallet's named events in it and the records
 // attributeStakes gave the wallet in it are then all at hand. Each message is
@@ -37,12 +48,7 @@ func maxTargetHeight(targets []heightTime, usable []int) int64 {
 // it on the same rows. The walk's stop is its first block, newest first, that
 // does not settle; the same blocks are settled here in the same order with
 // the same inputs, so a stop found above floor is the walk's stop.
-func (s *Server) unnamedStopAbove(ids []int64, addr, operator string, floor, hi int64, node *ledgerNode) (int64, error) {
-	var delegationsAt func(int64) (map[string]*big.Int, error)
-	if node != nil {
-		budget := newArchiveBudget()
-		delegationsAt = func(h int64) (map[string]*big.Int, error) { return node.delegationsAt(addr, h, budget) }
-	}
+func (s *Server) unnamedStopAbove(ids []int64, addr, operator string, floor, hi int64, delegationsAt func(int64) (map[string]*big.Int, error)) (int64, error) {
 	rel, rp := s.effectiveRel()
 	msgQuery, blockQuery, redelQuery := s.ledgerQueries(rel)
 	seen := map[uint64]bool{}
