@@ -135,3 +135,16 @@ func TestWasmFallbackFlattenedOtherCoins(t *testing.T) {
 		}
 	}
 }
+
+// A transfer escrow is never the wallet side of a contract's other coins,
+// even when the message has no send_packet naming its channel; native rows
+// are as they were.
+func TestWasmFallbackSkipsEscrowOtherCoins(t *testing.T) {
+	signer, contract := testBech(t, "signer", 20), testBech(t, "contract", 32)
+	escrow := escrowAddress("transfer", "channel-75")
+	log := executeLog(contract, transferEv(contract, escrow, "5factory/test/token"), transferEv(contract, signer, "3factory/test/token"))
+	want := fallbackLine(string(CategoryTransfer), "3", "factory/test/token", contract, signer, contract, true)
+	if got := summary(parseExecute(t, signer, log)); got != want {
+		t.Fatalf("got:\n%swant:\n%s", got, want)
+	}
+}
