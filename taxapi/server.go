@@ -94,6 +94,9 @@ type Server struct {
 	// the wallet's attribute index, which module accounts fill with millions
 	// of rows.
 	blockReads bool
+	// earlyMessages, when set, is the first early-stop window's message
+	// count in place of earlyStopMessages.
+	earlyMessages int
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {

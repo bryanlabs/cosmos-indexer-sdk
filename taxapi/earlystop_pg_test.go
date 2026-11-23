@@ -36,6 +36,11 @@ type earlyBlock struct {
 	// validator, that is not the wallet's; foreignFirst puts it first.
 	foreign      int64
 	foreignFirst bool
+	// own is a delegation whose event names the wallet as delegator, as
+	// Gaia v15 on writes it: read with the wallet's events, not attributed.
+	own int64
+	// placeMatched dates the matched message at placed too.
+	placeMatched bool
 }
 
 // earlyFixture loads blocks into temp tables and returns the database, the
@@ -124,12 +129,24 @@ func earlyFixture(t *testing.T, blocks []earlyBlock) (*gorm.DB, string, map[int6
 			exec("INSERT INTO message_events VALUES (%[1]d0,%[1]d,1,0),(%[1]d1,%[1]d,3,1),(%[1]d2,%[1]d,4,2)", d)
 			exec("INSERT INTO message_event_attributes VALUES (%[1]d0,1,'%[2]s',0),(%[1]d0,3,'%[4]duatom',1),(%[1]d1,5,'staking',0),(%[1]d1,4,'%[2]s',1),(%[1]d2,6,'%[3]s',0),(%[1]d2,3,'%[4]duatom',1),(%[1]d2,7,'%[4]d.000000000000000000',2)", d, w, v1, b.named)
 		}
+		if b.own > 0 {
+			o := 2*n + 2_000_001
+			exec("INSERT INTO txes VALUES (%d,%d,'O%d',0)", o, b.h, n)
+			exec("INSERT INTO messages VALUES (%d,%d)", o, o)
+			exec("INSERT INTO message_events VALUES (%[1]d0,%[1]d,4,0)", o)
+			exec("INSERT INTO message_event_attributes VALUES (%[1]d0,9,'%[2]s',0),(%[1]d0,6,'%[3]s',1),(%[1]d0,3,'%[4]duatom',2)", o, w, v1, b.own)
+		}
 		if b.matched > 0 {
 			r := 2*n + 1_000_001
 			exec("INSERT INTO txes VALUES (%d,%d,'R%d',0)", r, b.h, n)
 			exec("INSERT INTO messages VALUES (%d,%d)", r, r)
 			exec("INSERT INTO message_events VALUES (%[1]d0,%[1]d,6,0),(%[1]d1,%[1]d,4,1)", r)
 			exec("INSERT INTO message_event_attributes VALUES (%[1]d0,9,'%[2]s',0),(%[1]d0,6,'%[3]s',1),(%[1]d1,6,'%[3]s',0),(%[1]d1,3,'%[4]duatom',1)", r, w, v1, b.matched)
+			if b.placeMatched {
+				for i, p := range b.placed {
+					exec("INSERT INTO tax_tx_inclusions (chain, height, tx_index, hash, tx_id, block_id, code, effective, recorded_at) VALUES ('cosmoshub-4',%d,%d,'R%d',%d,%d,0,true,now())", p, i+100, n, r, p)
+				}
+			}
 		}
 		heights := b.placed
 		if len(heights) == 0 {
@@ -137,7 +154,7 @@ func earlyFixture(t *testing.T, blocks []earlyBlock) (*gorm.DB, string, map[int6
 		}
 		for _, h := range heights {
 			before := stake
-			stake += b.named + b.unnamed + b.matched
+			stake += b.named + b.unnamed + b.matched + b.own
 			after := stake
 			if !b.clean || h == b.dirty {
 				after += 7
@@ -148,6 +165,17 @@ func earlyFixture(t *testing.T, blocks []earlyBlock) (*gorm.DB, string, map[int6
 		}
 	}
 	return database, w, states
+}
+
+// earlyServers are the pre-check's read paths: windows cut from the found
+// messages' datings, one, two, three and the default count to the first
+// window, and windows cut by height with block reads.
+func earlyServers(database *gorm.DB) []*Server {
+	var out []*Server
+	for _, n := range []int{1, 2, 3, 0} {
+		out = append(out, &Server{db: database, native: DefaultNativeAsset, earlyMessages: n})
+	}
+	return append(out, &Server{db: database, native: DefaultNativeAsset, blockReads: true})
 }
 
 // walkStop is the walk's own stop over (lowest, tip]: its ledger read and
@@ -235,6 +263,28 @@ func TestUnnamedStopAboveMatchesTheWalkPostgres(t *testing.T) {
 			{h: 960_000, unnamed: 50, foreign: 11, foreignFirst: true, clean: true},
 			{h: 400_000, unnamed: 9, clean: false},
 		}},
+		// An exec and the delegation attributed to the wallet beside it, both
+		// dated in two windows: the lower block needs the attributed record
+		// read with the upper one.
+		{"attributed message dated in two windows", []earlyBlock{
+			{h: 960_000, unnamed: 50, named: 30, clean: true},
+			{h: 10, unnamed: 20, matched: 25, placeMatched: true, clean: true, placed: []int64{940_000, 600_000}},
+			{h: 400_000, unnamed: 9, clean: false},
+		}},
+		// A block just above a window's end that settles only with the
+		// wallet's named delegation in it.
+		{"named delegation just above a window end", []earlyBlock{
+			{h: 900_001, unnamed: 40, own: 20, clean: true},
+			{h: 900_000, unnamed: 30, own: 5, clean: true},
+			{h: 650_000, unnamed: 10, clean: false},
+		}},
+		// One exec dated three times, the lower two below some floors: a
+		// dating at or below the floor is never settled by the pre-check.
+		{"one message dated three times, below the floor", []earlyBlock{
+			{h: 960_000, unnamed: 50, named: 30, clean: true},
+			{h: 10, unnamed: 20, clean: true, placed: []int64{940_000, 600_000, 500_000}, dirty: 600_000},
+			{h: 400_000, unnamed: 9, clean: false},
+		}},
 		// Blocks on and just above window edges that settle only with the
 		// delegation attributeStakes gave the wallet in the same block.
 		{"attributed records on window edges", []earlyBlock{
@@ -254,7 +304,7 @@ func TestUnnamedStopAboveMatchesTheWalkPostgres(t *testing.T) {
 				}
 			}
 			floors = append(floors, earlyTip-1, 900_001, 900_000, 899_999, 700_001, 700_000, 699_999, 300_000, 1)
-			for _, s := range []*Server{{db: database, native: DefaultNativeAsset}, {db: database, native: DefaultNativeAsset, blockReads: true}} {
+			for _, s := range earlyServers(database) {
 				for _, floor := range floors {
 					var wr, er []int64
 					want := walkStop(t, s, w, floor, delegationsBy(states, &wr))
@@ -263,7 +313,7 @@ func TestUnnamedStopAboveMatchesTheWalkPostgres(t *testing.T) {
 					}
 					got, err := s.unnamedStopAbove([]int64{1}, w, "", floor, earlyTip, delegationsBy(states, &er))
 					require.NoError(t, err)
-					require.Equal(t, want, got, "floor %d block reads %t", floor, s.blockReads)
+					require.Equal(t, want, got, "floor %d block reads %t messages %d", floor, s.blockReads, s.earlyMessages)
 				}
 			}
 		})
@@ -279,7 +329,7 @@ func TestUnnamedStopAboveStopsPostgres(t *testing.T) {
 		{h: 650_000, unnamed: 10, clean: false},
 		{h: 250_000, unnamed: 5, clean: true},
 	})
-	for _, s := range []*Server{{db: database, native: DefaultNativeAsset}, {db: database, native: DefaultNativeAsset, blockReads: true}} {
+	for _, s := range earlyServers(database) {
 		for floor, want := range map[int64]int64{
 			960_000: 0, 950_000: 0, 949_999: 0, 900_001: 0, 900_000: 0,
 			899_999: 900_000, 650_000: 900_000, 1: 900_000,
@@ -287,7 +337,7 @@ func TestUnnamedStopAboveStopsPostgres(t *testing.T) {
 			var read []int64
 			got, err := s.unnamedStopAbove([]int64{1}, w, "", floor, earlyTip, delegationsBy(states, &read))
 			require.NoError(t, err)
-			require.Equal(t, want, got, "floor %d block reads %t", floor, s.blockReads)
+			require.Equal(t, want, got, "floor %d block reads %t messages %d", floor, s.blockReads, s.earlyMessages)
 		}
 		// No archive: the first block down holding an unnamed record stops.
 		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, nil)
@@ -301,11 +351,13 @@ func TestUnnamedStopAboveStopsPostgres(t *testing.T) {
 		{h: 650_000, unnamed: 10, clean: false},
 		{h: 250_000, unnamed: 5, clean: false},
 	})
-	var read []int64
-	got, err := (&Server{db: database, native: DefaultNativeAsset}).unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, delegationsBy(states, &read))
-	require.NoError(t, err)
-	require.Equal(t, int64(650_000), got, "the highest stop, below the settled groups")
-	require.Equal(t, []int64{949_999, 950_000, 899_999, 900_000, 700_000, 700_001, 649_999, 650_000}, read, "blocks settled newest first, each once")
+	for _, s := range earlyServers(database) {
+		var read []int64
+		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, delegationsBy(states, &read))
+		require.NoError(t, err)
+		require.Equal(t, int64(650_000), got, "the highest stop, below the settled groups")
+		require.Equal(t, []int64{949_999, 950_000, 899_999, 900_000, 700_000, 700_001, 649_999, 650_000}, read, "blocks settled newest first, each once; block reads %t messages %d", s.blockReads, s.earlyMessages)
+	}
 }
 
 // The pre-check spends one budget across every window, as the walk does, so
@@ -316,19 +368,20 @@ func TestUnnamedStopAboveSharesOneBudgetPostgres(t *testing.T) {
 		{h: 800_000, unnamed: 40, named: 20, clean: true},
 		{h: 500_000, unnamed: 10, clean: true},
 	})
-	s := &Server{db: database, native: DefaultNativeAsset}
-	for limit := 0; limit <= 7; limit++ {
-		var wr, er []int64
-		want := walkStop(t, s, w, 1, budgeted(states, limit, &wr))
-		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, budgeted(states, limit, &er))
+	for _, s := range earlyServers(database) {
+		for limit := 0; limit <= 7; limit++ {
+			var wr, er []int64
+			want := walkStop(t, s, w, 1, budgeted(states, limit, &wr))
+			got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, budgeted(states, limit, &er))
+			require.NoError(t, err)
+			require.Equal(t, want, got, "limit %d block reads %t messages %d", limit, s.blockReads, s.earlyMessages)
+			require.Equal(t, wr, er, "limit %d block reads %t messages %d", limit, s.blockReads, s.earlyMessages)
+		}
+		var read []int64
+		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, budgeted(states, 4, &read))
 		require.NoError(t, err)
-		require.Equal(t, want, got, "limit %d", limit)
-		require.Equal(t, wr, er, "limit %d", limit)
+		require.Equal(t, int64(500_000), got, "the third block finds the budget spent; block reads %t messages %d", s.blockReads, s.earlyMessages)
 	}
-	var read []int64
-	got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, budgeted(states, 4, &read))
-	require.NoError(t, err)
-	require.Equal(t, int64(500_000), got, "the third block, in the third window, finds the budget spent")
 }
 
 // The fixtures' attributed and twice-dated records are what they claim to
@@ -364,8 +417,32 @@ func TestEarlyFixtureShapesPostgres(t *testing.T) {
 		{h: 700_001, unnamed: 15, matched: 25, clean: true},
 		{h: 650_000, unnamed: 10, clean: false},
 	})
-	var read []int64
-	got, err := (&Server{db: database, native: DefaultNativeAsset}).unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, delegationsBy(states, &read))
+	for _, s := range earlyServers(database) {
+		var read []int64
+		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, delegationsBy(states, &read))
+		require.NoError(t, err)
+		require.Equal(t, int64(650_000), got, "the edge blocks settle with their attributed delegations")
+	}
+
+	database, w, states = earlyFixture(t, []earlyBlock{
+		{h: 900_001, unnamed: 40, own: 20, clean: true},
+		{h: 900_000, unnamed: 30, own: 5, clean: true},
+		{h: 650_000, unnamed: 10, clean: false},
+	})
+	events, unmatched, err = (&Server{db: database, native: DefaultNativeAsset}).ledgerStakeEvents([]int64{1}, w, "", 1, earlyTip)
 	require.NoError(t, err)
-	require.Equal(t, int64(650_000), got, "the edge blocks settle with their attributed delegations")
+	own := 0
+	for _, ev := range events {
+		if ev.Type == "delegate" && (ev.Height == 900_001 || ev.Height == 900_000) {
+			own++
+		}
+	}
+	require.Equal(t, 2, own, "the v15 delegations are the wallet's own events")
+	require.Len(t, unmatched, 3)
+	for _, s := range earlyServers(database) {
+		var read []int64
+		got, err := s.unnamedStopAbove([]int64{1}, w, "", 1, earlyTip, delegationsBy(states, &read))
+		require.NoError(t, err)
+		require.Equal(t, int64(650_000), got, "the block above the window end settles with its named delegation; block reads %t messages %d", s.blockReads, s.earlyMessages)
+	}
 }
