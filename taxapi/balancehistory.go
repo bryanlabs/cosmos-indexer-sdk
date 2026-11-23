@@ -881,15 +881,62 @@ WHERE m.id IN @msgs {{OWN}}`, rel) + `
     OFFSET 0
   ) e
 )
-SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, 1 AS phase, ev.type, k.key, a.value
+SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, 1 AS phase, ev.type, k.key, a.value, ev.index AS event_index, a.index AS attr_index
 FROM ev
 CROSS JOIN LATERAL (
   SELECT a.index, a.message_event_attribute_key_id, a.value FROM message_event_attributes a
   WHERE a.message_event_id = ev.id
   OFFSET 0
 ) a
-JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-ORDER BY ev.height, ev.message_id, ev.index, a.index`
+JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id`
+}
+
+// stakeAttrRow is one row of redelegationRowsQuery with the event and
+// attribute indexes it is ordered by.
+type stakeAttrRow struct {
+	EventID    uint64
+	MessageID  uint64
+	Height     int64
+	TimeStamp  time.Time
+	Phase      int
+	Type       string
+	Key        string
+	Value      string
+	EventIndex int64
+	AttrIndex  int64
+}
+
+// readStakeRows runs redelegationRowsQuery for msgs and returns its rows in
+// height, message, event and attribute order. The query leaves the order to
+// this sort: a chunk of a large staking wallet is tens of megabytes, which
+// Postgres would sort on disk.
+func (s *Server) readStakeRows(msgs []uint64, rel string, rp map[string]any) ([]ledgerAttrRow, error) {
+	var part []stakeAttrRow
+	if err := s.db.Raw(redelegationRowsQuery(rel),
+		withParams(rp, map[string]any{"msgs": msgs})).
+		Scan(&part).Error; err != nil {
+		return nil, err
+	}
+	sort.Slice(part, func(i, j int) bool {
+		a, b := &part[i], &part[j]
+		switch {
+		case a.Height != b.Height:
+			return a.Height < b.Height
+		case a.MessageID != b.MessageID:
+			return a.MessageID < b.MessageID
+		case a.EventIndex != b.EventIndex:
+			return a.EventIndex < b.EventIndex
+		case a.EventID != b.EventID:
+			return a.EventID < b.EventID
+		}
+		return a.AttrIndex < b.AttrIndex
+	})
+	rows := make([]ledgerAttrRow, len(part))
+	for i := range part {
+		r := &part[i]
+		rows[i] = ledgerAttrRow{EventID: r.EventID, MessageID: r.MessageID, Height: r.Height, TimeStamp: r.TimeStamp, Phase: r.Phase, Type: r.Type, Key: r.Key, Value: r.Value}
+	}
+	return rows, nil
 }
 
 // redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards,
@@ -900,10 +947,8 @@ ORDER BY ev.height, ev.message_id, ev.index, a.index`
 func (s *Server) redelegationRows(msgs []uint64, rel string, rp map[string]any) ([]ledgerAttrRow, error) {
 	var rows []ledgerAttrRow
 	if err := inChunks(msgs, func(chunk []uint64) error {
-		var part []ledgerAttrRow
-		if err := s.db.Raw(redelegationRowsQuery(rel),
-			withParams(rp, map[string]any{"msgs": chunk})).
-			Scan(&part).Error; err != nil {
+		part, err := s.readStakeRows(chunk, rel, rp)
+		if err != nil {
 			return fmt.Errorf("redelegation events: %w", err)
 		}
 		rows = append(rows, part...)
@@ -948,10 +993,8 @@ func (s *Server) attributeStakeRows(msgs []uint64, rel string, rp map[string]any
 	var runs []stakeRun
 	var held []ledgerAttrRow
 	for start := 0; start < len(msgs); start += size {
-		var part []ledgerAttrRow
-		if err := s.db.Raw(redelegationRowsQuery(rel),
-			withParams(rp, map[string]any{"msgs": msgs[start:min(start+size, len(msgs))]})).
-			Scan(&part).Error; err != nil {
+		part, err := s.readStakeRows(msgs[start:min(start+size, len(msgs))], rel, rp)
+		if err != nil {
 			return nil, nil, fmt.Errorf("redelegation events: %w", err)
 		}
 		at, multi := map[uint64]int64{}, map[uint64]bool{}
