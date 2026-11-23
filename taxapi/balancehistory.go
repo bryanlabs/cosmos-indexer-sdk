@@ -1674,7 +1674,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	// When every date is below the height the walk would stop at, on a staking
 	// record no delegator is named for, the dates are refused as the walk
 	// refuses them, without reading the rest of the wallet's history.
-	if stop, err := s.unnamedStopAbove(ids, addr, operator, maxTargetHeight(targets, usable), tip.Height, node); err != nil {
+	if stop, err := s.unnamedStopAbove(ids, addr, operator, maxTargetHeight(targets, usable), tip.Height, earlyDelegationsAt(node, addr)); err != nil {
 		return nil, 0, err
 	} else if stop > 0 {
 		for _, i := range usable {
