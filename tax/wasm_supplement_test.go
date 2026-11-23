@@ -81,7 +81,15 @@ func TestWasmSupplementAppendsAfterKnownRows(t *testing.T) {
 		if summary(got) != summary(append(append([]TaxableEvent{}, known...), state.late...)) {
 			t.Fatalf("%s: supplement rows are not after the known rows", n)
 		}
+		// The native coin is named per address, any other coin per address
+		// and denom.
 		named := map[string]bool{}
+		key := func(addr, denom string) string {
+			if denom == fixtureNativeDenom {
+				return addr
+			}
+			return addr + "|" + denom
+		}
 		for i, e := range got {
 			fallback := strings.Contains(e.Detail, `"fallback":"bank"`)
 			if fallback && i < len(known) {
@@ -92,13 +100,11 @@ func TestWasmSupplementAppendsAfterKnownRows(t *testing.T) {
 				if !excludedContract(log, e.FromAddr) && !fallbackModuleSet[e.FromAddr] && e.FromAddr != firstContract(log) {
 					wallet = e.FromAddr
 				}
-				if named[wallet] {
+				if named[key(wallet, e.Denom)] {
 					t.Fatalf("%s: fallback row for %s, which an earlier row names", n, wallet)
 				}
 			}
-			if e.Denom == fixtureNativeDenom {
-				named[e.FromAddr], named[e.ToAddr] = true, true
-			}
+			named[key(e.FromAddr, e.Denom)], named[key(e.ToAddr, e.Denom)] = true, true
 		}
 		checked++
 	}

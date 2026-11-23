@@ -613,13 +613,136 @@ func namesAny(rows []TaxableEvent, addr string, coins sdk.Coins) bool {
 	return false
 }
 
-// bankFallbackEvents records the native coin a wallet gained or lost in a
-// contract message that no other row of the message names, as a plain
-// transfer: out to the address it paid most, or in from the address that
-// paid it most. Contracts that ran in the message, module accounts and IBC
-// escrow accounts are never the wallet side, and a 32-byte address is the
-// wallet side only as the signer. Fee legs never reach a message's events,
-// and a leg to a fee collector is skipped in case one does.
+// ReviewUnclassifiedContractMovement marks a bank fallback row for a coin
+// other than the native one whose meaning no rule decides: the coin a wallet
+// paid a contract or got from one, recorded as a transfer for the user to
+// review, never dropped and never guessed as income.
+const ReviewUnclassifiedContractMovement = "unclassified_contract_movement"
+
+// fallbackFlow is one wallet's net movement of one denom in a contract
+// message that no other row of the message names for that denom.
+type fallbackFlow struct {
+	wallet, denom string
+	net           sdkmath.Int
+	topIn, topOut sdkmath.Int
+	from, to      string
+	firstLegPos   int
+}
+
+type flowKey struct{ wallet, denom string }
+
+// fallbackFlows nets each wallet's legs of the denoms keep accepts, in leg
+// order. A leg names a wallet only for a denom no known row names it for.
+func fallbackFlows(legs []coinTransfer, keep func(string) bool, wallet func(string) bool, named map[flowKey]bool) (map[flowKey]*fallbackFlow, []flowKey) {
+	flows := map[flowKey]*fallbackFlow{}
+	var order []flowKey
+	for pos, l := range legs {
+		if feeCollectors[l.from] || feeCollectors[l.to] || l.from == l.to {
+			continue
+		}
+		for _, c := range l.coins {
+			if !keep(c.Denom) || !c.Amount.IsPositive() {
+				continue
+			}
+			for _, side := range []string{l.from, l.to} {
+				k := flowKey{side, c.Denom}
+				if !wallet(side) || named[k] {
+					continue
+				}
+				f := flows[k]
+				if f == nil {
+					f = &fallbackFlow{wallet: side, denom: c.Denom, net: sdkmath.ZeroInt(), topIn: sdkmath.ZeroInt(), topOut: sdkmath.ZeroInt(), firstLegPos: pos}
+					flows[k] = f
+					order = append(order, k)
+				}
+				if side == l.to {
+					f.net = f.net.Add(c.Amount)
+					if c.Amount.GT(f.topIn) {
+						f.topIn, f.from = c.Amount, l.from
+					}
+				} else {
+					f.net = f.net.Sub(c.Amount)
+					if c.Amount.GT(f.topOut) {
+						f.topOut, f.to = c.Amount, l.to
+					}
+				}
+			}
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool { return flows[order[i]].firstLegPos < flows[order[j]].firstLegPos })
+	return flows, order
+}
+
+// fallbackRow is the plain transfer of one flow: out to the address the
+// wallet paid most, or in from the address that paid it most. A counterparty
+// that is itself a wallet gets its own row, or is already named by one, so
+// the row names the contract instead and no wallet sees the coin twice. It
+// returns the row and the contract it is recorded against.
+func fallbackRow(log *indexerTxTypes.LogMessage, f *fallbackFlow, top string, ownFlow func(string) bool) (TaxableEvent, string) {
+	from, to, cp := f.from, f.wallet, f.from
+	amt := f.net
+	if f.net.IsNegative() {
+		from, to, cp = f.wallet, f.to, f.to
+		amt = f.net.Neg()
+	}
+	if ownFlow(cp) {
+		if from == cp {
+			from = top
+		} else {
+			to = top
+		}
+	}
+	contract := top
+	if excludedContract(log, cp) {
+		contract = cp
+	}
+	return TaxableEvent{Category: string(CategoryTransfer), FromAddr: from, ToAddr: to, Amount: amt.String(), Denom: f.denom}, contract
+}
+
+// fallbackEvidence is what our own node's contract info says each
+// registered contract is (code id and label). Only these contracts' registry
+// kinds decide a fallback row's category; any other contract's rows are
+// flagged for review, whatever kind the registry gives it.
+var fallbackEvidence = map[string]struct {
+	codeID uint64
+	label  string
+}{
+	"cosmos1clswlqlfm8gpn7n5wu0ypu0ugaj36urlhj7yz30hn7v7mkcm2tuqy9f8s5": {127, "Skip Swap Entry Point"},
+	"cosmos1lqu9662kd4my6dww4gzp3730vew0gkwe0nl9ztjh0n5da0a8zc4swsvd22": {126, "Skip Swap IBC Transfer Adapter"},
+	"cosmos1r9695xq7y0fd2nk06rv6llykay7ny27jrpq4de2w6eqja5p2mlvqfv8aa9": {187, "DAO Rewards Distributor"},
+	"cosmos19fprlcmzt2axrukx3xacsdpykv40nrdsv9l7jgnfrpwukgteu3zq3t2q9f": {187, "DAO Rewards Distributor"},
+	"cosmos15nafa2hazwmjs8yz844h5ry5yrzvz6q96a0300ge26vm8hcsrd4s7zxhyj": {192, "dao-voting-token-staked"},
+	"cosmos1690hpscut3ltfkcm997fw2jws3tk0wkh7tnlntlavqkpg56hpdzsrjhy5r": {752, "Inflow ATOM Vault"},
+	"cosmos1d2hrvjvrvqvzdcffy2cy0p2gnytj48e2yg0lvnxk6knhmnt7cqvqetf09u": {752, "Inflow ATOM Vault"},
+	"cosmos1nhu3aqrlf3adlffvx3z5pyxntgulgj9dhfskwlp8fksx5mf7v9qqfjpgpd": {691, "Governance Score Rewards"},
+}
+
+// bankFallbackEvents records the coin a wallet gained or lost in a contract
+// message that no other row of the message names, so every coin that moves
+// between a wallet and a contract reaches the wallet's balances.
+//
+// The native coin is recorded exactly as it always has been: one plain
+// transfer per wallet, out to the address it paid most or in from the
+// address that paid it most. Every other coin follows all native rows, one
+// row per wallet and denom against the contract, in the order of the
+// wallet's first such leg. A wallet whose only unexplained coins are not the
+// native one gets the category its contracts and movement decide:
+//   - coins out and other coins back through a router or vault are a swap,
+//     the way DEX trades and vault shares are recorded;
+//   - tokens into a DAO staking module are a deposit the wallet still owns,
+//     and tokens out of one are its withdrawal;
+//   - coins only received from a rewards distributor are income.
+//
+// Only contracts in fallbackEvidence decide. Anything else, and the other
+// coins of a wallet that also has a native fallback row (whose plain
+// transfer cannot be one leg of a swap), is a transfer flagged
+// ReviewUnclassifiedContractMovement: never dropped and never guessed as
+// income.
+//
+// Contracts that ran in the message, module accounts and IBC escrow accounts
+// are never the wallet side, and a 32-byte address is the wallet side only as
+// the signer. Fee legs never reach a message's events, and a leg to a fee
+// collector is skipped in case one does.
 func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
 	excluded := fallbackExcluded(log)
 	wallet := func(addr string) bool {
@@ -632,86 +755,118 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 		_, bz, err := bech32.DecodeAndConvert(addr)
 		return err == nil && len(bz) == 20
 	}
-	named := map[string]bool{}
+	nativeNamed := map[flowKey]bool{}
+	named := map[flowKey]bool{}
 	for _, e := range known {
+		for _, a := range []string{e.FromAddr, e.ToAddr} {
+			named[flowKey{a, e.Denom}] = true
+		}
 		if e.Denom == fixtureNativeDenom {
-			named[e.FromAddr] = true
-			named[e.ToAddr] = true
+			nativeNamed[flowKey{e.FromAddr, fixtureNativeDenom}] = true
+			nativeNamed[flowKey{e.ToAddr, fixtureNativeDenom}] = true
 		}
 	}
-	type flow struct {
-		net         sdkmath.Int
-		topIn       sdkmath.Int
-		topOut      sdkmath.Int
-		from, to    string
-		firstLegPos int
-	}
-	flows := map[string]*flow{}
-	var order []string
 	legs := transfersIn(log)
-	for pos, l := range legs {
-		amt := l.coins.AmountOf(fixtureNativeDenom)
-		if !amt.IsPositive() || feeCollectors[l.from] || feeCollectors[l.to] || l.from == l.to {
-			continue
-		}
-		for _, side := range []string{l.from, l.to} {
-			if !wallet(side) || named[side] {
-				continue
-			}
-			f := flows[side]
-			if f == nil {
-				f = &flow{net: sdkmath.ZeroInt(), topIn: sdkmath.ZeroInt(), topOut: sdkmath.ZeroInt(), firstLegPos: pos}
-				flows[side] = f
-				order = append(order, side)
-			}
-			if side == l.to {
-				f.net = f.net.Add(amt)
-				if amt.GT(f.topIn) {
-					f.topIn, f.from = amt, l.from
-				}
-			} else {
-				f.net = f.net.Sub(amt)
-				if amt.GT(f.topOut) {
-					f.topOut, f.to = amt, l.to
-				}
-			}
-		}
-	}
-	sort.SliceStable(order, func(i, j int) bool { return flows[order[i]].firstLegPos < flows[order[j]].firstLegPos })
+	native, nativeOrder := fallbackFlows(legs, func(d string) bool { return d == fixtureNativeDenom }, wallet, nativeNamed)
+	other, otherOrder := fallbackFlows(legs, func(d string) bool { return d != fixtureNativeDenom }, wallet, named)
 	top := firstContract(log)
 	var out []TaxableEvent
-	for _, addr := range order {
-		f := flows[addr]
+	nativeRow := map[string]bool{}
+	for _, k := range nativeOrder {
+		f := native[k]
 		if f.net.IsZero() {
 			continue
 		}
-		from, to, cp := f.from, addr, f.from
-		amt := f.net
-		if f.net.IsNegative() {
-			from, to, cp = addr, f.to, f.to
-			amt = f.net.Neg()
-		}
-		// A counterparty that is itself a wallet gets its own row, or is
-		// already named by one, so this row names the contract instead and
-		// no wallet sees the coin twice.
-		if _, ok := flows[cp]; ok || (named[cp] && wallet(cp)) {
-			if from == cp {
-				from = top
-			} else {
-				to = top
-			}
-		}
-		contract := top
-		if excludedContract(log, cp) {
-			contract = cp
-		}
-		out = append(out, TaxableEvent{
-			Category: string(CategoryTransfer), FromAddr: from, ToAddr: to,
-			Amount: amt.String(), Denom: fixtureNativeDenom,
-			Detail: contractDetail(contract, map[string]string{detailFallback: fallbackBank}),
+		nativeRow[k.wallet] = true
+		e, contract := fallbackRow(log, f, top, func(cp string) bool {
+			_, ok := native[flowKey{cp, fixtureNativeDenom}]
+			return ok || (nativeNamed[flowKey{cp, fixtureNativeDenom}] && wallet(cp))
 		})
+		e.Detail = contractDetail(contract, map[string]string{detailFallback: fallbackBank})
+		out = append(out, e)
+	}
+	seen := map[string]bool{}
+	for _, k0 := range otherOrder {
+		w := k0.wallet
+		if seen[w] || other[k0].net.IsZero() {
+			continue
+		}
+		seen[w] = true
+		var flows []*fallbackFlow
+		var rows []TaxableEvent
+		var contracts []string
+		for _, k := range otherOrder {
+			f := other[k]
+			if k.wallet != w || f.net.IsZero() {
+				continue
+			}
+			e, contract := fallbackRow(log, f, top, func(cp string) bool {
+				_, ok := other[flowKey{cp, k.denom}]
+				return ok || (named[flowKey{cp, k.denom}] && wallet(cp))
+			})
+			flows, rows, contracts = append(flows, f), append(rows, e), append(contracts, contract)
+		}
+		category, review := CategoryTransfer, true
+		if !nativeRow[w] {
+			category, review = fallbackClass(flows, contracts)
+		}
+		for i := range rows {
+			extra := map[string]string{detailFallback: fallbackBank}
+			if review {
+				extra[detailReviewRequired] = attributeTrue
+				extra[detailReviewReason] = ReviewUnclassifiedContractMovement
+			}
+			rows[i].Category = string(category)
+			rows[i].Detail = contractDetail(contracts[i], extra)
+		}
+		out = append(out, rows...)
 	}
 	return out
+}
+
+// fallbackClass decides one wallet's fallback rows in a message from the
+// registry kinds of the contracts they are recorded against, when our node's
+// evidence backs every one of them, and from whether the wallet paid,
+// received or both. It reports whether the rows need review.
+func fallbackClass(flows []*fallbackFlow, contracts []string) (Category, bool) {
+	var paid, got bool
+	for _, f := range flows {
+		if f.net.IsNegative() {
+			paid = true
+		} else {
+			got = true
+		}
+	}
+	kinds := map[string]bool{}
+	for _, c := range contracts {
+		if _, ok := fallbackEvidence[c]; !ok {
+			return CategoryTransfer, true
+		}
+		kinds[contractKind(c)] = true
+	}
+	only := func(allowed ...string) bool {
+		for k := range kinds {
+			ok := false
+			for _, a := range allowed {
+				ok = ok || k == a
+			}
+			if !ok {
+				return false
+			}
+		}
+		return len(kinds) > 0
+	}
+	switch {
+	case paid && got && only(contractRoleRouter, contractRoleVault):
+		return CategorySwap, false
+	case paid && !got && only(contractRoleDAOStaking):
+		return CategoryProtocolDeposit, false
+	case got && !paid && only(contractRoleDAOStaking):
+		return CategoryProtocolWithdrawal, false
+	case got && !paid && only(attributeRewards):
+		return CategoryIncome, false
+	}
+	return CategoryTransfer, true
 }
 
 // feeCollectors are the module accounts transaction fees are paid to.
