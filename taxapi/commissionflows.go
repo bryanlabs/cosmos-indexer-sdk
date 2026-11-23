@@ -205,17 +205,14 @@ const (
 
 // Deposit-sweep rule: an exchange's hot wallet collects from deposit
 // addresses, one per customer, each of which forwards what it receives to the
-// hot wallet and does nothing else. A busy wallet whose sampled senders are
-// mostly such pass-through wallets is labelled exchange-like. Measured
+// hot wallet and does nothing else. A busy wallet whose senders are mostly
+// such pass-through wallets is labelled exchange-like. Measured
 // 2026-11-21 on the busiest unlabelled receivers: 160 to 184 of 200 senders
 // pass through for the clearest hot wallets, 7 of 200 for a wallet that is
 // not one. Busy wallets that fail it and the wide distributor rule stay
 // busy_wallet, with what was measured kept in the trace's evidence.
 const (
 	flowSweepHeuristic = "heuristic:deposit-sweep/v2"
-	flowSweepSample    = 3000
-	flowSweepSenders   = 200
-	flowSweepPerSender = 200
 	// A pass-through wallet sent on at least this share of what other
 	// wallets sent it in the window, and never more.
 	flowSweepForwardMin = "0.9"
@@ -267,46 +264,41 @@ SELECT count(*) FROM (
 	return n, err
 }
 
-// sweepDepositSenders samples the distinct wallets that sent addr the native
-// coin in [start, end) and counts those that pass through to it: in bounded
-// reads of their window, every movement they made is a transfer to addr, and
-// it carried between flowSweepForwardMin and all of what other wallets sent
-// them.
+// sweepDepositSenders counts every distinct wallet that sent addr the native
+// coin in [start, end) and those of them that pass through to it: every
+// movement they made in the window is a transfer to addr, and together they
+// carried between flowSweepForwardMin and all of what other wallets sent
+// them. No sample: the ratio is over all senders and all their rows, so it
+// does not depend on read order or query plan.
 func (s *Server) sweepDepositSenders(addr string, start, end time.Time) (examined, deposits int, err error) {
 	var row struct {
 		Examined int
 		Deposits int
 	}
 	err = s.db.Raw(`
-WITH senders AS (
-	SELECT DISTINCT from_addr FROM (
-		SELECT from_addr FROM taxable_events
-		WHERE to_addr = @addr AND category || '' = @transfer AND denom = @denom AND from_addr <> '' AND from_addr <> @addr
-			AND timestamp >= @start AND timestamp < @end AND coalesce(reward_trigger, '') <> @withdraw
-		LIMIT @sample) r
-	LIMIT @senders),
-moves AS (
-	SELECT s.from_addr,
-		coalesce(sum(o.amount::numeric) FILTER (WHERE o.category = @transfer AND o.to_addr = @addr), 0) AS swept,
-		count(*) FILTER (WHERE NOT (o.category = @transfer AND o.to_addr = @addr)) AS other
-	FROM senders s
-	CROSS JOIN LATERAL (
-		SELECT category, to_addr, amount FROM taxable_events
-		WHERE from_addr = s.from_addr AND denom = @denom AND timestamp >= @start AND timestamp < @end
-		LIMIT @per) o
-	GROUP BY s.from_addr),
+WITH senders AS MATERIALIZED (
+	SELECT DISTINCT from_addr FROM taxable_events
+	WHERE to_addr = @addr AND category || '' = @transfer AND denom = @denom AND from_addr <> '' AND from_addr <> @addr
+		AND timestamp >= @start AND timestamp < @end AND coalesce(reward_trigger, '') <> @withdraw),
+passing AS (
+	SELECT s.from_addr FROM senders s
+	WHERE NOT EXISTS (
+		SELECT 1 FROM taxable_events o
+		WHERE o.from_addr = s.from_addr AND o.denom = @denom AND o.timestamp >= @start AND o.timestamp < @end
+			AND NOT (o.category = @transfer AND o.to_addr = @addr))),
 funded AS (
-	SELECT m.swept, (
-		SELECT coalesce(sum(i.amount::numeric), 0) FROM (
-			SELECT amount FROM taxable_events
-			WHERE to_addr = m.from_addr AND denom = @denom AND from_addr <> @addr AND timestamp >= @start AND timestamp < @end
-			LIMIT @per) i) AS received
-	FROM moves m WHERE m.other = 0)
+	SELECT (
+		SELECT coalesce(sum(o.amount::numeric), 0) FROM taxable_events o
+		WHERE o.from_addr = p.from_addr AND o.denom = @denom AND o.timestamp >= @start AND o.timestamp < @end
+			AND o.category = @transfer AND o.to_addr = @addr) AS swept, (
+		SELECT coalesce(sum(i.amount::numeric), 0) FROM taxable_events i
+		WHERE i.to_addr = p.from_addr AND i.denom = @denom AND i.from_addr <> @addr AND i.timestamp >= @start AND i.timestamp < @end) AS received
+	FROM passing p)
 SELECT (SELECT count(*) FROM senders) AS examined,
 	(SELECT count(*) FROM funded WHERE received > 0 AND swept >= received * CAST(@forward AS numeric) AND swept <= received) AS deposits`,
 		map[string]any{
 			"addr": addr, "transfer": apiTransfer, "denom": s.native.Denom, "start": start, "end": end, "withdraw": tax.TriggerWithdrawAddress,
-			"sample": flowSweepSample, "senders": flowSweepSenders, "per": flowSweepPerSender, "forward": flowSweepForwardMin,
+			"forward": flowSweepForwardMin,
 		}).Scan(&row).Error
 	return row.Examined, row.Deposits, err
 }
@@ -1199,7 +1191,7 @@ func (l *dbFlowLoader) busy(addr string, rows int64, start, end time.Time) (flow
 	if err != nil {
 		return flowStop{}, err
 	}
-	sweep := fmt.Sprintf("%d of %d sampled senders from %s to %s pass through to it", deposits, examined, start.Format(apiDateLayout), end.Format(apiDateLayout))
+	sweep := fmt.Sprintf("%d of %d senders from %s to %s pass through to it", deposits, examined, start.Format(apiDateLayout), end.Format(apiDateLayout))
 	if sweepExchange(examined, deposits) {
 		lab := AddressLabel{
 			Chain: l.chain, Address: addr, Name: "deposit-sweep wallet", Kind: labelExchangeLike, Source: flowSweepHeuristic,

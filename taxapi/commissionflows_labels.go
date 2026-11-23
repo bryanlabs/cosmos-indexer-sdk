@@ -82,7 +82,7 @@ func (p ExchangeProfile) ExchangeLike() bool {
 }
 
 func (p ExchangeProfile) String() string {
-	return fmt.Sprintf("conditions met: %s (memo-deposit senders %d of %d needed; deposit-sweep %d of %d sampled senders pass through; fed by %d deposit-style address(es); pays %d distinct wallets, %d+ supports)",
+	return fmt.Sprintf("conditions met: %s (memo-deposit senders %d of %d needed; deposit-sweep %d of %d senders pass through; fed by %d deposit-style address(es); pays %d distinct wallets, %d+ supports)",
 		strings.Join(p.Met, ", "), p.MemoSenders, flowMemoMinSenders, p.SweepPass, p.SweepExamine, p.FedBy, p.Receivers, flowPayoutReceivers)
 }
 

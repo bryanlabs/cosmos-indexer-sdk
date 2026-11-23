@@ -137,9 +137,9 @@ func TestCommissionFlowBusyWalletSweepPostgres(t *testing.T) {
 	require.Len(t, labels, 2)
 	byAddr := map[string]AddressLabel{labels[0].Address: labels[0], labels[1].Address: labels[1]}
 	require.Equal(t, labelExchangeLike, byAddr[hot].Kind)
-	require.Contains(t, byAddr[hot].Evidence, "30 of 45 sampled senders from 2025-01-01 to 2025-04-01 pass through to it")
+	require.Contains(t, byAddr[hot].Evidence, "30 of 45 senders from 2025-01-01 to 2025-04-01 pass through to it")
 	require.Equal(t, labelBusyWallet, byAddr[service].Kind)
-	require.Contains(t, byAddr[service].Evidence, "0 of 30 sampled senders")
+	require.Contains(t, byAddr[service].Evidence, "0 of 30 senders")
 	var stored int64
 	require.NoError(t, s.db.Model(&AddressLabel{}).Where("source = ?", flowSweepHeuristic).Count(&stored).Error)
 	require.Zero(t, stored, "a private run stores no label")
