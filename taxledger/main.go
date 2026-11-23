@@ -14,6 +14,12 @@
 // the index, the ledger scan and the validator rates cover, up to yesterday,
 // rebuilding only the wallets those days can have changed.
 //
+// With -days-rebuild it rebuilds the stored days of the addresses whose ids
+// the file lists over the whole built span, after a correction to their
+// history, writing the rows it replaces, the rows it stores and a rollback
+// script to -days-rebuild-out. Without -days-rebuild-write it writes only
+// those files and its session is read only.
+//
 // With -commission-flows it traces every validator's withdrawn commission
 // from -commission-flows-from to today and stores where it went (OPS-818).
 //
@@ -23,17 +29,19 @@
 // events, so the outcome follows from where the transaction failed.
 //
 // Env: DB_HOST DB_PORT DB_NAME DB_USER DB_PASS, and NODE_REST_API for
-// -days-from, -days-append and -commission-flows (which also reads
+// -days-from, -days-append, -days-rebuild and -commission-flows (which also reads
 // ORACLE_URL for denoms).
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -88,6 +96,10 @@ func main() {
 	daysBatch := flag.Int("days-batch", 2000, "addresses read per batch of the build")
 	daysWorkers := flag.Int("days-workers", 8, "addresses built in parallel")
 	daysAppend := flag.Bool("days-append", false, "append the finished days after the stored balance build")
+	daysRebuild := flag.String("days-rebuild", "", "file of address ids, one per line, whose stored balance days are rebuilt over the built span")
+	daysRebuildSHA := flag.String("days-rebuild-sha256", "", "exact digest of -days-rebuild")
+	daysRebuildOut := flag.String("days-rebuild-out", "", "new directory for the rebuild's before.jsonl, after.jsonl and rollback.sql")
+	daysRebuildWrite := flag.Bool("days-rebuild-write", false, "replace the rows; without it the rebuild only writes its files")
 	flows := flag.Bool("commission-flows", false, "trace where each validator's commission went")
 	flowsFrom := flag.String("commission-flows-from", "2023-01-01", "first day of the commission trace")
 	flowsOnly := flag.String("commission-validators", "", "comma-separated valoper addresses to trace, default every validator")
@@ -155,6 +167,9 @@ func main() {
 	if *deriveLabels != "" {
 		runtime = append(runtime, "default_transaction_read_only=on", fmt.Sprintf("statement_timeout=%d", deriveTimeout.Milliseconds()), "plan_cache_mode=force_custom_plan")
 	}
+	if *daysRebuild != "" && !*daysRebuildWrite {
+		runtime = append(runtime, "default_transaction_read_only=on")
+	}
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
@@ -201,6 +216,10 @@ func main() {
 	}
 	if *daysAppend {
 		appendDays(db, *chain, *daysWorkers)
+		return
+	}
+	if *daysRebuild != "" {
+		rebuildDays(db, *chain, *daysRebuild, *daysRebuildSHA, *daysRebuildOut, *daysWorkers, *daysRebuildWrite)
 		return
 	}
 	if *daysFrom != "" {
@@ -298,6 +317,53 @@ func buildDays(db *gorm.DB, chain, fromText, toText string, batch, workers int) 
 	if err := srv.BuildBalanceDays(chain, "cosmos", node, from, to, batch, workers, log.Printf); err != nil {
 		log.Fatalf("balance days: %v", err)
 	}
+}
+
+func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir string, workers int, write bool) {
+	raw, err := os.ReadFile(idsPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if sum := fmt.Sprintf("%x", sha256.Sum256(raw)); wantSHA == "" || sum != wantSHA {
+		log.Fatalf("-days-rebuild digest %s does not match -days-rebuild-sha256", sum)
+	}
+	var ids []int64
+	for _, line := range strings.Fields(string(raw)) {
+		id, err := strconv.ParseInt(line, 10, 64)
+		if err != nil || id <= 0 {
+			log.Fatalf("-days-rebuild: bad address id %q", line)
+		}
+		ids = append(ids, id)
+	}
+	if outDir == "" {
+		log.Fatal("-days-rebuild requires -days-rebuild-out")
+	}
+	if err := os.Mkdir(outDir, 0o700); err != nil {
+		log.Fatal(err)
+	}
+	create := func(name string) *os.File {
+		f, err := os.OpenFile(filepath.Join(outDir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return f
+	}
+	before, after, rollback := create("before.jsonl"), create("after.jsonl"), create("rollback.sql")
+	node, err := taxapi.NewLedgerNode()
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	r, err := srv.RebuildBalanceDaysFor(chain, "cosmos", node, ids, workers, write, before, after, rollback, log.Printf)
+	for _, f := range []*os.File{before, after, rollback} {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		log.Fatalf("balance rebuild: %v", err)
+	}
+	log.Printf("balance rebuild: %d addresses, %s to %s, %d rows before, %d after, written=%v", r.Addresses, r.From.Format(time.DateOnly), r.To.Format(time.DateOnly), r.Before, r.After, r.Written)
 }
 
 func appendDays(db *gorm.DB, chain string, workers int) {
