@@ -24,8 +24,8 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v20"
-	MethodologyDate    = "2026-11-22"
+	MethodologyVersion = "v21"
+	MethodologyDate    = "2026-11-23"
 )
 
 func currentMethodology() Methodology {
@@ -43,7 +43,8 @@ func currentMethodology() Methodology {
 		Sources: []string{
 			"wasm-indexer oracle /price endpoint (chain-registry + scraped IBC/CosmWasm-token price feeds)",
 			"CoinGecko daily USD price (00:00 UTC), the oracle's primary source; it reaches back to 2025-06-26",
-			"Coinbase Exchange daily candle open (00:00 UTC) for ATOM (ATOM-USD, from 2021-01-01) and USDT (USDT-USD, from 2021-05-04) on days CoinGecko cannot serve; over 289 overlapping ATOM days the median difference from CoinGecko was 0.08%. Other assets have no direct USD market there and stay unpriced before CoinGecko's first day",
+			"Coinbase Exchange daily candle open (00:00 UTC) for ATOM (ATOM-USD, from 2020-01-15) and USDT (USDT-USD, from 2021-05-04) on days CoinGecko cannot serve; over 289 overlapping ATOM days the median difference from CoinGecko was 0.08%. Coinbase's first ATOM day, 2020-01-14, is not used because its candle opens at the 18:00 UTC listing, not at 00:00. Other assets have no direct USD market there and stay unpriced before CoinGecko's first day",
+			"Kraken ATOM/USD public trade history for ATOM from 2019-04-22, Kraken's listing and the first USD market, to 2020-01-14: the first trade at or after 00:00 UTC (kraken-daily-open), or the day's volume-weighted average price (kraken-daily-vwap) when the day's first trade came more than six hours after 00:00 UTC or the day had fewer than 20 trades. Only 2019-04-22, first traded at 18:13 UTC, takes the average; every other day had at least 61 trades and a first trade a median of eight minutes after 00:00. Over 352 days of 2020 the Kraken open was a median 0.21% from Coinbase's open (largest 4.7%), and over 74 days of late 2019 a median 0.37% from Binance.US's open (largest 2.4%). ATOM before 2019-04-22 had no USD market and stays unpriced",
 		},
 		TimestampGranularity: "daily (UTC calendar day); every event on a given day for a given denom uses that day's single reference price, not an intraday price. The price is for that exact day: a missing day is never filled from an earlier one, except today before the oracle's first refresh of the day, which uses yesterday's price",
 		AggregationRule:      "one reference USD price per (denom, UTC day), read once from the oracle and cached; every row for that denom/day reuses the same value",
