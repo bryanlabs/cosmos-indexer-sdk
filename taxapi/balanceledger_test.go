@@ -2,6 +2,7 @@ package taxapi
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"testing"
@@ -419,6 +420,144 @@ func TestAttributeRedelegations(t *testing.T) {
 	}
 }
 
+// Before Gaia v15 the delegate and unbond events name no delegator; the
+// wallet gets them from its own staking message. Events that do name it are
+// read with the wallet's other events and are not given twice.
+func TestAttributePreV15DelegateAndUnbond(t *testing.T) {
+	other := "cosmos1other"
+	rows := []ledgerAttrRow{
+		// The wallet's own MsgDelegate, first delegation to the validator.
+		redelRow(1, 10, 100, "message", "action", "/cosmos.staking.v1beta1.MsgDelegate"),
+		redelRow(1, 10, 100, "message", "module", "staking"),
+		redelRow(1, 10, 100, "message", "sender", ledgerTestAddr),
+		redelRow(1, 11, 100, "delegate", "validator", ledgerTestVal),
+		redelRow(1, 11, 100, "delegate", "amount", "1000uatom"),
+		redelRow(1, 11, 100, "delegate", "new_shares", "1000.000000000000000000"),
+		// The wallet's own MsgUndelegate.
+		redelRow(2, 20, 110, "message", "module", "staking"),
+		redelRow(2, 20, 110, "message", "sender", ledgerTestAddr),
+		redelRow(2, 21, 110, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(2, 21, 110, "withdraw_rewards", "delegator", ledgerTestAddr),
+		redelRow(2, 22, 110, "unbond", "validator", ledgerTestVal),
+		redelRow(2, 22, 110, "unbond", "amount", "400uatom"),
+		redelRow(2, 22, 110, "unbond", "completion_time", "2022-03-22T00:00:00Z"),
+		// Someone else's delegation.
+		redelRow(3, 30, 120, "message", "module", "staking"),
+		redelRow(3, 30, 120, "message", "sender", other),
+		redelRow(3, 31, 120, "delegate", "validator", ledgerTestVal),
+		redelRow(3, 31, 120, "delegate", "amount", "9uatom"),
+		// Gaia v15 and later: the delegator is on the event already.
+		redelRow(4, 40, 130, "message", "module", "staking"),
+		redelRow(4, 40, 130, "message", "sender", ledgerTestAddr),
+		redelRow(4, 41, 130, "delegate", "validator", ledgerTestVal),
+		redelRow(4, 41, 130, "delegate", "delegator", ledgerTestAddr),
+		redelRow(4, 41, 130, "delegate", "amount", "5uatom"),
+		// An authz exec for two granters: matched by the preceding withdrawal.
+		redelRow(5, 50, 140, "message", "module", "authz"),
+		redelRow(5, 51, 140, "withdraw_rewards", "validator", ledgerTestVal2),
+		redelRow(5, 51, 140, "withdraw_rewards", "delegator", other),
+		redelRow(5, 52, 140, "delegate", "validator", ledgerTestVal2),
+		redelRow(5, 52, 140, "delegate", "amount", "3uatom"),
+		redelRow(5, 53, 140, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(5, 53, 140, "withdraw_rewards", "delegator", ledgerTestAddr),
+		redelRow(5, 54, 140, "unbond", "validator", ledgerTestVal),
+		redelRow(5, 54, 140, "unbond", "amount", "2uatom"),
+	}
+	events, unattributed := attributeRedelegations(rows, ledgerTestAddr)
+	if unattributed != 0 {
+		t.Fatalf("unattributed = %d", unattributed)
+	}
+	want := []struct {
+		typ, amount string
+		height      int64
+	}{{"delegate", "1000uatom", 100}, {"unbond", "400uatom", 110}, {"unbond", "2uatom", 140}}
+	if len(events) != len(want) {
+		t.Fatalf("events = %+v", events)
+	}
+	for i, w := range want {
+		rec := events[i].records()
+		if events[i].Type != w.typ || events[i].Height != w.height || len(rec) != 1 || rec[0]["delegator"] != ledgerTestAddr || rec[0]["amount"] != w.amount || rec[0]["validator"] != ledgerTestVal {
+			t.Fatalf("event %d = %s %d %+v", i, events[i].Type, events[i].Height, rec)
+		}
+	}
+
+	// Two granters withdrawing from the same validator leave it ambiguous.
+	ambiguous := []ledgerAttrRow{
+		redelRow(6, 60, 150, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(6, 60, 150, "withdraw_rewards", "delegator", other),
+		redelRow(6, 61, 150, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(6, 61, 150, "withdraw_rewards", "delegator", ledgerTestAddr),
+		redelRow(6, 62, 150, "delegate", "validator", ledgerTestVal),
+		redelRow(6, 62, 150, "delegate", "amount", "1uatom"),
+	}
+	events, unattributed = attributeRedelegations(ambiguous, ledgerTestAddr)
+	if len(events) != 0 || unattributed != 150 {
+		t.Fatalf("events = %+v, unattributed = %d", events, unattributed)
+	}
+
+	// SDK 0.42 to 0.45 merge a message's message events into one: the
+	// distribution module's sender for the reward payout comes first, the
+	// staking delegator after module=staking. Only the latter is the owner.
+	distr := "cosmos1distribution"
+	merged := []ledgerAttrRow{
+		redelRow(7, 70, 160, "message", "action", "/cosmos.staking.v1beta1.MsgDelegate"),
+		redelRow(7, 70, 160, "message", "sender", distr),
+		redelRow(7, 70, 160, "message", "module", "staking"),
+		redelRow(7, 70, 160, "message", "sender", ledgerTestAddr),
+		redelRow(7, 71, 160, "delegate", "validator", ledgerTestVal),
+		redelRow(7, 71, 160, "delegate", "amount", "3700000uatom"),
+		redelRow(7, 72, 160, "withdraw_rewards", "validator", ledgerTestVal),
+		redelRow(7, 72, 160, "withdraw_rewards", "amount", "8569uatom"),
+	}
+	events, unattributed = attributeRedelegations(merged, ledgerTestAddr)
+	if unattributed != 0 || len(events) != 1 || events[0].records()[0]["delegator"] != ledgerTestAddr || events[0].records()[0]["amount"] != "3700000uatom" {
+		t.Fatalf("merged: events = %+v, unattributed = %d", events, unattributed)
+	}
+	if events, _ = attributeRedelegations(merged, distr); len(events) != 0 {
+		t.Fatalf("merged: the payout sender got %+v", events)
+	}
+
+	// Before Gaia v15 the unbond event names the amount asked for; the
+	// unbonding entry holds what the bonded pool moved.
+	bonded, notBonded := moduleAccount("bonded_tokens_pool"), moduleAccount("not_bonded_tokens_pool")
+	unbond := []ledgerAttrRow{
+		redelRow(9, 90, 180, "message", "action", "/cosmos.staking.v1beta1.MsgUndelegate"),
+		redelRow(9, 90, 180, "message", "sender", distr),
+		redelRow(9, 90, 180, "message", "sender", bonded),
+		redelRow(9, 90, 180, "message", "module", "staking"),
+		redelRow(9, 90, 180, "message", "sender", ledgerTestAddr),
+		redelRow(9, 91, 180, "transfer", "recipient", ledgerTestAddr),
+		redelRow(9, 91, 180, "transfer", "sender", distr),
+		redelRow(9, 91, 180, "transfer", "amount", "10815uatom"),
+		redelRow(9, 91, 180, "transfer", "recipient", notBonded),
+		redelRow(9, 91, 180, "transfer", "sender", bonded),
+		redelRow(9, 91, 180, "transfer", "amount", "941999uatom"),
+		redelRow(9, 92, 180, "unbond", "validator", ledgerTestVal),
+		redelRow(9, 92, 180, "unbond", "amount", "942000uatom"),
+		redelRow(9, 92, 180, "unbond", "completion_time", "2023-04-11T17:03:33Z"),
+	}
+	events, unattributed = attributeRedelegations(unbond, ledgerTestAddr)
+	if unattributed != 0 || len(events) != 1 || events[0].records()[0]["amount"] != "941999uatom" || events[0].records()[0]["requested"] != "942000uatom" {
+		t.Fatalf("unbond paid: events = %+v, unattributed = %d", events, unattributed)
+	}
+	// An unbonded validator: no pool transfer, the event's amount stands.
+	events, _ = attributeRedelegations(append(append([]ledgerAttrRow{}, unbond[:5]...), unbond[11:]...), ledgerTestAddr)
+	if len(events) != 1 || events[0].records()[0]["amount"] != "942000uatom" || events[0].records()[0]["requested"] != "942000uatom" {
+		t.Fatalf("unbond unpaid: events = %+v", events)
+	}
+
+	// A message that names the wallet but no delegator anywhere is refused.
+	nameless := []ledgerAttrRow{
+		redelRow(8, 80, 170, "message", "action", "/cosmos.staking.v1beta1.MsgUndelegate"),
+		redelRow(8, 81, 170, "unbond", "validator", ledgerTestVal),
+		redelRow(8, 81, 170, "unbond", "amount", "5uatom"),
+	}
+	events, unattributed = attributeRedelegations(nameless, ledgerTestAddr)
+	if len(events) != 0 || unattributed != 170 {
+		t.Fatalf("nameless: events = %+v, unattributed = %d", events, unattributed)
+	}
+}
+
 func TestApproximateLinesCarryTheirBound(t *testing.T) {
 	s := &Server{native: DefaultNativeAsset, oracle: NewOracle(apiTestUnusedOrigin, "")}
 	h := ledgerHoldings{
@@ -469,5 +608,98 @@ func TestChainTokensRoundsTo18PlacesFirst(t *testing.T) {
 		if got := chainTokens(decimal.RequireFromString(in)); got.IntPart() != want {
 			t.Fatalf("chainTokens(%s) = %s, want %d", in, got, want)
 		}
+	}
+}
+
+// A pre-v15 unbond names the tokens asked for. When the wallet keeps shares
+// on the validator, the shares taken are those tokens over the rate,
+// truncated, so undoing it gives the chain's shares instead of a one-token
+// span. Figures are a mainnet unbond at 14558149: 942000 asked, 941999 paid.
+func TestUndoPreV15UnbondFromRequestedTokens(t *testing.T) {
+	tokens := func(s string) *big.Int { n, _ := new(big.Int).SetString(s, 10); return n }
+	in := ledgerInput{Address: "w", BondDenom: "uatom",
+		Samples: map[string][]rateSample{"val": {
+			{14558148, validatorRate{tokens("3937452193313"), decimal.RequireFromString("3937845934960.16505149177549495")}},
+		}},
+		Anchor: ledgerAnchor{Height: 14558150, Rates: map[string]validatorRate{
+			"val": {tokens("3937451251314"), decimal.RequireFromString("3937844992865.965906100400790647")},
+		}},
+	}
+	after := decimal.RequireFromString("2000460.025532312090476741")
+	chain := decimal.RequireFromString("2942554.224677703465181044")
+	undo := func(attrs []ledgerAttr) shareSpan {
+		shares := map[string]*shareSpan{"val": {after, after}}
+		ev := ledgerEvent{ID: 1, Msg: 1, Height: 14558149, Phase: 1, Type: "unbond", Attrs: attrs}
+		if err := undoEvent(in, newRateBook(in), map[uint64]*big.Int{}, ev, map[string]*big.Int{}, shares); err != nil {
+			t.Fatal(err)
+		}
+		return *shares["val"]
+	}
+	base := []ledgerAttr{{Key: "validator", Value: "val"}, {Key: "amount", Value: "941999uatom"}, {Key: "delegator", Value: "w"}}
+	sp := undo(append(base, ledgerAttr{Key: "requested", Value: "942000uatom"}))
+	if sp.lo.GreaterThan(chain) || sp.hi.LessThan(chain) || sp.hi.Sub(sp.lo).GreaterThan(decimal.New(1, -6)) {
+		t.Fatalf("requested tokens: shares %s..%s, chain %s", sp.lo, sp.hi, chain)
+	}
+	sp = undo(base)
+	if sp.lo.GreaterThan(chain) || sp.hi.LessThan(chain) || sp.hi.Sub(sp.lo).LessThan(decimal.NewFromInt(1)) {
+		t.Fatalf("paid tokens only: shares %s..%s, chain %s", sp.lo, sp.hi, chain)
+	}
+	// Nothing left after the unbond: the chain may have capped the shares
+	// at the delegation's, so the requested tokens do not fix them.
+	shares := map[string]*shareSpan{"val": {decimal.Zero, decimal.Zero}}
+	ev := ledgerEvent{ID: 1, Msg: 1, Height: 14558149, Phase: 1, Type: "unbond", Attrs: append(base, ledgerAttr{Key: "requested", Value: "942000uatom"})}
+	if err := undoEvent(in, newRateBook(in), map[uint64]*big.Int{}, ev, map[string]*big.Int{}, shares); err != nil {
+		t.Fatal(err)
+	}
+	if shares["val"].hi.Sub(shares["val"].lo).LessThan(decimal.NewFromInt(1)) {
+		t.Fatalf("emptied delegation used the requested tokens: %s..%s", shares["val"].lo, shares["val"].hi)
+	}
+}
+
+// A rate the index lacks below some targets refuses only those: the targets
+// walked before the rebuild stopped come back exactly as a walk that stops
+// above the gap gives them.
+func TestWalkBackKeepsTargetsAboveUnknownRate(t *testing.T) {
+	in := ledgerInput{
+		Address:   ledgerTestAddr,
+		BondDenom: "uatom",
+		Anchor: ledgerAnchor{
+			Height:      100,
+			Bank:        map[string]*big.Int{},
+			Delegations: map[string]*big.Int{ledgerTestVal: bi(150), ledgerTestVal2: bi(10)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal: decimal.RequireFromString("150.505050505050505050"), ledgerTestVal2: decimal.NewFromInt(10)},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(999, 1000), ledgerTestVal2: unitRate(500)},
+		},
+		// Nothing is recorded for ledgerTestVal before height 25.
+		Samples: map[string][]rateSample{ledgerTestVal: {{25, rate(990, 1000)}, {50, rate(998, 1000)}}},
+		Events: []ledgerEvent{
+			ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "50uatom", "new_shares", "50.505050505050505050"),
+			ev(2, 20, phaseTx, "unbond", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "1000uatom"),
+		},
+	}
+	above, err := walkBack(in, []int64{50, 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := walkBack(in, []int64{50, 25, 12})
+	var unk ledgerUnknown
+	if !errors.As(err, &unk) {
+		t.Fatalf("the undelegation at 20 needs a rate below 25, want unknown, got %v", err)
+	}
+	if _, ok := got[12]; ok || len(got) != 2 {
+		t.Fatalf("only the targets above the gap are returned, got %d targets", len(got))
+	}
+	for _, h := range []int64{50, 25} {
+		if fmt.Sprint(got[h]) != fmt.Sprint(above[h]) {
+			t.Fatalf("target %d differs from the walk that stops above the gap: %v vs %v", h, got[h], above[h])
+		}
+	}
+
+	// Any other failure returns nothing.
+	in.Anchor.Bank = map[string]*big.Int{"uatom": bi(-1)}
+	got, err = walkBack(in, []int64{50})
+	var inc ledgerInconsistent
+	if !errors.As(err, &inc) || got != nil {
+		t.Fatalf("a history that goes negative returns no holdings, got %v %v", got, err)
 	}
 }

@@ -65,6 +65,8 @@ func TestWalletFeesExactWindowPostgres(t *testing.T) {
 		"CREATE TABLE fees(id bigint PRIMARY KEY,payer_address_id bigint,denomination_id bigint,tx_id bigint,amount numeric)",
 		"CREATE INDEX idx_payer_addr ON fees(payer_address_id)",
 		"CREATE UNIQUE INDEX tx_denom_fee ON fees(tx_id,denomination_id)",
+		"CREATE TABLE tax_failed_tx_fees(tx_id bigint PRIMARY KEY,charged text)",
+		"CREATE TABLE messages(id bigint PRIMARY KEY,tx_id bigint,opaque boolean)",
 		"INSERT INTO chains VALUES(1,'cosmoshub-4'),(2,'foreign')",
 		"INSERT INTO addresses VALUES(1,'payer'),(2,'other')",
 		"INSERT INTO denoms VALUES(1,'uatom'),(2,'voucher')",

@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -318,6 +319,30 @@ func (b rateBook) sharesFor(v string, h int64, tlo, thi decimal.Decimal) (decima
 	return shareTrunc(tlo.DivRound(rhi, rateDigits)), shareTrunc(thi.DivRound(rlo, rateDigits)), nil
 }
 
+// requestedShareTokens is the bond tokens an unbond asked for, when the
+// record names them apart from the tokens it paid.
+func requestedShareTokens(rec map[string]string, bondDenom string) (decimal.Decimal, bool) {
+	if rec["requested"] == "" {
+		return decimal.Zero, false
+	}
+	coins, err := ledgerCoins(rec["requested"], bondDenom)
+	if err != nil {
+		return decimal.Zero, false
+	}
+	n := bondAmount(coins, bondDenom)
+	if n == nil || n.Sign() <= 0 {
+		return decimal.Zero, false
+	}
+	return decimal.NewFromBigInt(n, 0), true
+}
+
+// sharesLeft says the wallet certainly still holds shares on v at this point
+// of the walk back, after the event being undone.
+func sharesLeft(shares map[string]*shareSpan, v string) bool {
+	sp, ok := shares[v]
+	return ok && sp.lo.GreaterThan(shareEpsilon)
+}
+
 // shareTrunc truncates a computed quotient to the chain's 18 share places,
 // first rounding off the last digits so a quotient that is exact on chain
 // is not carried below itself by the division's own rounding.
@@ -379,7 +404,12 @@ func (b rateBook) shown(v string, h int64, sp shareSpan) (*big.Int, *big.Int, er
 }
 
 // walkBack rebuilds the wallet at each target height (all at or below the
-// anchor). Targets are answered from the same event set.
+// anchor). Targets are answered from the same event set, newest first, and
+// the holdings at a target depend only on the anchor and the events above
+// it. So when the rebuild stops on something the index lacks (a
+// ledgerUnknown), the targets already answered above that point are
+// returned with the error and the caller refuses only the rest. Any other
+// error returns no holdings.
 func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error) {
 	events := append([]ledgerEvent(nil), in.Events...)
 	sort.SliceStable(events, func(i, j int) bool {
@@ -414,13 +444,20 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 	spent := bondSpentByMessage(in)
 	ei, fi := 0, 0
 	out := make(map[int64]ledgerHoldings, len(order))
+	stop := func(err error) (map[int64]ledgerHoldings, error) {
+		var unk ledgerUnknown
+		if errors.As(err, &unk) {
+			return out, err
+		}
+		return nil, err
+	}
 	for _, h := range order {
 		if h > in.Anchor.Height {
 			return nil, fmt.Errorf("target height %d is after the anchor %d", h, in.Anchor.Height)
 		}
 		for ei < len(events) && events[ei].Height > h {
 			if err := undoEvent(in, book, spent, events[ei], liquid, shares); err != nil {
-				return nil, err
+				return stop(err)
 			}
 			ei++
 		}
@@ -447,7 +484,7 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 			}
 			amt, bound, err := book.shown(v, h, *sp)
 			if err != nil {
-				return nil, err
+				return stop(err)
 			}
 			if amt.Sign() != 0 || bound.Sign() != 0 {
 				hold.Delegations[v] = amt
@@ -537,6 +574,19 @@ func undoEvent(in ledgerInput, book rateBook, spent map[uint64]*big.Int, ev ledg
 				// rounded down.
 				if book.unit[v] {
 					add(v, amt, amt)
+					continue
+				}
+				if req, ok := requestedShareTokens(rec, in.BondDenom); ok && sharesLeft(shares, v) {
+					// Before Gaia v15 the tokens asked for are known. The
+					// chain takes them over the rate, truncated, and caps
+					// that at the delegation's shares only when it takes
+					// the whole delegation; shares left after the unbond
+					// rule the cap out.
+					lo, hi, err := book.sharesFor(v, ev.Height, req, req)
+					if err != nil {
+						return wrap(err)
+					}
+					add(v, lo, hi)
 					continue
 				}
 				lo, hi, err := book.sharesFor(v, ev.Height, amt, amt.Add(one))

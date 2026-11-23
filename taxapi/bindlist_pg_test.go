@@ -20,6 +20,9 @@ func bindListFixture(t *testing.T) (*gorm.DB, int, int) {
 	if err := dbpkg.MigrateModels(db); err != nil {
 		t.Fatal(err)
 	}
+	if err := inclusionsMigrate(db); err != nil {
+		t.Fatal(err)
+	}
 	messages := 2*bindListChunk + 7
 	blocks := (messages + 1) / 2
 	for _, q := range []string{
@@ -109,7 +112,8 @@ func TestChunkedWalletReadsMatchOneRead(t *testing.T) {
 				distinct = append(distinct, id)
 			}
 		}
-		got, err := s.redelegationRows(distinct)
+		rel, rp := s.effectiveRel()
+		got, err := s.redelegationRows(distinct, rel, rp)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -123,11 +127,11 @@ JOIN txes x ON x.id = m.tx_id
 JOIN blocks b ON b.id = x.block_id
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message')
+WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message', 'transfer')
 ORDER BY b.height, me.message_id, me.index, a.index`, map[string]any{"msgs": distinct}).Scan(&want).Error; err != nil {
 			t.Fatal(err)
 		}
-		if len(want) != messages*9 || !reflect.DeepEqual(got, want) {
+		if len(want) != messages*12 || !reflect.DeepEqual(got, want) {
 			t.Fatalf("chunked read %d rows, single read %d rows, equal %v", len(got), len(want), reflect.DeepEqual(got, want))
 		}
 	})

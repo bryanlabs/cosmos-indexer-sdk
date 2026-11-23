@@ -176,7 +176,9 @@ func (s *Server) appendWallets(chain, prefix string, ids []int64, node *ledgerNo
 	}
 
 	var unknownHoles int64
-	if err := s.db.Model(&IndexHole{}).Where("chain = ? AND height > ? AND height <= ? AND NOT addresses_known", chain, lo, hi).Count(&unknownHoles).Error; err != nil {
+	cleared, cp := s.clearedHoleCond("h")
+	if err := s.db.Raw(`SELECT count(*) FROM tax_index_holes h WHERE h.chain = @chain AND h.height > @lo AND h.height <= @hi AND NOT h.addresses_known AND `+cleared,
+		withParams(cp, map[string]any{apiChain: chain, "lo": lo, "hi": hi})).Scan(&unknownHoles).Error; err != nil {
 		return nil, "", err
 	}
 	if unknownHoles > 0 {
@@ -201,7 +203,8 @@ func (s *Server) appendWallets(chain, prefix string, ids []int64, node *ledgerNo
 	// Everything named from two blocks before the window, where a downtime
 	// slash in it can reach new entries, up to the tip the stakers are read
 	// at, so a staker who left a validator after the window is still found.
-	params := map[string]any{"ids": ids, "lo": lo - 2, "hi": tip.Height, "pattern": prefix + "%"}
+	rel, rp := s.effectiveRel()
+	params := withParams(rp, map[string]any{qpIDs: ids, "lo": lo - 2, "hi": tip.Height, "pattern": prefix + "%"})
 	var named []string
 	// Left to itself the planner scans every event attribute for a day's
 	// blocks; walked from the blocks through the indexes it takes seconds.
@@ -209,7 +212,8 @@ func (s *Server) appendWallets(chain, prefix string, ids []int64, node *ledgerNo
 		if err := tx.Exec("SET LOCAL enable_seqscan = off; SET LOCAL enable_hashjoin = off; SET LOCAL enable_mergejoin = off").Error; err != nil {
 			return err
 		}
-		for _, q := range []string{`
+		for _, q := range []string{
+			`
 SELECT DISTINCT a.value FROM blocks b
 JOIN txes x ON x.block_id = b.id
 JOIN messages m ON m.tx_id = x.id
@@ -228,7 +232,25 @@ WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi`, `
 SELECT DISTINCT g.granter FROM blocks b
 JOIN txes x ON x.block_id = b.id
 JOIN tax_fee_grants g ON g.tx_id = x.id
-WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi`} {
+WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi`,
+			// Rows whose effective inclusion is in the window, wherever the
+			// row itself is dated.
+			`
+SELECT DISTINCT a.value FROM blocks b
+JOIN ` + rel + ` p ON p.block_id = b.id
+JOIN messages m ON m.tx_id = p.tx_id
+JOIN message_events me ON me.message_id = m.id
+JOIN message_event_attributes a ON a.message_event_id = me.id
+WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi AND a.value LIKE @pattern`, `
+SELECT DISTINCT ad.address FROM blocks b
+JOIN ` + rel + ` p ON p.block_id = b.id
+JOIN fees f ON f.tx_id = p.tx_id
+JOIN addresses ad ON ad.id = f.payer_address_id
+WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi`, `
+SELECT DISTINCT p.granter FROM blocks b
+JOIN ` + rel + ` p ON p.block_id = b.id
+WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi AND p.granter <> ''`,
+		} {
 			named = named[:0]
 			if err := tx.Raw(q, params).Scan(&named).Error; err != nil {
 				return err
@@ -277,7 +299,7 @@ SELECT d.address FROM tax_balance_days d
 WHERE d.chain = @chain AND d.status <> '' AND d.day BETWEEN @from AND @to
 AND NOT EXISTS (SELECT 1 FROM tax_balance_days n
   WHERE n.chain = d.chain AND n.address = d.address AND n.day > d.day AND n.day <= @to)`,
-		map[string]any{"chain": chain, "from": build.FromDay.Format(apiDateLayout), "to": build.ToDay.Format(apiDateLayout)}).Scan(&named).Error; err != nil {
+		map[string]any{apiChain: chain, "from": build.FromDay.Format(apiDateLayout), "to": build.ToDay.Format(apiDateLayout)}).Scan(&named).Error; err != nil {
 		return nil, "", fmt.Errorf("unbuilt wallets: %w", err)
 	}
 	for _, v := range named {
