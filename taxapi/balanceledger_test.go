@@ -703,3 +703,39 @@ func TestWalkBackKeepsTargetsAboveUnknownRate(t *testing.T) {
 		t.Fatalf("a history that goes negative returns no holdings, got %v %v", got, err)
 	}
 }
+
+func TestWalkBackNegativeSharesRefuseTheWallet(t *testing.T) {
+	// The anchor holds nothing on the validator and the index has the
+	// delegation but not the undelegation that emptied it. Between the two,
+	// the walk would show 0 for a delegation that existed; below the
+	// delegation the shares go negative, which is how the gap shows.
+	in := ledgerInput{
+		Address:   ledgerTestAddr,
+		BondDenom: "uatom",
+		Anchor: ledgerAnchor{
+			Height: 100,
+			Bank:   map[string]*big.Int{"uatom": bi(1000)},
+			Rates:  map[string]validatorRate{ledgerTestVal: unitRate(1000)},
+		},
+		Events: []ledgerEvent{
+			ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "100uatom", "new_shares", "100.000000000000000000"),
+		},
+	}
+	got, err := walkBack(in, []int64{40, 20})
+	var inc ledgerInconsistent
+	if !errors.As(err, &inc) || got != nil {
+		t.Fatalf("a negative share span must refuse the whole wallet, got %v, %v", got, err)
+	}
+
+	// A span within the epsilon of zero, on either side, is still empty.
+	in.Events = []ledgerEvent{
+		ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "0uatom", "new_shares", "0.000000000000000001"),
+	}
+	got, err = walkBack(in, []int64{40, 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got[20].Delegations) != 0 || len(got[20].DelegationError) != 0 {
+		t.Fatalf("a span within the epsilon of zero shows nothing, got %v ± %v", got[20].Delegations, got[20].DelegationError)
+	}
+}
