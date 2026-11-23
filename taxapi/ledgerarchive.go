@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -49,9 +50,10 @@ const (
 	archiveResultFailed  = "failed"
 	archiveResultLimited = "rate_limited"
 	archiveResultCeiling = "over_ceiling"
+	archiveResultAbsent  = "absent"
 )
 
-var archiveResults = []string{archiveResultOK, archiveResultFailed, archiveResultLimited, archiveResultCeiling}
+var archiveResults = []string{archiveResultOK, archiveResultFailed, archiveResultLimited, archiveResultCeiling, archiveResultAbsent}
 
 var archiveCalls = func() map[string]*atomic.Int64 {
 	m := map[string]*atomic.Int64{}
@@ -71,7 +73,22 @@ var (
 	// errArchiveLostDenom is the delegation query failing where the archive's
 	// newer binary cannot price delegations at the height (lostBondDenom).
 	errArchiveLostDenom = errors.New("archive: delegations cannot be priced at the height")
+	// errArchiveAbsent is the archive answering, for the height asked, that
+	// a validator does not exist there.
+	errArchiveAbsent = errors.New("archive: no such validator at the height")
 )
+
+// validatorQuery is the archive read of one validator's tokens and shares,
+// and sdkKeyNotFound the code, in the "sdk" codespace, it answers with for a
+// validator the height does not hold.
+const (
+	validatorQuery = "/cosmos.staking.v1beta1.Query/Validator"
+	sdkKeyNotFound = 22
+)
+
+// archiveAbsentZeros counts the delegations balance history showed as zero
+// because the archive answered that their validator did not exist yet.
+var archiveAbsentZeros atomic.Int64
 
 // servingArchive is the archive this process reads, when StartLedgerArchive
 // configured one.
@@ -83,6 +100,7 @@ type ledgerArchive struct {
 	// floor is the lowest height the serving node holds; zero while unknown,
 	// and the archive is then not read.
 	floor atomic.Int64
+	logf  func(string, ...any)
 }
 
 func newLedgerArchive(origin string, timeout time.Duration) (*ledgerArchive, error) {
@@ -102,6 +120,7 @@ func StartLedgerArchive(origin string, logf func(string, ...any)) error {
 	if err != nil {
 		return err
 	}
+	a.logf = logf
 	node, err := newLedgerNode()
 	if err != nil {
 		return err
@@ -179,10 +198,11 @@ func (a *ledgerArchive) abci(b *archiveBudget, path string, data []byte, height 
 	var body struct {
 		Result struct {
 			Response struct {
-				Code   uint32 `json:"code"`
-				Log    string `json:"log"`
-				Value  string `json:"value"`
-				Height string `json:"height"`
+				Code      uint32 `json:"code"`
+				Codespace string `json:"codespace"`
+				Log       string `json:"log"`
+				Value     string `json:"value"`
+				Height    string `json:"height"`
 			} `json:"response"`
 		} `json:"result"`
 	}
@@ -192,6 +212,10 @@ func (a *ledgerArchive) abci(b *archiveBudget, path string, data []byte, height 
 		return nil, errArchiveFailed
 	}
 	r := body.Result.Response
+	if r.Code == sdkKeyNotFound && r.Codespace == "sdk" && path == validatorQuery && r.Height == strconv.FormatInt(height, 10) {
+		countArchive(archiveResultAbsent)
+		return nil, errArchiveAbsent
+	}
 	if r.Code != 0 {
 		countArchive(archiveResultFailed)
 		if strings.Contains(r.Log, "invalid denom") {
@@ -304,7 +328,7 @@ func (a *ledgerArchive) storeDelegations(b *archiveBudget, addr string, height i
 // rate reads validator v's tokens and delegator shares at height.
 func (a *ledgerArchive) rate(b *archiveBudget, v string, height int64) (validatorRate, error) {
 	var r stakingtypes.QueryValidatorResponse
-	if err := a.query(b, "/cosmos.staking.v1beta1.Query/Validator", &stakingtypes.QueryValidatorRequest{ValidatorAddr: v}, &r, height); err != nil {
+	if err := a.query(b, validatorQuery, &stakingtypes.QueryValidatorRequest{ValidatorAddr: v}, &r, height); err != nil {
 		return validatorRate{}, err
 	}
 	if r.Validator.OperatorAddress != v || r.Validator.Tokens.IsNil() || r.Validator.DelegatorShares.IsNil() {
@@ -384,4 +408,26 @@ func writeArchiveMetrics(w http.ResponseWriter) {
 	for _, r := range archiveResults {
 		fmt.Fprintf(w, "archive_calls_total{result=%q} %d\n", r, archiveCalls[r].Load())
 	}
+	fmt.Fprintln(w, "# HELP archive_absent_zero_total Delegations shown as zero because the archive answered that their validator did not exist yet.")
+	fmt.Fprintln(w, "# TYPE archive_absent_zero_total counter")
+	fmt.Fprintf(w, "archive_absent_zero_total %d\n", archiveAbsentZeros.Load())
+}
+
+// noteAbsent records a delegation on v at height the archive found no
+// validator for: shown as zero when accepted, refused otherwise. The
+// validator is named by a short hash, as no log line names a wallet's
+// holdings.
+func (a *ledgerArchive) noteAbsent(v string, height int64, sp shareSpan, accepted bool) {
+	if accepted {
+		archiveAbsentZeros.Add(1)
+	}
+	if a.logf == nil {
+		return
+	}
+	vh := sha256.Sum256([]byte(v))
+	outcome := "refused, the walk holds shares there"
+	if accepted {
+		outcome = "shown as zero"
+	}
+	a.logf("balance history archive: validator %x absent at height %d, shares %s..%s, %s", vh[:4], height, sp.lo, sp.hi, outcome)
 }

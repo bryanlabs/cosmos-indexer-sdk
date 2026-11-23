@@ -704,6 +704,156 @@ func TestWalkBackKeepsTargetsAboveUnknownRate(t *testing.T) {
 	}
 }
 
+// absentInput is a wallet that delegated 50 tokens on ledgerTestVal at 30
+// and took them all back at 60. The undelegation names the tokens paid out,
+// so the shares put back carry a token of rounding, and the walk back to 20
+// holds between zero and about one share there. The archive answers that
+// ledgerTestVal did not exist at 20. ledgerTestVal2 is held throughout.
+func absentInput(answer error) ledgerInput {
+	return ledgerInput{
+		Address:   ledgerTestAddr,
+		BondDenom: "uatom",
+		Anchor: ledgerAnchor{
+			Height:      100,
+			Bank:        map[string]*big.Int{},
+			Delegations: map[string]*big.Int{ledgerTestVal2: bi(10)},
+			Shares:      map[string]decimal.Decimal{ledgerTestVal2: decimal.NewFromInt(10)},
+			Rates:       map[string]validatorRate{ledgerTestVal: rate(999, 1000), ledgerTestVal2: unitRate(500)},
+		},
+		Samples: map[string][]rateSample{ledgerTestVal: {{40, rate(999, 1000)}}},
+		Events: []ledgerEvent{
+			ev(1, 30, phaseTx, "delegate", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "50uatom", "new_shares", "50.050050050050050050"),
+			ev(2, 60, phaseTx, "unbond", "delegator", ledgerTestAddr, "validator", ledgerTestVal, "amount", "50uatom"),
+		},
+		RateAt: func(v string, h int64) (validatorRate, error) {
+			if v == ledgerTestVal && h == 20 {
+				return validatorRate{}, answer
+			}
+			return validatorRate{}, errArchiveFailed
+		},
+	}
+}
+
+type absentNote struct {
+	v        string
+	h        int64
+	accepted bool
+}
+
+func noteAbsents(in *ledgerInput) *[]absentNote {
+	var notes []absentNote
+	in.OnAbsent = func(v string, h int64, sp shareSpan, accepted bool) {
+		notes = append(notes, absentNote{v, h, accepted})
+	}
+	return &notes
+}
+
+// A validator the archive says did not exist at a target holds no
+// delegation there, so a rebuilt span that allows zero is shown as zero, and
+// the other validators of the day are untouched.
+func TestWalkBackShowsZeroOnAValidatorNotYetCreated(t *testing.T) {
+	in := absentInput(errArchiveAbsent)
+	notes := noteAbsents(&in)
+	got, err := walkBack(in, []int64{50, 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got[20].Delegations[ledgerTestVal]; ok {
+		t.Fatalf("a validator that did not exist shows a delegation: %v", got[20].Delegations)
+	}
+	if _, ok := got[20].DelegationError[ledgerTestVal]; ok {
+		t.Fatalf("a validator that did not exist shows an error bound: %v", got[20].DelegationError)
+	}
+	if got[20].Delegations[ledgerTestVal2].Cmp(bi(10)) != 0 || got[50].Delegations[ledgerTestVal2].Cmp(bi(10)) != 0 {
+		t.Fatalf("the other validator changed: %v %v", got[20].Delegations, got[50].Delegations)
+	}
+	if got[50].Delegations[ledgerTestVal] == nil || got[50].Delegations[ledgerTestVal].Cmp(bi(49)) < 0 {
+		t.Fatalf("the delegation at 50 is shown from the recorded rates, got %v", got[50].Delegations)
+	}
+	if want := []absentNote{{ledgerTestVal, 20, true}}; fmt.Sprint(*notes) != fmt.Sprint(want) {
+		t.Fatalf("notes %v, want %v", *notes, want)
+	}
+}
+
+// Zero that comes from records the walk could not read is refused, however
+// the archive answers: a staking record on the validator that names no
+// delegator, or one that names no validator, may be the wallet's.
+func TestWalkBackRefusesZeroFromUnnamedRecords(t *testing.T) {
+	for name, rec := range map[string]ledgerEvent{
+		"no delegator": ev(3, 45, phaseTx, "delegate", "validator", ledgerTestVal, "amount", "5uatom"),
+		"no validator": ev(3, 45, phaseTx, "unbond", "delegator", ledgerTestAddr, "amount", "5uatom"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := absentInput(errArchiveAbsent)
+			in.Events = append(in.Events, rec)
+			notes := noteAbsents(&in)
+			got, err := walkBack(in, []int64{50, 20})
+			var unk ledgerUnknown
+			if name == "no validator" {
+				// The walk cannot undo it at all.
+				if err == nil {
+					t.Fatal("an unbond that names no validator was undone")
+				}
+				return
+			}
+			if !errors.As(err, &unk) || !strings.Contains(unk.msg, "tokens per share") {
+				t.Fatalf("want the rate refusal, got %v", err)
+			}
+			if _, ok := got[20]; ok {
+				t.Fatal("the target below the unnamed record was served")
+			}
+			if len(*notes) != 0 {
+				t.Fatalf("a refused zero was noted as absent: %v", *notes)
+			}
+		})
+	}
+
+	// A record naming no validator is refused by the check itself, before
+	// the walk would use it.
+	if stakeRecordsNamed([]ledgerEvent{ev(3, 45, phaseTx, "unbond", "delegator", ledgerTestAddr, "amount", "5uatom")}, ledgerTestVal) {
+		t.Fatal("a record naming no validator passed")
+	}
+	if !stakeRecordsNamed([]ledgerEvent{ev(3, 45, phaseTx, "delegate", "validator", ledgerTestVal2, "amount", "5uatom")}, ledgerTestVal) {
+		t.Fatal("an unnamed record on another validator failed the check for this one")
+	}
+}
+
+// When the walk's own records hold shares that cannot be zero (here the
+// index lacks the delegation the undelegation took back), a validator the
+// archive says did not exist means the index and the chain disagree.
+func TestWalkBackRefusesAbsentValidatorWithShares(t *testing.T) {
+	in := absentInput(errArchiveAbsent)
+	in.Events = in.Events[1:]
+	notes := noteAbsents(&in)
+	_, err := walkBack(in, []int64{50, 20})
+	var inc ledgerInconsistent
+	if !errors.As(err, &inc) {
+		t.Fatalf("want inconsistent, got %v", err)
+	}
+	if want := []absentNote{{ledgerTestVal, 20, false}}; fmt.Sprint(*notes) != fmt.Sprint(want) {
+		t.Fatalf("notes %v, want %v", *notes, want)
+	}
+}
+
+// Any other answer for the validator stays the refusal it was.
+func TestWalkBackRefusesOtherArchiveAnswers(t *testing.T) {
+	for _, answer := range []error{errArchiveFailed, errArchiveHeight, errArchiveCeiling} {
+		in := absentInput(answer)
+		notes := noteAbsents(&in)
+		got, err := walkBack(in, []int64{50, 20})
+		var unk ledgerUnknown
+		if !errors.As(err, &unk) {
+			t.Fatalf("%v: want unknown, got %v", answer, err)
+		}
+		if _, ok := got[20]; ok || got[50].Height != 50 {
+			t.Fatalf("%v: only 50 is served, got %v", answer, got)
+		}
+		if len(*notes) != 0 {
+			t.Fatalf("%v: noted as absent: %v", answer, *notes)
+		}
+	}
+}
+
 func TestWalkBackNegativeSharesRefuseTheWallet(t *testing.T) {
 	// The anchor holds nothing on the validator and the index has the
 	// delegation but not the undelegation that emptied it. Between the two,
