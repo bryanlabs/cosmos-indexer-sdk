@@ -92,6 +92,7 @@ func main() {
 	flowsCorrections := flag.String("commission-source-corrections", "", "exact retained native source corrections for private commission reads only")
 	flowsCorrectionsSHA := flag.String("commission-source-corrections-sha256", "", "exact immutable native correction manifest digest")
 	flowsMaxHops := flag.Int("commission-max-hops", 0, "private versioned runs only: wallets followed past the receiving wallets (0 keeps the default 3); the version must name it, e.g. -hops5")
+	flowsViews := flag.String("commission-hop-views", "", "private versioned runs only: lower hop limits, comma separated, whose results each run also keeps in its evidence from the same trace (each below the run's own limit)")
 	flowsLabels := flag.String("commission-label-file", "", "private versioned runs only: an immutable label file whose digest the version names (-labels<first 12>)")
 	flowsLabelsSHA := flag.String("commission-label-file-sha256", "", "exact digest of --commission-label-file")
 	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
@@ -179,9 +180,19 @@ func main() {
 				log.Fatal(err)
 			}
 		}
+		views, err := parseCommissionHopViews(*flowsViews)
+		if err != nil {
+			log.Fatal(err)
+		}
 		var failed []string
 		for _, r := range runs {
-			if err := commissionFlows(db, *chain, *flowsFrom, r.only, *flowsWorkers, r.version, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, r.hops, *flowsPrefetch, shared); err != nil {
+			var below []int
+			for _, v := range views {
+				if v < r.hops {
+					below = append(below, v)
+				}
+			}
+			if err := commissionFlows(db, *chain, *flowsFrom, r.only, *flowsWorkers, r.version, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, r.hops, below, *flowsPrefetch, shared); err != nil {
 				log.Printf("commission flows: %s: %v", r.version, err)
 				failed = append(failed, r.version)
 			}
@@ -270,7 +281,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int, shared *taxapi.CommissionSharedHistory) error {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops int, views []int, prefetch int, shared *taxapi.CommissionSharedHistory) error {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -306,7 +317,7 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 			log.Fatal("commission archive configuration has no RPC endpoint")
 		}
 	}
-	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, WalletPrefetch: prefetch, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops, SharedHistory: shared}); err != nil {
+	if err := srv.BuildCommissionFlows(chain, node, from, validators, workers, log.Printf, taxapi.CommissionFlowBuildOptions{Version: version, Build: build, AsOf: asOf, ArchiveRPC: archiveRPC, ReadSnapshotTimeout: readTimeout, WalletPrefetch: prefetch, PrivateProfile: profile, SourceCorrections: corrections, Labels: labels, MaxHops: maxHops, Views: views, SharedHistory: shared}); err != nil {
 		return err
 	}
 	return nil
@@ -378,4 +389,21 @@ func deriveFollowLabels(db *gorm.DB, chain, fromText, asOfText, out string) {
 		log.Fatal(err)
 	}
 	log.Printf("label file %s: %d labels, %d unfollowed, %d profiles, sha256 %s", out, len(lf.Labels), len(lf.Unfollowed), len(lf.Profiles), digest)
+}
+
+// parseCommissionHopViews reads --commission-hop-views: distinct positive
+// hop limits, in increasing order.
+func parseCommissionHopViews(text string) ([]int, error) {
+	var out []int
+	for _, f := range strings.Split(text, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		n, err := strconv.Atoi(f)
+		if err != nil || n < 1 || (len(out) > 0 && n <= out[len(out)-1]) {
+			return nil, fmt.Errorf("commission hop views must be increasing positive hop limits: %q", text)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }

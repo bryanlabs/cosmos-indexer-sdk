@@ -363,6 +363,9 @@ type dbFlowLoader struct {
 	private bool
 	// maxHops is the run's hop limit; zero means flowMaxHops.
 	maxHops int
+	// views are lower hop limits whose results the run keeps in its
+	// evidence, from the same trace.
+	views []int
 	// labelFile is the digest of the private label file this run added.
 	labelFile string
 	archive   *flowArchive
@@ -1460,6 +1463,7 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 	loader = &dbFlowLoader{s: reader, chain: chain, node: node, labels: map[string]AddressLabel{}, mu: &sync.Mutex{}, chans: map[string]string{}, private: len(options) == 1}
 	if len(options) == 1 {
 		loader.maxHops = options[0].MaxHops
+		loader.views = options[0].Views
 		loader.prefetchN = options[0].WalletPrefetch
 	}
 	var progressSink *commissionProgressSink
@@ -1593,6 +1597,9 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	tr := newFlowTrace(validator, from, asOf, loader)
 	tr.maxHops = loader.maxHops
 	tr.strict = loader.private
+	if len(loader.views) > 0 {
+		tr.withViews(loader.views)
+	}
 	if loader.private {
 		tr.progress = loader.progress
 	}
@@ -1644,6 +1651,7 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	overdraw := map[string]string{}
 	var total [flowRules]decimal.Decimal
 	drift := decimal.Zero
+	views := make([]flowViewTotals, len(tr.views))
 	asOfDay := asOf.AddDate(0, 0, -1)
 	closing := loader.closingReads(tr.order, asOfDay)
 	defer closing.close()
@@ -1658,6 +1666,14 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		for r := 0; r < flowRules; r++ {
 			total[r] = total[r].Add(w.Overdraw[r])
 		}
+		for j, v := range tr.views {
+			if w.Hop <= v.Hops {
+				views[j].wallets++
+				for r := 0; r < flowRules; r++ {
+					views[j].overdraw[r] = views[j].overdraw[r].Add(w.Overdraw[r])
+				}
+			}
+		}
 		tr.reportProgress("closing_started", w.Addr, len(tr.order)-i)
 		actual, known, err := closing.holdingsAt(loader, i, w.Addr, asOfDay)
 		if err != nil || !known {
@@ -1668,7 +1684,13 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 		}
 		tr.closingReadCompletedWallets++
 		tr.reportProgress("closing_complete", w.Addr, len(tr.order)-i-1)
-		drift = drift.Add(w.simulated().Sub(actual.total()).Abs())
+		d := w.simulated().Sub(actual.total()).Abs()
+		drift = drift.Add(d)
+		for j, v := range tr.views {
+			if w.Hop <= v.Hops {
+				views[j].drift = views[j].drift.Add(d)
+			}
+		}
 		if loader.private {
 			e := commissionFlowWalletEvidence(w, actual, asOfDay)
 			e.OpeningSource = w.OpeningSource
@@ -1703,19 +1725,16 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	b, _ = json.Marshal(untracked)
 	run.Untracked = string(b)
 
-	rows := make([]CommissionFlow, 0, len(tr.Fates))
-	for k, v := range tr.Fates {
-		if !v.IsPositive() {
-			continue
-		}
-		rows = append(rows, CommissionFlow{Chain: chain, Validator: validator, Rule: flowRuleNames[k.Rule], Month: k.Month, Class: k.Class, Detail: k.Detail, ViaUnbonding: k.ViaUnbonding, AmountBase: v.String()})
-	}
+	rows := commissionFlowRows(chain, validator, tr.Fates)
 	evidence := loader.evidence()
 	evidence.Wallets = walletEvidence
 	if loader.private {
 		evidence.MaxHops = loader.maxHops
 		evidence.LabelFile = loader.labelFile
 		evidence.Stops = commissionFlowStopEvidence(tr.Stops)
+		for j, v := range tr.views {
+			evidence.Views = append(evidence.Views, views[j].evidence(chain, validator, v))
+		}
 	}
 	if loader.archive != nil {
 		evidence.Archive = loader.archive.evidence(tr.attempted)
@@ -1727,6 +1746,46 @@ func (s *Server) traceCommissionSaved(chain string, loader *dbFlowLoader, valida
 	}
 	tr.reportProgress("saved", "", 0)
 	return run, nil
+}
+
+func commissionFlowRows(chain, validator string, fates map[FlowFateKey]decimal.Decimal) []CommissionFlow {
+	rows := make([]CommissionFlow, 0, len(fates))
+	for k, v := range fates {
+		if !v.IsPositive() {
+			continue
+		}
+		rows = append(rows, CommissionFlow{Chain: chain, Validator: validator, Rule: flowRuleNames[k.Rule], Month: k.Month, Class: k.Class, Detail: k.Detail, ViaUnbonding: k.ViaUnbonding, AmountBase: v.String()})
+	}
+	return rows
+}
+
+// flowViewTotals is the run summary a view's wallets give.
+type flowViewTotals struct {
+	wallets  int
+	overdraw [flowRules]decimal.Decimal
+	drift    decimal.Decimal
+}
+
+func (t flowViewTotals) evidence(chain, validator string, v *flowView) CommissionFlowViewEvidence {
+	overdraw := map[string]string{}
+	for r := 0; r < flowRules; r++ {
+		overdraw[flowRuleNames[r]] = t.overdraw[r].String()
+	}
+	b, _ := json.Marshal(overdraw)
+	status := flowStatusReconciled
+	if t.drift.GreaterThan(flowDriftTolerance.Mul(decimal.NewFromInt(int64(t.wallets)))) {
+		status = flowStatusDrift
+	}
+	if t.wallets == 0 {
+		status = flowStatusOK
+	}
+	rows := commissionFlowRows(chain, validator, v.Fates)
+	sort.Slice(rows, func(i, j int) bool { return commissionFlowRowKey(rows[i]) < commissionFlowRowKey(rows[j]) })
+	return CommissionFlowViewEvidence{MaxHops: v.Hops, Exact: v.Conflicts == 0, Conflicts: v.Conflicts, Status: status, Wallets: t.wallets, Overdraw: string(b), DriftBase: t.drift.String(), Rows: rows, Stops: commissionFlowStopEvidence(v.Stops)}
+}
+
+func commissionFlowRowKey(r CommissionFlow) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%t", r.Rule, r.Month, r.Class, r.Detail, r.ViaUnbonding)
 }
 
 // saveCommissionFlows replaces a validator's stored result. A failed run
