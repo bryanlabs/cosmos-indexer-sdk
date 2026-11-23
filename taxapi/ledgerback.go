@@ -1,9 +1,11 @@
 package taxapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,18 @@ func NewArchiveLedgerNode(cacheDir, archiveREST string) (*ledgerNode, error) {
 		return nil, err
 	}
 	return &ledgerNode{rest: rest, cache: cacheDir}, nil
+}
+
+// UseArchiveRPC gives the node an archive RPC origin for the staking store
+// reads that stand in when the archive's delegation query cannot answer for
+// a height. Block reads still come from the cache.
+func (n *ledgerNode) UseArchiveRPC(origin string) error {
+	rpc, err := servicehttp.New(&http.Client{Timeout: 60 * time.Second}, origin)
+	if err != nil {
+		return err
+	}
+	n.rpc = rpc
+	return nil
 }
 
 // ErrLedgerScanUnindexed is where a backward scan stops at a block that is
@@ -85,6 +99,69 @@ func scanBackBlock(height int64, chain []nodeTx, index []backTx) backBlock {
 	return b
 }
 
+// LedgerBackOptions defaults to a read-only dry run that plans every chunk
+// without writing to the database. Apply requires a new backup file on
+// durable storage. Backup records contain wallet addresses and must never be
+// logged or committed.
+type LedgerBackOptions struct {
+	Apply      bool
+	BackupPath string
+}
+
+// LedgerBackSummary totals what a backward scan recorded, or would record in
+// a dry run.
+type LedgerBackSummary struct {
+	Apply          bool          `json:"apply"`
+	StartFrom      int64         `json:"start_from"`
+	From           int64         `json:"from"`
+	Chunks         int           `json:"chunks"`
+	Blocks         int64         `json:"blocks"`
+	Holes          int           `json:"holes"`
+	HoleAddresses  int           `json:"hole_addresses"`
+	Fees           int           `json:"failed_fees"`
+	FeesCharged    int           `json:"failed_fees_charged"`
+	Grants         int           `json:"fee_grants"`
+	ExistingSame   int           `json:"existing_same"`
+	ExistingDiffer int           `json:"existing_differ"`
+	PreEvents      preEventStats `json:"pre_events"`
+}
+
+// ledgerBackHole is one hole a chunk records.
+type ledgerBackHole struct {
+	Height    int64    `json:"height"`
+	ChainTxs  int      `json:"chain_txs"`
+	Addresses []string `json:"addresses"`
+}
+
+// ledgerBackChunk is the durable plan of one chunk. A record is synced before
+// its database transaction commits, so it is a plan, not proof the
+// transaction committed: compare the database with it to reconcile.
+type ledgerBackChunk struct {
+	Version        int              `json:"version"`
+	PlannedAt      time.Time        `json:"planned_at"`
+	Apply          bool             `json:"apply"`
+	Chain          string           `json:"chain"`
+	FromBefore     int64            `json:"span_from_before"`
+	FromAfter      int64            `json:"span_from_after"`
+	Holes          []ledgerBackHole `json:"holes"`
+	Fees           []FailedTxFee    `json:"failed_fees"`
+	Grants         []FeeGrantUse    `json:"fee_grants"`
+	ExistingSame   int              `json:"existing_same"`
+	ExistingDiffer []string         `json:"existing_differ,omitempty"`
+	PreEvents      preEventStats    `json:"pre_events"`
+	Stop           string           `json:"stop,omitempty"`
+}
+
+func openLedgerBackBackup(opts LedgerBackOptions) (*os.File, error) {
+	if opts.BackupPath == "" {
+		if opts.Apply {
+			return nil, errors.New("applying a ledger scan back requires --backup on durable storage")
+		}
+		return nil, nil
+	}
+	return openIndexHoleBackup(RecheckIndexHolesOptions(opts))
+}
+
 // ExtendLedgerScanBack lowers the start of the scanned span one chunk at a
 // time, down to floor, reading each block from node: it records the blocks
 // missing a transaction or holding a successful one without its messages,
@@ -92,20 +169,40 @@ func scanBackBlock(height int64, chain []nodeTx, index []backTx) backBlock {
 // grant paid, then moves the span's start below the chunk in the same
 // database transaction. It stops at the first block that is not fully
 // indexed or cannot be read, so a later run resumes where this one stopped.
-// It returns the new start of the span.
-func (s *Server) ExtendLedgerScanBack(chain string, node *ledgerNode, floor, chunk int64, workers int, logf func(string, ...any)) (int64, error) {
+// Rows already recorded are never changed; a chunk whose plan disagrees with
+// a recorded row stops an apply before it writes. A dry run (the default)
+// plans the same chunks without writing. It returns the new start of the
+// span.
+func (s *Server) ExtendLedgerScanBack(chain string, node *ledgerNode, floor, chunk int64, workers int, opts LedgerBackOptions, logf func(string, ...any)) (int64, LedgerBackSummary, error) {
+	sum := LedgerBackSummary{Apply: opts.Apply}
+	if chainParam(chain) == apiMainnet && floor < hubCoinEventsFrom {
+		return 0, sum, fmt.Errorf("floor %d is below block %d: failed transactions' fees before Gaia v6 cannot be read from the chain yet", floor, hubCoinEventsFrom)
+	}
+	backup, err := openLedgerBackBackup(opts)
+	if err != nil {
+		return 0, sum, err
+	}
+	if backup != nil {
+		defer backup.Close()
+	}
 	ids, err := s.chainRowIDs(chain)
 	if err != nil {
-		return 0, err
+		return 0, sum, err
 	}
 	scan, err := s.ledgerScan(chain)
 	if err != nil {
-		return 0, err
+		return 0, sum, err
 	}
 	if scan.FeeGrantsFrom == 0 {
-		return 0, errors.New("the ledger scan has not started")
+		return 0, sum, errors.New("the ledger scan has not started")
 	}
+	mode := "dry run"
+	if opts.Apply {
+		mode = "applied"
+	}
+	preEvents := func(h int64) bool { return chainParam(chain) == apiMainnet && h < hubFailedTxEventsFrom }
 	from := scan.FeeGrantsFrom
+	sum.StartFrom, sum.From = from, from
 	for from > floor {
 		hi := from - 1
 		lo := max(floor, hi-chunk+1)
@@ -116,7 +213,7 @@ SELECT b.height, b.tx_indexed AND b.block_events_indexed AS indexed, COALESCE(x.
 FROM blocks b LEFT JOIN txes x ON x.block_id = b.id
 WHERE b.chain_id IN @ids AND b.height BETWEEN @lo AND @hi
 ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
-			return from, fmt.Errorf("index rows %d to %d: %w", lo, hi, err)
+			return from, sum, fmt.Errorf("index rows %d to %d: %w", lo, hi, err)
 		}
 		byHeight := map[int64][]backTx{}
 		for _, r := range rows {
@@ -124,7 +221,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 		}
 		// Read the chunk's blocks in parallel, then walk down from its top so
 		// the span stays contiguous.
-		read := make([][]nodeTx, hi-lo+1)
+		read := make([]scannedBlock, hi-lo+1)
 		readErr := make([]error, hi-lo+1)
 		heights := make(chan int64)
 		var wg sync.WaitGroup
@@ -133,7 +230,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 			go func() {
 				defer wg.Done()
 				for h := range heights {
-					read[h-lo], readErr[h-lo] = node.blockTxs(h)
+					read[h-lo], readErr[h-lo] = node.blockScan(h, preEvents(h))
 				}
 			}()
 		}
@@ -145,6 +242,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 		close(heights)
 		wg.Wait()
 
+		plan := ledgerBackChunk{Version: 1, PlannedAt: time.Now().UTC(), Apply: opts.Apply, Chain: chain, FromBefore: from}
 		var scanned []backBlock
 		next := from
 		var stop error
@@ -158,22 +256,75 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": lo, "hi": hi}).Scan(&rows).
 				stop = fmt.Errorf("block %d: %w", h, readErr[h-lo])
 				break
 			}
-			scanned = append(scanned, scanBackBlock(h, read[h-lo], idx))
+			b := read[h-lo]
+			if preEvents(h) {
+				plan.PreEvents.add(settlePreEventBlock(h, b))
+			}
+			scanned = append(scanned, scanBackBlock(h, b.txs, idx))
 			next = h
 		}
+		if stop != nil {
+			plan.Stop = stop.Error()
+		}
 		if next < from {
-			holes, err := s.recordBackScan(chain, scanned, next)
-			if err != nil {
-				return from, fmt.Errorf("record scan of %d to %d: %w", next, from-1, err)
+			plan.FromAfter = next
+			for _, b := range scanned {
+				plan.Fees = append(plan.Fees, b.fees...)
+				plan.Grants = append(plan.Grants, b.grants...)
+				if b.chainTxs > 0 {
+					plan.Holes = append(plan.Holes, ledgerBackHole{Height: b.height, ChainTxs: b.chainTxs, Addresses: b.accounts})
+				}
 			}
-			logf("ledger scan back: span starts at %d (%d blocks, %d with missing transactions)", next, from-next, holes)
+			same, differ, err := s.existingBackRows(chain, plan, next, from-1)
+			if err != nil {
+				return from, sum, fmt.Errorf("recorded rows %d to %d: %w", next, from-1, err)
+			}
+			plan.ExistingSame, plan.ExistingDiffer = same, differ
+			if backup != nil {
+				if err := json.NewEncoder(backup).Encode(plan); err != nil {
+					return from, sum, fmt.Errorf("write backup: %w", err)
+				}
+				if err := backup.Sync(); err != nil {
+					return from, sum, fmt.Errorf("persist backup: %w", err)
+				}
+			}
+			if opts.Apply && len(differ) > 0 {
+				return from, sum, fmt.Errorf("chunk %d to %d disagrees with %d recorded rows (first: %s); nothing written", next, from-1, len(differ), differ[0])
+			}
+			if opts.Apply {
+				if _, err := s.recordBackScan(chain, scanned, from, next); err != nil {
+					return from, sum, fmt.Errorf("record scan of %d to %d: %w", next, from-1, err)
+				}
+			}
+			sum.Chunks++
+			sum.Blocks += from - next
+			sum.Holes += len(plan.Holes)
+			for _, h := range plan.Holes {
+				sum.HoleAddresses += len(h.Addresses)
+			}
+			sum.Fees += len(plan.Fees)
+			for _, f := range plan.Fees {
+				if f.Charged != "" {
+					sum.FeesCharged++
+				}
+			}
+			sum.Grants += len(plan.Grants)
+			sum.ExistingSame += same
+			sum.ExistingDiffer += len(differ)
+			// The summary keeps counts; heights stay in the backup's chunks.
+			counts := plan.PreEvents
+			counts.UnresolvedHeights = nil
+			sum.PreEvents.add(counts)
+			logf("ledger scan back (%s): span starts at %d (%d blocks, %d with missing transactions, %d failed fees, %d grants, %d recorded rows agree, %d disagree, pre-v7 unresolved blocks %d)",
+				mode, next, from-next, len(plan.Holes), len(plan.Fees), len(plan.Grants), same, len(differ), plan.PreEvents.UnresolvedBlocks)
 			from = next
+			sum.From = from
 		}
 		if stop != nil {
-			return from, stop
+			return from, sum, stop
 		}
 	}
-	return from, nil
+	return from, sum, nil
 }
 
 // FailedFeeCounts is what RecordFailedTxFees settled: failed transactions
@@ -225,7 +376,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": from, "hi": to}).Scan(&rows
 			go func() {
 				defer wg.Done()
 				for i := range next {
-					charges[i], readErr[i] = node.failedTxCharges(heights[i])
+					charges[i], readErr[i] = node.failedTxCharges(heights[i], chainParam(chain) == apiMainnet && heights[i] < hubFailedTxEventsFrom)
 				}
 			}()
 		}
@@ -263,67 +414,72 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": from, "hi": to}).Scan(&rows
 	return n, nil
 }
 
-// RecheckIndexHoles reads every recorded hole's block from node again and
-// compares it with the index the way the scan now does: a hole that is no
-// longer short is dropped, and the rest get their transaction count and
-// accounts rewritten. It returns how many holes it dropped and how many are
-// left.
-func (s *Server) RecheckIndexHoles(chain string, node *ledgerNode, logf func(string, ...any)) (int, int, error) {
-	ids, err := s.chainRowIDs(chain)
-	if err != nil {
-		return 0, 0, err
+// existingBackRows compares a chunk's plan with rows already recorded for the
+// same transactions and heights. It returns how many agree and a short
+// description of each that does not.
+func (s *Server) existingBackRows(chain string, plan ledgerBackChunk, lo, hi int64) (int, []string, error) {
+	same := 0
+	var differ []string
+	fees := map[uint]string{}
+	var feeIDs []uint
+	for _, f := range plan.Fees {
+		fees[f.TxID] = f.Charged
+		feeIDs = append(feeIDs, f.TxID)
 	}
-	var heights []int64
-	if err := s.db.Model(&IndexHole{}).Where("chain = ?", chain).Order("height").Pluck("height", &heights).Error; err != nil {
-		return 0, 0, err
+	grants := map[uint]string{}
+	var grantIDs []uint
+	for _, g := range plan.Grants {
+		grants[g.TxID] = g.Granter
+		grantIDs = append(grantIDs, g.TxID)
 	}
-	dropped := 0
-	for _, h := range heights {
-		txs, err := node.blockTxs(h)
-		if err != nil {
-			return dropped, len(heights) - dropped, fmt.Errorf("block %d: %w", h, err)
+	for start := 0; start < len(feeIDs); start += 10000 {
+		var have []FailedTxFee
+		if err := s.db.Where("tx_id IN ?", feeIDs[start:min(start+10000, len(feeIDs))]).Find(&have).Error; err != nil {
+			return 0, nil, err
 		}
-		var index []indexedTx
-		if err := s.db.Raw(`
-SELECT b.height, b.tx_indexed AND b.block_events_indexed AS indexed, COALESCE(x.hash, '') AS hash, COALESCE(x.code, 0) AS code,
-       EXISTS (SELECT 1 FROM messages m WHERE m.tx_id = x.id) AS messages
-FROM blocks b LEFT JOIN txes x ON x.block_id = b.id
-WHERE b.chain_id IN @ids AND b.height = @h`, map[string]any{"ids": ids, "h": h}).Scan(&index).Error; err != nil {
-			return dropped, len(heights) - dropped, fmt.Errorf("index rows at %d: %w", h, err)
-		}
-		n, accounts := scanHole(txs, index)
-		if err := s.db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Where("chain = ? AND height = ?", chain, h).Delete(&IndexHoleAddress{}).Error; err != nil {
-				return err
+		for _, h := range have {
+			if fees[h.TxID] == h.Charged {
+				same++
+			} else {
+				differ = append(differ, fmt.Sprintf("failed fee of tx %d", h.TxID))
 			}
-			if n == 0 {
-				return tx.Where("chain = ? AND height = ?", chain, h).Delete(&IndexHole{}).Error
-			}
-			if err := tx.Model(&IndexHole{}).Where("chain = ? AND height = ?", chain, h).Updates(map[string]any{"chain_txs": n, "addresses_known": true}).Error; err != nil {
-				return err
-			}
-			rows := make([]IndexHoleAddress, 0, len(accounts))
-			for _, a := range accounts {
-				rows = append(rows, IndexHoleAddress{Chain: chain, Height: h, Address: a})
-			}
-			if len(rows) == 0 {
-				return nil
-			}
-			return tx.CreateInBatches(rows, 500).Error
-		}); err != nil {
-			return dropped, len(heights) - dropped, fmt.Errorf("hole at %d: %w", h, err)
-		}
-		if n == 0 {
-			dropped++
 		}
 	}
-	logf("index holes: rechecked %d, dropped %d, %d left", len(heights), dropped, len(heights)-dropped)
-	return dropped, len(heights) - dropped, nil
+	for start := 0; start < len(grantIDs); start += 10000 {
+		var have []FeeGrantUse
+		if err := s.db.Where("tx_id IN ?", grantIDs[start:min(start+10000, len(grantIDs))]).Find(&have).Error; err != nil {
+			return 0, nil, err
+		}
+		for _, h := range have {
+			if grants[h.TxID] == h.Granter {
+				same++
+			} else {
+				differ = append(differ, fmt.Sprintf("fee grant of tx %d", h.TxID))
+			}
+		}
+	}
+	planned := map[int64]int{}
+	for _, h := range plan.Holes {
+		planned[h.Height] = h.ChainTxs
+	}
+	var holes []IndexHole
+	if err := s.db.Where("chain = ? AND height BETWEEN ? AND ?", chain, lo, hi).Find(&holes).Error; err != nil {
+		return 0, nil, err
+	}
+	for _, h := range holes {
+		if n, ok := planned[h.Height]; ok && n == h.ChainTxs {
+			same++
+		} else {
+			differ = append(differ, fmt.Sprintf("index hole at %d", h.Height))
+		}
+	}
+	return same, differ, nil
 }
 
-// recordBackScan stores one chunk's records and moves the span's start to
-// from, all or nothing.
-func (s *Server) recordBackScan(chain string, blocks []backBlock, from int64) (int, error) {
+// recordBackScan stores one chunk's records and moves the span's start from
+// prev to from, all or nothing. It refuses when the span no longer starts at
+// prev, so two runs cannot interleave.
+func (s *Server) recordBackScan(chain string, blocks []backBlock, prev, from int64) (int, error) {
 	holes := 0
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var fees []FailedTxFee
@@ -358,7 +514,14 @@ func (s *Server) recordBackScan(chain string, blocks []backBlock, from int64) (i
 				return err
 			}
 		}
-		return tx.Model(&LedgerScan{}).Where("chain = ? AND fee_grants_from > ?", chain, from).Update("fee_grants_from", from).Error
+		res := tx.Model(&LedgerScan{}).Where("chain = ? AND fee_grants_from = ?", chain, prev).Update("fee_grants_from", from)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return fmt.Errorf("the span no longer starts at %d", prev)
+		}
+		return nil
 	})
 	return holes, err
 }

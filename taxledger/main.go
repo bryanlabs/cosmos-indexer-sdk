@@ -2,6 +2,8 @@
 // no longer holds: it scans blocks from the archive block cache back from the
 // start of the scanned span, then records validator rates for those days from
 // an archive node's REST API. Both steps resume where the last run stopped.
+// The scan is a dry run unless --apply, which needs a new --backup file:
+// every chunk's plan is synced there before its database transaction.
 //
 // With -days-from it instead stores every address's holdings at the end of
 // each day from -days-from to -days-to, walking back from the serving node
@@ -26,11 +28,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +78,7 @@ func main() {
 	chain := flag.String("chain", "mainnet", "chain the ledger scan belongs to")
 	cache := flag.String("cache", "/cache", "archive block cache directory for this chain")
 	archive := flag.String("archive-rest", os.Getenv("ARCHIVE_REST"), "archive node REST origin for validator state")
+	archiveRPC := flag.String("archive-rpc", os.Getenv("ARCHIVE_RPC"), "archive node RPC origin for staking store reads where its delegation query fails")
 	floor := flag.Int64("floor", 0, "lowest height to scan back to")
 	chunk := flag.Int64("chunk", 5000, "blocks recorded per database transaction")
 	workers := flag.Int("workers", 16, "blocks read in parallel")
@@ -104,7 +109,13 @@ func main() {
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
 	failedTo := flag.Int64("failed-fees-to", 0, "record failed-tx fee outcomes from -floor below this height, then stop")
 	failedWrite := flag.Bool("failed-fees-write", false, "write the outcomes -failed-fees-to settles; without it the run only counts them")
-	recheck := flag.Bool("recheck-holes", false, "read every recorded index hole's block again and drop the holes that are no longer short")
+	recheck := flag.Bool("recheck-holes", false, "recheck recorded index holes against cached blocks (dry run unless --apply)")
+	apply := flag.Bool("apply", false, "apply an index-hole recheck or a ledger scan back, requires --backup")
+	backup := flag.String("backup", "", "new private JSONL backup file on durable storage for an index-hole recheck or a ledger scan back")
+	repeated := flag.Bool("repeated-inclusions", false, "date transactions the chain included twice at the copy that took effect and clear the holes this proves (dry run unless --apply)")
+	repeatedHeights := flag.String("hole-heights", "", "comma-separated recorded hole heights for --repeated-inclusions, default every uncleared hole")
+	compareHeights := flag.String("compare-heights", "", "comma-separated hole heights whose accounts --repeated-inclusions also rebuilds the way the API answers and compares with chain state")
+	compareAccounts := flag.Int("compare-accounts", 1, "accounts compared per --compare-heights hole")
 	flag.Parse()
 	if (*flowsProfile != "" || *flowsProfileSHA != "") && (!*flows || strings.TrimSpace(*flowsVersion) == "" || *flowsProfile == "" || *flowsProfileSHA == "") {
 		log.Fatal("private profile requires versioned commission collection and exact digest")
@@ -118,11 +129,29 @@ func main() {
 	if *flowsPrefetch != 0 && (!*flows || strings.TrimSpace(*flowsVersion) == "") {
 		log.Fatal("commission wallet prefetch requires private versioned commission collection")
 	}
+	otherOp := *flows || *daysAppend || *daysFrom != "" || *failedTo > 0 || *deriveLabels != ""
+	if *repeated && (otherOp || *recheck) {
+		log.Fatal("--repeated-inclusions cannot be combined with another ledger operation")
+	}
+	if (*apply || *backup != "") && otherOp {
+		log.Fatal("--apply and --backup are only supported with --recheck-holes, --repeated-inclusions or the ledger scan back")
+	}
+	if *recheck && otherOp {
+		log.Fatal("--recheck-holes cannot be combined with another ledger operation")
+	}
+	if *apply && *backup == "" {
+		log.Fatal("--apply requires --backup on durable storage")
+	}
 
 	// The commission trace runs thousands of small per-wallet queries whose
 	// plans cross jit_above_cost; JIT compiling each took about 1 s for 40 ms
-	// of work. Session-only, so other jobs and the API keep their settings.
+	// of work. The repeated-inclusion repair reads the same way, one account
+	// and one block at a time. Session-only, so other jobs and the API keep
+	// their settings.
 	runtime := commissionRuntimeParams(*flows, *flowsVersion)
+	if *repeated {
+		runtime = append(runtime, "jit=off")
+	}
 	if *deriveLabels != "" {
 		runtime = append(runtime, "default_transaction_read_only=on", fmt.Sprintf("statement_timeout=%d", deriveTimeout.Milliseconds()), "plan_cache_mode=force_custom_plan")
 	}
@@ -182,6 +211,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if *archiveRPC != "" {
+		if err := node.UseArchiveRPC(*archiveRPC); err != nil {
+			log.Fatal(err)
+		}
+	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
 	if *failedTo > 0 {
 		n, err := srv.RecordFailedTxFees(*chain, node, *floor, *failedTo, *chunk, *workers, *failedWrite, log.Printf)
@@ -191,13 +225,37 @@ func main() {
 		log.Printf("failed-tx fees: %d charged, %d charged nothing, %d left unsettled (write=%v)", n.Charged, n.Uncharged, n.Unsettled, *failedWrite)
 		return
 	}
+	if *repeated {
+		hs, err := heightList(*repeatedHeights)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cs, err := heightList(*compareHeights)
+		if err != nil {
+			log.Fatal(err)
+		}
+		sum, err := srv.RepairRepeatedInclusions(*chain, node, taxapi.RepeatedInclusionsOptions{Apply: *apply, BackupPath: *backup, Heights: hs, Compare: cs, CompareAccounts: *compareAccounts, Workers: *workers}, log.Printf)
+		if out, jerr := json.Marshal(sum); jerr == nil {
+			log.Printf("repeated inclusions summary: %s", out)
+		}
+		if err != nil {
+			log.Fatalf("repeated inclusions: %v", err)
+		}
+		if !*apply {
+			log.Printf("repeated inclusions: dry run, nothing written")
+		}
+		return
+	}
 	if *recheck {
-		if _, _, err := srv.RecheckIndexHoles(*chain, node, log.Printf); err != nil {
+		if _, _, err := srv.RecheckIndexHoles(*chain, node, taxapi.RecheckIndexHolesOptions{Apply: *apply, BackupPath: *backup}, log.Printf); err != nil {
 			log.Fatalf("index holes: %v", err)
 		}
 		return
 	}
-	from, err := srv.ExtendLedgerScanBack(*chain, node, *floor, *chunk, *workers, log.Printf)
+	from, sum, err := srv.ExtendLedgerScanBack(*chain, node, *floor, *chunk, *workers, taxapi.LedgerBackOptions{Apply: *apply, BackupPath: *backup}, log.Printf)
+	if out, jerr := json.Marshal(sum); jerr == nil {
+		log.Printf("ledger scan back summary: %s", out)
+	}
 	switch {
 	case errors.Is(err, taxapi.ErrLedgerScanUnindexed):
 		log.Printf("ledger scan back: stopped at the span start %d: %v", from, err)
@@ -205,6 +263,10 @@ func main() {
 		log.Fatalf("ledger scan back: stopped at the span start %d: %v", from, err)
 	default:
 		log.Printf("ledger scan back: span starts at the floor %d", from)
+	}
+	if !*apply {
+		log.Printf("ledger scan back: dry run, nothing written; validator rates are recorded only with --apply")
+		return
 	}
 	if *rates {
 		if err := srv.BackfillValidatorRates(*chain, node, log.Printf); err != nil {
@@ -313,4 +375,19 @@ func deriveFollowLabels(db *gorm.DB, chain, fromText, asOfText, out string) {
 		log.Fatal(err)
 	}
 	log.Printf("label file %s: %d labels, %d unfollowed, %d profiles, sha256 %s", out, len(lf.Labels), len(lf.Unfollowed), len(lf.Profiles), digest)
+}
+
+func heightList(v string) ([]int64, error) {
+	var out []int64
+	for _, f := range strings.Split(v, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		h, err := strconv.ParseInt(f, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("height %q: %w", f, err)
+		}
+		out = append(out, h)
+	}
+	return out, nil
 }
