@@ -14,10 +14,14 @@ import (
 
 const (
 	// MaxAssetDecisionsJSONBytes bounds a user-supplied asset-review payload.
-	MaxAssetDecisionsJSONBytes = 256 << 10
+	// It is sized for MaxUserPrices price: keys of about 130 bytes each.
+	MaxAssetDecisionsJSONBytes = 4 << 20
 	MaxAssetDecisions          = 500
 	MaxAssetDecisionRecordID   = 256
 	MaxAssetDecisionToken      = 32
+	// MaxUserPrices bounds the price: keys, which do not count toward
+	// MaxAssetDecisions: one wallet can have thousands of unpriced days.
+	MaxUserPrices = 25000
 )
 
 const (
@@ -38,6 +42,20 @@ const (
 //	                     price on its own receipt date
 //	policy:spam          every receipt flagged with the spam_memo reason that
 //	                     has no more specific decision; exclude only
+//	price:<raw_denom>@<YYYY-MM-DD>
+//	                     an override with unit_value_usd: the user's USD unit
+//	                     price for every unpriced row of that on-chain denom
+//	                     on that UTC day
+//	price:<HASH>#<m>#<s> an override with value_usd: the user's total USD value
+//	                     for one unpriced row, keyed like a row tag
+//
+// A price: decision only fills a price the reference sources left missing; it
+// never replaces an oracle, pegged or implied price, and it never reaches a
+// flagged receipt, which is valued through its identity decision instead. It
+// sets the value only: the row keeps its own token, quantity and date, and its
+// basis follows the methodology (the value for income, unknown for a
+// transfer in), so it carries no token, quantity, cost_basis_usd or
+// acquired_date.
 //
 // AppliedFrom is set by the server on the materialized per-receipt decision to
 // say which key produced it; a request must not set it.
@@ -52,20 +70,26 @@ type AssetDecision struct {
 	AppliedFrom  string `json:"applied_from,omitempty"`
 }
 
-// AssetDecisions is keyed by record ID, denom:<raw_denom> or policy:spam.
+// AssetDecisions is keyed by record ID, denom:<raw_denom>, policy:spam or
+// price:<raw_denom>@<day> and price:<row key>.
 // This package deliberately does not infer record IDs or asset values.
 type AssetDecisions map[string]AssetDecision
 
 const (
 	DecisionKeyDenomPrefix = "denom:"
 	DecisionKeySpamPolicy  = "policy:spam"
+	DecisionKeyPricePrefix = "price:"
+	decisionKindPrice      = "price"
 )
 
-// decisionKeyKind classifies a decision key: "record", "denom" or "policy".
+// decisionKeyKind classifies a decision key: "record", "denom", "policy" or
+// "price".
 func decisionKeyKind(key string) string {
 	switch {
 	case key == DecisionKeySpamPolicy:
 		return "policy"
+	case strings.HasPrefix(key, DecisionKeyPricePrefix):
+		return decisionKindPrice
 	case strings.HasPrefix(key, DecisionKeyDenomPrefix):
 		return apiDenom
 	default:
@@ -95,7 +119,13 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 	if raw == nil {
 		return nil, fmt.Errorf("decode asset decisions: expected JSON object")
 	}
-	if len(raw) > MaxAssetDecisions {
+	nonPrice := 0
+	for key := range raw {
+		if decisionKeyKind(key) != decisionKindPrice {
+			nonPrice++
+		}
+	}
+	if nonPrice > MaxAssetDecisions {
 		return nil, fmt.Errorf("asset decisions exceed %d entries", MaxAssetDecisions)
 	}
 
@@ -122,14 +152,94 @@ func ParseAssetDecisions(input string) (AssetDecisions, error) {
 		}
 		out[recordID] = normalized
 	}
+	if err := checkUserPriceDays(out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// checkUserPriceDays bounds the price: keys.
+func checkUserPriceDays(decisions AssetDecisions) error {
+	n := 0
+	for key := range decisions {
+		if decisionKeyKind(key) == decisionKindPrice {
+			n++
+		}
+	}
+	if n > MaxUserPrices {
+		return fmt.Errorf("user prices exceed %d entries", MaxUserPrices)
+	}
+	return nil
+}
+
+// userPriceRowKey reports whether a price: key names one row (a row tag key
+// HASH#message#sub) rather than a denom.
+func userPriceRowKey(key string) bool {
+	return strings.Contains(strings.TrimPrefix(key, DecisionKeyPricePrefix), rowKeySep)
+}
+
+// userPriceDenomDay splits a price:<raw_denom>@<YYYY-MM-DD> key.
+func userPriceDenomDay(key string) (denom, day string, ok bool) {
+	target := strings.TrimPrefix(key, DecisionKeyPricePrefix)
+	at := strings.LastIndexByte(target, '@')
+	if at <= 0 {
+		return "", "", false
+	}
+	return target[:at], target[at+1:], true
+}
+
+// normalizeUserPrice validates a price: decision. It is an override that sets
+// a value only: value_usd (the row's total) on a row key, unit_value_usd on a
+// denom and day key. Values are nonnegative USD, with explicit zero allowed.
+func normalizeUserPrice(key string, decision AssetDecision) (AssetDecision, error) {
+	target := strings.TrimPrefix(key, DecisionKeyPricePrefix)
+	if target == "" {
+		return AssetDecision{}, fmt.Errorf("price key needs <raw_denom>@<YYYY-MM-DD> or a row key after %q", DecisionKeyPricePrefix)
+	}
+	if decision.Mode != AssetDecisionOverride {
+		return AssetDecision{}, fmt.Errorf("a price: key takes mode %q", AssetDecisionOverride)
+	}
+	if decision.Token != "" || decision.Quantity != "" || decision.CostBasisUSD != "" || decision.AcquiredDate != "" {
+		return AssetDecision{}, fmt.Errorf("a user price sets the value only (value_usd on a row key, unit_value_usd on a denom and day key); the row keeps its token, quantity and date, and its basis follows the methodology")
+	}
+	if userPriceRowKey(key) {
+		canonical, err := normalizeTagKey(target)
+		if err != nil || canonical != target {
+			return AssetDecision{}, fmt.Errorf("price row key must be HASH#message_index#sub_index with an uppercase hash")
+		}
+		if decision.UnitValueUSD != "" {
+			return AssetDecision{}, fmt.Errorf("a price row key carries value_usd, the row's total; unit_value_usd belongs on price:<raw_denom>@<YYYY-MM-DD>")
+		}
+		if err := validateDecimal(decision.ValueUSD, false); err != nil {
+			return AssetDecision{}, fmt.Errorf("value_usd: %w", err)
+		}
+		return AssetDecision{Mode: AssetDecisionOverride, ValueUSD: decision.ValueUSD, AppliedFrom: decision.AppliedFrom}, nil
+	}
+	denom, day, ok := userPriceDenomDay(key)
+	if !ok || strings.ContainsAny(denom, "@ ") {
+		return AssetDecision{}, fmt.Errorf("price key must be price:<raw_denom>@<YYYY-MM-DD> or price:<row key>")
+	}
+	if err := validateDate(day); err != nil {
+		return AssetDecision{}, fmt.Errorf("price key day: %w", err)
+	}
+	if decision.ValueUSD != "" {
+		return AssetDecision{}, fmt.Errorf("a price:<raw_denom>@<YYYY-MM-DD> key carries unit_value_usd; a row total belongs on a row key")
+	}
+	if err := validateDecimal(decision.UnitValueUSD, false); err != nil {
+		return AssetDecision{}, fmt.Errorf("unit_value_usd: %w", err)
+	}
+	return AssetDecision{Mode: AssetDecisionOverride, UnitValueUSD: decision.UnitValueUSD, AppliedFrom: decision.AppliedFrom}, nil
 }
 
 // NormalizeKeyedDecision validates a decision against the shape its key
 // allows: a receipt override carries totals, a denom override carries a unit
 // price, and the spam policy can only exclude.
 func NormalizeKeyedDecision(key string, decision AssetDecision) (AssetDecision, error) {
-	switch decisionKeyKind(key) {
+	kind := decisionKeyKind(key)
+	if kind == decisionKindPrice {
+		return normalizeUserPrice(key, decision)
+	}
+	switch kind {
 	case "policy":
 		if decision.Mode != AssetDecisionExclude {
 			return AssetDecision{}, fmt.Errorf("policy:spam can only exclude (mode %q)", AssetDecisionExclude)
@@ -203,8 +313,17 @@ func NormalizeAssetDecision(decision AssetDecision) (AssetDecision, error) {
 // mutate it; callers that need normalized tokens should use ParseAssetDecisions
 // or NormalizeAssetDecision.
 func ValidateAssetDecisions(decisions AssetDecisions) error {
-	if len(decisions) > MaxAssetDecisions {
+	nonPrice := 0
+	for key := range decisions {
+		if decisionKeyKind(key) != decisionKindPrice {
+			nonPrice++
+		}
+	}
+	if nonPrice > MaxAssetDecisions {
 		return fmt.Errorf("asset decisions exceed %d entries", MaxAssetDecisions)
+	}
+	if err := checkUserPriceDays(decisions); err != nil {
+		return err
 	}
 	for recordID, decision := range decisions {
 		if err := validateRecordID(recordID); err != nil {

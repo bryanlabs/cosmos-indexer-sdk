@@ -59,7 +59,7 @@ func attachSpamEvidence(row *Row, event tax.TaxableEvent, chain, wallet, memo st
 	promotional := (strings.Contains(lower, "https://") || strings.Contains(lower, "http://")) && (strings.Contains(lower, "claim") || strings.Contains(lower, TagAirdrop))
 	knownSuspect := chain == apiMainnet && (event.Denom == junoFactoryUatomVoucher || event.Denom == airdrop67Voucher)
 	// Missing price alone is not a spam signal, nor is a normal native-token receipt.
-	suspicious := knownSuspect || (event.Denom != apiUatom && event.Denom != cosmosHubNobleUSDCDenom && row.PriceMissing && promotional)
+	suspicious := knownSuspect || (event.Denom != apiUatom && !isPeggedUSDC(chain, event.Denom) && row.PriceMissing && promotional)
 	if row.AssetIdentity == nil && !suspicious {
 		return
 	}

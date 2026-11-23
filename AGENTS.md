@@ -51,6 +51,10 @@ k8s namespace `apps` as two trios (mainnet + a parallel `-testnet-*`):
   by moniker), `tax/gaia_versions.go` (the reviewed Gaia releases and upcoming changes) with
   `taxapi/chainreleases.go` (the daily watcher that records
   `chain_release_checks` and flags unreviewed releases; `GET /chain/releases`),
+  `taxapi/assetreview_runtime.go` `applyUserPrices` (user-entered USD for
+  price-missing rows through `price:<denom>@<day>` and `price:<row key>`
+  asset decisions, labelled `price_source=user` in every output; see
+  `taxapi/ASSET-REVIEW.md`),
   `taxapi/tags.go` (the `tags` query parameter on every export and report,
   vocabulary in `tax/catalog.go`), `taxapi/journal.go` (double-entry USD ledger
   in date order with `price_usd`, `counterparty`, `validator`,
