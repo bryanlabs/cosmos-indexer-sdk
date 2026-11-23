@@ -122,6 +122,9 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		if r.PriceImplied {
 			memo += " [price implied from the other swap leg]"
 		}
+		if r.PriceUserSupplied {
+			memo += " [user-supplied USD price]"
+		}
 		asset := acctDigitalAssets + ": " + r.Symbol
 		val := r.ValueUSD
 		counterparty := ""

@@ -153,15 +153,31 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 
 const cosmosHubNobleUSDCDenom = "ibc/27BCBC098A3AE31C80E18A3EA7A516F2530B7362F83D7992A4D7888DBB586D33"
 
+// cosmosHubNobleDirectUSDCDenom is Noble's native USDC sent straight to the
+// Hub: its trace is transfer/channel-536/uusdc, and Hub channel-536 is Noble's
+// channel-4 on noble-1, where uusdc is Circle's USD Coin.
+const cosmosHubNobleDirectUSDCDenom = "ibc/F663521BF1836B00F5F177680F74BFB9A8B5654A694D0D2BC249E03CF2509013"
+
 // fixedUSDStablecoinPrice is deliberately an exact chain+denom allowlist, not a
-// symbol check. Anyone can create a token called USDC, while this voucher's IBC
-// trace is pinned to transfer/channel-1266/transfer/channel-2/uusdc. The oracle
-// currently knows its symbol and decimals but has no CoinGecko mapping for it.
+// symbol check. Anyone can create a token called USDC, and other bridges carry
+// their own USDC: ibc/FA33D22E... (transfer/channel-569/transfer/channel-2/uusdc)
+// is Axelar's USDC routed through Neutron, a different asset that stays off the
+// list and unpriced without an oracle price. Each listed voucher's IBC trace is
+// pinned to Noble's uusdc: ibc/27BCBC09... through Elys
+// (transfer/channel-1266/transfer/channel-2/uusdc, Elys channel-2 to Noble
+// channel-117) and ibc/F663521B... directly (transfer/channel-536/uusdc). The
+// oracle knows their symbol and decimals but has no CoinGecko mapping for
+// them on every day.
 func fixedUSDStablecoinPrice(chain, denom string) (float64, bool) {
-	if chain == apiMainnet && denom == cosmosHubNobleUSDCDenom {
+	if isPeggedUSDC(chain, denom) {
 		return 1, true
 	}
 	return 0, false
+}
+
+// isPeggedUSDC reports whether a denom is on the exact $1 USDC allowlist.
+func isPeggedUSDC(chain, denom string) bool {
+	return chain == apiMainnet && (denom == cosmosHubNobleUSDCDenom || denom == cosmosHubNobleDirectUSDCDenom)
 }
 
 // PriceAt returns the USD price for a denom on (or most recently before) a date
