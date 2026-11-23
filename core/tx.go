@@ -228,7 +228,12 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 
 		processedTx.Tx.SignerAddresses = signers
 
-		fees, err := ProcessFees(db, indexerTx.AuthInfo, signers)
+		feeSigners, err := FeeSigners(cl, txFull.AuthInfo, signers)
+		if err != nil {
+			return currTxDbWrappers, blockTime, err
+		}
+
+		fees, err := ProcessFees(db, indexerTx.AuthInfo, feeSigners)
 		if err != nil {
 			return currTxDbWrappers, blockTime, err
 		}
@@ -427,7 +432,12 @@ func ProcessRPCTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client.ChainClient,
 		}
 		processedTx.Tx.SignerAddresses = signers
 
-		fees, err := ProcessFees(db, indexerTx.AuthInfo, signers)
+		feeSigners, err := FeeSigners(cl, currTx.AuthInfo, signers)
+		if err != nil {
+			return currTxDbWrappers, blockTime, err
+		}
+
+		fees, err := ProcessFees(db, indexerTx.AuthInfo, feeSigners)
 		if err != nil {
 			return currTxDbWrappers, blockTime, err
 		}
@@ -594,6 +604,37 @@ func ProcessSigners(cl *client.ChainClient, authInfo *cosmosTx.AuthInfo, message
 	}
 
 	return signerAddressArray, nil
+}
+
+// FeeSigners returns the signers in the order ProcessFees reads them. The SDK
+// charges the account of the first signer info when the fee names no payer or
+// granter. For a multisig that account is the multisig key's own address,
+// which ProcessSigners lists after the member keys, so it is moved first here.
+// The stored signer list is left as ProcessSigners built it.
+func FeeSigners(cl *client.ChainClient, authInfo *cosmosTx.AuthInfo, signers []models.Address) ([]models.Address, error) {
+	if len(authInfo.SignerInfos) == 0 || authInfo.SignerInfos[0].PublicKey == nil {
+		return signers, nil
+	}
+	first := authInfo.SignerInfos[0].PublicKey
+	pubKey, err := cl.Codec.InterfaceRegistry.Resolve(first.TypeUrl)
+	if err != nil {
+		return nil, err
+	}
+	if err := cl.Codec.InterfaceRegistry.UnpackAny(first, &pubKey); err != nil {
+		return nil, err
+	}
+	multisigKey, ok := pubKey.(*multisig.LegacyAminoPubKey)
+	if !ok {
+		return signers, nil
+	}
+	account := types.AccAddress(multisigKey.Address().Bytes()).String()
+	ordered := []models.Address{{Address: account}}
+	for _, signer := range signers {
+		if signer.Address != account {
+			ordered = append(ordered, signer)
+		}
+	}
+	return ordered, nil
 }
 
 // Processes fees into model form, applying denoms and addresses to them

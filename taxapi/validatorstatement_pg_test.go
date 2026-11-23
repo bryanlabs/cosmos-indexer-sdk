@@ -75,7 +75,7 @@ func statementPGServer(t *testing.T) *Server {
 		"CREATE TABLE message_event_attributes (message_event_id bigint, value text)",
 		"CREATE TABLE taxable_events (id bigserial PRIMARY KEY, message_id bigint, sub_index bigint, category text, amount text, denom text, from_addr text, to_addr text, block_height bigint, timestamp timestamptz, tx_hash text, asset text, validator_address text, reward_trigger text, detail text)",
 		"CREATE INDEX idx_tax_validator ON taxable_events (validator_address, category, timestamp) WHERE validator_address <> ''",
-		"INSERT INTO chains VALUES (1,'cosmoshub-4')",
+		tempHubChainRow,
 	} {
 		require.NoError(t, database.Exec(sql).Error, sql)
 	}

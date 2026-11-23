@@ -212,21 +212,32 @@ func (s *Server) buildWalletDays(chain string, ids []int64, node *ledgerNode, ad
 	if heavy, err := s.deferHeavyWallet(chain, addr); err != nil || heavy {
 		return 0, err
 	}
-	rebuilt, anchor, err := s.rebuildHoldings(chain, ids, node, addr, ends)
+	rows, err := s.walletDayRows(chain, ids, node, addr, days, ends)
 	if err != nil {
 		return 0, err
+	}
+	err = s.db.Transaction(func(tx *gorm.DB) error { return replaceWalletDays(tx, chain, addr, days, rows) })
+	return len(rows), err
+}
+
+// walletDayRows walks addr back to the end of each day and keeps the days
+// that differ from the day before, without writing anything.
+func (s *Server) walletDayRows(chain string, ids []int64, node *ledgerNode, addr string, days []time.Time, ends []heightTime) ([]BalanceDay, error) {
+	rebuilt, anchor, err := s.rebuildHoldings(chain, ids, node, addr, ends)
+	if err != nil {
+		return nil, err
 	}
 	var prev BalanceDay
 	res := s.db.Where("chain = ? AND address = ? AND day < ?", chain, addr, days[0].Format(apiDateLayout)).Order("day DESC").Limit(1).Find(&prev)
 	if res.Error != nil {
-		return 0, res.Error
+		return nil, res.Error
 	}
 	all := make([]BalanceDay, len(rebuilt))
 	for i, r := range rebuilt {
 		all[i] = BalanceDay{Chain: chain, Address: addr, Day: days[i], Height: ends[i].Height, AnchorHeight: anchor, Status: r.Status, Reason: r.Reason, Holdings: "{}"}
 		if r.Status == "" {
 			if all[i].Holdings, err = encodeHoldings(r.Holdings); err != nil {
-				return 0, err
+				return nil, err
 			}
 		}
 	}
@@ -234,17 +245,18 @@ func (s *Server) buildWalletDays(chain string, ids []int64, node *ledgerNode, ad
 	if res.RowsAffected > 0 {
 		before = &prev
 	}
-	rows := changedDays(before, all)
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("chain = ? AND address = ? AND day BETWEEN ? AND ?", chain, addr, days[0].Format(apiDateLayout), days[len(days)-1].Format(apiDateLayout)).Delete(&BalanceDay{}).Error; err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			return nil
-		}
-		return tx.CreateInBatches(rows, 1000).Error
-	})
-	return len(rows), err
+	return changedDays(before, all), nil
+}
+
+// replaceWalletDays replaces addr's rows in the span of days with rows.
+func replaceWalletDays(tx *gorm.DB, chain, addr string, days []time.Time, rows []BalanceDay) error {
+	if err := tx.Where("chain = ? AND address = ? AND day BETWEEN ? AND ?", chain, addr, days[0].Format(apiDateLayout), days[len(days)-1].Format(apiDateLayout)).Delete(&BalanceDay{}).Error; err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return tx.CreateInBatches(rows, 1000).Error
 }
 
 // changedDays keeps the days whose holdings, status or reason differ from

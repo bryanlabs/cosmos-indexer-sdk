@@ -31,16 +31,18 @@ func TestBalanceLedgerFeesAndHolesPostgres(t *testing.T) {
 	database = database.WithContext(ctx)
 	for _, sql := range []string{
 		"SET search_path = pg_temp",
-		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, height bigint)",
+		"CREATE TEMP TABLE blocks (id bigint, chain_id bigint, height bigint, time_stamp timestamptz)",
 		"CREATE TEMP TABLE txes (id bigint, block_id bigint, hash text, code bigint)",
 		"CREATE TEMP TABLE messages (id bigint, tx_id bigint)",
-		"CREATE TEMP TABLE addresses (id bigint, address text)",
-		"CREATE TEMP TABLE denoms (id bigint, base text)",
+		tempAddressesTable,
+		tempDenomsTable,
 		"CREATE TEMP TABLE fees (tx_id bigint, denomination_id bigint, amount numeric, payer_address_id bigint)",
 		"CREATE TEMP TABLE tax_fee_grants (tx_id bigint, granter text)",
 		"CREATE TEMP TABLE tax_failed_tx_fees (tx_id bigint, charged text)",
 		"CREATE TEMP TABLE tax_index_holes (chain text, height bigint, chain_txs bigint, addresses_known boolean NOT NULL DEFAULT false)",
 		"CREATE TEMP TABLE tax_index_hole_addresses (chain text, height bigint, address text)",
+		tempInclusionsTable,
+		tempClearancesTable,
 		"INSERT INTO blocks VALUES (1,1,10),(2,1,20),(3,1,30)",
 		"INSERT INTO addresses VALUES (1,'cosmos1grantee'),(2,'cosmos1granter')",
 		"INSERT INTO denoms VALUES (1,'uatom')",
@@ -59,13 +61,13 @@ func TestBalanceLedgerFeesAndHolesPostgres(t *testing.T) {
 	s := &Server{db: database, native: DefaultNativeAsset}
 	ids := []int64{1}
 
-	grantee, unknown, err := s.ledgerFees(ids, "cosmos1grantee", 0, 100, nil)
+	grantee, unknown, err := s.ledgerFees(apiMainnet, ids, "cosmos1grantee", 0, 100, nil)
 	require.NoError(t, err)
 	require.Zero(t, unknown)
 	require.Len(t, grantee, 1, "a fee a grant paid is not the signer's")
 	require.Equal(t, int64(10), grantee[0].Height)
 
-	granter, _, err := s.ledgerFees(ids, "cosmos1granter", 0, 100, nil)
+	granter, _, err := s.ledgerFees(apiMainnet, ids, "cosmos1granter", 0, 100, nil)
 	require.NoError(t, err)
 	require.Len(t, granter, 2, "the granter pays the granted fee and its own")
 	require.Equal(t, "7", granter[0].Coins.AmountOf("uatom").String())

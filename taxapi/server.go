@@ -85,6 +85,15 @@ type Server struct {
 	// staking serves the staking views from the staking tables once they
 	// cover the embedded files; nil serves the embedded files.
 	staking *stakingTables
+
+	// preview, set only on a repair run's own Server, stands in for the
+	// inclusion and clearance tables.
+	preview *inclusionPreview
+	// blockReads, set only on a repair run's own Server, reads a wallet's
+	// events from the blocks of a window a few blocks wide instead of from
+	// the wallet's attribute index, which module accounts fill with millions
+	// of rows.
+	blockReads bool
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
@@ -390,8 +399,11 @@ type feeRec struct {
 	Ts     time.Time
 	Hash   string
 	// ChainID is set on fees read from an earlier Hub chain.
-	ChainID       string
-	commissionKey *flowKey
+	ChainID string
+	// OutcomeUnknown marks a failed transaction's declared fee whose charge
+	// is not recorded (walletFees).
+	OutcomeUnknown bool
+	commissionKey  *flowKey
 }
 
 // rowsFor loads classified taxable events + fees for an address in [start,end),
@@ -539,6 +551,9 @@ func (s *Server) priceWalletRows(chain, addr string, input walletRows) []Row {
 	for _, f := range fees {
 		row := s.buildRow(chain, meta, f.Ts, f.Hash, apiFee, apiOut, f.Denom, f.Amount, addr, "")
 		row.ChainID = rowChainID(input.stampChain, f.ChainID)
+		if f.OutcomeUnknown {
+			row.markFeeOutcomeUnknown()
+		}
 		out = append(out, row)
 	}
 
