@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -291,6 +292,15 @@ func TestAssetReviewWindowedMatchesWhole(t *testing.T) {
 	}
 	blockedCode, blocked := answer(0, nil)
 	require.Equal(t, http.StatusConflict, blockedCode)
+	// A window blocked after a plan that passed answers for the whole period.
+	period := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	err := s.periodReadinessError(chainParam(""), []string{wallet}, period, period.AddDate(1, 0, 0))
+	var required reportReadinessRequired
+	require.True(t, errors.As(err, &required), "%v", err)
+	rr := httptest.NewRecorder()
+	writeTaxError(rr, err)
+	require.Equal(t, blockedCode, rr.Code)
+	require.Equal(t, blocked, rr.Body.String())
 	for _, rowCap := range []int64{1, 2, 3, 5} {
 		code, body := answer(rowCap, nil)
 		require.Equal(t, blockedCode, code, "blocked at cap %d", rowCap)

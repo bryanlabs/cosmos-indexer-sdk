@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -257,6 +258,10 @@ func (s *Server) reviewedWindows(chain string, addresses []string, windows []rep
 	return review, nil
 }
 
+// errReviewHistoryChanged refuses a review read in windows whose history
+// changed between the plan and the last window.
+var errReviewHistoryChanged = errors.New("financial history changed while the review was read; retry")
+
 // readReviewWindows reads a report period over the row cap for review, one
 // window per snapshot. The windows, the readiness gate for the whole period
 // and the review fingerprint are read in one snapshot before the first
@@ -281,7 +286,12 @@ func (s *Server) readReviewWindows(chain string, addresses []string, start, end 
 	}
 	eras := s.legacyEras(chain)
 	review, err := s.reviewedWindows(chain, addresses, windows, decisions, func(window reportWindow) (reportInput, error) {
-		return s.readWalletInput(chain, addresses, window.Start, window.End, false, eras, reportJobReadSnapshotTimeout)
+		input, err := s.readWalletInput(chain, addresses, window.Start, window.End, false, eras, reportJobReadSnapshotTimeout)
+		var required reportReadinessRequired
+		if errors.As(err, &required) {
+			return input, s.periodReadinessError(chain, addresses, start, end)
+		}
+		return input, err
 	})
 	if err != nil {
 		return windowedReview{}, err
@@ -295,7 +305,21 @@ func (s *Server) readReviewWindows(chain string, addresses []string, start, end 
 		return windowedReview{}, err
 	}
 	if after != before {
-		return windowedReview{}, fmt.Errorf("financial history changed while the review was read; retry")
+		return windowedReview{}, errReviewHistoryChanged
 	}
 	return review, nil
+}
+
+// periodReadinessError answers a window the readiness gate blocked, which
+// the whole period passed when the windows were planned: history changed
+// while the review was read. It names what blocks the whole period now, as
+// a report read whole would, or asks for a retry if nothing does.
+func (s *Server) periodReadinessError(chain string, addresses []string, start, end time.Time) error {
+	if err := s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
+		_, err := reader.reportReadiness(chain, addresses, start, end)
+		return err
+	}); err != nil {
+		return err
+	}
+	return errReviewHistoryChanged
 }
