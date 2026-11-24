@@ -622,13 +622,15 @@ func assertFirstWithdrawalsMatchPlainRead(t *testing.T, s *Server, first map[str
 		require.True(t, got.Equal(r.FirstAt), "%s: %s against %s", r.Validator, got, r.FirstAt)
 	}
 
-	// flowPGServer holds one connection, so the SHOWs below run on the
-	// connection the warm-up used.
+	// flowPGServer holds one connection, so the SETs and SHOWs below run on
+	// the connection the warm-up used.
+	require.NoError(t, s.db.Exec("SET enable_hashjoin = on").Error)
+	require.NoError(t, s.db.Exec("SET work_mem = '4MB'").Error)
 	_, err := s.commissionFirstWithdrawals(apiMainnet)
 	require.NoError(t, err)
 	var hashjoin, workMem string
 	require.NoError(t, s.db.Raw("SHOW enable_hashjoin").Scan(&hashjoin).Error)
 	require.NoError(t, s.db.Raw("SHOW work_mem").Scan(&workMem).Error)
 	require.Equal(t, "on", hashjoin, "the warm-up's planner setting does not outlive its transaction")
-	require.NotEqual(t, "32MB", workMem, "the warm-up's work_mem does not outlive its transaction")
+	require.Equal(t, "4MB", workMem, "the warm-up's work_mem does not outlive its transaction")
 }
