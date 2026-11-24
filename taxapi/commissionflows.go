@@ -1340,10 +1340,27 @@ func (s *Server) commissionFirstWithdrawals(chain string) (map[string]time.Time,
 		Validator string
 		FirstAt   time.Time
 	}
-	err := s.scopedTaxEvents(chain).
-		Select("taxable_events.validator_address AS validator, MIN(taxable_events.timestamp) AS first_at").
-		Where("taxable_events.category = ? AND taxable_events.validator_address <> ''", apiCommission).
-		Group("taxable_events.validator_address").Scan(&rows).Error
+	read := func(db *gorm.DB) error {
+		return taxEventsScope(db, chain).
+			Select("taxable_events.validator_address AS validator, MIN(taxable_events.timestamp) AS first_at").
+			Where("taxable_events.category = ? AND taxable_events.validator_address <> ''", apiCommission).
+			Group("taxable_events.validator_address").Scan(&rows).Error
+	}
+	var err error
+	if s.db.Dialector.Name() == "postgres" {
+		err = s.db.Transaction(func(tx *gorm.DB) error {
+			// A hash join over every block spills about 1 GB of temp; index lookups read the same rows.
+			if err := tx.Exec("SET LOCAL enable_hashjoin = off").Error; err != nil {
+				return err
+			}
+			if err := tx.Exec("SET LOCAL work_mem = '32MB'").Error; err != nil {
+				return err
+			}
+			return read(tx)
+		})
+	} else {
+		err = read(s.db)
+	}
 	if err != nil {
 		return nil, err
 	}

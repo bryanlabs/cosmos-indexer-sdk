@@ -201,6 +201,7 @@ func TestCommissionFlowLabelsAndScopePostgres(t *testing.T) {
 	for _, at := range first {
 		require.False(t, at.IsZero())
 	}
+	assertFirstWithdrawalsMatchPlainRead(t, s, first)
 
 	op := operatorAccount(flowPGValidator)
 	require.NoError(t, s.db.Create(&AddressLabel{Chain: apiMainnet, Address: op, Name: "Named Exchange", Kind: labelExchange, Source: "manual", CreatedAt: nowUTC()}).Error)
@@ -598,4 +599,36 @@ func TestCommissionFlowWithdrawAddressMovesPostgres(t *testing.T) {
 	senders, err := s.memoDepositSenders(flowPGDeposit)
 	require.NoError(t, err)
 	require.Equal(t, 120, senders)
+}
+
+// assertFirstWithdrawalsMatchPlainRead checks the warm-up's planner settings
+// change only how Postgres reads the rows: the same query without them gives
+// the same first withdrawal for every validator, and the settings end with the
+// warm-up's transaction.
+func assertFirstWithdrawalsMatchPlainRead(t *testing.T, s *Server, first map[string]time.Time) {
+	t.Helper()
+	var plain []struct {
+		Validator string
+		FirstAt   time.Time
+	}
+	require.NoError(t, s.scopedTaxEvents(apiMainnet).
+		Select("taxable_events.validator_address AS validator, MIN(taxable_events.timestamp) AS first_at").
+		Where("taxable_events.category = ? AND taxable_events.validator_address <> ''", apiCommission).
+		Group("taxable_events.validator_address").Scan(&plain).Error)
+	require.Len(t, first, len(plain))
+	for _, r := range plain {
+		got, ok := first[r.Validator]
+		require.True(t, ok, r.Validator)
+		require.True(t, got.Equal(r.FirstAt), "%s: %s against %s", r.Validator, got, r.FirstAt)
+	}
+
+	// flowPGServer holds one connection, so the SHOWs below run on the
+	// connection the warm-up used.
+	_, err := s.commissionFirstWithdrawals(apiMainnet)
+	require.NoError(t, err)
+	var hashjoin, workMem string
+	require.NoError(t, s.db.Raw("SHOW enable_hashjoin").Scan(&hashjoin).Error)
+	require.NoError(t, s.db.Raw("SHOW work_mem").Scan(&workMem).Error)
+	require.Equal(t, "on", hashjoin, "the warm-up's planner setting does not outlive its transaction")
+	require.NotEqual(t, "32MB", workMem, "the warm-up's work_mem does not outlive its transaction")
 }
