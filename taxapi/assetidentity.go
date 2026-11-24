@@ -19,8 +19,12 @@ type AssetIdentity struct {
 	ChannelPath       string         `json:"channel_path"`
 	BaseToken         string         `json:"base_token"`
 	OfficialAtomMatch bool           `json:"official_atom_match"`
-	Treatment         string         `json:"treatment"`
-	Note              string         `json:"note"`
+	// ListedLookalike is the listed symbol a lookalike carries (lookalike.go);
+	// ExportLabel is the name exports render for it instead.
+	ListedLookalike string `json:"listed_lookalike,omitempty"`
+	ExportLabel     string `json:"export_label,omitempty"`
+	Treatment       string `json:"treatment"`
+	Note            string `json:"note"`
 }
 
 const (

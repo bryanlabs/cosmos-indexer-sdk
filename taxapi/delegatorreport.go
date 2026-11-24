@@ -192,7 +192,7 @@ func (s *Server) handleDelegatorReport(w http.ResponseWriter, r *http.Request) {
 			priceMissing++
 		}
 		if row.Symbol != "" {
-			symbol = row.Symbol
+			symbol = row.exportSymbol()
 		}
 	}
 
