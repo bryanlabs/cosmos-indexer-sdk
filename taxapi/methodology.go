@@ -24,7 +24,7 @@ type Methodology struct {
 }
 
 const (
-	MethodologyVersion = "v29"
+	MethodologyVersion = "v30"
 	MethodologyDate    = "2026-11-24"
 )
 

@@ -130,44 +130,51 @@ func (s *Server) readWalletInput(chain string, addresses []string, start, end ti
 	// earlier chain is in reports, so a role that cannot read it never aborts
 	// a report's transaction.
 	err = s.withReadSnapshotTimeout(timeout, func(reader *Server) error {
-		phases.next("readiness")
-		refundPairs, err := reader.reportReadiness(chain, addresses, start, end)
-		if err != nil {
-			return err
-		}
-		for _, addr := range addresses {
-			phases.next("wallet_rows")
-			rows, err := reader.loadWalletRows(chain, addr, start, end, refundPairs)
-			if err != nil {
-				return err
-			}
-			phases.next("native_source_corrections")
-			rows, err = reader.applyCommissionSourceCorrections(chain, addr, start, end, rows)
-			if err != nil {
-				return err
-			}
-			if eras.active() {
-				phases.next("legacy_rows")
-				events, fees, err := reader.legacyWalletRows(eras, addr, start, end)
-				if err != nil {
-					return err
-				}
-				rows = withLegacyRows(rows, events, fees)
-			}
-			input.Wallets = append(input.Wallets, rows)
-		}
-		if fingerprint {
-			phases.next("fingerprint")
-			var err error
-			input.Fingerprint, err = reader.reviewFingerprintInSnapshot(chain, addresses)
-			if err != nil {
-				return err
-			}
-		}
-		phases.next("commit")
-		return nil
+		var err error
+		input, err = reader.walletInputInSnapshot(chain, addresses, start, end, fingerprint, eras, phases)
+		return err
 	})
 	return input, err
+}
+
+// walletInputInSnapshot reads a period's report input in the snapshot the
+// reader already holds.
+func (s *Server) walletInputInSnapshot(chain string, addresses []string, start, end time.Time, fingerprint bool, eras *legacyEraState, phases *privateReadPhases) (input reportInput, err error) {
+	phases.next("readiness")
+	refundPairs, err := s.reportReadiness(chain, addresses, start, end)
+	if err != nil {
+		return input, err
+	}
+	for _, addr := range addresses {
+		phases.next("wallet_rows")
+		rows, err := s.loadWalletRows(chain, addr, start, end, refundPairs)
+		if err != nil {
+			return input, err
+		}
+		phases.next("native_source_corrections")
+		rows, err = s.applyCommissionSourceCorrections(chain, addr, start, end, rows)
+		if err != nil {
+			return input, err
+		}
+		if eras.active() {
+			phases.next("legacy_rows")
+			events, fees, err := s.legacyWalletRows(eras, addr, start, end)
+			if err != nil {
+				return input, err
+			}
+			rows = withLegacyRows(rows, events, fees)
+		}
+		input.Wallets = append(input.Wallets, rows)
+	}
+	if fingerprint {
+		phases.next("fingerprint")
+		input.Fingerprint, err = s.reviewFingerprintInSnapshot(chain, addresses)
+		if err != nil {
+			return input, err
+		}
+	}
+	phases.next("commit")
+	return input, nil
 }
 
 func (s *Server) reviewedInputRows(chain string, addresses []string, input reportInput, decisions AssetDecisions, allowPending bool) ([]Row, error) {

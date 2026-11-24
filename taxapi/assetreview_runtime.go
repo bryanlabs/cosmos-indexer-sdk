@@ -76,9 +76,35 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 	if err := ValidateAssetDecisions(decisions); err != nil {
 		return nil, err
 	}
+	match := newDecisionMatch()
+	out, err := match.apply(rows, decisions)
+	if err != nil {
+		return nil, err
+	}
+	if err := match.check(decisions); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// decisionMatch carries what applying decisions has seen and matched so far.
+// A report read in windows applies the decisions to each window with one
+// decisionMatch and checks that every keyed decision matched once, after the
+// last window, as ApplyAssetDecisions does for a report read whole.
+type decisionMatch struct {
+	seen, used, classified, semanticSeen map[string]bool
+}
+
+func newDecisionMatch() *decisionMatch {
+	return &decisionMatch{seen: map[string]bool{}, used: map[string]bool{}, classified: map[string]bool{}, semanticSeen: map[string]bool{}}
+}
+
+// apply applies the already validated decisions to rows and records which
+// keys matched. It refuses what a row alone shows to be wrong; a key that
+// matches nothing is left to check.
+func (m *decisionMatch) apply(rows []Row, decisions AssetDecisions) ([]Row, error) {
 	out := append([]Row(nil), rows...)
-	seen := map[string]bool{}
-	used := map[string]bool{}
+	seen, used := m.seen, m.used
 	for i := range out {
 		row := &out[i]
 		if row.AssetIdentity == nil {
@@ -132,26 +158,29 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 		row.DecimalsAssumed = false
 		row.Excluded = false
 	}
-	classified, err := applySemanticDecisions(out, decisions, used)
-	if err != nil {
+	if err := applySemanticDecisionsTo(out, decisions, used, m.semanticSeen, m.classified); err != nil {
 		return nil, err
 	}
 	applyUserPrices(out, decisions)
-	// A record ID that matches nothing is a stale or foreign decision and is
-	// refused, and so is a classification on a record that waits on no
-	// classification review. A denom, policy or price key that matches nothing is harmless:
-	// the token did not appear in this period, or a reference price has since
-	// covered the row, so a remembered rule can be sent with every report.
+	return out, nil
+}
+
+// check refuses a record ID that matched nothing: a stale or foreign
+// decision, and a classification on a record that waits on no
+// classification review. A denom, policy or price key that matches nothing is harmless:
+// the token did not appear in this period, or a reference price has since
+// covered the row, so a remembered rule can be sent with every report.
+func (m *decisionMatch) check(decisions AssetDecisions) error {
 	for key := range decisions {
 		kind := decisionKeyKind(key)
-		if !used[key] && (kind == apiRecord || kind == decisionKindSemantic) {
-			return nil, fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", key)
+		if !m.used[key] && (kind == apiRecord || kind == decisionKindSemantic) {
+			return fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", key)
 		}
-		if kind == apiRecord && decisions[key].Classification != "" && !classified[key] {
-			return nil, fmt.Errorf("asset decision %q: classification on a receipt that waits on no classification review", key)
+		if kind == apiRecord && decisions[key].Classification != "" && !m.classified[key] {
+			return fmt.Errorf("asset decision %q: classification on a receipt that waits on no classification review", key)
 		}
 	}
-	return out, nil
+	return nil
 }
 
 // userPriceFor is the user's unit price for an unpriced row and the key it
@@ -224,6 +253,12 @@ func hasUserPriceRowKeys(decisions AssetDecisions) bool {
 // idle. A price key whose rows now have a reference price is idle too.
 func UnmatchedDecisionKeys(rows []Row, decisions AssetDecisions) []string {
 	used := map[string]bool{}
+	markDecisionKeysUsed(rows, used)
+	return unmatchedDecisionKeys(used, decisions)
+}
+
+// markDecisionKeysUsed adds to used every decision key a row was decided by.
+func markDecisionKeysUsed(rows []Row, used map[string]bool) {
 	for _, r := range rows {
 		if r.AssetDecision != nil && r.AssetDecision.AppliedFrom != "" {
 			used[r.AssetDecision.AppliedFrom] = true
@@ -238,6 +273,9 @@ func UnmatchedDecisionKeys(rows []Row, decisions AssetDecisions) []string {
 			used[r.SemanticRecordID] = true
 		}
 	}
+}
+
+func unmatchedDecisionKeys(used map[string]bool, decisions AssetDecisions) []string {
 	var out []string
 	for key := range decisions {
 		if !used[key] {
@@ -414,8 +452,39 @@ func writeTaxError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errAwaitingCorrection):
 		code = http.StatusServiceUnavailable
 		w.Header().Set("Retry-After", "1800")
+	case errors.Is(err, errReviewWindowsBusy):
+		code = http.StatusServiceUnavailable
+		w.Header().Set("Retry-After", "60")
 	}
 	http.Error(w, err.Error(), code)
+}
+
+// assetReviewRows reads the rows /asset-review answers with, the report's
+// readiness and the decision keys no row matched. A period over the report
+// row cap is read in windows, keeping only the rows a person reviews. A
+// period that grows over the cap between the count and the whole read is
+// read in windows too.
+func (s *Server) assetReviewRows(chain string, addresses []string, start, end time.Time, decisions AssetDecisions) ([]Row, ReportReadiness, []string, error) {
+	addresses = normalizedWalletScope(addresses)
+	over, err := s.overReportRowCap(addresses, start, end)
+	if err != nil {
+		return nil, ReportReadiness{}, nil, err
+	}
+	if !over {
+		rows, err := s.reviewedRows(chain, addresses, start, end, decisions, true)
+		var tooLarge reportTooLarge
+		if !errors.As(err, &tooLarge) {
+			if err != nil {
+				return nil, ReportReadiness{}, nil, err
+			}
+			return rows, readinessForRows(rows), UnmatchedDecisionKeys(rows, decisions), nil
+		}
+	}
+	review, err := s.readReviewWindows(chain, addresses, start, end, decisions)
+	if err != nil {
+		return nil, ReportReadiness{}, nil, err
+	}
+	return review.Rows, review.readiness(), unmatchedDecisionKeys(review.Used, decisions), nil
 }
 
 func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
@@ -430,11 +499,21 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 		writeTaxError(w, err)
 		return
 	}
-	rows, err := s.reviewedRows(chainParam(q.Get(apiChain)), addresses, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)), decisions, true)
+	rows, readiness, unmatched, err := s.assetReviewRows(chainParam(q.Get(apiChain)), addresses, dateParam(q.Get(apiStart), time.Time{}), dateParam(q.Get(apiEnd), nowUTC().AddDate(0, 0, 1)), decisions)
 	if err != nil {
 		writeTaxError(w, err)
 		return
 	}
+	pending, body := assetReviewBody(rows, readiness, unmatched, decisions)
+	w.Header().Set(apiContentType, apiJSONContentType)
+	if pending > 0 {
+		w.WriteHeader(http.StatusConflict)
+	}
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// assetReviewBody is the /asset-review answer and its pending count.
+func assetReviewBody(rows []Row, readiness ReportReadiness, unmatched []string, decisions AssetDecisions) (int, map[string]any) {
 	reviews := []Row{}
 	for _, row := range rows {
 		if row.AssetIdentity != nil {
@@ -442,7 +521,6 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 			reviews = append(reviews, row)
 		}
 	}
-	readiness := readinessForRows(rows)
 	pending := readiness.PendingAssetReviews + readiness.PendingSemanticReviews
 	semanticReviews := []Row{}
 	for _, row := range rows {
@@ -450,18 +528,14 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 			semanticReviews = append(semanticReviews, row)
 		}
 	}
-	w.Header().Set(apiContentType, apiJSONContentType)
-	if pending > 0 {
-		w.WriteHeader(http.StatusConflict)
-	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	return pending, map[string]any{
 		ReportJobPending:          pending,
 		apiReadiness:              readiness,
 		"semantic_reviews":        semanticReviews,
 		"reviews":                 reviews,
 		"groups":                  ReviewGroups(reviews, decisions),
 		"decisions":               decisions,
-		"unmatched_decision_keys": UnmatchedDecisionKeys(rows, decisions),
+		"unmatched_decision_keys": unmatched,
 		"reason_glossary":         ReviewReasonGlossary(),
 		"decision_keys": map[string]string{
 			"record_id":           "one receipt; override carries quantity, value_usd, cost_basis_usd and acquired_date totals",
@@ -470,7 +544,7 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 			"semantic_record_id":  "one row of semantic_reviews, keyed by its SemanticRecordID; carries classification and no mode, with value_usd for an unpriced row and cost_basis_usd and acquired_date for a transfer_in. A flagged receipt's SemanticRecordID is its record_id, where classification rides beside the mode",
 		},
 		"classifications": ClassificationVocabulary(),
-	})
+	}
 }
 
 // ReviewGroup is one flagged token: the unit a person actually decides on.
