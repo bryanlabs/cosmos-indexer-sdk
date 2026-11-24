@@ -4,6 +4,7 @@
 package taxapi
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -132,6 +133,10 @@ func NewOracle(base, nodeREST string) *Oracle {
 
 // denomsRetryAfterFailure is how soon a failed /denoms refresh is retried while
 // the last good snapshot is served.
+// errEmptyDenoms is an oracle answer with no denoms, treated as a failed
+// refresh so it never replaces a good snapshot.
+var errEmptyDenoms = errors.New("oracle /denoms returned no denoms")
+
 const denomsRetryAfterFailure = 5 * time.Minute
 
 // Denoms returns the chain's denom->meta map, cached for 1h. A failed refresh
@@ -156,6 +161,9 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 		} `json:"denoms"`
 	}
 	err := o.get(o.base, "/denoms", url.Values{apiChain: {chain}}, &body)
+	if err == nil && len(body.Denoms) == 0 {
+		err = errEmptyDenoms
+	}
 	if err != nil {
 		// Keep the last good snapshot through an oracle outage, retrying in
 		// five minutes: an empty map would also empty the listed-symbol

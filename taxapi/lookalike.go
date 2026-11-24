@@ -8,7 +8,7 @@ import (
 // A lookalike is a receipt whose label is the symbol of a listed asset (a
 // registry asset with a price mapping) while the token is not that asset: its
 // denom is none of the listed asset's denoms, and its base denom on the origin
-// chain is derived (an issuer path) and matches none of theirs. Tax software that imports by symbol would value
+// chain is derived (an issuer path or contract denom) and matches none of theirs. Tax software that imports by symbol would value
 // it as the listed asset, so it is flagged for review like an ATOM lookalike,
 // and every export and download renders it under its own name. The same base
 // over another IBC route (USDC sent the long way round) is the same token and
@@ -109,10 +109,11 @@ func (ix officialIndex) lookalikeOf(meta map[string]DenomMeta, denom, base, symb
 	case !strings.HasPrefix(denom, "ibc/"):
 		candidate = denom
 	}
-	// Only a derived base (a tokenfactory or other issuer path) is judged. A
-	// plain base such as uusdc, ustars or cro can be the listed token under a
-	// registry spelling this index lacks, so it is left as it is.
-	if candidate == "" || !strings.Contains(candidate, "/") || o.bases[candidate] {
+	// Only a derived base (a tokenfactory or other issuer path, or a cw20: or
+	// erc20: contract denom) is judged. A plain base such as uusdc, ustars or
+	// cro can be the listed token under a registry spelling this index lacks,
+	// so it is left as it is.
+	if candidate == "" || !strings.ContainsAny(candidate, "/:") || o.bases[candidate] {
 		return ""
 	}
 	return key
