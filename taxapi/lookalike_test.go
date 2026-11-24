@@ -766,6 +766,9 @@ func TestResolvedTraceKeepsTheVoucherFlagged(t *testing.T) {
 	if row.AssetIdentity == nil || !row.PriceMissing {
 		t.Fatalf("resolved trace unflagged the voucher: %+v", row)
 	}
+	if row.AssetIdentity.ReportedLabel != "USDC" || row.AssetIdentity.ListedLookalike != "USDC" {
+		t.Fatalf("review lost the label that flagged it: %+v", row.AssetIdentity)
+	}
 	if !s.labelDenom(apiMainnet, s.oracle.Denoms(apiMainnet), fake).flagged() {
 		t.Fatal("price-series would price the voucher")
 	}
@@ -800,5 +803,49 @@ func TestDenomsColdStartFailureRetriesSoon(t *testing.T) {
 	o.mu.Unlock()
 	if m := o.Denoms(apiMainnet); m[apiUatom].Symbol != apiSymbolATOM {
 		t.Fatalf("retry did not load the snapshot: %+v", m)
+	}
+}
+
+// A resolved base the oracle lists under another unverified label does not
+// clear the voucher's own lookalike label.
+func TestResolvedTraceToAListedBaseKeepsTheVoucherFlagged(t *testing.T) {
+	meta := loadOracleDenomsFixture(t)[apiMainnet]
+	fake := fixtureFakeUSDC(t, meta)
+	base := meta[fake].Base
+	withBase := map[string]DenomMeta{}
+	for d, m := range meta {
+		withBase[d] = m
+	}
+	withBase[base] = DenomMeta{Symbol: "FAKE", Decimals: 6, Base: base}
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/ibc/apps/transfer/v1/denom_traces/") {
+			w.Header().Set(apiContentType, apiJSONContentType)
+			_, _ = w.Write([]byte(`{"denom_trace":{"path":"transfer/channel-207","base_denom":"` + base + `"}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(node.Close)
+	priced := fixtureOracle(t, withBase, 10)
+	s := NewServer(nil, NewOracle(priced.oracle.base, node.URL), DefaultNativeAsset)
+	if l := s.labelDenom(apiMainnet, s.oracle.Denoms(apiMainnet), fake); !l.flagged() || l.reported != "USDC" {
+		t.Fatalf("listed base cleared the lookalike: %+v", l)
+	}
+}
+
+// The known spam vouchers get no reference price on /price-series even when
+// the oracle quotes them.
+func TestKnownSpamVoucherGetsNoReferencePrice(t *testing.T) {
+	meta := loadOracleDenomsFixture(t)[apiMainnet]
+	s := fixtureOracle(t, meta, 10)
+	req := httptest.NewRequest(http.MethodGet, "/price-series?denom="+url.QueryEscape(airdrop67Voucher)+"&start=2026-05-21&end=2026-05-21", nil)
+	rec := httptest.NewRecorder()
+	s.handlePriceSeries(rec, req)
+	var body struct{ Points []pricePoint }
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Points) != 1 || body.Points[0].Found {
+		t.Fatalf("AIRDROP67 published a price: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := s.positionPrice(apiMainnet, "2026-05-21")(airdrop67Voucher); ok {
+		t.Fatal("AIRDROP67 position took a price")
 	}
 }
