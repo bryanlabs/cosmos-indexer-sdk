@@ -471,4 +471,36 @@ func TestDenomsKeepsLastSnapshotThroughOutage(t *testing.T) {
 	if retryIn <= 0 || retryIn > denomsRetryAfterFailure {
 		t.Fatalf("retry in %s", retryIn)
 	}
+
+	// An answer with no denoms is a failed refresh too.
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(apiContentType, apiJSONContentType)
+		_, _ = w.Write([]byte(`{"denoms":{}}`))
+	}))
+	t.Cleanup(empty.Close)
+	o.mu.Lock()
+	o.base = empty.URL
+	o.at[apiMainnet] = nowUTC().Add(-2 * time.Hour)
+	o.mu.Unlock()
+	if m := o.Denoms(apiMainnet); m[apiUatom].Symbol != apiSymbolATOM || !m[apiUatom].Verified {
+		t.Fatalf("an empty answer replaced the snapshot: %+v", m)
+	}
+}
+
+func TestContractDenomLookalikeIsJudged(t *testing.T) {
+	meta := map[string]DenomMeta{
+		cosmosHubNobleUSDCDenom: {Symbol: "USDC", Verified: true, CoingeckoID: "usd-coin", Base: "uusdc"},
+		"ibc/CW20USDC":          {Symbol: "USDC", Base: "cw20:juno1fakeusdccontract"},
+		"ibc/ERC20USDC":         {Symbol: "USDC", Base: "erc20:0xfakeusdc"},
+		"ibc/PLAINUSDC":         {Symbol: "USDC", Base: "uusdc"},
+	}
+	ix := newOfficialIndex(meta)
+	for _, denom := range []string{"ibc/CW20USDC", "ibc/ERC20USDC"} {
+		if got := ix.lookalikeOf(meta, denom, denom, "USDC"); got != "USDC" {
+			t.Fatalf("%s: a contract-denom USDC was not judged (%q)", denom, got)
+		}
+	}
+	if got := ix.lookalikeOf(meta, "ibc/PLAINUSDC", "ibc/PLAINUSDC", "USDC"); got != "" {
+		t.Fatalf("a plain-base USDC reroute was flagged (%q)", got)
+	}
 }
