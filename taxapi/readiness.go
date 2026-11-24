@@ -140,7 +140,12 @@ func chainIDs(chain string) []string {
 }
 
 func (s *Server) scopedTaxEvents(chain string) *gorm.DB {
-	return s.db.Table(apiTaxableEvents).
+	return taxEventsScope(s.db, chain)
+}
+
+// taxEventsScope is scopedTaxEvents on db, such as a transaction.
+func taxEventsScope(db *gorm.DB, chain string) *gorm.DB {
+	return db.Table(apiTaxableEvents).
 		Joins("JOIN messages scope_m ON scope_m.id = taxable_events.message_id").
 		Joins("JOIN txes scope_t ON scope_t.id = scope_m.tx_id").
 		Joins("JOIN blocks scope_b ON scope_b.id = scope_t.block_id").
