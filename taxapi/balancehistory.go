@@ -2127,7 +2127,7 @@ func (s *Server) fillBalanceLines(chain string, meta map[string]DenomMeta, hb *H
 		row := s.buildRow(chain, meta, day, "", "balance", "", denom, amt.String(), "", "")
 		approx := bound != nil && bound.Sign() > 0
 		line := BalanceLine{
-			Bucket: bucket, Validator: validator, Denom: denom, Symbol: row.Symbol,
+			Bucket: bucket, Validator: validator, Denom: denom, Symbol: row.exportSymbol(),
 			AmountBase: amt.String(), Quantity: row.Amount, PriceMissing: row.PriceMissing,
 			DecimalsAssumed: row.DecimalsAssumed, Approximate: approx,
 		}

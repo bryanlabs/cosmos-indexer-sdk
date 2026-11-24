@@ -216,7 +216,7 @@ func (r Row) description() string {
 		d += " (decimals unknown, amount may be wrong)"
 	}
 	if r.FeeOutcomeUnknown {
-		d += " (fee outcome unknown, declared " + r.DeclaredFee + " " + r.Symbol + ", counted as 0)"
+		d += " (fee outcome unknown, declared " + r.DeclaredFee + " " + r.exportSymbol() + ", counted as 0)"
 	}
 	if r.PriceMissing {
 		d += " (price missing)"
@@ -380,7 +380,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			typ := ctcType(r)
 			_ = w.Write([]string{
 				r.Time.UTC().Format("2006-01-02 15:04:05"),
-				typ, r.Symbol, r.Amount.String(), "", "", "", "",
+				typ, r.exportSymbol(), r.Amount.String(), "", "", "", "",
 				r.From, r.To, "cosmos", r.TxHash, r.description(), rowPriceText(r), "USD",
 			})
 		}
@@ -392,13 +392,13 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			date := r.Time.UTC().Format("2006-01-02 15:04:05")
 			amt, rate, val := r.Amount.String(), rowPriceText(r), rowValueText(r)
 			if r.Direction == "in" && r.Category != apiFee {
-				_ = w.Write([]string{date, "deposit", r.TxHash, r.Symbol, amt, rate, val, "", "", "", "", "", "", "", "", party(r), r.description()})
+				_ = w.Write([]string{date, "deposit", r.TxHash, r.exportSymbol(), amt, rate, val, "", "", "", "", "", "", "", "", party(r), r.description()})
 			} else {
 				ot := "withdraw"
 				if r.Category == apiFee {
 					ot = apiFee
 				}
-				_ = w.Write([]string{date, ot, r.TxHash, "", "", "", "", r.Symbol, amt, rate, val, "", "", "", "", party(r), r.description()})
+				_ = w.Write([]string{date, ot, r.TxHash, "", "", "", "", r.exportSymbol(), amt, rate, val, "", "", "", "", party(r), r.description()})
 			}
 		}
 
@@ -415,7 +415,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 			}
 			_ = w.Write([]string{
 				fmt.Sprintf("%s-%d", r.TxHash, i), r.Time.UTC().Format(time.RFC3339),
-				typ, r.Amount.String(), r.Symbol, r.TxHash, party(r), r.description(),
+				typ, r.Amount.String(), r.exportSymbol(), r.TxHash, party(r), r.description(),
 			})
 		}
 
@@ -446,7 +446,7 @@ func writeCSV(out io.Writer, format string, rows []Row) error {
 // identity metadata, and user overrides retain their chosen Symbol verbatim.
 func genericAssetDisplay(r Row) string {
 	if r.AssetIdentity == nil || r.AssetDecision == nil || r.AssetDecision.Mode != AssetDecisionExclude {
-		return r.Symbol
+		return r.exportSymbol()
 	}
 
 	name := strings.TrimSpace(r.AssetIdentity.TokenName)
@@ -577,9 +577,9 @@ func party(r Row) string {
 
 func splitDir(r Row) (sentAmt, sentCur, recvAmt, recvCur string) {
 	if r.Direction == apiOut {
-		return r.Amount.String(), r.Symbol, "", ""
+		return r.Amount.String(), r.exportSymbol(), "", ""
 	}
-	return "", "", r.Amount.String(), r.Symbol
+	return "", "", r.Amount.String(), r.exportSymbol()
 }
 
 // CTC transfer types: a move between wallets, never a disposal.

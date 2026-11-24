@@ -128,7 +128,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		if r.PriceUserSupplied {
 			memo += " [user-supplied USD price]"
 		}
-		asset := acctDigitalAssets + ": " + r.Symbol
+		asset := acctDigitalAssets + ": " + r.exportSymbol()
 		val := r.ValueUSD
 		counterparty := ""
 		switch {
@@ -152,7 +152,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		}
 		line := func(account string, debit bool) JournalLine {
 			l := JournalLine{
-				Date: date, TxHash: r.TxHash, EntryID: id, Account: account, Asset: r.Symbol, Quantity: r.Amount.String(), Category: r.Category, Memo: memo,
+				Date: date, TxHash: r.TxHash, EntryID: id, Account: account, Asset: r.exportSymbol(), Quantity: r.Amount.String(), Category: r.Category, Memo: memo,
 				PriceUSD: price, Counterparty: counterparty, Validator: validator, ValidatorCountry: validatorCountry, Methodology: MethodologyVersion,
 			}
 			if !r.PriceMissing {
@@ -167,7 +167,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		in := r.Direction == "in"
 		switch {
 		case r.UserTag == TagSpam:
-			out = append(out, JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctSpam, Asset: r.Symbol, Quantity: r.Amount.String(), Category: r.Category, Memo: memo, Counterparty: counterparty, Methodology: MethodologyVersion})
+			out = append(out, JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctSpam, Asset: r.exportSymbol(), Quantity: r.Amount.String(), Category: r.Category, Memo: memo, Counterparty: counterparty, Methodology: MethodologyVersion})
 			continue
 		case r.Category == apiFee:
 			out = append(out, line(acctFees, true), line(asset, false))
@@ -180,7 +180,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.Category == TagExpense:
 			paid := asset
 			if lotFunded(r) {
-				paid = acctInProtocol + ": " + r.Symbol
+				paid = acctInProtocol + ": " + r.exportSymbol()
 			}
 			out = append(out, line(acctProtocolFees+": "+titleTrigger(r.RewardTrigger), true), line(paid, false))
 		case r.Category == apiSwap:
@@ -193,9 +193,9 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 			var debits, credits decimal.Decimal
 			for _, leg := range legs {
 				lr := leg
-				legLine := JournalLine{Date: date, TxHash: lr.TxHash, EntryID: id, Account: acctDigitalAssets + ": " + lr.Symbol, Asset: lr.Symbol, Quantity: lr.Amount.String(), Category: apiSwap, Memo: memo}
+				legLine := JournalLine{Date: date, TxHash: lr.TxHash, EntryID: id, Account: acctDigitalAssets + ": " + lr.exportSymbol(), Asset: lr.exportSymbol(), Quantity: lr.Amount.String(), Category: apiSwap, Memo: memo}
 				if lotFunded(lr) {
-					legLine.Account = acctInProtocol + ": " + lr.Symbol
+					legLine.Account = acctInProtocol + ": " + lr.exportSymbol()
 				}
 				if !lr.PriceMissing {
 					if lr.Direction == "in" {
@@ -229,13 +229,13 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.Category == "nft_transfer", r.Category == "nft_burn", r.Category == "share_record", r.Category == apiRedelegate:
 			out = append(out, JournalLine{Date: date, TxHash: r.TxHash, EntryID: id, Account: acctNFTAssets, Asset: r.Asset, Quantity: r.Amount.String(), Category: r.Category, Memo: memo + " (memo entry, no USD movement)"})
 		case r.Category == apiDelegate, r.Category == "cancel_unbonding":
-			out = append(out, line(acctStakedAssets+": "+r.Symbol, true), line(asset, false))
+			out = append(out, line(acctStakedAssets+": "+r.exportSymbol(), true), line(asset, false))
 		case r.Category == "undelegate":
-			out = append(out, line(acctUnbondingAssets+": "+r.Symbol, true), line(acctStakedAssets+": "+r.Symbol, false))
+			out = append(out, line(acctUnbondingAssets+": "+r.exportSymbol(), true), line(acctStakedAssets+": "+r.exportSymbol(), false))
 		case r.Category == "tokenize_shares":
-			out = append(out, line(acctLiquidShares+": "+r.Symbol, true), line(acctStakedAssets+": "+r.Symbol, false))
+			out = append(out, line(acctLiquidShares+": "+r.exportSymbol(), true), line(acctStakedAssets+": "+r.exportSymbol(), false))
 		case r.Category == "redeem_shares":
-			out = append(out, line(acctStakedAssets+": "+r.Symbol, true), line(acctLiquidShares+": "+r.Symbol, false))
+			out = append(out, line(acctStakedAssets+": "+r.exportSymbol(), true), line(acctLiquidShares+": "+r.exportSymbol(), false))
 		case r.Category == "gov_deposit":
 			out = append(out, line(acctGovDeposits, true), line(asset, false))
 		case r.Category == "gov_deposit_refund":
@@ -243,15 +243,15 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		case r.Category == "gov_deposit_burn":
 			out = append(out, line(acctGovDepositBurns, true), line(acctGovDeposits, false))
 		case r.Category == "unbonding_complete":
-			out = append(out, line(asset, true), line(acctUnbondingAssets+": "+r.Symbol, false))
+			out = append(out, line(asset, true), line(acctUnbondingAssets+": "+r.exportSymbol(), false))
 		case r.Category == TagProtocolDeposit || r.UserTag == TagProtocolDeposit:
 			if in {
-				out = append(out, line(asset, true), line(acctInProtocol+": "+r.Symbol, false))
+				out = append(out, line(asset, true), line(acctInProtocol+": "+r.exportSymbol(), false))
 			} else {
-				out = append(out, line(acctInProtocol+": "+r.Symbol, true), line(asset, false))
+				out = append(out, line(acctInProtocol+": "+r.exportSymbol(), true), line(asset, false))
 			}
 		case r.Category == "protocol_withdrawal":
-			out = append(out, line(asset, true), line(acctInProtocol+": "+r.Symbol, false))
+			out = append(out, line(asset, true), line(acctInProtocol+": "+r.exportSymbol(), false))
 		default: // transfer, ibc_in, ibc_out and tagged variants
 			contra := acctTransfersOut
 			if in {

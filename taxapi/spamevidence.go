@@ -58,8 +58,11 @@ func attachSpamEvidence(row *Row, event tax.TaxableEvent, chain, wallet, memo st
 	lower := strings.ToLower(memo)
 	promotional := (strings.Contains(lower, "https://") || strings.Contains(lower, "http://")) && (strings.Contains(lower, "claim") || strings.Contains(lower, TagAirdrop))
 	knownSuspect := chain == apiMainnet && (event.Denom == junoFactoryUatomVoucher || event.Denom == airdrop67Voucher)
+	// A non-ATOM listed lookalike (lookalike.go) is suspect by its identity
+	// alone; ATOM lookalikes keep their original reasons and fingerprints.
+	listedLookalike := row.AssetIdentity != nil && row.AssetIdentity.ListedLookalike != "" && !strings.EqualFold(row.AssetIdentity.ListedLookalike, apiSymbolATOM)
 	// Missing price alone is not a spam signal, nor is a normal native-token receipt.
-	suspicious := knownSuspect || (event.Denom != apiUatom && !isPeggedUSDC(chain, event.Denom) && row.PriceMissing && promotional)
+	suspicious := knownSuspect || listedLookalike || (event.Denom != apiUatom && !isPeggedUSDC(chain, event.Denom) && row.PriceMissing && promotional)
 	if row.AssetIdentity == nil && !suspicious {
 		return
 	}
@@ -76,6 +79,12 @@ func attachSpamEvidence(row *Row, event tax.TaxableEvent, chain, wallet, memo st
 	}
 	if knownSuspect {
 		a.addReason(ReasonUnverifiedFactory)
+	}
+	if listedLookalike {
+		a.addReason(ReasonListedLookalike)
+		if strings.HasPrefix(a.BaseToken, "factory/") {
+			a.addReason(ReasonIssuerToken)
+		}
 	}
 	if promotional {
 		a.addReason(ReasonSpamMemo)

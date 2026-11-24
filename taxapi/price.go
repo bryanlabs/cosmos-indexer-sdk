@@ -6,6 +6,7 @@ package taxapi
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,6 +16,11 @@ import (
 type DenomMeta struct {
 	Symbol   string
 	Decimals int
+	// Verified marks a chain-registry asset; CoingeckoID is its price
+	// mapping. Base is the denom on its origin chain (see lookalike.go).
+	Verified    bool
+	CoingeckoID string
+	Base        string
 }
 
 // Oracle is a thin client for the wasm-indexer price/denom API, with a fallback
@@ -30,6 +36,7 @@ type Oracle struct {
 	bank        map[string]DenomMeta            // denom -> meta from the chain's bank module (cached, no TTL)
 	prices      map[string]priceCacheEntry      // "chain|denom|date" -> price (cached; see PriceAt)
 	denomTraces map[string]denomTraceCacheEntry // ibc hash -> trace (cached; see DenomTrace)
+	official    map[string]officialIndexEntry   // chain -> listed symbols of the cached denoms map
 
 	validatorMu     sync.Mutex
 	validators      map[string]string
@@ -119,10 +126,16 @@ func NewOracle(base, nodeREST string) *Oracle {
 		bank:        map[string]DenomMeta{},
 		prices:      map[string]priceCacheEntry{},
 		denomTraces: map[string]denomTraceCacheEntry{},
+		official:    map[string]officialIndexEntry{},
 	}
 }
 
-// Denoms returns the chain's denom->meta map, cached for 1h.
+// denomsRetryAfterFailure is how soon a failed /denoms refresh is retried while
+// the last good snapshot is served.
+const denomsRetryAfterFailure = 5 * time.Minute
+
+// Denoms returns the chain's denom->meta map, cached for 1h. A failed refresh
+// keeps serving the last good map.
 func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 	o.mu.Lock()
 	if m, ok := o.denoms[chain]; ok && time.Since(o.at[chain]) < time.Hour {
@@ -134,18 +147,42 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 	m := map[string]DenomMeta{}
 	var body struct {
 		Denoms map[string]struct {
-			Symbol   string `json:"symbol"`
-			Decimals int    `json:"decimals"`
+			Symbol      string `json:"symbol"`
+			Decimals    int    `json:"decimals"`
+			Verified    bool   `json:"verified"`
+			CoingeckoID string `json:"coingecko_id"`
+			Base        string `json:"base"`
+			Origin      string `json:"origin"`
 		} `json:"denoms"`
 	}
-	if err := o.get(o.base, "/denoms", url.Values{apiChain: {chain}}, &body); err == nil {
+	err := o.get(o.base, "/denoms", url.Values{apiChain: {chain}}, &body)
+	if err != nil {
+		// Keep the last good snapshot through an oracle outage, retrying in
+		// five minutes: an empty map would also empty the listed-symbol
+		// index and let a lookalike export under the ticker it copies.
+		o.mu.Lock()
+		if prev, ok := o.denoms[chain]; ok && len(prev) > 0 {
+			o.at[chain] = nowUTC().Add(-time.Hour + denomsRetryAfterFailure)
+			o.mu.Unlock()
+			return prev
+		}
+		o.mu.Unlock()
+	} else {
 		for d, v := range body.Denoms {
-			m[d] = DenomMeta{Symbol: v.Symbol, Decimals: v.Decimals}
+			base := v.Base
+			if base == "" && !v.Verified {
+				// An oracle without the base field still names a trace
+				// voucher's base first in its origin text.
+				base, _, _ = strings.Cut(v.Origin, " · ")
+			}
+			m[d] = DenomMeta{Symbol: v.Symbol, Decimals: v.Decimals, Verified: v.Verified, CoingeckoID: v.CoingeckoID, Base: strings.TrimSpace(base)}
 		}
 	}
+	index := newOfficialIndex(m)
 
 	o.mu.Lock()
 	o.denoms[chain] = m
+	o.official[chain] = officialIndexEntry{meta: mapIdentity(m), index: index}
 	o.at[chain] = nowUTC()
 	o.mu.Unlock()
 	return m
