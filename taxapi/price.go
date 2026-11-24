@@ -192,6 +192,11 @@ func (o *Oracle) Denoms(chain string) map[string]DenomMeta {
 	o.denoms[chain] = m
 	o.official[chain] = officialIndexEntry{meta: mapIdentity(m), index: index}
 	o.at[chain] = nowUTC()
+	if err != nil {
+		// No good snapshot yet: retry in five minutes, not an hour, so a
+		// cold-start outage does not leave every denom unlabelled.
+		o.at[chain] = o.at[chain].Add(-time.Hour + denomsRetryAfterFailure)
+	}
 	o.mu.Unlock()
 	return m
 }
