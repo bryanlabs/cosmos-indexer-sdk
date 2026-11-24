@@ -5,8 +5,10 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"sort"
@@ -502,5 +504,159 @@ func TestContractDenomLookalikeIsJudged(t *testing.T) {
 	}
 	if got := ix.lookalikeOf(meta, "ibc/PLAINUSDC", "ibc/PLAINUSDC", "USDC"); got != "" {
 		t.Fatalf("a plain-base USDC reroute was flagged (%q)", got)
+	}
+}
+
+// fixtureOracle serves the oracle fixture's mainnet /denoms and prices every
+// denom at $1, except uatom at atomUSD (no price when atomUSD is 0).
+func fixtureOracle(t *testing.T, meta map[string]DenomMeta, atomUSD float64) *Server {
+	t.Helper()
+	type entry struct {
+		Symbol      string `json:"symbol"`
+		Decimals    int    `json:"decimals"`
+		Verified    bool   `json:"verified"`
+		CoingeckoID string `json:"coingecko_id"`
+		Base        string `json:"base"`
+	}
+	denoms := map[string]entry{}
+	for d, m := range meta {
+		denoms[d] = entry{m.Symbol, m.Decimals, m.Verified, m.CoingeckoID, m.Base}
+	}
+	body, err := json.Marshal(map[string]any{"denoms": denoms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(apiContentType, apiJSONContentType)
+		switch {
+		case r.URL.Path == "/denoms":
+			_, _ = w.Write(body)
+		case r.URL.Path == "/price" && r.URL.Query().Get(apiDenom) == apiUatom:
+			if atomUSD == 0 {
+				_, _ = w.Write([]byte(`{"usd":0,"found":false}`))
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"usd":%v,"found":true,"date":"2026-05-21"}`, atomUSD)
+		case r.URL.Path == "/price":
+			_, _ = w.Write([]byte(`{"usd":1,"found":true,"date":"2026-05-21"}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return NewServer(nil, NewOracle(srv.URL, ""), DefaultNativeAsset)
+}
+
+func fixtureFakeUSDC(t *testing.T, meta map[string]DenomMeta) string {
+	t.Helper()
+	for d, m := range meta {
+		if m.Symbol == apiSymbolUSDC && !m.Verified && strings.HasPrefix(m.Base, "factory/juno") {
+			return d
+		}
+	}
+	t.Fatal("fixture has no Juno factory uusdc voucher")
+	return ""
+}
+
+func fixtureRoundTripATOM(t *testing.T, meta map[string]DenomMeta) string {
+	t.Helper()
+	for d, m := range meta {
+		if d != apiUatom && m.Verified && m.CoingeckoID == "cosmos" && m.Base == apiUatom {
+			return d
+		}
+	}
+	t.Fatal("fixture has no priced round-trip ATOM voucher")
+	return ""
+}
+
+// A flagged denom gets no reference price anywhere a user sees one: not on
+// /price-series, and not as a position's market price after the user decides
+// the receipt, even when the oracle quotes that denom.
+func TestFlaggedDenomsGetNoReferencePrice(t *testing.T) {
+	meta := loadOracleDenomsFixture(t)[apiMainnet]
+	s := fixtureOracle(t, meta, 10)
+	fake, roundTrip := fixtureFakeUSDC(t, meta), fixtureRoundTripATOM(t, meta)
+
+	series := func(denom string) []pricePoint {
+		req := httptest.NewRequest(http.MethodGet, "/price-series?denom="+url.QueryEscape(denom)+"&start=2026-05-20&end=2026-05-21", nil)
+		rec := httptest.NewRecorder()
+		s.handlePriceSeries(rec, req)
+		var body struct{ Points []pricePoint }
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Points) != 2 {
+			t.Fatalf("%s: %d %s", denom, rec.Code, rec.Body.String())
+		}
+		return body.Points
+	}
+	for _, denom := range []string{fake, roundTrip} {
+		for _, p := range series(denom) {
+			if p.Found || p.USD != 0 {
+				t.Fatalf("%s: flagged denom published a price %+v", denom, p)
+			}
+		}
+	}
+	for denom, want := range map[string]float64{apiUatom: 10, cosmosHubNobleUSDCDenom: 1} {
+		for _, p := range series(denom) {
+			if !p.Found || p.USD != want {
+				t.Fatalf("%s: real asset lost its price %+v", denom, p)
+			}
+		}
+	}
+
+	anyPrice := func(string) (decimal.Decimal, bool) { return decimal.NewFromInt(1), true }
+	for _, denom := range []string{fake, roundTrip} {
+		row := lookalikeRow(s, apiMainnet, meta, denom)
+		attachSpamEvidence(&row, fakeUSDCEvent(denom), apiMainnet, "wallet", "")
+		if row.AssetIdentity == nil || row.AssetIdentity.RecordID == "" {
+			t.Fatalf("%s not flagged: %+v", denom, row.AssetIdentity)
+		}
+		decided, err := ApplyAssetDecisions([]Row{row}, AssetDecisions{row.AssetIdentity.RecordID: {Mode: AssetDecisionOverride, Token: "MYTOKEN", Quantity: "10", ValueUSD: "0", CostBasisUSD: "0", AcquiredDate: "2026-05-21"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := BuildPositions(decided, lookalikeAt.AddDate(0, 0, 1), anyPrice)
+		if len(p) != 1 || !p[0].PriceMissing || !p[0].MarketValueUSD.IsZero() || !p[0].UnrealizedGainUSD.IsZero() {
+			t.Fatalf("%s: decided flagged receipt took a reference price %+v", denom, p)
+		}
+	}
+	real := lookalikeRow(s, apiMainnet, meta, cosmosHubNobleUSDCDenom)
+	if p := BuildPositions([]Row{real}, lookalikeAt.AddDate(0, 0, 1), anyPrice); len(p) != 1 || p[0].PriceMissing {
+		t.Fatalf("real USDC position lost its price %+v", p)
+	}
+}
+
+// A fake USDC leg never prices the ATOM it was swapped for: ATOM's value is
+// the ATOM oracle price, and with no ATOM price the ATOM leg stays unpriced.
+func TestFlaggedSwapLegNeverPricesTheOtherLeg(t *testing.T) {
+	meta := loadOracleDenomsFixture(t)[apiMainnet]
+	fake := fixtureFakeUSDC(t, meta)
+	swap := func(s *Server, atomDir, fakeDir string) (atom, usdc Row) {
+		rows := []Row{
+			s.buildRow(apiMainnet, meta, lookalikeAt, "SWAPTX", apiSwap, atomDir, apiUatom, "5000000", "a", "b"),
+			s.buildRow(apiMainnet, meta, lookalikeAt, "SWAPTX", apiSwap, fakeDir, fake, "100000000", "b", "a"),
+		}
+		if rows[1].AssetIdentity == nil || !rows[1].PriceMissing {
+			t.Fatalf("fake USDC leg not flagged and unpriced: %+v", rows[1])
+		}
+		implySwapPrices(rows)
+		return rows[0], rows[1]
+	}
+
+	priced := fixtureOracle(t, meta, 10)
+	for _, dirs := range [][2]string{{apiOut, "in"}, {"in", apiOut}} {
+		atom, _ := swap(priced, dirs[0], dirs[1])
+		if atom.PriceMissing || atom.PriceImplied || !atom.PriceUSD.Equal(decimal.NewFromInt(10)) || !atom.ValueUSD.Equal(decimal.NewFromInt(50)) {
+			t.Fatalf("ATOM %s: not valued at the ATOM oracle price: %+v", dirs[0], atom)
+		}
+	}
+
+	unpriced := fixtureOracle(t, meta, 0)
+	for _, dirs := range [][2]string{{apiOut, "in"}, {"in", apiOut}} {
+		atom, usdc := swap(unpriced, dirs[0], dirs[1])
+		if !atom.PriceMissing || atom.PriceImplied || !atom.ValueUSD.IsZero() {
+			t.Fatalf("ATOM %s: priced from the fake USDC leg: %+v", dirs[0], atom)
+		}
+		if !usdc.PriceMissing || !usdc.ValueUSD.IsZero() {
+			t.Fatalf("fake USDC leg priced: %+v", usdc)
+		}
 	}
 }

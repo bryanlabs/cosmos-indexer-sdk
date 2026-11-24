@@ -42,10 +42,16 @@ func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A report gives a flagged denom (an ATOM mismatch or a listed lookalike)
+	// no reference price, so none is published for it here either.
+	flagged := s.labelDenom(chain, s.oracle.Denoms(chain), denom).flagged()
 	points := make([]pricePoint, 0, int(end.Sub(start).Hours()/24)+1)
 	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
 		dateStr := d.Format(apiDateLayout)
-		usd, found := s.oracle.PriceAt(chain, denom, dateStr)
+		usd, found := 0.0, false
+		if !flagged {
+			usd, found = s.oracle.PriceAt(chain, denom, dateStr)
+		}
 		points = append(points, pricePoint{Date: dateStr, USD: usd, Found: found})
 	}
 
