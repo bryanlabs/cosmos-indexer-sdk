@@ -40,9 +40,6 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 	sort.SliceStable(sorted, func(i, j int) bool { return lotsBefore(sorted[i], sorted[j]) })
 	lots := map[string][]lot{}
 	denoms := map[string]string{}
-	// priceDenoms holds only denoms of rows with no asset identity: a flagged
-	// receipt the user decided never supplies a position's reference price.
-	priceDenoms := map[string]string{}
 	for _, r := range sorted {
 		if r.Excluded || r.FeeOutcomeUnknown || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
@@ -55,9 +52,6 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 				asset = r.Denom
 			}
 			denoms[asset] = r.Denom
-			if r.AssetIdentity == nil {
-				priceDenoms[asset] = r.Denom
-			}
 			lots[asset] = moveRewardLots(lots[asset], r)
 			continue
 		}
@@ -72,9 +66,6 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 			asset = r.Denom
 		}
 		denoms[asset] = r.Denom
-		if r.AssetIdentity == nil {
-			priceDenoms[asset] = r.Denom
-		}
 		switch {
 		case r.Direction == "in" && r.Category != apiFee:
 			cost, acquired, unknown := r.PriceUSD, r.Time, basisUnknownForRow(r)
@@ -121,8 +112,7 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 				p.OldestLot = l.date.UTC().Format(apiDateLayout)
 			}
 		}
-		priceDenom, unflagged := priceDenoms[a]
-		if price, ok := priceAt(priceDenom); unflagged && ok {
+		if price, ok := priceAt(denoms[a]); ok {
 			p.MarketPriceUSD = price.Round(8)
 			p.MarketValueUSD = p.Quantity.Mul(price).Round(2)
 			p.UnrealizedGainUSD = p.Quantity.Sub(p.BasisUnknownQty).Mul(price).Sub(p.CostBasisUSD).Round(2)
@@ -155,20 +145,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	day := asOf.UTC().Format(apiDateLayout)
-	meta := s.oracle.Denoms(chain)
-	positions := BuildPositions(rows, asOf.AddDate(0, 0, 1), func(denom string) (decimal.Decimal, bool) {
-		if s.labelDenom(chain, meta, denom).flagged() {
-			return decimal.Zero, false
-		}
-		base, _ := s.resolveBaseDenom(denom)
-		if p, ok := s.oracle.PriceAt(chain, base, day); ok {
-			return decimal.NewFromFloat(p), true
-		}
-		if p, ok := s.oracle.PriceAt(chain, denom, day); ok {
-			return decimal.NewFromFloat(p), true
-		}
-		return decimal.Zero, false
-	})
+	positions := BuildPositions(rows, asOf.AddDate(0, 0, 1), s.positionPrice(chain, day))
 	if q.Get(apiFormat) == apiCSV {
 		w.Header().Set(apiContentType, apiCSVContentType)
 		w.Header().Set(apiContentDisposition, "attachment; filename=positions.csv")
@@ -193,3 +170,22 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 }
 
 func itoa(n int) string { return decimal.NewFromInt(int64(n)).String() }
+
+// positionPrice is a position's market price: the reference price on day for
+// the denom, through its trace base first, and none for a flagged denom.
+func (s *Server) positionPrice(chain, day string) func(denom string) (decimal.Decimal, bool) {
+	meta := s.oracle.Denoms(chain)
+	return func(denom string) (decimal.Decimal, bool) {
+		if s.labelDenom(chain, meta, denom).flagged() {
+			return decimal.Zero, false
+		}
+		base, _ := s.resolveBaseDenom(denom)
+		if p, ok := s.oracle.PriceAt(chain, base, day); ok {
+			return decimal.NewFromFloat(p), true
+		}
+		if p, ok := s.oracle.PriceAt(chain, denom, day); ok {
+			return decimal.NewFromFloat(p), true
+		}
+		return decimal.Zero, false
+	}
+}

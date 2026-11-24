@@ -684,6 +684,19 @@ func (s *Server) labelDenom(chain string, meta map[string]DenomMeta, denom strin
 	l.atomMismatch = chain == apiMainnet && denom != apiUatom && (l.unverifiedFactory || strings.EqualFold(l.symbol, apiSymbolATOM) || l.base == apiUatom)
 	l.official = s.officialIndexFor(chain, meta)
 	l.lookalike = l.official.lookalikeOf(meta, denom, l.base, l.symbol)
+	// When the trace resolves to a base the oracle does not list, the label
+	// above is the bare base. The voucher's own listed label is judged too, so
+	// a resolved trace never turns a flagged voucher into an unflagged one.
+	if exact, ok := meta[denom]; ok && l.base != denom {
+		if _, listed := meta[l.base]; !listed {
+			if chain == apiMainnet && denom != apiUatom && strings.EqualFold(exact.Symbol, apiSymbolATOM) {
+				l.atomMismatch = true
+			}
+			if l.lookalike == "" {
+				l.lookalike = l.official.lookalikeOf(meta, denom, l.base, exact.Symbol)
+			}
+		}
+	}
 	if l.unverifiedFactory && l.lookalike == "" {
 		l.lookalike = apiSymbolATOM
 	}
