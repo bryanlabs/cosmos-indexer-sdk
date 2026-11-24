@@ -168,14 +168,14 @@ func assignSemanticRecordID(row *Row, event tax.TaxableEvent, chain, wallet stri
 	row.SemanticRecordID = id
 }
 
-// applySemanticDecisions books each classified row as the person said. The
+// applySemanticDecisionsTo books each classified row as the person said. The
 // row keeps its token, quantity, time, counterparties and detail;
 // ClassifiedFrom keeps the parser's category and SemanticDecision the
 // decision, so every export can show both. It marks each key it applied in
-// used and returns the keys whose classification settled a row.
-func applySemanticDecisions(rows []Row, decisions AssetDecisions, used map[string]bool) (map[string]bool, error) {
-	seen := map[string]bool{}
-	classified := map[string]bool{}
+// used and in classified the keys whose classification settled a row. seen
+// holds the semantic record IDs met so far, across every window of a report
+// read in windows.
+func applySemanticDecisionsTo(rows []Row, decisions AssetDecisions, used, seen, classified map[string]bool) error {
 	for i := range rows {
 		row := &rows[i]
 		key := row.SemanticRecordID
@@ -185,7 +185,7 @@ func applySemanticDecisions(rows []Row, decisions AssetDecisions, used map[strin
 		semanticKey := decisionKeyKind(key) == decisionKindSemantic
 		if semanticKey {
 			if seen[key] {
-				return nil, fmt.Errorf("duplicate semantic record ID")
+				return fmt.Errorf("duplicate semantic record ID")
 			}
 			seen[key] = true
 		}
@@ -195,22 +195,22 @@ func applySemanticDecisions(rows []Row, decisions AssetDecisions, used map[strin
 		}
 		decision, err := NormalizeKeyedDecision(key, raw)
 		if err != nil {
-			return nil, fmt.Errorf(apiAssetDecisionErrorFormat, key, err)
+			return fmt.Errorf(apiAssetDecisionErrorFormat, key, err)
 		}
 		if want := classDirections[decision.Classification]; want != "" && want != row.Direction {
-			return nil, fmt.Errorf("asset decision %q: classification %s needs an %s row, and this row is %s", key, decision.Classification, want, row.Direction)
+			return fmt.Errorf("asset decision %q: classification %s needs an %s row, and this row is %s", key, decision.Classification, want, row.Direction)
 		}
 		used[key] = true
 		classified[key] = true
 		if semanticKey {
 			if err := applySemanticValue(row, &decision, key); err != nil {
-				return nil, fmt.Errorf(apiAssetDecisionErrorFormat, key, err)
+				return fmt.Errorf(apiAssetDecisionErrorFormat, key, err)
 			}
 		}
 		classify(row, decision.Classification)
 		row.SemanticDecision = &decision
 	}
-	return classified, nil
+	return nil
 }
 
 // applySemanticValue applies a semantic decision's value and basis. value_usd
