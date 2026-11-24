@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -257,6 +258,28 @@ func TestAssetReviewWindowedMatchesWhole(t *testing.T) {
 	_, whole := answer(0, nil)
 	_, atCap := answer(6, nil)
 	require.Equal(t, whole, atCap)
+
+	// An invalid decision set is refused with 400 either way, naming a
+	// decision that is invalid and carrying no report rows. Which invalid
+	// decision a windowed read names first may differ from the whole read.
+	future := AssetDecision{Mode: AssetDecisionOverride, Token: apiTestOverrideToken, Quantity: "2", ValueUSD: "20", CostBasisUSD: "6", AcquiredDate: "2026-12-31"}
+	stale := "mainnet|" + wallet + "|404|0:ee"
+	for name, decisions := range map[string]AssetDecisions{
+		"acquired after receipt":           {id: future},
+		"acquired after receipt and stale": {id: future, stale: {Mode: AssetDecisionExclude}},
+	} {
+		wholeCode, whole := answer(0, decisions)
+		require.Equal(t, http.StatusBadRequest, wholeCode, name)
+		for _, rowCap := range []int64{1, 2, 3, 5} {
+			code, body := answer(rowCap, decisions)
+			require.Equal(t, http.StatusBadRequest, code, "%s at cap %d", name, rowCap)
+			require.NotContains(t, body, "{", "%s at cap %d", name, rowCap)
+			require.True(t, strings.Contains(body, "acquisition date cannot be after the receipt date") || strings.Contains(body, stale), "%s at cap %d: %s", name, rowCap, body)
+			if len(decisions) == 1 {
+				require.Equal(t, whole, body, "%s at cap %d", name, rowCap)
+			}
+		}
+	}
 
 	// A blocked report names what blocks the whole period, not the first
 	// window: one undecoded message on each of two days.
