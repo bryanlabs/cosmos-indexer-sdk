@@ -452,6 +452,9 @@ func writeTaxError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errAwaitingCorrection):
 		code = http.StatusServiceUnavailable
 		w.Header().Set("Retry-After", "1800")
+	case errors.Is(err, errReviewWindowsBusy):
+		code = http.StatusServiceUnavailable
+		w.Header().Set("Retry-After", "60")
 	}
 	http.Error(w, err.Error(), code)
 }

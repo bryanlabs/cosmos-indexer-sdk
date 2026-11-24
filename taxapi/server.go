@@ -40,7 +40,12 @@ type Server struct {
 	readOnlyLedger bool
 	// reportRowCap is the largest wallet history a report reads on request;
 	// zero reads every row.
-	reportRowCap                int64
+	reportRowCap int64
+	// reviewWindowsTimeoutOverride, when set, replaces
+	// reportReviewWindowsTimeout.
+	reviewWindowsTimeoutOverride time.Duration
+	// reviewWindowsRunning is set while a review over the cap is read.
+	reviewWindowsRunning        atomic.Bool
 	privateReadSnapshotTimeout  time.Duration
 	readSnapshotStarted         time.Time
 	commissionPrivateProfile    *CommissionPrivateProfile

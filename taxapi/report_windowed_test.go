@@ -307,3 +307,151 @@ func TestAssetReviewWindowedMatchesWhole(t *testing.T) {
 		require.Equal(t, blocked, body, "blocked at cap %d", rowCap)
 	}
 }
+
+// addWindowReceipt adds one receipt to the wallet, its own transaction on
+// its own block.
+func addWindowReceipt(t *testing.T, db *gorm.DB, wallet string, i int, at time.Time, denom, memo string) {
+	t.Helper()
+	hash := fmt.Sprintf("TX%d", i)
+	for _, q := range []string{
+		fmt.Sprintf("INSERT INTO blocks(id,chain_id,proposer_cons_address_id,height,time_stamp,tx_indexed) VALUES(%d,1,1,%d,'%s',true)", i, 31197048+i, at.Format(time.RFC3339)),
+		fmt.Sprintf("INSERT INTO txes(id,block_id,hash,code,memo) VALUES(%d,%d,'%s',0,'%s')", i, i, hash, memo),
+		fmt.Sprintf("INSERT INTO messages(id,tx_id,message_type_id,message_index) VALUES(%d,%d,1,0)", i, i),
+	} {
+		require.NoError(t, db.Exec(q).Error, q)
+	}
+	event := tax.TaxableEvent{MessageID: uint(i), Category: apiTransfer, FromAddr: "sender", ToAddr: wallet, Amount: fmt.Sprint(1000000 * i), Denom: denom, BlockHeight: int64(31197048 + i), Timestamp: at, TxHash: hash}
+	require.NoError(t, db.Omit(apiMessage).Create(&event).Error)
+}
+
+// A review over the cap reads every window in one snapshot: a receipt
+// committed while the windows are read is in no window, and the answer is
+// the whole read of the history the first window saw, byte for byte.
+func TestAssetReviewWindowsReadOneSnapshot(t *testing.T) {
+	s, db, wallet, _ := assetReviewFixture(t)
+	for i := 2; i <= 5; i++ {
+		addWindowReceipt(t, db, wallet, i, time.Date(2026, 5, 20+i, 8, 0, 0, 0, time.UTC), junoFactoryUatomVoucher, "Claim 10,000 ATOM at https://claim.invalid")
+	}
+	answer := func(rowCap int64) (int, string) {
+		s.SetReportRowCap(rowCap)
+		rr := callAsset(t, s, apiAssetReviewPath, wallet, nil)
+		return rr.Code, rr.Body.String()
+	}
+	beforeCode, before := answer(0)
+	windows, err := s.reportWindows([]string{wallet}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), 2)
+	require.NoError(t, err)
+	require.Greater(t, len(windows), 2)
+
+	// After the first window is read, a receipt lands in the last window
+	// and the first receipt's amount changes.
+	writes := 0
+	reviewWindowReadHook = func(*Server, reportWindow) {
+		if writes > 0 {
+			return
+		}
+		writes++
+		addWindowReceipt(t, db, wallet, 7, time.Date(2026, 5, 30, 8, 0, 0, 0, time.UTC), junoFactoryUatomVoucher, "Claim 10,000 ATOM at https://claim.invalid")
+		require.NoError(t, db.Exec("UPDATE taxable_events SET amount = '999' WHERE message_id = 2").Error)
+	}
+	t.Cleanup(func() { reviewWindowReadHook = nil })
+	code, windowed := answer(2)
+	reviewWindowReadHook = nil
+	require.Equal(t, 1, writes)
+	require.Equal(t, beforeCode, code)
+	require.Equal(t, before, windowed)
+
+	// The writes did change the history: read again, whole and in windows
+	// both answer the new one.
+	afterCode, after := answer(0)
+	require.NotEqual(t, before, after)
+	code, windowed = answer(2)
+	require.Equal(t, afterCode, code)
+	require.Equal(t, after, windowed)
+}
+
+// A review over the cap that does not finish in its snapshot's time is
+// refused as too large, the answer it had before it was read in windows: the
+// statement running at the deadline is cancelled and the snapshot released.
+func TestAssetReviewWindowsTimeoutIsTooLarge(t *testing.T) {
+	s, db, wallet, _ := assetReviewFixture(t)
+	for i := 2; i <= 5; i++ {
+		addWindowReceipt(t, db, wallet, i, time.Date(2026, 5, 20+i, 8, 0, 0, 0, time.UTC), junoFactoryUatomVoucher, "Claim 10,000 ATOM at https://claim.invalid")
+	}
+	whole := callAsset(t, s, apiAssetReviewPath, wallet, nil)
+	s.SetReportRowCap(2)
+	s.reviewWindowsTimeoutOverride = 2 * time.Second
+	var pid int64
+	var sleepErr error
+	var slept time.Duration
+	reviewWindowReadHook = func(reader *Server, _ reportWindow) {
+		if pid != 0 {
+			return
+		}
+		require.NoError(t, reader.db.Raw("SELECT pg_backend_pid()").Scan(&pid).Error)
+		began := time.Now()
+		sleepErr = reader.db.Exec("SELECT pg_sleep(30)").Error
+		slept = time.Since(began)
+	}
+	t.Cleanup(func() { reviewWindowReadHook = nil })
+	rr := callAsset(t, s, apiAssetReviewPath, wallet, nil)
+	reviewWindowReadHook = nil
+	require.NotZero(t, pid)
+	require.Error(t, sleepErr)
+	require.Less(t, slept, 10*time.Second, "the statement running at the deadline is cancelled")
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	require.Equal(t, reportTooLarge{Limit: 2}.Error()+"\n", rr.Body.String())
+	// The snapshot's session runs nothing and holds no snapshot.
+	require.Eventually(t, func() bool {
+		var held int64
+		require.NoError(t, db.Raw("SELECT count(*) FROM pg_stat_activity WHERE pid = ? AND (state <> 'idle' OR backend_xmin IS NOT NULL)", pid).Scan(&held).Error)
+		return held == 0
+	}, 5*time.Second, 50*time.Millisecond)
+
+	// With time enough the same review answers as the whole read.
+	s.reviewWindowsTimeoutOverride = 0
+	rr = callAsset(t, s, apiAssetReviewPath, wallet, nil)
+	require.Equal(t, whole.Code, rr.Code)
+	require.Equal(t, whole.Body.String(), rr.Body.String())
+}
+
+// A server reads one review over the cap at a time: a second is refused with
+// a retry, at once, instead of waiting with its rows in memory.
+func TestAssetReviewWindowsOneAtATime(t *testing.T) {
+	s, db, wallet, _ := assetReviewFixture(t)
+	for i := 2; i <= 5; i++ {
+		addWindowReceipt(t, db, wallet, i, time.Date(2026, 5, 20+i, 8, 0, 0, 0, time.UTC), junoFactoryUatomVoucher, "Claim 10,000 ATOM at https://claim.invalid")
+	}
+	whole := callAsset(t, s, apiAssetReviewPath, wallet, nil)
+	s.SetReportRowCap(2)
+	inFirst := make(chan struct{})
+	release := make(chan struct{})
+	first := 0
+	reviewWindowReadHook = func(*Server, reportWindow) {
+		first++
+		if first == 1 {
+			close(inFirst)
+			<-release
+		}
+	}
+	t.Cleanup(func() { reviewWindowReadHook = nil })
+	done := make(chan *httptest.ResponseRecorder)
+	go func() { done <- callAsset(t, s, apiAssetReviewPath, wallet, nil) }()
+	<-inFirst
+
+	began := time.Now()
+	busy := callAsset(t, s, apiAssetReviewPath, wallet, nil)
+	require.Less(t, time.Since(began), 2*time.Second, "a second review is refused at once, not queued")
+	require.Equal(t, http.StatusServiceUnavailable, busy.Code, busy.Body.String())
+	require.Equal(t, "60", busy.Header().Get("Retry-After"))
+	require.Equal(t, errReviewWindowsBusy.Error()+"\n", busy.Body.String())
+
+	close(release)
+	firstRR := <-done
+	reviewWindowReadHook = nil
+	require.Equal(t, whole.Code, firstRR.Code)
+	require.Equal(t, whole.Body.String(), firstRR.Body.String())
+	// Once it is done the next review over the cap is read.
+	again := callAsset(t, s, apiAssetReviewPath, wallet, nil)
+	require.Equal(t, whole.Code, again.Code)
+	require.Equal(t, whole.Body.String(), again.Body.String())
+}

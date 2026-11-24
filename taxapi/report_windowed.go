@@ -1,6 +1,7 @@
 package taxapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -9,7 +10,7 @@ import (
 
 // A wallet whose history in a period is over the report row cap is read in
 // windows: stretches of the period, in time order, each holding no more
-// than the cap. Each window is read in its own snapshot and priced and
+// than the cap. Every window is read in one snapshot, and each is priced and
 // reviewed before the next is read, so memory holds one window's rows and
 // what is kept from the windows before it, not the whole history.
 //
@@ -195,7 +196,9 @@ func keptForReview(row Row) bool {
 // one window. The rows a report read whole lists wallet by wallet, each
 // wallet's events in time order and then its fees, so the kept rows are
 // gathered per wallet and per kind and joined in that order at the end.
-func (s *Server) reviewedWindows(chain string, addresses []string, windows []reportWindow, decisions AssetDecisions, read func(reportWindow) (reportInput, error)) (windowedReview, error) {
+// Message indexes are read through reader, the snapshot the windows are
+// read in.
+func (s *Server) reviewedWindows(reader *Server, chain string, addresses []string, windows []reportWindow, decisions AssetDecisions, read func(reportWindow) (reportInput, error)) (windowedReview, error) {
 	if err := ValidateAssetDecisions(decisions); err != nil {
 		return windowedReview{}, assetReviewInputError{err}
 	}
@@ -222,7 +225,7 @@ func (s *Server) reviewedWindows(chain string, addresses []string, windows []rep
 		}
 		input = reportInput{}
 		if hasUserPriceRowKeys(decisions) {
-			if err := s.loadMessageIndexes(rows); err != nil {
+			if err := reader.loadMessageIndexes(rows); err != nil {
 				return windowedReview{}, err
 			}
 		}
@@ -258,62 +261,86 @@ func (s *Server) reviewedWindows(chain string, addresses []string, windows []rep
 	return review, nil
 }
 
-// errReviewHistoryChanged refuses a review read in windows whose history
-// changed between the plan and the last window.
+// errReviewHistoryChanged asks for a retry of a review whose window the
+// readiness gate blocked while the whole period passed.
 var errReviewHistoryChanged = errors.New("financial history changed while the review was read; retry")
 
+// reportReviewWindowsTimeout bounds the one snapshot a review over the row
+// cap is read in. A review that does not finish in it is refused as too
+// large, the answer such a review had before it was read in windows, well
+// before the public proxy's four minute limit gives up on the request.
+const reportReviewWindowsTimeout = 150 * time.Second
+
+// errReviewWindowsBusy refuses a review over the cap while another is read:
+// each holds up to a window of rows, so a pod reads one at a time.
+var errReviewWindowsBusy = errors.New("another large review is being read; retry in a minute")
+
 // readReviewWindows reads a report period over the row cap for review, one
-// window per snapshot. The windows, the readiness gate for the whole period
-// and the review fingerprint are read in one snapshot before the first
-// window, and the fingerprint again after the last. A change between them
-// refuses the answer, so every window shows the history the windows were
-// planned on, and a blocked report names what blocks the whole period.
+// window at a time, all in one snapshot: the windows, the readiness gate for
+// the whole period and every window read the same history, as a report read
+// whole does. Only one window's rows are held at a time, and a server reads
+// one such review at a time.
 func (s *Server) readReviewWindows(chain string, addresses []string, start, end time.Time, decisions AssetDecisions) (windowedReview, error) {
-	var windows []reportWindow
-	var before string
-	if err := s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
-		var err error
-		if windows, err = reader.reportWindows(addresses, start, end, s.reportRowCap); err != nil {
+	if !s.reviewWindowsRunning.CompareAndSwap(false, true) {
+		return windowedReview{}, errReviewWindowsBusy
+	}
+	defer s.reviewWindowsRunning.Store(false)
+	eras := s.legacyEras(chain)
+	var review windowedReview
+	blocked := false
+	timeout := s.reviewWindowsTimeout()
+	started := time.Now()
+	err := s.withReadSnapshotTimeout(timeout, func(reader *Server) error {
+		windows, err := reader.reportWindows(addresses, start, end, s.reportRowCap)
+		if err != nil {
 			return err
 		}
 		if _, err = reader.reportReadiness(chain, addresses, start, end); err != nil {
 			return err
 		}
-		before, err = reader.reviewFingerprintInSnapshot(chain, addresses)
+		review, err = s.reviewedWindows(reader, chain, addresses, windows, decisions, func(window reportWindow) (reportInput, error) {
+			phases := reader.privateReadPhases(addresses, window.Start, window.End, "snapshot")
+			input, err := reader.walletInputInSnapshot(chain, addresses, window.Start, window.End, false, eras, phases)
+			var required reportReadinessRequired
+			if errors.As(err, &required) {
+				blocked = true
+			}
+			if err == nil && reviewWindowReadHook != nil {
+				reviewWindowReadHook(reader, window)
+			}
+			return input, phases.wrap(err)
+		})
 		return err
-	}); err != nil {
-		return windowedReview{}, err
-	}
-	eras := s.legacyEras(chain)
-	review, err := s.reviewedWindows(chain, addresses, windows, decisions, func(window reportWindow) (reportInput, error) {
-		input, err := s.readWalletInput(chain, addresses, window.Start, window.End, false, eras, reportJobReadSnapshotTimeout)
-		var required reportReadinessRequired
-		if errors.As(err, &required) {
-			return input, s.periodReadinessError(chain, addresses, start, end)
-		}
-		return input, err
 	})
+	// A failure once the snapshot's time is up is the deadline, whichever
+	// error the driver or the commit reported it with.
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || time.Since(started) >= timeout) {
+		return windowedReview{}, reportTooLarge{Limit: s.reportRowCap}
+	}
+	if blocked {
+		return windowedReview{}, s.periodReadinessError(chain, addresses, start, end)
+	}
 	if err != nil {
 		return windowedReview{}, err
-	}
-	var after string
-	if err := s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
-		var err error
-		after, err = reader.reviewFingerprintInSnapshot(chain, addresses)
-		return err
-	}); err != nil {
-		return windowedReview{}, err
-	}
-	if after != before {
-		return windowedReview{}, errReviewHistoryChanged
 	}
 	return review, nil
 }
 
+// reviewWindowReadHook, when set by a test, runs in the snapshot after each
+// window is read.
+var reviewWindowReadHook func(*Server, reportWindow)
+
+func (s *Server) reviewWindowsTimeout() time.Duration {
+	if s.reviewWindowsTimeoutOverride > 0 {
+		return s.reviewWindowsTimeoutOverride
+	}
+	return reportReviewWindowsTimeout
+}
+
 // periodReadinessError answers a window the readiness gate blocked, which
-// the whole period passed when the windows were planned: history changed
-// while the review was read. It names what blocks the whole period now, as
-// a report read whole would, or asks for a retry if nothing does.
+// the whole period passed in the same snapshot. It names what blocks the
+// whole period now, as a report read whole would, or asks for a retry if
+// nothing does.
 func (s *Server) periodReadinessError(chain string, addresses []string, start, end time.Time) error {
 	if err := s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
 		_, err := reader.reportReadiness(chain, addresses, start, end)
