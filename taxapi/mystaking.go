@@ -286,7 +286,7 @@ func buildMyStaking(chain string, start, end time.Time, rowsByAddr [][]Row) mySt
 			if row.PriceMissing {
 				missing++
 			}
-			tx := myStakingTx{Date: row.Time.UTC().Format(apiDateLayout), Category: row.Category, TxHash: row.TxHash, Symbol: row.Symbol, Amount: row.Amount.String(), ValueUSD: row.ValueUSD.String(), PriceMissing: row.PriceMissing, addr: ai}
+			tx := myStakingTx{Date: row.Time.UTC().Format(apiDateLayout), Category: row.Category, TxHash: row.TxHash, Symbol: row.exportSymbol(), Amount: row.Amount.String(), ValueUSD: row.ValueUSD.String(), PriceMissing: row.PriceMissing, addr: ai}
 			op := row.ValidatorAddress
 			if op != "" && (row.Category == apiReward || row.Category == apiCommission) && row.UserTag == "" {
 				v := byOp[op]
@@ -298,10 +298,10 @@ func buildMyStaking(chain string, start, end time.Time, rowsByAddr [][]Row) mySt
 					v.Moniker = row.ValidatorMoniker
 				}
 				if row.Category == apiCommission {
-					add(ownBySym, op, row.Symbol, row.Amount)
+					add(ownBySym, op, row.exportSymbol(), row.Amount)
 					ownUSD[op] = ownUSD[op].Add(row.ValueUSD)
 				} else {
-					add(rewardsBySym, op, row.Symbol, row.Amount)
+					add(rewardsBySym, op, row.exportSymbol(), row.Amount)
 					rewardsUSD[op] = rewardsUSD[op].Add(row.ValueUSD)
 					v.RewardRows++
 				}
@@ -320,7 +320,7 @@ func buildMyStaking(chain string, start, end time.Time, rowsByAddr [][]Row) mySt
 				b = &myStakingBucket{Kind: kind}
 				other[kind] = b
 			}
-			add(otherBySym, kind, row.Symbol, row.Amount)
+			add(otherBySym, kind, row.exportSymbol(), row.Amount)
 			otherUSD[kind] = otherUSD[kind].Add(row.ValueUSD)
 			b.Rows++
 			if row.PriceMissing {
