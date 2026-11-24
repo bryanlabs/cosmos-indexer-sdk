@@ -47,7 +47,7 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 		// A reward move takes exactly the reward lot to the withdraw address
 		// at its basis and receipt time, as in Form 8949.
 		if r.isRewardMove() {
-			asset := r.Symbol
+			asset := r.exportSymbol()
 			if asset == "" {
 				asset = r.Denom
 			}
@@ -61,7 +61,7 @@ func BuildPositions(rows []Row, asOf time.Time, priceAt func(denom string) (deci
 		if r.Category == apiNFTSale || r.Category == apiNFTMint {
 			continue
 		}
-		asset := r.Symbol
+		asset := r.exportSymbol()
 		if asset == "" {
 			asset = r.Denom
 		}
