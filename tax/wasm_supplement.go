@@ -59,9 +59,12 @@ func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known [
 	// of bank legs and contract events and the signer are lost. Only the
 	// order-free fallback runs there, and only for 20-byte wallets.
 	var out []TaxableEvent
-	settled := lsmSettlementEvents(lsmRecordSettlements(log, sender))
+	// Settlements are found once, with the real signer, and the same slice
+	// both books the rewards and removes their legs from the fallback.
+	settlements := lsmRecordSettlements(log, sender)
+	settled := lsmSettlementEvents(settlements)
 	if flattenedLog(log) {
-		return append(settled, bankFallbackEvents(log, "", known)...)
+		return append(settled, bankFallbackEvents(log, "", known, settlements)...)
 	}
 	out = append(out, marketplaceBidEvents(log, sender, known)...)
 	out = append(out, askSaleEvents(log, known)...)
@@ -78,7 +81,7 @@ func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known [
 	// Settlement rows are not in all: a payee's other coins in the message
 	// still reach the fallback, which only loses the settled legs.
 	out = append(out, settled...)
-	out = append(out, bankFallbackEvents(log, sender, all)...)
+	out = append(out, bankFallbackEvents(log, sender, all, settlements)...)
 	return out
 }
 
@@ -768,8 +771,9 @@ var fallbackCodeBuilds = map[uint64]struct {
 // Contracts that ran in the message, module accounts and IBC escrow accounts
 // are never the wallet side, and a 32-byte address is the wallet side only as
 // the signer. Fee legs never reach a message's events, and a leg to a fee
-// collector is skipped in case one does.
-func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent) []TaxableEvent {
+// collector is skipped in case one does. settled are the LSM record
+// settlements the supplement booked as rewards; their legs are left out.
+func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []TaxableEvent, settled []lsmSettlement) []TaxableEvent {
 	excluded := fallbackExcluded(log)
 	wallet := func(addr string) bool {
 		if addr == "" || excluded[addr] {
@@ -792,7 +796,7 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 			nativeNamed[flowKey{e.ToAddr, fixtureNativeDenom}] = true
 		}
 	}
-	legs := withoutSettlementLegs(transfersIn(log), lsmRecordSettlements(log, sender))
+	legs := withoutSettlementLegs(transfersIn(log), settled)
 	native, nativeOrder := fallbackFlows(legs, func(d string) bool { return d == fixtureNativeDenom }, wallet, nativeNamed)
 	otherWallet := func(addr string) bool { return wallet(addr) && !transferEscrows()[addr] }
 	other, otherOrder := fallbackFlows(legs, func(d string) bool { return d != fixtureNativeDenom }, otherWallet, named)

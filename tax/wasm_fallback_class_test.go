@@ -113,7 +113,7 @@ func TestWasmFallbackNamedPerDenom(t *testing.T) {
 	signer, contract := testBech(t, "signer", 20), testBech(t, "contract", 32)
 	log := executeLog(contract, transferEv(signer, contract, "9ibc/AAA"), transferEv(contract, signer, "4ibc/BBB"))
 	known := []TaxableEvent{{Category: string(CategorySwap), FromAddr: signer, ToAddr: contract, Amount: "9", Denom: "ibc/AAA"}}
-	got := summary(bankFallbackEvents(log, signer, known))
+	got := summary(bankFallbackEvents(log, signer, known, nil))
 	want := fallbackLine(string(CategoryTransfer), "4", "ibc/BBB", contract, signer, contract, true)
 	if got != want {
 		t.Fatalf("got:\n%swant:\n%s", got, want)

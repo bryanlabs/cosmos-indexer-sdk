@@ -163,3 +163,28 @@ func TestContractRedeemContractPayeeKeepsOldRows(t *testing.T) {
 		t.Fatalf("rows = %+v, want none", out)
 	}
 }
+
+// On a flattened log the settlements are the ones found with the real
+// signer, and the same slice removes their legs from the fallback, so a
+// 32-byte signer paid by a record gets exactly one row per settled coin.
+func TestContractRedeemFlattenedSignerPayeeBookedOnce(t *testing.T) {
+	signer, contract, lsmModule := testBech(t, "dao-signer", 32), testBech(t, "contract", 32), testBech(t, "lsm-module", 32)
+	rec := lsmRecordAccount("701")
+	paid := "5" + lsmTestIBCDenom + ",10uatom"
+	log := executeLog(contract,
+		ev(string(CategoryTransfer),
+			[2]string{attributeRecipient, signer}, [2]string{attributeSender, rec}, [2]string{attributeAmount, paid},
+			[2]string{attributeRecipient, lsmModule}, [2]string{attributeSender, signer}, [2]string{attributeAmount, "7" + lsmTestValoperA + "/701"},
+		),
+		ev(eventWithdrawTokenizeShareReward, [2]string{attributeAmount, paid}, [2]string{attributeWithdrawAddress, signer}),
+	)
+	if !flattenedLog(log) {
+		t.Fatal("fixture is not a flattened log")
+	}
+	out := parseExecute(t, signer, log)
+	requireRewardRows(t, out, []rewardRow{{lsmTestValoperA, "5", lsmTestIBCDenom}, {lsmTestValoperA, "10", "uatom"}})
+	requireRewardRecipients(t, out, signer, signer)
+	if len(out) != 2 {
+		t.Fatalf("rows = %+v, want one reward per settled coin and nothing else", out)
+	}
+}
