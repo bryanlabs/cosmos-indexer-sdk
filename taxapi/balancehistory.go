@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -162,7 +163,25 @@ func newLedgerNode() (*ledgerNode, error) {
 	if err != nil {
 		return nil, err
 	}
+	if r := ledgerNodeRetry.Load(); r != nil {
+		rest, rpc = rest.WithRetry(*r), rpc.WithRetry(*r)
+	}
 	return &ledgerNode{rest: rest, rpc: rpc}, nil
+}
+
+var ledgerNodeRetry atomic.Pointer[servicehttp.Retry]
+
+// SetLedgerNodeRetry makes every ledger node opened after it retry a read our
+// own node refused, reset or answered with a 5xx, with backoff, for d before
+// failing it, logging each retry. It never reads another source. A long
+// collection run uses it so a node restart does not end hours of work; the
+// API's live reads do not.
+func SetLedgerNodeRetry(d time.Duration, logf func(string, ...any)) {
+	if d <= 0 {
+		ledgerNodeRetry.Store(nil)
+		return
+	}
+	ledgerNodeRetry.Store(&servicehttp.Retry{For: d, Max: 30 * time.Second, Logf: logf})
 }
 
 func (n *ledgerNode) at(path string, q url.Values, height int64, out any) error {

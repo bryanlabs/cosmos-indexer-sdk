@@ -97,6 +97,7 @@ func main() {
 	deriveLabels := flag.String("commission-derive-follow-labels", "", "read only: write the deposit-follow label file for --commission-flows-from to --commission-as-of to this path and exit")
 	deriveTimeout := flag.Duration("commission-derive-statement-timeout", 2*time.Minute, "read only: per-query limit while deriving labels; a condition whose query hits it is recorded unmeasured")
 	flowsPrefetch := flag.Int("commission-wallet-prefetch", 0, "opt-in private versioned wallets one trace reads from the index ahead of its queue, each on its own connection (0 reads each wallet only when asked; results do not depend on it)")
+	flowsNodeRetry := flag.Duration("commission-node-retry", 10*time.Minute, "how long a commission flows read keeps retrying when our own node refuses, resets or answers 5xx, before the root fails (0 fails on the first such error)")
 	flowsSharedMiB := flag.Int("commission-shared-history-mib", 0, "opt-in private versioned: share index reads across this process's traces, keeping up to this many MiB (0 shares nothing; results do not depend on it)")
 	flowsHopPlan := flag.String("commission-hop-plan", "", "private versioned runs only: a file of '<hop limit> <validator>' lines, run hop limit by hop limit in file order in this process; --commission-output-version names each run with {hops}")
 	flowsReadTimeout := flag.Duration("commission-read-snapshot-timeout", 0, "opt-in private versioned read snapshot deadline (0 keeps 30s; does not change public API reads)")
@@ -181,7 +182,7 @@ func main() {
 		}
 		var failed []string
 		for _, r := range runs {
-			if err := commissionFlows(db, *chain, *flowsFrom, r.only, *flowsWorkers, r.version, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, r.hops, *flowsPrefetch, shared); err != nil {
+			if err := commissionFlows(db, *chain, *flowsFrom, r.only, *flowsWorkers, r.version, *flowsBuild, *flowsAsOf, *flowsArchive, *flowsReadTimeout, profile, corrections, labels, r.hops, *flowsPrefetch, shared, *flowsNodeRetry); err != nil {
 				log.Printf("commission flows: %s: %v", r.version, err)
 				failed = append(failed, r.version)
 			}
@@ -270,7 +271,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 	}
 }
 
-func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int, shared *taxapi.CommissionSharedHistory) error {
+func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, version, build, asOfText, archiveConfig string, readTimeout time.Duration, profile *taxapi.CommissionPrivateProfile, corrections *taxapi.CommissionSourceCorrections, labels *taxapi.CommissionLabelFile, maxHops, prefetch int, shared *taxapi.CommissionSharedHistory, nodeRetry time.Duration) error {
 	if strings.TrimSpace(version) == "" || strings.TrimSpace(build) == "" || asOfText == "" {
 		log.Fatal("commission flows require --commission-output-version, --commission-build and --commission-as-of; replacement of prior output is disabled")
 	}
@@ -282,6 +283,7 @@ func commissionFlows(db *gorm.DB, chain, fromText, only string, workers int, ver
 	if err != nil {
 		log.Fatalf("-commission-flows-from: %v", err)
 	}
+	taxapi.SetLedgerNodeRetry(nodeRetry, log.Printf)
 	node, err := taxapi.NewLedgerNode()
 	if err != nil {
 		log.Fatal(err)
