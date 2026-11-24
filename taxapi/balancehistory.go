@@ -17,6 +17,8 @@ import (
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
+	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -36,6 +38,46 @@ type FailedTxFee struct {
 }
 
 func (FailedTxFee) TableName() string { return "tax_failed_tx_fees" }
+
+// staleReportTime is the computed_through a fee outcome writer gives a ready
+// report it changes: older than reportMaxAge, so the next view builds again.
+var staleReportTime = time.Unix(0, 0).UTC()
+
+// recordFailedTxFees inserts the fee outcomes not yet recorded and, in the
+// caller's transaction, marks stale every ready report of a wallet that paid
+// or granted one of the fees it inserted. Report fingerprints hash the outcomes,
+// but the evidence journal does not see this table, so a ready report would
+// otherwise keep serving the fee as it was before.
+func recordFailedTxFees(db *gorm.DB, fees []FailedTxFee, batch int) error {
+	for len(fees) > 0 {
+		n := min(batch, len(fees))
+		part := fees[:n]
+		fees = fees[n:]
+		values := make([]string, len(part))
+		args := make([]any, 0, 2*len(part))
+		for i, f := range part {
+			values[i] = "(?, ?)"
+			args = append(args, f.TxID, f.Charged)
+		}
+		var added []uint
+		if err := db.Raw("INSERT INTO tax_failed_tx_fees (tx_id, charged) VALUES "+strings.Join(values, ", ")+
+			" ON CONFLICT DO NOTHING RETURNING tx_id", args...).Scan(&added).Error; err != nil {
+			return err
+		}
+		if len(added) == 0 {
+			continue
+		}
+		if err := db.Model(&ReportJob{}).
+			Where("status = ? AND computed_through > ?", ReportJobReady, staleReportTime).
+			Where(`string_to_array(addresses, ',') && ARRAY(
+ SELECT a.address FROM fees f JOIN addresses a ON a.id = f.payer_address_id WHERE f.tx_id IN ?
+ UNION SELECT g.granter FROM tax_fee_grants g WHERE g.tx_id IN ?)`, added, added).
+			Update("computed_through", staleReportTime).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // FeeGrantUse records a transaction whose fee a fee grant paid. The ante
 // handler then deducts the granter's balance, but blocks indexed before the
@@ -119,6 +161,9 @@ func BalanceHistoryMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(&FailedTxFee{}, &FeeGrantUse{}, &LedgerScan{}, &ValidatorConsensus{}, &IndexHole{}, &IndexHoleAddress{}, &ValidatorRateSample{}, &BalanceDay{}, &BalanceBuild{}, &BalanceDeferred{}); err != nil {
 		return err
 	}
+	if err := inclusionsMigrate(db); err != nil {
+		return err
+	}
 	if err := db.Exec("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_txes_block_id ON txes (block_id)").Error; err != nil {
 		return err
 	}
@@ -137,6 +182,9 @@ type ledgerNode struct {
 	// cache, when set, is a block cache directory that RPC reads come from
 	// instead of the node.
 	cache string
+	// archive, when set, answers balance history's delegation and rate reads
+	// below the lowest height the node holds.
+	archive *ledgerArchive
 }
 
 func newLedgerNode() (*ledgerNode, error) {
@@ -162,7 +210,7 @@ func newLedgerNode() (*ledgerNode, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ledgerNode{rest: rest, rpc: rpc}, nil
+	return &ledgerNode{rest: rest, rpc: rpc, archive: servingArchive.Load()}, nil
 }
 
 func (n *ledgerNode) at(path string, q url.Values, height int64, out any) error {
@@ -239,36 +287,8 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 	if err != nil {
 		return a, fmt.Errorf("bank balances: %w", err)
 	}
-	err = n.paged("/cosmos/staking/v1beta1/delegations/"+addr, height, func(get func(any) error) (pageResp, error) {
-		var body struct {
-			DelegationResponses []struct {
-				Delegation struct {
-					ValidatorAddress string `json:"validator_address"`
-					Shares           string `json:"shares"`
-				} `json:"delegation"`
-				Balance balCoin `json:"balance"`
-			} `json:"delegation_responses"`
-			Pagination pageResp `json:"pagination"`
-		}
-		if err := get(&body); err != nil {
-			return pageResp{}, err
-		}
-		for _, d := range body.DelegationResponses {
-			v, err := parseInt(d.Balance.Amount)
-			if err != nil {
-				return pageResp{}, err
-			}
-			sh, err := decimal.NewFromString(d.Delegation.Shares)
-			if err != nil {
-				return pageResp{}, fmt.Errorf("delegation shares %q: %w", d.Delegation.Shares, err)
-			}
-			addInt(a.Delegations, d.Delegation.ValidatorAddress, v)
-			a.Shares[d.Delegation.ValidatorAddress] = a.Shares[d.Delegation.ValidatorAddress].Add(sh)
-		}
-		return body.Pagination, nil
-	})
-	if err != nil {
-		return a, fmt.Errorf("delegations: %w", err)
+	if a.Delegations, a.Shares, err = n.delegations(addr, height); err != nil {
+		return a, err
 	}
 	err = n.paged("/cosmos/staking/v1beta1/delegators/"+addr+"/unbonding_delegations", height, func(get func(any) error) (pageResp, error) {
 		var body struct {
@@ -305,6 +325,47 @@ func (n *ledgerNode) anchor(addr string, height int64) (ledgerAnchor, error) {
 	return a, nil
 }
 
+// delegations reads addr's delegations at height, in tokens as the chain
+// shows them and in delegator shares.
+func (n *ledgerNode) delegations(addr string, height int64) (map[string]*big.Int, map[string]decimal.Decimal, error) {
+	amounts, shares := map[string]*big.Int{}, map[string]decimal.Decimal{}
+	err := n.paged("/cosmos/staking/v1beta1/delegations/"+addr, height, func(get func(any) error) (pageResp, error) {
+		var body struct {
+			DelegationResponses []struct {
+				Delegation struct {
+					ValidatorAddress string `json:"validator_address"`
+					Shares           string `json:"shares"`
+				} `json:"delegation"`
+				Balance balCoin `json:"balance"`
+			} `json:"delegation_responses"`
+			Pagination pageResp `json:"pagination"`
+		}
+		if err := get(&body); err != nil {
+			return pageResp{}, err
+		}
+		for _, d := range body.DelegationResponses {
+			v, err := parseInt(d.Balance.Amount)
+			if err != nil {
+				return pageResp{}, err
+			}
+			sh, err := decimal.NewFromString(d.Delegation.Shares)
+			if err != nil {
+				return pageResp{}, fmt.Errorf("delegation shares %q: %w", d.Delegation.Shares, err)
+			}
+			addInt(amounts, d.Delegation.ValidatorAddress, v)
+			shares[d.Delegation.ValidatorAddress] = shares[d.Delegation.ValidatorAddress].Add(sh)
+		}
+		return body.Pagination, nil
+	})
+	if lostBondDenom(err) {
+		amounts, shares, err = n.storeDelegations(addr, height)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("delegations: %w", err)
+	}
+	return amounts, shares, nil
+}
+
 // validatorRates reads every validator's bonded tokens and delegator shares.
 func (n *ledgerNode) validatorRates(height int64) (map[string]validatorRate, error) {
 	out := map[string]validatorRate{}
@@ -334,6 +395,33 @@ func (n *ledgerNode) validatorRates(height int64) (map[string]validatorRate, err
 		return body.Pagination, nil
 	})
 	return out, err
+}
+
+// rateAt reads one validator's bonded tokens and delegator shares at
+// the end of block height.
+func (n *ledgerNode) rateAt(v string, height int64) (validatorRate, error) {
+	var body struct {
+		Validator struct {
+			OperatorAddress string `json:"operator_address"`
+			Tokens          string `json:"tokens"`
+			DelegatorShares string `json:"delegator_shares"`
+		} `json:"validator"`
+	}
+	if err := n.at("/cosmos/staking/v1beta1/validators/"+v, nil, height, &body); err != nil {
+		return validatorRate{}, err
+	}
+	if body.Validator.OperatorAddress != v {
+		return validatorRate{}, fmt.Errorf("the node answered for validator %q", body.Validator.OperatorAddress)
+	}
+	tokens, err := parseInt(body.Validator.Tokens)
+	if err != nil {
+		return validatorRate{}, err
+	}
+	shares, err := decimal.NewFromString(body.Validator.DelegatorShares)
+	if err != nil {
+		return validatorRate{}, err
+	}
+	return validatorRate{Tokens: tokens, Shares: shares}, nil
 }
 
 // consensusOperators maps every validator's consensus address to its operator.
@@ -407,14 +495,20 @@ func (a rpcAttr) decoded() (string, string) {
 
 // failedTxCharges reads one block's failed transactions from the node and
 // returns, by hash, the coins each one's fee deduction moved. A transaction
-// whose block results do not settle it is left out.
-func (n *ledgerNode) failedTxCharges(height int64) (map[string]string, error) {
-	txs, err := n.blockTxs(height)
+// whose block results do not settle it is left out. preEvents is set for a
+// mainnet block before Gaia v7, whose failed transactions carry no events
+// whether or not they paid: settlePreEventBlock decides them from their
+// results, as every other reader of those blocks does.
+func (n *ledgerNode) failedTxCharges(height int64, preEvents bool) (map[string]string, error) {
+	b, err := n.blockScan(height, preEvents)
 	if err != nil {
 		return nil, err
 	}
+	if preEvents {
+		settlePreEventBlock(height, b)
+	}
 	out := map[string]string{}
-	for _, t := range txs {
+	for _, t := range b.txs {
 		if t.Code != 0 && t.ChargeKnown {
 			out[t.Hash] = t.Charged
 		}
@@ -489,7 +583,7 @@ func (s *Server) dayEndBlock(ids []int64, day time.Time) (heightTime, error) {
 		return heightTime{}, res.Error
 	}
 	if res.RowsAffected == 0 || !h.TimeStamp.Before(cutoff) {
-		return heightTime{}, balanceIncomplete{fmt.Sprintf("block %d, the last block of %s, is not in the index", next.Height-1, day.Format(apiDateLayout))}
+		return heightTime{}, balanceIncomplete{fmt.Sprintf("the last block of %s is not in the index yet: index coverage resumes at block %d", day.Format(apiDateLayout), next.Height)}
 	}
 	return h, nil
 }
@@ -571,16 +665,19 @@ func (s *Server) indexHoles(chain, addr string, lo, hi int64) (int64, int64, err
 }
 
 // holeHeights lists, ascending, the recorded index holes in (lo, hi] that may
-// touch addr.
+// touch addr, leaving out holes whose block was proven complete once its
+// repeated inclusions were placed.
 func (s *Server) holeHeights(chain, addr string, lo, hi int64) ([]int64, error) {
 	var heights []int64
+	cleared, cp := s.clearedHoleCond("h")
 	err := s.db.Raw(`
 SELECT h.height FROM tax_index_holes h
 WHERE h.chain = @chain AND h.height > @lo AND h.height <= @hi
 AND (NOT h.addresses_known OR EXISTS (SELECT 1 FROM tax_index_hole_addresses a
      WHERE a.chain = h.chain AND a.height = h.height AND a.address = @addr))
+AND `+cleared+`
 ORDER BY h.height`,
-		map[string]any{"chain": chain, "addr": addr, "lo": lo, "hi": hi}).Scan(&heights).Error
+		withParams(cp, map[string]any{apiChain: chain, qpAddr: addr, "lo": lo, "hi": hi})).Scan(&heights).Error
 	return heights, err
 }
 
@@ -635,33 +732,64 @@ func groupLedgerRows(rows []ledgerAttrRow) []ledgerEvent {
 // plus the wallet's redelegations, and the highest height of a redelegation
 // that cannot be attributed.
 func (s *Server) ledgerEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, int64, error) {
+	events, unmatched, err := s.ledgerStakeEvents(ids, addr, operator, lo, hi)
+	return events, lastHeight(unmatched), err
+}
+
+// ledgerStakeEvents is ledgerEvents with each staking record that may be the
+// wallet's but cannot be attributed returned as its own event, as
+// attributeStakes gives it.
+func (s *Server) ledgerStakeEvents(ids []int64, addr, operator string, lo, hi int64) ([]ledgerEvent, []ledgerEvent, error) {
+	// A transaction's events are dated at its effective inclusion.
+	rel, rp := s.effectiveRel()
+	params := withParams(rp, map[string]any{qpAddr: addr, "op": operator, "types": ledgerMessageTypes, qpIDs: ids, "lo": lo, "hi": hi})
+	msgQuery, blockQuery, redelQuery := s.ledgerQueries(rel)
 	var msgRows []ledgerAttrRow
-	if err := s.db.Raw(`
-SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
+	if err := s.db.Raw(msgQuery, params).Scan(&msgRows).Error; err != nil {
+		return nil, nil, fmt.Errorf("message events: %w", err)
+	}
+	var blockRows []ledgerAttrRow
+	if err := s.db.Raw(blockQuery, withParams(params, map[string]any{"types": ledgerBlockTypes})).Scan(&blockRows).Error; err != nil {
+		return nil, nil, fmt.Errorf("block events: %w", err)
+	}
+	var redelMsgs []uint64
+	if err := s.db.Raw(redelQuery, params).Scan(&redelMsgs).Error; err != nil {
+		return nil, nil, fmt.Errorf("redelegation messages: %w", err)
+	}
+	redelegations, unmatched, err := s.attributeStakeRows(redelMsgs, rel, rp, addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
+	return append(events, redelegations...), unmatched, nil
+}
+
+// ledgerQueries are ledgerStakeEvents' reads of a wallet's message events,
+// block events and candidate unattributed staking messages in (@lo, @hi].
+func (s *Server) ledgerQueries(rel string) (msgQuery, blockQuery, redelQuery string) {
+	msgQuery = `SELECT * FROM (` + datedBranches(`
+SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value, a.index AS attr_index
 FROM message_events me
 JOIN message_event_types t ON t.id = me.message_event_type_id
 JOIN messages m ON m.id = me.message_id
 JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
+{{BLOCK}}
 JOIN message_event_attributes a ON a.message_event_id = me.id
 JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.id IN (
+WHERE {{HIT}}
+AND (t.type IN @types OR t.type = 'create_validator')
+AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi {{OWN}}`, rel, `me.id IN (
   SELECT a0.message_event_id FROM message_event_attributes a0
   WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr
   UNION
   SELECT a1.message_event_id FROM message_event_attributes a1
   JOIN message_events me1 ON me1.id = a1.message_event_id
   JOIN message_event_types t1 ON t1.id = me1.message_event_type_id
-  WHERE left(a1.value, 100) = left(@op, 100) AND a1.value = @op AND t1.type = 'create_validator')
-AND (t.type IN @types OR t.type = 'create_validator')
-AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, me.id, a.index`,
-		map[string]any{"addr": addr, "op": operator, "types": ledgerMessageTypes, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&msgRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("message events: %w", err)
-	}
-	var blockRows []ledgerAttrRow
-	if err := s.db.Raw(`
+  WHERE left(a1.value, 100) = left(@op, 100) AND a1.value = @op AND t1.type = 'create_validator')`,
+		`(EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me.id AND a0.value = @addr)
+  OR (t.type = 'create_validator' AND EXISTS (SELECT 1 FROM message_event_attributes a1 WHERE a1.message_event_id = me.id AND a1.value = @op)))`) + `) u
+ORDER BY height, event_id, attr_index`
+	blockQuery = `
 SELECT be.id AS event_id, b.height, b.time_stamp, CASE WHEN be.lifecycle_position = 0 THEN 0 ELSE 2 END AS phase, t.type, k.key, a.value
 FROM block_events be
 JOIN block_event_types t ON t.id = be.block_event_type_id
@@ -673,58 +801,154 @@ WHERE be.id IN (
   WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr)
 AND t.type IN @types
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, be.id, a.index`,
-		map[string]any{"addr": addr, "types": ledgerBlockTypes, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&blockRows).Error; err != nil {
-		return nil, 0, fmt.Errorf("block events: %w", err)
-	}
-	var redelMsgs []uint64
-	if err := s.db.Raw(`
-SELECT DISTINCT me0.message_id FROM message_event_attributes a0
-JOIN message_events me0 ON me0.id = a0.message_event_id
+ORDER BY b.height, be.id, a.index`
+	// Only messages with a staking event that does not name its delegator,
+	// whose delegators include the wallet or are not named at all, are read:
+	// attributeRedelegations adds nothing and refuses nothing for any other.
+	redelQuery = `WITH cand AS MATERIALIZED (SELECT DISTINCT message_id FROM (` + datedBranches(`
+SELECT me0.message_id FROM message_events me0
 JOIN message_event_types t0 ON t0.id = me0.message_event_type_id
 JOIN messages m ON m.id = me0.message_id
 JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
-WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr AND t0.type IN ('withdraw_rewards', 'message')
+{{BLOCK}}
+WHERE {{HIT}} AND t0.type IN ('withdraw_rewards', 'message')
 AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-AND EXISTS (SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
-            WHERE r.message_id = me0.message_id AND rt.type = 'redelegate')`,
-		map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi}).
-		Scan(&redelMsgs).Error; err != nil {
-		return nil, 0, fmt.Errorf("redelegation messages: %w", err)
+AND EXISTS (`+unnamedStakingEvent("me0.message_id")+`) {{OWN}}`, rel,
+		`me0.id IN (SELECT a0.message_event_id FROM message_event_attributes a0 WHERE left(a0.value, 100) = left(@addr, 100) AND a0.value = @addr)`,
+		`EXISTS (SELECT 1 FROM message_event_attributes a0 WHERE a0.message_event_id = me0.id AND a0.value = @addr)`) + `) u)
+SELECT message_id FROM cand c WHERE ` + walletStakeMessage("c")
+	if s.blockReads {
+		msgQuery, blockQuery, redelQuery = blockReadQueries(rel)
 	}
-	redelRows, err := s.redelegationRows(redelMsgs)
-	if err != nil {
-		return nil, 0, err
-	}
-	redelegations, unattributed := attributeRedelegations(redelRows, addr)
-	events := append(groupLedgerRows(msgRows), groupLedgerRows(blockRows)...)
-	return append(events, redelegations...), unattributed, nil
+	return msgQuery, blockQuery, redelQuery
 }
 
-// redelegationRows reads the redelegate, withdraw_rewards and message events
-// of the messages msgs, in height, message, event and attribute order. The
+// unnamedStakingEvent is a subquery on the message msg's redelegate,
+// delegate and unbond events that carry no delegator attribute: the only
+// events attributeRedelegations attributes or refuses on. A record without a
+// delegator never shares an event with one that has it, since one SDK wrote
+// the message.
+func unnamedStakingEvent(msg string) string {
+	return `SELECT 1 FROM message_events r JOIN message_event_types rt ON rt.id = r.message_event_type_id
+            WHERE r.message_id = ` + msg + ` AND rt.type IN ('redelegate', 'delegate', 'unbond')
+            AND NOT EXISTS (SELECT 1 FROM message_event_attributes ra
+              JOIN message_event_attribute_keys rk ON rk.id = ra.message_event_attribute_key_id
+              WHERE ra.message_event_id = r.id AND rk.key = 'delegator')`
+}
+
+// walletStakeMessage is a condition on the message of ev: its delegators, as
+// attributeRedelegations reads them, include @addr, or it names none. The
+// delegators are the withdraw_rewards delegators and the sender right after
+// module=staking in a message event (the next attribute by index, as
+// stakingMessageSenders reads it). A message whose delegators are all others
+// (an authz exec a wallet sends for its granters) gives @addr no event and no
+// refusal, so it is not read. It is one scalar subquery on the message's own
+// events, applied to the materialized candidate messages, so it runs once per
+// candidate on the message and attribute indexes.
+func walletStakeMessage(ev string) string {
+	return `(SELECT coalesce(bool_or(d.delegator = @addr), false) OR NOT coalesce(bool_or(d.delegator <> ''), false) FROM (
+    SELECT CASE
+      WHEN wt.type = 'withdraw_rewards' AND wk.key = 'delegator' THEN wa.value
+      WHEN wt.type = 'message' AND wk.key = 'module' AND wa.value = 'staking'
+        AND lead(wk.key) OVER w = 'sender' THEN lead(wa.value) OVER w
+    END AS delegator
+    FROM message_events we
+    JOIN message_event_types wt ON wt.id = we.message_event_type_id
+    JOIN message_event_attributes wa ON wa.message_event_id = we.id
+    JOIN message_event_attribute_keys wk ON wk.id = wa.message_event_attribute_key_id
+    WHERE we.message_id = ` + ev + `.message_id AND wt.type IN ('withdraw_rewards', 'message')
+    WINDOW w AS (PARTITION BY we.id ORDER BY wa.index)) d)`
+}
+
+// redelegationRowsQuery is redelegationRows' read of one chunk @msgs. The
+// messages are dated first, then each one's events and each event's
+// attributes are read by id. The materialized steps and lateral reads keep
+// the planner from hashing the attribute table.
+func redelegationRowsQuery(rel string) string {
+	return `
+WITH dated AS MATERIALIZED (` + datedBranches(`
+SELECT m.id AS message_id, b.height, b.time_stamp
+FROM messages m
+JOIN txes x ON x.id = m.tx_id
+{{BLOCK}}
+WHERE m.id IN @msgs {{OWN}}`, rel) + `
+), ev AS MATERIALIZED (
+  SELECT e.id, d.message_id, d.height, d.time_stamp, e.index, e.type FROM dated d
+  CROSS JOIN LATERAL (
+    SELECT me.id, me.index, t.type FROM message_events me
+    JOIN message_event_types t ON t.id = me.message_event_type_id
+    WHERE me.message_id = d.message_id AND t.type IN ('redelegate', 'delegate', 'unbond', 'withdraw_rewards', 'message', 'transfer')
+    OFFSET 0
+  ) e
+)
+SELECT ev.id AS event_id, ev.message_id, ev.height, ev.time_stamp, 1 AS phase, ev.type, k.key, a.value, ev.index AS event_index, a.index AS attr_index
+FROM ev
+CROSS JOIN LATERAL (
+  SELECT a.index, a.message_event_attribute_key_id, a.value FROM message_event_attributes a
+  WHERE a.message_event_id = ev.id
+  OFFSET 0
+) a
+JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id`
+}
+
+// stakeAttrRow is one row of redelegationRowsQuery with the event and
+// attribute indexes it is ordered by.
+type stakeAttrRow struct {
+	EventID    uint64
+	MessageID  uint64
+	Height     int64
+	TimeStamp  time.Time
+	Phase      int
+	Type       string
+	Key        string
+	Value      string
+	EventIndex int64
+	AttrIndex  int64
+}
+
+// readStakeRows runs redelegationRowsQuery for msgs and returns its rows in
+// height, message, event and attribute order. The query leaves the order to
+// this sort: a chunk of a large staking wallet is tens of megabytes, which
+// Postgres would sort on disk.
+func (s *Server) readStakeRows(msgs []uint64, rel string, rp map[string]any) ([]ledgerAttrRow, error) {
+	var part []stakeAttrRow
+	if err := s.db.Raw(redelegationRowsQuery(rel),
+		withParams(rp, map[string]any{"msgs": msgs})).
+		Scan(&part).Error; err != nil {
+		return nil, err
+	}
+	sort.Slice(part, func(i, j int) bool {
+		a, b := &part[i], &part[j]
+		switch {
+		case a.Height != b.Height:
+			return a.Height < b.Height
+		case a.MessageID != b.MessageID:
+			return a.MessageID < b.MessageID
+		case a.EventIndex != b.EventIndex:
+			return a.EventIndex < b.EventIndex
+		case a.EventID != b.EventID:
+			return a.EventID < b.EventID
+		}
+		return a.AttrIndex < b.AttrIndex
+	})
+	rows := make([]ledgerAttrRow, len(part))
+	for i := range part {
+		r := &part[i]
+		rows[i] = ledgerAttrRow{EventID: r.EventID, MessageID: r.MessageID, Height: r.Height, TimeStamp: r.TimeStamp, Phase: r.Phase, Type: r.Type, Key: r.Key, Value: r.Value}
+	}
+	return rows, nil
+}
+
+// redelegationRows reads the redelegate, delegate, unbond, withdraw_rewards,
+// message and transfer events of the messages msgs, in height, message, event and attribute order. The
 // messages are read in chunks, since a wallet can name more than one
 // statement may bind. Each message's rows come whole from one chunk, so a
 // stable sort by height and message restores the order of a single read.
-func (s *Server) redelegationRows(msgs []uint64) ([]ledgerAttrRow, error) {
+func (s *Server) redelegationRows(msgs []uint64, rel string, rp map[string]any) ([]ledgerAttrRow, error) {
 	var rows []ledgerAttrRow
 	if err := inChunks(msgs, func(chunk []uint64) error {
-		var part []ledgerAttrRow
-		if err := s.db.Raw(`
-SELECT me.id AS event_id, me.message_id, b.height, b.time_stamp, 1 AS phase, t.type, k.key, a.value
-FROM message_events me
-JOIN message_event_types t ON t.id = me.message_event_type_id
-JOIN messages m ON m.id = me.message_id
-JOIN txes x ON x.id = m.tx_id
-JOIN blocks b ON b.id = x.block_id
-JOIN message_event_attributes a ON a.message_event_id = me.id
-JOIN message_event_attribute_keys k ON k.id = a.message_event_attribute_key_id
-WHERE me.message_id IN @msgs AND t.type IN ('redelegate', 'withdraw_rewards', 'message')
-ORDER BY b.height, me.message_id, me.index, a.index`,
-			map[string]any{"msgs": chunk}).
-			Scan(&part).Error; err != nil {
+		part, err := s.readStakeRows(chunk, rel, rp)
+		if err != nil {
 			return fmt.Errorf("redelegation events: %w", err)
 		}
 		rows = append(rows, part...)
@@ -741,18 +965,143 @@ ORDER BY b.height, me.message_id, me.index, a.index`,
 	return rows, nil
 }
 
-// attributeRedelegations gives the wallet its redelegate events. Gaia never
-// puts the delegator on a redelegate event, so it is read from the same
-// message: the delegators its withdraw_rewards events name, or the sender of
-// its staking message event on SDKs that leave the delegator off those too.
-// A message with one such delegator is that delegator's. In one with several
-// (an authz exec for many granters), a redelegation is matched to the reward
-// withdrawal from its source validator that precedes it. The highest height
-// of a redelegation that may be the wallet's but cannot be matched is
-// returned, so dates before it are refused.
+// stakeRowsChunk is how many candidate messages attributeStakeRows reads at
+// a time: an authz exec before Gaia v15 can carry hundreds of rows.
+const stakeRowsChunk = 500
+
+// stakeRun is one message's rows at one height in the single read's order.
+type stakeRun struct {
+	height int64
+	msg    uint64
+}
+
+// attributeStakeRows is attributeStakes over redelegationRows(msgs), read
+// chunk by chunk so that only one chunk's rows are held at a time. In the
+// single read, attributeStakes takes each run of one message's rows as a
+// group. A message dated once is a group of its own there, so its rows are
+// attributed with their chunk. Whether the datings of a message dated more
+// than once form one group depends on the rows of other chunks between
+// them, so its rows are kept until every chunk is read and then grouped as
+// the single read's order groups them. What each group gives is then put in
+// that order, by height and message, as the single read returns it.
+func (s *Server) attributeStakeRows(msgs []uint64, rel string, rp map[string]any, addr string) ([]ledgerEvent, []ledgerEvent, error) {
+	size := stakeRowsChunk
+	if s.stakeChunk > 0 {
+		size = s.stakeChunk
+	}
+	var out, unmatched, got, left []ledgerEvent
+	var runs []stakeRun
+	var held []ledgerAttrRow
+	for start := 0; start < len(msgs); start += size {
+		part, err := s.readStakeRows(msgs[start:min(start+size, len(msgs))], rel, rp)
+		if err != nil {
+			return nil, nil, fmt.Errorf("redelegation events: %w", err)
+		}
+		at, multi := map[uint64]int64{}, map[uint64]bool{}
+		for i, r := range part {
+			if i == 0 || r.Height != part[i-1].Height || r.MessageID != part[i-1].MessageID {
+				runs = append(runs, stakeRun{r.Height, r.MessageID})
+			}
+			if h, ok := at[r.MessageID]; ok && h != r.Height {
+				multi[r.MessageID] = true
+			}
+			at[r.MessageID] = r.Height
+		}
+		once := part[:0:0]
+		for _, r := range part {
+			if multi[r.MessageID] {
+				held = append(held, r)
+			} else {
+				once = append(once, r)
+			}
+		}
+		got, left = attributeStakes(once, addr)
+		out, unmatched = append(out, got...), append(unmatched, left...)
+	}
+	if len(held) > 0 {
+		byRun := func(rs []stakeRun) {
+			sort.SliceStable(rs, func(i, j int) bool {
+				if rs[i].height != rs[j].height {
+					return rs[i].height < rs[j].height
+				}
+				return rs[i].msg < rs[j].msg
+			})
+		}
+		byRun(runs)
+		// A run joins the group before it when the single read puts it
+		// right after a run of the same message.
+		group := make(map[stakeRun]int, len(runs))
+		for i, r := range runs {
+			if i > 0 && runs[i-1].msg == r.msg {
+				group[r] = group[runs[i-1]]
+			} else {
+				group[r] = i
+			}
+		}
+		sort.SliceStable(held, func(i, j int) bool {
+			if held[i].Height != held[j].Height {
+				return held[i].Height < held[j].Height
+			}
+			return held[i].MessageID < held[j].MessageID
+		})
+		for start := 0; start < len(held); {
+			g := group[stakeRun{held[start].Height, held[start].MessageID}]
+			end := start + 1
+			for end < len(held) && group[stakeRun{held[end].Height, held[end].MessageID}] == g {
+				end++
+			}
+			got, left = attributeStakes(held[start:end], addr)
+			out, unmatched = append(out, got...), append(unmatched, left...)
+			start = end
+		}
+	}
+	return singleReadOrder(out), singleReadOrder(unmatched), nil
+}
+
+// singleReadOrder sorts what attributeStakes gave, group by group, into the
+// order of the single read: by height, then message, each run's events
+// keeping their order.
+func singleReadOrder(evs []ledgerEvent) []ledgerEvent {
+	sort.SliceStable(evs, func(i, j int) bool {
+		if evs[i].Height != evs[j].Height {
+			return evs[i].Height < evs[j].Height
+		}
+		return evs[i].Msg < evs[j].Msg
+	})
+	return evs
+}
+
+// attributeRedelegations gives the wallet the staking events that do not name
+// their delegator: every redelegate event, and the delegate and unbond events
+// of SDKs before Gaia v15. The delegator is read from the same message: the
+// delegators its withdraw_rewards events name, or the sender of its staking
+// message event on SDKs that leave the delegator off those too. A message
+// with one such delegator is that delegator's. In one with several (an authz
+// exec for many granters), an event is matched to the reward withdrawal from
+// its (source) validator that precedes it. The highest height of an event
+// that may be the wallet's but cannot be matched is returned, so dates before
+// it are refused. Events that name their delegator are read with the
+// wallet's other events and skipped here.
 func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, int64) {
-	var out []ledgerEvent
-	var unattributed int64
+	out, unnamed := attributeStakes(rows, addr)
+	return out, lastHeight(unnamed)
+}
+
+// lastHeight is the highest height of events, 0 for none.
+func lastHeight(events []ledgerEvent) int64 {
+	var h int64
+	for _, ev := range events {
+		h = max(h, ev.Height)
+	}
+	return h
+}
+
+// attributeStakes is attributeRedelegations with each record that may be the
+// wallet's but cannot be matched returned as its own event, in the form it
+// would take as the wallet's, for settleUnnamedStakes to settle from chain
+// state.
+func attributeStakes(rows []ledgerAttrRow, addr string) ([]ledgerEvent, []ledgerEvent) {
+	var out, unmatched []ledgerEvent
 	for start := 0; start < len(rows); {
 		end := start
 		for end < len(rows) && rows[end].MessageID == rows[start].MessageID {
@@ -761,15 +1110,33 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 		events := groupLedgerRows(rows[start:end])
 		start = end
 		delegators := map[string]bool{}
+		paid := unbondPaid(events)
+		var unnamed []ledgerEvent
 		for _, ev := range events {
-			for _, rec := range ev.records() {
-				switch {
-				case ev.Type == "withdraw_rewards" && rec["delegator"] != "":
-					delegators[rec["delegator"]] = true
-				case ev.Type == "message" && rec["module"] == "staking" && rec["sender"] != "":
-					delegators[rec["sender"]] = true
+			switch ev.Type {
+			case "withdraw_rewards":
+				for _, rec := range ev.records() {
+					if rec["delegator"] != "" {
+						delegators[rec["delegator"]] = true
+					}
+				}
+			case "message":
+				for _, d := range stakingMessageSenders(ev.Attrs) {
+					delegators[d] = true
+				}
+			case "redelegate", "delegate", "unbond":
+				for _, rec := range ev.records() {
+					if rec["delegator"] == "" {
+						unnamed = append(unnamed, ownedEvent(ev, rec, paid, addr))
+					}
 				}
 			}
+		}
+		if len(delegators) == 0 {
+			// The message names the wallet, but nothing in it says whose
+			// stake moved: refuse rather than guess either way.
+			unmatched = append(unmatched, unnamed...)
+			continue
 		}
 		if !delegators[addr] {
 			continue
@@ -786,36 +1153,33 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 						withdrawn[rec["validator"]][rec["delegator"]] = true
 					}
 				}
-			case "redelegate":
+			case "redelegate", "delegate", "unbond":
 				var attrs []ledgerAttr
 				for _, rec := range ev.records() {
 					if rec["delegator"] != "" {
 						continue
 					}
+					validator := rec["validator"]
+					if ev.Type == "redelegate" {
+						validator = rec["source_validator"]
+					}
 					owner := ""
 					if len(delegators) == 1 {
 						owner = addr
-					} else if w := withdrawn[rec["source_validator"]]; len(w) == 1 {
+					} else if w := withdrawn[validator]; len(w) == 1 {
 						for d := range w {
 							owner = d
 						}
 					}
 					if owner == "" {
-						if ev.Height > unattributed {
-							unattributed = ev.Height
-						}
+						unmatched = append(unmatched, ownedEvent(ev, rec, paid, addr))
 						continue
 					}
 					withdrawn = map[string]map[string]bool{}
 					if owner != addr {
 						continue
 					}
-					for _, k := range []string{"source_validator", "destination_validator", "amount", "completion_time"} {
-						if v, ok := rec[k]; ok {
-							attrs = append(attrs, ledgerAttr{Key: k, Value: v})
-						}
-					}
-					attrs = append(attrs, ledgerAttr{Key: "delegator", Value: addr})
+					attrs = append(attrs, ownedEvent(ev, rec, paid, addr).Attrs...)
 				}
 				if len(attrs) > 0 {
 					out = append(out, ledgerEvent{ID: ev.ID, Msg: ev.Msg, Height: ev.Height, Time: ev.Time, Phase: ev.Phase, Type: ev.Type, Attrs: attrs})
@@ -823,7 +1187,85 @@ func attributeRedelegations(rows []ledgerAttrRow, addr string) ([]ledgerEvent, i
 			}
 		}
 	}
-	return out, unattributed
+	return out, unmatched
+}
+
+// ownedEvent is the record rec of the staking event ev as the wallet's own:
+// its attributes with the wallet as delegator. paid is the message's
+// unbondPaid.
+func ownedEvent(ev ledgerEvent, rec map[string]string, paid, addr string) ledgerEvent {
+	own := map[string]string{}
+	for k, v := range rec {
+		own[k] = v
+	}
+	if ev.Type == "unbond" {
+		// The event names the tokens asked for, which fix the shares taken;
+		// the paid amount is what the unbonding entry holds.
+		own["requested"] = own["amount"]
+		if paid != "" {
+			own["amount"] = paid
+		}
+	}
+	var attrs []ledgerAttr
+	for _, k := range []string{"validator", "source_validator", "destination_validator", "amount", "requested", "new_shares", "completion_time"} {
+		if v, ok := own[k]; ok {
+			attrs = append(attrs, ledgerAttr{Key: k, Value: v})
+		}
+	}
+	attrs = append(attrs, ledgerAttr{Key: "delegator", Value: addr})
+	return ledgerEvent{ID: ev.ID, Msg: ev.Msg, Height: ev.Height, Time: ev.Time, Phase: ev.Phase, Type: ev.Type, Attrs: attrs}
+}
+
+// unbondPaid is the tokens a message's one undelegation moved into the
+// unbonding pool, or "" when that is not certain. Before Gaia v15 the unbond
+// event names the amount the delegator asked for; the unbonding entry holds
+// the tokens its shares were worth, rounded down, which can be less. The
+// bonded pool's transfer to the not-bonded pool in the same message carries
+// that amount, when the validator is bonded and the message holds one
+// undelegation and one such transfer. Gaia v15 and later name the paid amount
+// on the event itself.
+func unbondPaid(events []ledgerEvent) string {
+	bonded, notBonded := moduleAccount(stakingtypes.BondedPoolName), moduleAccount(stakingtypes.NotBondedPoolName)
+	unbonds, transfers := 0, []string{}
+	for _, ev := range events {
+		for _, rec := range ev.records() {
+			switch {
+			case ev.Type == "unbond":
+				unbonds++
+			case ev.Type == "transfer" && rec["sender"] == bonded && rec["recipient"] == notBonded && rec["amount"] != "":
+				transfers = append(transfers, rec["amount"])
+			}
+		}
+	}
+	if unbonds != 1 || len(transfers) != 1 || bonded == "" || notBonded == "" {
+		return ""
+	}
+	return transfers[0]
+}
+
+// moduleAccount is a module's account address, or "" when it cannot be formed.
+func moduleAccount(name string) string {
+	a, err := sdk.Bech32ifyAddressBytes(sdk.GetConfig().GetBech32AccountAddrPrefix(), authtypes.NewModuleAddress(name))
+	if err != nil {
+		return ""
+	}
+	return a
+}
+
+// stakingMessageSenders is the delegators a staking message event names. The
+// staking module emits module=staking followed by sender=<delegator>; SDK
+// 0.42 to 0.45 merge every message event of a message into one, so other
+// modules' senders (the distribution module paying out rewards, for one) sit
+// in the same event and only the sender right after module=staking is the
+// delegator's.
+func stakingMessageSenders(attrs []ledgerAttr) []string {
+	var out []string
+	for i := 0; i+1 < len(attrs); i++ {
+		if attrs[i].Key == "module" && attrs[i].Value == "staking" && attrs[i+1].Key == "sender" && attrs[i+1].Value != "" {
+			out = append(out, attrs[i+1].Value)
+		}
+	}
+	return out
 }
 
 type ledgerFeeRow struct {
@@ -842,27 +1284,53 @@ type ledgerFeeRow struct {
 // grants paid for. A successful transaction paid its declared fee. A failed
 // one paid what its block results show; ones not yet recorded are read from
 // the node, and the count still unknown is returned.
-func (s *Server) ledgerFees(ids []int64, addr string, lo, hi int64, node *ledgerNode) ([]ledgerFee, int, error) {
+func (s *Server) ledgerFees(chain string, ids []int64, addr string, lo, hi int64, node *ledgerNode) ([]ledgerFee, int, error) {
 	var rows []ledgerFeeRow
-	if err := s.db.Raw(`
-SELECT x.id AS tx_id, x.hash, b.height, x.code, d.base AS denom, f.amount::text AS amount,
-       o.tx_id IS NOT NULL AS resolved, COALESCE(o.charged, '') AS charged
-FROM (
-  SELECT f.tx_id, f.denomination_id, f.amount FROM fees f
+	// A row with an effective inclusion pays as that inclusion did: at its
+	// block, with its outcome and through its fee grant.
+	rel, rp := s.effectiveRel()
+	prefix, payer, granted := "", `fees f
   JOIN addresses ad ON ad.id = f.payer_address_id
-  WHERE ad.address = @addr AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = f.tx_id)
-  UNION ALL
-  SELECT f.tx_id, f.denomination_id, f.amount FROM tax_fee_grants g
+  WHERE ad.address = @addr`, `tax_fee_grants g
   JOIN fees f ON f.tx_id = g.tx_id
-  WHERE g.granter = @addr
+  WHERE g.granter = @addr`
+	if s.blockReads {
+		// A repair checks one block at a time, and some wallets it names have
+		// paid over a million fees, so the fees are read from the window's
+		// transactions instead of from the payer.
+		prefix = `WITH w AS MATERIALIZED (SELECT tx_id FROM ` + windowTxs(rel) + ` wt),
+payer AS MATERIALIZED (SELECT id FROM addresses WHERE address = @addr)
+`
+		payer = `w
+  JOIN fees f ON f.tx_id = w.tx_id
+  WHERE f.payer_address_id IN (SELECT id FROM payer)`
+		granted = `w
+  JOIN tax_fee_grants g ON g.tx_id = w.tx_id
+  JOIN fees f ON f.tx_id = g.tx_id
+  WHERE g.granter = @addr`
+	}
+	if err := s.db.Raw(prefix+`SELECT * FROM (`+datedBranches(`
+SELECT x.id AS tx_id, x.hash, b.height, COALESCE(p.code, x.code) AS code, d.base AS denom, f.amount::text AS amount,
+       (p.tx_id IS NOT NULL OR o.tx_id IS NOT NULL) AS resolved,
+       CASE WHEN p.tx_id IS NOT NULL THEN p.charged ELSE COALESCE(o.charged, '') END AS charged
+FROM (
+  SELECT f.tx_id, f.denomination_id, f.amount FROM `+payer+` AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = f.tx_id)
+  AND NOT EXISTS (SELECT 1 FROM `+rel+` pg WHERE pg.tx_id = f.tx_id AND pg.granter <> '')
+  UNION ALL
+  SELECT f.tx_id, f.denomination_id, f.amount FROM `+granted+`
+  UNION ALL
+  SELECT f.tx_id, f.denomination_id, f.amount FROM `+rel+` pg
+  JOIN fees f ON f.tx_id = pg.tx_id
+  WHERE pg.granter = @addr AND NOT EXISTS (SELECT 1 FROM tax_fee_grants g WHERE g.tx_id = pg.tx_id)
 ) f
 JOIN txes x ON x.id = f.tx_id
-JOIN blocks b ON b.id = x.block_id
+{{BLOCK}}
+{{P}}
 JOIN denoms d ON d.id = f.denomination_id
 LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
-WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
-ORDER BY b.height, x.id`,
-		map[string]any{"addr": addr, "ids": ids, "lo": lo, "hi": hi}).
+WHERE b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi {{OWN}}`, rel)+`) u
+ORDER BY height, tx_id`,
+		withParams(rp, map[string]any{qpAddr: addr, qpIDs: ids, "lo": lo, "hi": hi})).
 		Scan(&rows).Error; err != nil {
 		return nil, 0, fmt.Errorf("fees: %w", err)
 	}
@@ -885,8 +1353,9 @@ ORDER BY b.height, x.id`,
 			pending = append(pending, r)
 		}
 	}
-	if len(pending) > 0 && node != nil {
-		resolved := s.resolveFailedFees(pending, node)
+	// A repair run's preview never records fee outcomes.
+	if len(pending) > 0 && node != nil && s.preview == nil {
+		resolved := s.resolveFailedFees(chain, pending, node)
 		for id, charged := range resolved {
 			r := failed[id]
 			r.Resolved, r.Charged = true, charged
@@ -913,14 +1382,14 @@ ORDER BY b.height, x.id`,
 
 // resolveFailedFees reads failed transactions' fee outcomes from the node's
 // block results and records them.
-func (s *Server) resolveFailedFees(rows []ledgerFeeRow, node *ledgerNode) map[uint]string {
+func (s *Server) resolveFailedFees(chain string, rows []ledgerFeeRow, node *ledgerNode) map[uint]string {
 	byHeight := map[int64][]ledgerFeeRow{}
 	for _, r := range rows {
 		byHeight[r.Height] = append(byHeight[r.Height], r)
 	}
 	out := map[uint]string{}
 	for h, rs := range byHeight {
-		charges, err := node.failedTxCharges(h)
+		charges, err := node.failedTxCharges(h, chainParam(chain) == apiMainnet && h < hubFailedTxEventsFrom)
 		if err != nil {
 			continue
 		}
@@ -930,7 +1399,9 @@ func (s *Server) resolveFailedFees(rows []ledgerFeeRow, node *ledgerNode) map[ui
 				continue
 			}
 			if !s.readOnlyLedger {
-				if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&FailedTxFee{TxID: r.TxID, Charged: charged}).Error; err != nil {
+				if err := s.db.Transaction(func(tx *gorm.DB) error {
+					return recordFailedTxFees(tx, []FailedTxFee{{TxID: r.TxID, Charged: charged}}, 1)
+				}); err != nil {
 					continue
 				}
 			}
@@ -964,14 +1435,14 @@ JOIN blocks b ON b.id = x.block_id
 JOIN fees f ON f.tx_id = x.id
 LEFT JOIN tax_failed_tx_fees o ON o.tx_id = x.id
 WHERE b.chain_id IN @ids AND b.height > @lo AND x.code <> 0 AND o.tx_id IS NULL`,
-		map[string]any{"ids": ids, "lo": latest - depth}).Scan(&rows).Error; err != nil {
+		map[string]any{qpIDs: ids, "lo": latest - depth}).Scan(&rows).Error; err != nil {
 		logf("failed-fee sweep: %v", err)
 		return
 	}
 	if len(rows) == 0 {
 		return
 	}
-	done := s.resolveFailedFees(rows, node)
+	done := s.resolveFailedFees(chain, rows, node)
 	logf("failed-fee sweep: recorded %d of %d failed transactions", len(done), len(rows))
 }
 
@@ -1057,7 +1528,7 @@ WHERE be.id IN (
   WHERE left(a0.value, 100) IN @reasons AND a0.value IN @reasons)
 AND t.type = 'slash' AND b.chain_id IN @ids AND b.height > @lo AND b.height <= @hi
 ORDER BY b.height, be.id, a.index`,
-		map[string]any{"reasons": reasons, "ids": ids, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
+		map[string]any{"reasons": reasons, qpIDs: ids, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("slashes: %w", err)
 	}
 	if len(rows) == 0 {
@@ -1299,10 +1770,6 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	if err != nil {
 		return nil, 0, err
 	}
-	unnamed, err := s.unnamedStakingHeights(chain, addr, lowest)
-	if err != nil {
-		return nil, 0, err
-	}
 	lowest = tip.Height
 	var usable []int
 	for i, t := range targets {
@@ -1336,11 +1803,6 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			out[i].Status, out[i].Reason = balanceIncompleteS, reason
 			continue
 		}
-		if k := sort.Search(len(unnamed), func(k int) bool { return unnamed[k] > t.Height }); k < len(unnamed) {
-			out[i].Status = balanceIncompleteS
-			out[i].Reason = fmt.Sprintf("the wallet moved stake at height %d, before Gaia v15 (block %d), when staking events did not name the delegator; rebuilding those from the messages is not deployed yet", unnamed[k], hubStakingDelegatorFrom)
-			continue
-		}
 		usable = append(usable, i)
 		lowest = min(lowest, t.Height)
 	}
@@ -1359,16 +1821,43 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 		return nil, 0, fmt.Errorf("anchor state at height %d: %w", tip.Height, err)
 	}
 	anchor.Time = tip.TimeStamp
-	events, unattributed, err := s.ledgerEvents(ids, addr, operator, lowest, tip.Height)
+	// When every date is below the height the walk would stop at, on a staking
+	// record no delegator is named for, the dates are refused as the walk
+	// refuses them, without reading the rest of the wallet's history.
+	if stop, err := s.unnamedStopAbove(ids, addr, operator, maxTargetHeight(targets, usable), tip.Height, earlyDelegationsAt(node, addr)); err != nil {
+		return nil, 0, err
+	} else if stop > 0 {
+		for _, i := range usable {
+			out[i].Status, out[i].Reason = balanceIncompleteS, unattributedReason(stop)
+		}
+		return out, tip.Height, nil
+	}
+	events, unmatched, err := s.ledgerStakeEvents(ids, addr, operator, lowest, tip.Height)
 	if err != nil {
 		return nil, 0, err
 	}
+	// A staking record no delegator is named for is settled from the
+	// wallet's delegations either side of its block, where the node or the
+	// archive still holds them; otherwise the dates before it are refused.
+	var delegationsAt func(int64) (map[string]*big.Int, error)
+	var rateAt func(string, int64) (validatorRate, error)
+	var onAbsent func(string, int64, shareSpan, bool)
+	if node != nil {
+		budget := newArchiveBudget()
+		delegationsAt = func(h int64) (map[string]*big.Int, error) { return node.delegationsAt(addr, h, budget) }
+		rateAt = func(v string, h int64) (validatorRate, error) { return node.rateAtHeight(v, h, budget) }
+		if node.archive != nil {
+			onAbsent = node.archive.noteAbsent
+		}
+	}
+	owned, unattributed := settleUnnamedStakes(delegationsAt, addr, operator, s.native.Denom, events, unmatched)
+	events = append(events, owned...)
 	if unattributed > 0 {
 		kept := usable[:0]
 		for _, i := range usable {
 			if targets[i].Height < unattributed {
 				out[i].Status = balanceIncompleteS
-				out[i].Reason = fmt.Sprintf("a redelegation at height %d after this date cannot be attributed to one delegator", unattributed)
+				out[i].Reason = unattributedReason(unattributed)
 				continue
 			}
 			kept = append(kept, i)
@@ -1377,7 +1866,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			return out, tip.Height, nil
 		}
 	}
-	fees, unknownFees, err := s.ledgerFees(ids, addr, lowest, tip.Height, node)
+	fees, unknownFees, err := s.ledgerFees(chain, ids, addr, lowest, tip.Height, node)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1405,17 +1894,26 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	for _, i := range usable {
 		heights = append(heights, targets[i].Height)
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, heights)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, RateAt: rateAt, OnAbsent: onAbsent}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {
 			return refuse("the indexed history does not reconcile with chain state: " + inc.msg)
 		}
 		var unk ledgerUnknown
-		if errors.As(err, &unk) {
-			return refuse(unk.msg)
+		if !errors.As(err, &unk) {
+			return nil, 0, err
 		}
-		return nil, 0, err
+		// The days walked before the rebuild stopped are served; only
+		// the days at or below where it stopped are refused.
+		for _, i := range usable {
+			if h, ok := held[targets[i].Height]; ok {
+				out[i].Holdings = h
+			} else {
+				out[i].Status, out[i].Reason = balanceIncompleteS, unk.msg
+			}
+		}
+		return out, tip.Height, nil
 	}
 	for _, i := range usable {
 		out[i].Holdings = held[targets[i].Height]
@@ -1476,7 +1974,7 @@ FROM tax_validator_rates r
 WHERE r.chain = @chain AND r.operator IN @ops AND r.height < @hi
 AND r.height >= COALESCE((SELECT max(p.height) FROM tax_validator_rates p
   WHERE p.chain = @chain AND p.operator = r.operator AND p.height <= @lo), @lo)
-ORDER BY r.operator, r.height`, map[string]any{"chain": chain, "ops": validators, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
+ORDER BY r.operator, r.height`, map[string]any{apiChain: chain, "ops": validators, "lo": lo, "hi": hi}).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("validator rates: %w", err)
 	}
 	out := map[string][]rateSample{}

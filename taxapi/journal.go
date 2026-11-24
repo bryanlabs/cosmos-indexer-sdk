@@ -98,7 +98,7 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 	for i, r := range rows {
 		stamp()
 		rowChain = r.ChainID
-		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+		if r.Excluded || r.FeeOutcomeUnknown || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
 		id := fmt.Sprintf("%s-%d", shortHash(r.TxHash), i)
@@ -116,11 +116,17 @@ func BuildJournal(input []Row, jurisdiction JurisdictionFunc) []JournalLine {
 		if r.UserTag != "" {
 			memo += " tagged " + r.UserTag
 		}
+		if r.SemanticDecision != nil {
+			memo += " [classified " + r.SemanticDecision.Classification + " by the user, parser booked " + r.ClassifiedFrom + "]"
+		}
 		if r.PriceMissing {
 			memo += " [no USD price: quantity only]"
 		}
 		if r.PriceImplied {
 			memo += " [price implied from the other swap leg]"
+		}
+		if r.PriceUserSupplied {
+			memo += " [user-supplied USD price]"
 		}
 		asset := acctDigitalAssets + ": " + r.Symbol
 		val := r.ValueUSD

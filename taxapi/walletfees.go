@@ -24,10 +24,20 @@ const feeChargedCondition = `(txes.code = 0 OR NOT EXISTS (
  WHERE uncharged.tx_id = fees.tx_id AND uncharged.charged = '')
  OR EXISTS (SELECT 1 FROM messages ran WHERE ran.tx_id = fees.tx_id AND NOT ran.opaque))`
 
+// feeOutcomeUnknownColumn marks a failed transaction's fee whose outcome is
+// not recorded: the chain may have charged it or nothing. A failed row with
+// decoded messages is a copy that ran (see feeChargedCondition) and paid. The
+// unique index on txes.hash keeps that payment from appearing twice.
+const feeOutcomeUnknownColumn = `(txes.code <> 0 AND NOT EXISTS (
+ SELECT 1 FROM tax_failed_tx_fees settled WHERE settled.tx_id = fees.tx_id)
+ AND NOT EXISTS (SELECT 1 FROM messages ran WHERE ran.tx_id = fees.tx_id AND NOT ran.opaque)) AS outcome_unknown`
+
 // walletFees loads every payer-side fee the chain charged in [start,end),
 // including fees on failed transactions that passed the ante handler and
 // transactions with no classified taxable event, and leaving out failed
-// transactions recorded as charged nothing.
+// transactions recorded as charged nothing. A failed transaction with no
+// recorded outcome comes back with OutcomeUnknown set: reports count it as
+// nothing and show its declared amount beside the flag (OPS-810).
 func (s *Server) walletFees(chain, addr string, start, end time.Time) ([]feeRec, error) {
 	if s.readOnlyLedger {
 		return s.effectiveWalletFees(chain, addr, start, end)
@@ -44,7 +54,7 @@ func (s *Server) walletFees(chain, addr string, start, end time.Time) ([]feeRec,
 	// Resolve the unique address before planning the fee query. A join hides
 	// heavy payers from PostgreSQL's per-payer cardinality statistics.
 	q := s.db.Table("fees").
-		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
+		Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash, "+feeOutcomeUnknownColumn).
 		Joins("JOIN denoms ON denoms.id = fees.denomination_id").
 		Joins("JOIN txes ON txes.id = fees.tx_id").
 		Joins("JOIN blocks ON blocks.id = txes.block_id").

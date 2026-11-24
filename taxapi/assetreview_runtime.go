@@ -132,20 +132,96 @@ func ApplyAssetDecisions(rows []Row, decisions AssetDecisions) ([]Row, error) {
 		row.DecimalsAssumed = false
 		row.Excluded = false
 	}
+	classified, err := applySemanticDecisions(out, decisions, used)
+	if err != nil {
+		return nil, err
+	}
+	applyUserPrices(out, decisions)
 	// A record ID that matches nothing is a stale or foreign decision and is
-	// refused. A denom or policy key that matches nothing is harmless: the token
-	// simply did not appear in this period, so a remembered rule can be sent
-	// with every report.
+	// refused, and so is a classification on a record that waits on no
+	// classification review. A denom, policy or price key that matches nothing is harmless:
+	// the token did not appear in this period, or a reference price has since
+	// covered the row, so a remembered rule can be sent with every report.
 	for key := range decisions {
-		if !used[key] && decisionKeyKind(key) == apiRecord {
+		kind := decisionKeyKind(key)
+		if !used[key] && (kind == apiRecord || kind == decisionKindSemantic) {
 			return nil, fmt.Errorf("asset decision does not match a flagged receipt in this report: %s", key)
+		}
+		if kind == apiRecord && decisions[key].Classification != "" && !classified[key] {
+			return nil, fmt.Errorf("asset decision %q: classification on a receipt that waits on no classification review", key)
 		}
 	}
 	return out, nil
 }
 
-// UnmatchedDecisionKeys lists the denom and policy keys that decided nothing
-// in these rows, so a client can show which remembered rules were idle.
+// userPriceFor is the user's unit price for an unpriced row and the key it
+// came from: the row's own price key (a total value, divided by the
+// quantity) first, then the denom's price for the row's UTC day.
+func userPriceFor(r Row, decisions AssetDecisions) (decimal.Decimal, string, bool) {
+	if k := r.rowKey(); k != "" && r.Amount.IsPositive() {
+		key := DecisionKeyPricePrefix + k
+		if d, ok := decisions[key]; ok && d.ValueUSD != "" {
+			return decimal.RequireFromString(d.ValueUSD).DivRound(r.Amount, 18), key, true
+		}
+	}
+	key := DecisionKeyPricePrefix + r.Denom + "@" + r.Time.UTC().Format(apiDateLayout)
+	if d, ok := decisions[key]; ok && d.UnitValueUSD != "" {
+		return decimal.RequireFromString(d.UnitValueUSD), key, true
+	}
+	return decimal.Decimal{}, "", false
+}
+
+// applyUserPrices values the rows still missing a price with the user's own
+// price: keys. Only a missing price is filled: an oracle, pegged or implied
+// price is never replaced, and a flagged receipt is valued only through its
+// identity decision. The row is marked user-supplied so every export says so.
+func applyUserPrices(rows []Row, decisions AssetDecisions) {
+	if !hasUserPrices(decisions) {
+		return
+	}
+	for i := range rows {
+		r := &rows[i]
+		if !r.PriceMissing || r.AssetIdentity != nil || r.Excluded {
+			continue
+		}
+		price, key, ok := userPriceFor(*r, decisions)
+		if !ok {
+			continue
+		}
+		r.PriceUSD = price
+		r.ValueUSD = r.Amount.Mul(price)
+		if d := decisions[key]; d.ValueUSD != "" {
+			r.ValueUSD = decimal.RequireFromString(d.ValueUSD)
+		}
+		r.PriceMissing = false
+		r.PriceUserSupplied = true
+		r.UserPriceKey = key
+	}
+}
+
+func hasUserPrices(decisions AssetDecisions) bool {
+	for key := range decisions {
+		if decisionKeyKind(key) == decisionKindPrice {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUserPriceRowKeys reports whether a price: key names a single row, which
+// needs the rows' message indexes loaded first.
+func hasUserPriceRowKeys(decisions AssetDecisions) bool {
+	for key := range decisions {
+		if decisionKeyKind(key) == decisionKindPrice && userPriceRowKey(key) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmatchedDecisionKeys lists the denom, policy and price keys that decided
+// nothing in these rows, so a client can show which remembered rules were
+// idle. A price key whose rows now have a reference price is idle too.
 func UnmatchedDecisionKeys(rows []Row, decisions AssetDecisions) []string {
 	used := map[string]bool{}
 	for _, r := range rows {
@@ -154,6 +230,12 @@ func UnmatchedDecisionKeys(rows []Row, decisions AssetDecisions) []string {
 		}
 		if r.AssetIdentity != nil && r.AssetDecision != nil && r.AssetDecision.AppliedFrom == "" {
 			used[r.AssetIdentity.RecordID] = true
+		}
+		if r.UserPriceKey != "" {
+			used[r.UserPriceKey] = true
+		}
+		if r.SemanticDecision != nil {
+			used[r.SemanticRecordID] = true
 		}
 	}
 	var out []string
@@ -247,7 +329,7 @@ func (s *Server) rowsForRequest(r *http.Request, chain string, addresses []strin
 // applyTags loads the message indexes when a row key needs them, then
 // applies the tags.
 func (s *Server) applyTags(rows []Row, tags UserTags) ([]Row, error) {
-	if tags.hasRowKeys() {
+	if tags.hasRowKeys() && !messageIndexesLoaded(rows) {
 		if err := s.loadMessageIndexes(rows); err != nil {
 			return nil, err
 		}
@@ -256,6 +338,17 @@ func (s *Server) applyTags(rows []Row, tags UserTags) ([]Row, error) {
 }
 
 const messageIndexChunk = 5000
+
+// messageIndexesLoaded reports whether every row with a message already has
+// its message index.
+func messageIndexesLoaded(rows []Row) bool {
+	for _, r := range rows {
+		if r.MessageID != 0 && !r.hasMessageIndex {
+			return false
+		}
+	}
+	return true
+}
 
 // loadMessageIndexes sets each row's MessageIndex from its stored message,
 // a primary-key lookup per message. A message index never changes once
@@ -374,7 +467,9 @@ func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
 			"record_id":           "one receipt; override carries quantity, value_usd, cost_basis_usd and acquired_date totals",
 			"denom:<raw>":         "every flagged receipt of that token in the report; override carries token and unit_value_usd, each receipt is priced quantity times unit on its own date",
 			DecisionKeySpamPolicy: "every receipt flagged as suspected spam without a more specific decision; exclude only (spam_policy=valueless is the same thing)",
+			"semantic_record_id":  "one row of semantic_reviews, keyed by its SemanticRecordID; carries classification and no mode, with value_usd for an unpriced row and cost_basis_usd and acquired_date for a transfer_in. A flagged receipt's SemanticRecordID is its record_id, where classification rides beside the mode",
 		},
+		"classifications": ClassificationVocabulary(),
 	})
 }
 

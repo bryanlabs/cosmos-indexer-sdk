@@ -22,7 +22,7 @@ func reviewFingerprint(rows []Row) string {
 		if row.AssetIdentity != nil {
 			ids = append(ids, row.AssetIdentity.RecordID)
 		}
-		if reason := semanticReviewReason(row); reason != "" {
+		if reason := rawSemanticReviewReason(row); reason != "" {
 			ids = append(ids, "semantic:"+row.TxHash+":"+row.Direction+":"+row.Denom+":"+reason+":"+row.Detail)
 		}
 	}
@@ -83,13 +83,20 @@ func (s *Server) reviewEvidenceInSnapshot(chain string, addresses []string, ev *
 	if err != nil {
 		return "", err
 	}
+	// A failed transaction's recorded fee outcome decides whether its fee
+	// counts, so it is hashed too. Its writers do not reach the evidence
+	// journal; they mark the payers' reports stale instead
+	// (recordFailedTxFees). Successful transactions add nothing, keeping
+	// their wallets' digests as they were.
 	fees, err := s.db.Table("fees f").
-		Select("jsonb_build_array(to_jsonb(f), a.address, d.base, t.memo, t.hash, t.code, b.time_stamp, c.chain_id)::text").
+		Select("jsonb_build_array(to_jsonb(f), a.address, d.base, t.memo, t.hash, t.code, b.time_stamp, c.chain_id)::text, "+
+			"CASE WHEN t.code <> 0 THEN jsonb_build_array(f.id, o.charged)::text END").
 		Joins("JOIN addresses a ON a.id=f.payer_address_id").
 		Joins("JOIN denoms d ON d.id=f.denomination_id").
 		Joins("JOIN txes t ON t.id=f.tx_id").
 		Joins("JOIN blocks b ON b.id=t.block_id").
 		Joins("JOIN chains c ON c.id=b.chain_id").
+		Joins("LEFT JOIN tax_failed_tx_fees o ON o.tx_id=f.tx_id").
 		Where("c.chain_id IN ? AND a.address IN ?", chainIDs(chain), addresses).
 		Order("f.id").Rows()
 	if err != nil {
@@ -97,11 +104,15 @@ func (s *Server) reviewEvidenceInSnapshot(chain string, addresses []string, ev *
 	}
 	for fees.Next() {
 		var exact string
-		if err := fees.Scan(&exact); err != nil {
+		var outcome sql.NullString
+		if err := fees.Scan(&exact, &outcome); err != nil {
 			_ = fees.Close()
 			return "", err
 		}
 		writeFinancialFingerprintRow(h, "fee", exact)
+		if outcome.Valid {
+			writeFinancialFingerprintRow(h, "fee_outcome", outcome.String)
+		}
 	}
 	err = fees.Err()
 	_ = fees.Close()

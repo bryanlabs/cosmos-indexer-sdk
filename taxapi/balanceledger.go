@@ -1,7 +1,11 @@
 package taxapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"sort"
 	"strconv"
@@ -115,6 +119,12 @@ type ledgerInput struct {
 	// Samples holds the recorded rates before the anchor of the validators
 	// whose rate is not one, ascending by height.
 	Samples map[string][]rateSample
+	// RateAt, when set, reads a validator's rate at the end of a block from
+	// chain state, for a point no recorded rate bounds on one side.
+	RateAt func(v string, height int64) (validatorRate, error)
+	// OnAbsent, when set, hears of each delegation RateAt found no validator
+	// for at a target, and whether it was shown as zero.
+	OnAbsent func(v string, height int64, sp shareSpan, accepted bool)
 }
 
 // ledgerHoldings is the rebuilt state at one block, in base units.
@@ -231,15 +241,27 @@ var shareEpsilon = decimal.New(1, -18)
 // before a point, lowered by the full fraction of each slash in between, and
 // the oldest recorded rate after it, raised the same way, bound it. A
 // validator at exactly one token per share at the anchor with no slash in the
-// window was at one throughout.
+// window was at one throughout. A side no recorded rate covers is read from
+// chain state at the block that bounds it, when the walk can read it.
 type rateBook struct {
 	unit    map[string]bool
 	samples map[string][]rateSample
 	slashes map[string][]ledgerSlash
+	anchor  int64
+	read    func(v string, height int64) (validatorRate, error)
+	// unread is the validator rates at a height the read did not return,
+	// and absent those it answered the validator did not exist for.
+	unread map[rateRead]bool
+	absent map[rateRead]bool
+}
+
+type rateRead struct {
+	v      string
+	height int64
 }
 
 func newRateBook(in ledgerInput) rateBook {
-	b := rateBook{unit: map[string]bool{}, samples: map[string][]rateSample{}, slashes: map[string][]ledgerSlash{}}
+	b := rateBook{unit: map[string]bool{}, samples: map[string][]rateSample{}, slashes: map[string][]ledgerSlash{}, anchor: in.Anchor.Height, read: in.RateAt, unread: map[rateRead]bool{}, absent: map[rateRead]bool{}}
 	for _, sl := range in.Slashes {
 		b.slashes[sl.Validator] = append(b.slashes[sl.Validator], sl)
 	}
@@ -272,6 +294,11 @@ func (b rateBook) at(v string, lastBefore, firstAfter, cut int64) (decimal.Decim
 	ss := b.samples[v]
 	i := sort.Search(len(ss), func(k int) bool { return ss[k].Height > lastBefore }) - 1
 	j := sort.Search(len(ss), func(k int) bool { return ss[k].Height >= firstAfter })
+	// A side no sample bounds is read, one side at a time, and the bounds
+	// are looked up again with the new sample.
+	if (i < 0 && b.fill(v, lastBefore)) || (i >= 0 && j >= len(ss) && b.fill(v, firstAfter)) {
+		return b.at(v, lastBefore, firstAfter, cut)
+	}
 	if i < 0 || j >= len(ss) {
 		return one, one, ledgerUnknown{fmt.Sprintf("the tokens per share of %s around height %d are not recorded", v, cut)}
 	}
@@ -303,6 +330,32 @@ func (b rateBook) at(v string, lastBefore, firstAfter, cut int64) (decimal.Decim
 	return lo, hi, nil
 }
 
+// fill reads v's rate at the end of block height from chain state and adds
+// it as a sample. It reports false, and adds nothing, when the book has no
+// read, the height is outside the walk, or the read fails; a rate is never
+// guessed.
+func (b rateBook) fill(v string, height int64) bool {
+	key := rateRead{v, height}
+	if b.read == nil || height < 1 || height > b.anchor || b.unread[key] {
+		return false
+	}
+	r, err := b.read(v, height)
+	if err != nil || r.Tokens == nil {
+		b.unread[key] = true
+		if errors.Is(err, errArchiveAbsent) {
+			b.absent[key] = true
+		}
+		return false
+	}
+	ss := b.samples[v]
+	at := sort.Search(len(ss), func(k int) bool { return ss[k].Height >= height })
+	ss = append(ss, rateSample{})
+	copy(ss[at+1:], ss[at:])
+	ss[at] = rateSample{height, r}
+	b.samples[v] = ss
+	return true
+}
+
 // sharesFor bounds the shares that tokens between tlo and thi bought or were
 // paid out for on v in block h: the tokens over the rate, truncated to the
 // chain's 18 places. Truncation is monotone, so truncating the quotients at
@@ -316,6 +369,30 @@ func (b rateBook) sharesFor(v string, h int64, tlo, thi decimal.Decimal) (decima
 		return tlo, thi, err
 	}
 	return shareTrunc(tlo.DivRound(rhi, rateDigits)), shareTrunc(thi.DivRound(rlo, rateDigits)), nil
+}
+
+// requestedShareTokens is the bond tokens an unbond asked for, when the
+// record names them apart from the tokens it paid.
+func requestedShareTokens(rec map[string]string, bondDenom string) (decimal.Decimal, bool) {
+	if rec["requested"] == "" {
+		return decimal.Zero, false
+	}
+	coins, err := ledgerCoins(rec["requested"], bondDenom)
+	if err != nil {
+		return decimal.Zero, false
+	}
+	n := bondAmount(coins, bondDenom)
+	if n == nil || n.Sign() <= 0 {
+		return decimal.Zero, false
+	}
+	return decimal.NewFromBigInt(n, 0), true
+}
+
+// sharesLeft says the wallet certainly still holds shares on v at this point
+// of the walk back, after the event being undone.
+func sharesLeft(shares map[string]*shareSpan, v string) bool {
+	sp, ok := shares[v]
+	return ok && sp.lo.GreaterThan(shareEpsilon)
 }
 
 // shareTrunc truncates a computed quotient to the chain's 18 share places,
@@ -379,7 +456,12 @@ func (b rateBook) shown(v string, h int64, sp shareSpan) (*big.Int, *big.Int, er
 }
 
 // walkBack rebuilds the wallet at each target height (all at or below the
-// anchor). Targets are answered from the same event set.
+// anchor). Targets are answered from the same event set, newest first, and
+// the holdings at a target depend only on the anchor and the events above
+// it. So when the rebuild stops on something the index lacks (a
+// ledgerUnknown), the targets already answered above that point are
+// returned with the error and the caller refuses only the rest. Any other
+// error returns no holdings.
 func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error) {
 	events := append([]ledgerEvent(nil), in.Events...)
 	sort.SliceStable(events, func(i, j int) bool {
@@ -414,13 +496,20 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 	spent := bondSpentByMessage(in)
 	ei, fi := 0, 0
 	out := make(map[int64]ledgerHoldings, len(order))
+	stop := func(err error) (map[int64]ledgerHoldings, error) {
+		var unk ledgerUnknown
+		if errors.As(err, &unk) {
+			return out, err
+		}
+		return nil, err
+	}
 	for _, h := range order {
 		if h > in.Anchor.Height {
 			return nil, fmt.Errorf("target height %d is after the anchor %d", h, in.Anchor.Height)
 		}
 		for ei < len(events) && events[ei].Height > h {
 			if err := undoEvent(in, book, spent, events[ei], liquid, shares); err != nil {
-				return nil, err
+				return stop(err)
 			}
 			ei++
 		}
@@ -441,13 +530,39 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		}
 		tiny := shareEpsilon.Mul(decimal.NewFromInt(1000))
 		for v, sp := range shares {
+			if sp.hi.LessThanOrEqual(tiny.Neg()) {
+				// Fewer than no shares: the index lacks an event that added
+				// them (an undelegation it never saw, say). Later days were
+				// rebuilt from the same gap and may show 0 for a delegation
+				// that existed, so the whole wallet refuses.
+				log.Printf("balance ledger: negative share span at height %d on validator %s [%s, %s]", h, hashLabel(v), sp.lo, sp.hi)
+				return nil, ledgerInconsistent{fmt.Sprintf("rebuilt shares at height %d are below zero (%s to %s), so the index is missing an event", h, sp.lo, sp.hi)}
+			}
 			if sp.lo.Sign() <= 0 && sp.hi.LessThan(tiny) {
 				// Emptied: no tokens at any rate, so no rate is needed.
 				continue
 			}
 			amt, bound, err := book.shown(v, h, *sp)
+			if err != nil && book.absent[rateRead{v, h}] {
+				// The archive answered that v did not exist at h, so no one
+				// held a delegation on it. That is the wallet's figure only
+				// if its own rebuild allows zero and none of its staking
+				// records on v leaves a delegator or validator unnamed.
+				switch {
+				case sp.lo.GreaterThan(tiny) || sp.hi.LessThan(tiny.Neg()):
+					if in.OnAbsent != nil {
+						in.OnAbsent(v, h, *sp, false)
+					}
+					return stop(ledgerInconsistent{fmt.Sprintf("the rebuilt delegation on %s at height %d is not zero, but the validator did not exist then", v, h)})
+				case stakeRecordsNamed(events[:ei], v):
+					if in.OnAbsent != nil {
+						in.OnAbsent(v, h, *sp, true)
+					}
+					continue
+				}
+			}
 			if err != nil {
-				return nil, err
+				return stop(err)
 			}
 			if amt.Sign() != 0 || bound.Sign() != 0 {
 				hold.Delegations[v] = amt
@@ -466,6 +581,31 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 		out[h] = hold
 	}
 	return out, nil
+}
+
+// stakeRecordsNamed says whether every staking record in events that may
+// touch v names its delegator, and every one names a validator, so that none
+// of them can be a change to the wallet's shares on v that the walk skipped.
+func stakeRecordsNamed(events []ledgerEvent, v string) bool {
+	for _, ev := range events {
+		switch ev.Type {
+		case "delegate", "unbond", "redelegate", "cancel_unbonding_delegation", "tokenize_shares", "redeem_shares":
+		default:
+			continue
+		}
+		for _, rec := range ev.records() {
+			vals := []string{rec["validator"], rec["source_validator"], rec["destination_validator"]}
+			named, touches := false, false
+			for _, x := range vals {
+				named = named || x != ""
+				touches = touches || x == v
+			}
+			if !named || (touches && rec["delegator"] == "") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // undoEvent reverses one event's effect on the wallet's liquid balance and
@@ -537,6 +677,19 @@ func undoEvent(in ledgerInput, book rateBook, spent map[uint64]*big.Int, ev ledg
 				// rounded down.
 				if book.unit[v] {
 					add(v, amt, amt)
+					continue
+				}
+				if req, ok := requestedShareTokens(rec, in.BondDenom); ok && sharesLeft(shares, v) {
+					// Before Gaia v15 the tokens asked for are known. The
+					// chain takes them over the rate, truncated, and caps
+					// that at the delegation's shares only when it takes
+					// the whole delegation; shares left after the unbond
+					// rule the cap out.
+					lo, hi, err := book.sharesFor(v, ev.Height, req, req)
+					if err != nil {
+						return wrap(err)
+					}
+					add(v, lo, hi)
 					continue
 				}
 				lo, hi, err := book.sharesFor(v, ev.Height, amt, amt.Add(one))
@@ -755,4 +908,10 @@ func unbondingAt(in ledgerInput, h int64) (map[string]*big.Int, map[string]*big.
 		}
 	}
 	return out, bounds
+}
+
+// hashLabel names a validator in logs without printing its address.
+func hashLabel(v string) string {
+	sum := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(sum[:4])
 }

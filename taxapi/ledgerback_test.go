@@ -106,7 +106,7 @@ func TestBlockTxsFromCache(t *testing.T) {
 		t.Fatalf("granted tx accounts %v", txs[0].Accounts)
 	}
 
-	charges, err := node.failedTxCharges(23763459)
+	charges, err := node.failedTxCharges(23763459, false)
 	if err != nil {
 		t.Fatal(err)
 	}

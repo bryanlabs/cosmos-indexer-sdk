@@ -29,6 +29,7 @@ var evidenceTestSchema = []string{
 	`CREATE TABLE messages (id bigserial PRIMARY KEY, tx_id bigint REFERENCES txes(id), message_type_id bigint REFERENCES message_types(id), message_index bigint, message_bytes bytea, opaque boolean DEFAULT false NOT NULL)`,
 	`CREATE TABLE failed_messages (id bigserial PRIMARY KEY, message_index bigint, tx_id bigint REFERENCES txes(id))`,
 	`CREATE TABLE fees (id bigserial PRIMARY KEY, tx_id bigint REFERENCES txes(id), amount numeric(78,0), denomination_id bigint REFERENCES denoms(id), payer_address_id bigint REFERENCES addresses(id))`,
+	`CREATE TABLE tax_failed_tx_fees (tx_id bigint PRIMARY KEY, charged text NOT NULL)`,
 	`CREATE TABLE tx_signer_addresses (tx_id bigint NOT NULL REFERENCES txes(id), address_id bigint NOT NULL REFERENCES addresses(id), PRIMARY KEY (tx_id, address_id))`,
 	`CREATE TABLE message_events (id bigserial PRIMARY KEY, index bigint, message_id bigint REFERENCES messages(id), message_event_type_id bigint REFERENCES message_event_types(id))`,
 	`CREATE TABLE message_event_attributes (id bigserial PRIMARY KEY, message_event_id bigint REFERENCES message_events(id), value text, index bigint, message_event_attribute_key_id bigint REFERENCES message_event_attribute_keys(id))`,

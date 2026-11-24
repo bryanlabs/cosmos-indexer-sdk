@@ -23,8 +23,9 @@ never updated by this feature.
 
 The optional `asset_decisions` query parameter is a JSON object. The web
 application uses the camel-case `assetDecisions` request-body field and forwards
-it to the SDK. Keys come in three kinds, and the most specific one wins for each
-receipt:
+it to the SDK. Keys for flagged receipts come in three kinds, and the most
+specific one wins for each receipt (user prices, below, have their own `price:`
+keys):
 
 | Key | Reaches | Override shape |
 | --- | --- | --- |
@@ -40,7 +41,9 @@ decided the receipt or a rule did. `applied_from` is server-set and rejected on
 input. An unknown record ID is rejected (400) because it is stale or foreign. An
 idle `denom:` or `policy:` key is accepted and listed in
 `unmatched_decision_keys` of `/asset-review`, so a remembered rule can be sent
-with every report.
+with every report. Rows waiting on classification review have a fourth key
+kind, `<record_id>:semantic:<hash>`, described under "Classifying rows held for
+semantic review" below.
 
 Each entry is one of:
 
@@ -68,8 +71,40 @@ Quantity is positive. USD value and basis are separate TOTAL amounts for the
 record, both manually entered and nonnegative. Explicit zero is valid; omission
 is not zero. The acquisition date must be valid and no later than the receipt.
 Plain decimals are bounded to 38 digits and 18 decimal places. At most 500
-decisions and 256 KiB of decision JSON are accepted; narrow the report range
+non-price decisions, 25,000 `price:` keys and 4 MiB of decision JSON are
+accepted, plus 10,000 semantic classification keys; narrow the report range
 when necessary. No excess rows or decisions are silently discarded.
+
+## User-entered prices for missing-price rows
+
+A row the oracle, the exact USDC peg and the other swap leg could not price is
+`price_missing`. A person can fill it with their own USD value through the same
+`asset_decisions` map, using `mode: "override"` and the existing value fields:
+
+| Key | Reaches | Shape |
+| --- | --- | --- |
+| `price:<raw_denom>@<YYYY-MM-DD>` | every price-missing row of that on-chain denom on that UTC day | `{"mode":"override","unit_value_usd":"0.42"}` |
+| `price:<HASH>#<message_index>#<sub_index>` | that one row (the preview's `Row Key`, uppercase hash) | `{"mode":"override","value_usd":"12.50"}`, the row's total |
+
+The row key wins over the denom and day key. A user price sets the value only:
+the row keeps its token, quantity, date and category, and its basis follows the
+methodology (the value for income, unknown for a transfer in), so `token`,
+`quantity`, `cost_basis_usd` and `acquired_date` are rejected on a `price:` key.
+It never replaces an oracle, pegged or implied price and never reaches a
+flagged receipt, which is valued through its identity decision. Any denom
+works, including `factory/...` and `cw20:...` tokens; the denom may not contain
+`@`. Explicit zero is valid. An idle `price:` key is accepted and listed in
+`unmatched_decision_keys`.
+
+The value is user-supplied, not an oracle price, and is labelled that way in
+every output: the preview and Generic CSV carry `Price Source`/`price_source`
+`user` and the `User Price Key`/`user_price_key` that set it (both also carry
+each row's key, `Row Key`/`row_key`, for building a row price), other CSV
+descriptions add "(user-supplied price, not an oracle price)", the journal memo
+adds "[user-supplied USD price]", and a Form 8949 line adds "(user-supplied sale
+price)" or "(user-supplied receipt price)". The preview's `Price Source` is
+otherwise `reference`, `implied`, `asset_review` or `missing`, and its `Denom`
+and `Row Key` columns give the keys to use.
 
 ## Reason codes and groups
 
@@ -136,8 +171,68 @@ Unknown contract claims retain observed transfer legs, `unknown_claim` as the
 source trigger, and `review_required="true"` with
 `review_reason="unknown_claim_semantics"` in detail. These rows are not certified
 as income or returned principal. Asset exclusions, price overrides, denom rules,
-spam policy and user tags do not resolve this semantic blocker. Actual classifier
-review and successful reindexing are required; no tax-policy override is inferred.
+spam policy and user tags do not resolve this semantic blocker. A person resolves
+it row by row with a classification decision (next section), or a classifier
+change and reindex resolves it for everyone; no tax-policy override is inferred.
+
+### Classifying rows held for semantic review
+
+Every row the parser held for classification review (an unknown claim, an
+unnamed contract movement, an unsettled block movement or gov deposit outcome,
+any detail with `review_required="true"`) carries a `SemanticRecordID` in
+`semantic_reviews`. A flagged receipt that also waits on classification uses its
+asset `RecordID` instead, so one decision carries both. The ID is the row's
+`chain|wallet|message|sub` plus `:semantic:` and a hash of the row's own facts
+(hash, denom, amount, time, category, direction, counterparties, trigger,
+detail, review reason); identical rows of one wallet get `#2`, `#3`. A reindex
+that changes any of those facts changes the ID, and the old decision is refused
+as stale rather than applied to different evidence.
+
+The decision rides in the same `asset_decisions` map:
+
+```json
+{"<SemanticRecordID>":{"classification":"income","value_usd":"12.50"}}
+{"<SemanticRecordID>":{"classification":"transfer_in","cost_basis_usd":"8","acquired_date":"2025-01-02"}}
+{"<asset RecordID>":{"mode":"exclude","classification":"exclude"}}
+```
+
+`/asset-review` lists the vocabulary in `classifications`:
+
+| Classification | Row direction | Booked as |
+| --- | --- | --- |
+| `income` | in | income at the row's value |
+| `payment` | in or out | transfer tagged `payment` (taxable disposal when out) |
+| `transfer_in` | in | transfer in; may carry `cost_basis_usd` and `acquired_date` |
+| `transfer_out` | out | transfer out |
+| `swap` | in or out | swap leg |
+| `expense` | out | expense |
+| `protocol_deposit` | out | protocol_deposit (record only) |
+| `protocol_withdrawal` | in | protocol_withdrawal (record only) |
+| `exclude` | in or out | excluded, zero value and basis |
+
+A classification whose direction does not fit the row is rejected (400). A
+semantic key takes no `mode`, `token`, `quantity` or `unit_value_usd`;
+`exclude` takes no value or basis; basis is accepted only on `transfer_in`, and
+its date may not be after the receipt. On an asset record key the
+classification sits beside the identity `mode` (`exclude` needs mode
+`exclude`), and it is refused on a receipt that waits on no classification. A
+`denom:`, `policy:` or `price:` key never takes a classification. An unknown
+semantic key is refused like an unknown record ID.
+
+`value_usd` fills only a missing price: a row with a reference, pegged or
+implied price keeps it, and the decision's value is dropped. A filled value is
+labelled user-supplied with the decision key as `user_price_key`, exactly like a
+`price:` value. A classified row keeps the parser's category and detail beside
+the user's: the Generic CSV `user_treatment` reads `classified:<class>` (after
+the identity mode when both apply), its description adds
+`user_classification=<class> parser_category=<category>`, and the journal memo
+adds "[classified <class> by the user, parser booked <category>]".
+
+Two reasons can never be classified away: an IBC refund waiting on its send's
+basis, and a withdraw-address move with no stored message. They keep blocking
+downloads until the data is fixed. Decisions do not change the evidence
+fingerprint, so a cached report recomputes only when the decisions or the
+indexed facts change.
 
 `/asset-review` returns `semantic_reviews` plus a `readiness` object containing
 `export_ready`, `parser_decode_complete`, `pending_asset_reviews`,
@@ -208,5 +303,7 @@ pending gates, retained previews, explicit exclusion, arbitrary token overrides,
 manual basis/date FIFO, exact zero values, source immutability, unknown-ID
 rejection, cache separation, and (`TestDenomAndPolicyDecisionsFanOutToReceipts`)
 denom and policy fan-out, precedence, `spam_policy` shorthand, groups, and the
-reason glossary. Frontend Node/SSR tests verify no selected mode
+reason glossary. `userprice_http_test.go` covers user prices through
+`/report-job`, `/events` and `/asset-review`, the Noble USDC peg and the
+unpegged Axelar USDC. Frontend Node/SSR tests verify no selected mode
 or default token, escaped memos, metadata integrity, and explicit manual values.

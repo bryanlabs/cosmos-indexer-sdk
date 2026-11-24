@@ -10,11 +10,15 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/spf13/viper"
 
 	indexerDB "github.com/DefiantLabs/cosmos-indexer/db"
 	"github.com/DefiantLabs/cosmos-indexer/taxapi"
@@ -43,6 +47,19 @@ func nativeAssetFromEnv() taxapi.NativeAsset {
 		}
 	}
 	return native
+}
+
+func startLedgerArchive(probe string) error {
+	config := viper.New()
+	config.SetConfigType("toml")
+	if err := config.ReadConfig(strings.NewReader(probe)); err != nil {
+		return errors.New("cannot read the archive configuration")
+	}
+	origin := config.GetString("probe.rpc")
+	if origin == "" {
+		return errors.New("the archive configuration has no RPC endpoint")
+	}
+	return taxapi.StartLedgerArchive(origin, os.Getenv, log.Printf)
 }
 
 func main() {
@@ -127,6 +144,16 @@ func main() {
 		reportRows = v
 	}
 	srv.SetReportRowCap(reportRows)
+	// Balance history reads what the serving node no longer holds from the
+	// archive RPC in LEDGER_ARCHIVE_PROBE, the archive Secret's probe.toml, at
+	// LEDGER_ARCHIVE_RPS calls a second (LEDGER_ARCHIVE_BURST at once). Either
+	// unset reads the serving node only. The origin is a credential and is
+	// never logged.
+	if probe := os.Getenv("LEDGER_ARCHIVE_PROBE"); probe != "" {
+		if err := startLedgerArchive(probe); err != nil {
+			log.Printf("balance history archive off: %v", err)
+		}
+	}
 	srv.StartAttestationScanner(2*time.Minute, log.Printf)
 	srv.StartBalanceLedgerSweeper("mainnet", 10*time.Minute, log.Printf)
 	srv.WarmCommissionFlows("mainnet")
@@ -161,6 +188,10 @@ func main() {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
+		// asset_decisions rides in the query string; a full set of user
+		// prices (taxapi.MaxAssetDecisionsJSONBytes, URL-encoded) needs more
+		// than the 1 MiB default.
+		MaxHeaderBytes: 8 << 20,
 	}
 	if err := httpServer.ListenAndServe(); err != nil {
 		log.Fatalf("serve: %v", err)

@@ -544,7 +544,7 @@ func commissionFlowEventsFromRows(rows walletRows, addr, native string, credited
 		}
 	}
 	for _, f := range rows.Fees {
-		if f.Denom != native {
+		if f.Denom != native || f.OutcomeUnknown {
 			continue
 		}
 		v, err := decimal.NewFromString(f.Amount)
