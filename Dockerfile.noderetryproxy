@@ -1,0 +1,18 @@
+# noderetryproxy: localhost sidecar in front of our own node for long collection
+# Jobs (tools/noderetryproxy). Pure-Go static binary.
+FROM golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY tools/noderetryproxy ./tools/noderetryproxy
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 go test -count=1 ./tools/noderetryproxy && \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/noderetryproxy ./tools/noderetryproxy
+
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/bryanlabs/cosmos-indexer-sdk"
+LABEL org.opencontainers.image.revision="${SOURCE_COMMIT:-unknown}"
+RUN adduser -D -u 1137 tax
+COPY --from=build /out/noderetryproxy /usr/local/bin/noderetryproxy
+USER tax
+ENTRYPOINT ["/usr/local/bin/noderetryproxy"]
