@@ -116,3 +116,50 @@ func TestContractRedeemKeepsPayeeOtherFlows(t *testing.T) {
 		t.Fatalf("last row = %+v, want the DAO's 7uatom transfer to the payee", last)
 	}
 }
+
+// Records that settle the same amount to one payee are matched as a group:
+// as many transfers as claims books each transfer once, against its own
+// record's validator.
+func TestContractRedeemEqualSettlementsBookEachRecord(t *testing.T) {
+	proposer, contract, payee := testBech(t, "proposer", 20), testBech(t, "contract", 32), testBech(t, "payee", 20)
+	recA, recC := lsmRecordAccount("501"), lsmRecordAccount("502")
+	claim := ev(eventWithdrawTokenizeShareReward, [2]string{attributeAmount, "10uatom"}, [2]string{attributeWithdrawAddress, payee})
+	log := executeLog(contract,
+		transferEv(recA, payee, "10uatom"), claim,
+		transferEv(recC, payee, "10uatom"), claim,
+		transferEv(contract, testBech(t, "lsm-module", 32), "5"+lsmTestValoperA+"/501,5"+lsmTestValoperC+"/502"),
+	)
+	out := parseExecute(t, proposer, log)
+	requireRewardRows(t, out, []rewardRow{{lsmTestValoperA, "10", "uatom"}, {lsmTestValoperC, "10", "uatom"}})
+	requireRewardRecipients(t, out, payee, payee)
+	if len(out) != 2 {
+		t.Fatalf("rows = %+v, want only the two rewards", out)
+	}
+
+	// One claim short: the two equal transfers prove neither.
+	short := executeLog(contract,
+		transferEv(recA, payee, "10uatom"), claim,
+		transferEv(recC, payee, "10uatom"),
+		transferEv(contract, testBech(t, "lsm-module", 32), "5"+lsmTestValoperA+"/501,5"+lsmTestValoperC+"/502"),
+	)
+	for _, e := range parseExecute(t, proposer, short) {
+		if e.Category == string(CategoryReward) {
+			t.Fatalf("unproven group booked a reward: %+v", e)
+		}
+	}
+}
+
+// A settlement paid to a contract is not a wallet side for the fallback, so
+// it is not booked here either: the message keeps the rows it had (none).
+func TestContractRedeemContractPayeeKeepsOldRows(t *testing.T) {
+	proposer, contract := testBech(t, "proposer", 20), testBech(t, "dao", 32)
+	rec := lsmRecordAccount("601")
+	log := executeLog(contract,
+		transferEv(rec, contract, "10uatom"),
+		ev(eventWithdrawTokenizeShareReward, [2]string{attributeAmount, "10uatom"}, [2]string{attributeWithdrawAddress, contract}),
+		transferEv(contract, testBech(t, "lsm-module", 32), "5"+lsmTestValoperA+"/601"),
+	)
+	if out := parseExecute(t, proposer, log); len(out) != 0 {
+		t.Fatalf("rows = %+v, want none", out)
+	}
+}

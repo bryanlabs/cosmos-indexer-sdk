@@ -59,7 +59,7 @@ func wasmSupplementEvents(log *indexerTxTypes.LogMessage, sender string, known [
 	// of bank legs and contract events and the signer are lost. Only the
 	// order-free fallback runs there, and only for 20-byte wallets.
 	var out []TaxableEvent
-	settled := lsmSettlementEvents(lsmRecordSettlements(log))
+	settled := lsmSettlementEvents(lsmRecordSettlements(log, sender))
 	if flattenedLog(log) {
 		return append(settled, bankFallbackEvents(log, "", known)...)
 	}
@@ -792,7 +792,7 @@ func bankFallbackEvents(log *indexerTxTypes.LogMessage, sender string, known []T
 			nativeNamed[flowKey{e.ToAddr, fixtureNativeDenom}] = true
 		}
 	}
-	legs := withoutSettlementLegs(transfersIn(log), lsmRecordSettlements(log))
+	legs := withoutSettlementLegs(transfersIn(log), lsmRecordSettlements(log, sender))
 	native, nativeOrder := fallbackFlows(legs, func(d string) bool { return d == fixtureNativeDenom }, wallet, nativeNamed)
 	otherWallet := func(addr string) bool { return wallet(addr) && !transferEscrows()[addr] }
 	other, otherOrder := fallbackFlows(legs, func(d string) bool { return d != fixtureNativeDenom }, otherWallet, named)

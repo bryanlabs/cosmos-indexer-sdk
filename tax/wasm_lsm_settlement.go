@@ -5,6 +5,7 @@ import (
 
 	indexerTxTypes "github.com/DefiantLabs/cosmos-indexer/cosmos/modules/tx"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/types/bech32"
 )
 
 // A contract can redeem tokenized shares itself, as a DAO DAO proposal that
@@ -24,24 +25,36 @@ type lsmSettlement struct {
 }
 
 // lsmRecordSettlements finds each withdraw_tokenize_share_reward in the log
-// whose withdraw address and amount match exactly one transfer from a record
-// account the log proves: the account derives from a record id that a
+// whose withdraw address and amount match a transfer from a record account
+// the log proves: the account derives from a record id that a
 // "<valoper>/<record id>" share denom in the same log names, which also gives
-// the validator. A settlement without exactly one such transfer is left to
-// the bank fallback, as before.
-func lsmRecordSettlements(log *indexerTxTypes.LogMessage) []lsmSettlement {
+// the validator. Claims with the same payee and amount are matched as a
+// group: when the log holds exactly as many such transfers as claims, each
+// transfer is one settlement (message 5795291 has five records each paying
+// 12525373uatom to one address); any other count proves none of them.
+// Only a payee the bank fallback treats as a wallet (a 20-byte account or
+// the signer, never a contract or module) is booked here; any other
+// settlement is left to the bank fallback, as before.
+func lsmRecordSettlements(log *indexerTxTypes.LogMessage, sender string) []lsmSettlement {
 	if log == nil {
 		return nil
 	}
-	type claim struct{ payee, amount string }
-	var claims []claim
+	type claim struct{ payee, coins string }
+	claims := map[claim]int{}
+	var order []claim
 	records := map[string]string{}
 	for _, ev := range log.Events {
 		if ev.Type == eventWithdrawTokenizeShareReward {
 			for _, g := range ibcAttributeGroups(ev, attributeWithdrawAddress, attributeAmount) {
-				if g[attributeWithdrawAddress] != "" && g[attributeAmount] != "" {
-					claims = append(claims, claim{g[attributeWithdrawAddress], g[attributeAmount]})
+				coins, err := sdk.ParseCoinsNormalized(g[attributeAmount])
+				if g[attributeWithdrawAddress] == "" || err != nil || coins.IsZero() {
+					continue
 				}
+				k := claim{g[attributeWithdrawAddress], coins.String()}
+				if claims[k] == 0 {
+					order = append(order, k)
+				}
+				claims[k]++
 			}
 		}
 		for _, a := range ev.Attributes {
@@ -67,41 +80,33 @@ func lsmRecordSettlements(log *indexerTxTypes.LogMessage) []lsmSettlement {
 	if len(claims) == 0 || len(records) == 0 {
 		return nil
 	}
-	legs := transfersIn(log)
-	var out []lsmSettlement
-	for _, c := range claims {
-		coins, err := sdk.ParseCoinsNormalized(c.amount)
-		if err != nil || coins.IsZero() {
-			continue
+	excluded := fallbackExcluded(log)
+	wallet := func(addr string) bool {
+		if addr == "" || excluded[addr] || records[addr] != "" {
+			return false
 		}
-		var match *coinTransfer
-		n := 0
-		for i := range legs {
-			l := &legs[i]
-			if _, ok := records[l.from]; ok && l.to == c.payee && l.coins.String() == coins.String() {
-				match, n = l, n+1
-			}
+		if addr == sender {
+			return true
 		}
-		if n != 1 {
-			continue
-		}
-		out = append(out, lsmSettlement{record: match.from, payee: c.payee, validator: records[match.from], coins: coins})
+		_, bz, err := bech32.DecodeAndConvert(addr)
+		return err == nil && len(bz) == 20
 	}
-	return dedupeSettlements(out)
-}
-
-// dedupeSettlements drops a settlement whose transfer another claim already
-// took, so two identical claims never book one payment twice.
-func dedupeSettlements(in []lsmSettlement) []lsmSettlement {
-	seen := map[string]bool{}
+	paid := map[claim][]coinTransfer{}
+	for _, l := range transfersIn(log) {
+		if _, ok := records[l.from]; ok {
+			k := claim{l.to, l.coins.String()}
+			paid[k] = append(paid[k], l)
+		}
+	}
 	var out []lsmSettlement
-	for _, s := range in {
-		k := s.record + "|" + s.payee + "|" + s.coins.String()
-		if seen[k] {
+	for _, k := range order {
+		legs := paid[k]
+		if len(legs) != claims[k] || !wallet(k.payee) {
 			continue
 		}
-		seen[k] = true
-		out = append(out, s)
+		for _, l := range legs {
+			out = append(out, lsmSettlement{record: l.from, payee: l.to, validator: records[l.from], coins: l.coins})
+		}
 	}
 	return out
 }
