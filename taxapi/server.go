@@ -646,35 +646,56 @@ func (s *Server) resolveBaseDenom(denom string) (base string, isIBC bool) {
 	return base, isIBC
 }
 
-func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time, hash, category, dir, denom, amountBase, from, to string) Row {
+// denomLabel is how a report reads a denom: its resolved base, label and
+// decimals, and whether that label is an ATOM mismatch or a listed lookalike.
+type denomLabel struct {
+	base, symbol                                    string
+	decimals                                        int
+	isIBC, assumed, unverifiedFactory, atomMismatch bool
+	lookalike                                       string
+	official                                        officialIndex
+}
+
+// flagged reports whether a row in this denom carries an asset identity and
+// so gets no reference price.
+func (l denomLabel) flagged() bool { return l.atomMismatch || l.lookalike != "" }
+
+func (s *Server) labelDenom(chain string, meta map[string]DenomMeta, denom string) denomLabel {
 	// IBC voucher denoms arrive as trace paths (e.g. "transfer/channel-0/uatom").
 	// Resolve to the underlying base asset so symbol, decimals and price match the
 	// native token (uatom that round-trips is still ATOM); keep the raw path.
-	base, isIBC := s.resolveBaseDenom(denom)
+	var l denomLabel
+	l.base, l.isIBC = s.resolveBaseDenom(denom)
 
 	// Decimals resolution: the oracle first, then the chain's own bank module,
 	// and only if both miss do we assume 6 (and flag it) rather than silently
 	// corrupting the amount (INF-200).
-	var decimals int
-	var symbol string
-	assumed := false
-	if m, ok := meta[base]; ok {
-		decimals, symbol = m.Decimals, m.Symbol
-	} else if m, ok := s.oracle.BankMetaFallback(base); ok {
-		decimals, symbol = m.Decimals, m.Symbol
+	if m, ok := meta[l.base]; ok {
+		l.decimals, l.symbol = m.Decimals, m.Symbol
+	} else if m, ok := s.oracle.BankMetaFallback(l.base); ok {
+		l.decimals, l.symbol = m.Decimals, m.Symbol
 	} else {
-		decimals, symbol, assumed = 6, base, true
+		l.decimals, l.symbol, l.assumed = 6, l.base, true
 	}
-	if symbol == "" {
-		symbol = base
+	if l.symbol == "" {
+		l.symbol = l.base
 	}
-	unverifiedFactory := isUnverifiedJunoFactoryUatom(chain, denom, base)
-	atomMismatch := chain == apiMainnet && denom != apiUatom && (unverifiedFactory || strings.EqualFold(symbol, apiSymbolATOM) || base == apiUatom)
-	official := s.officialIndexFor(chain, meta)
-	lookalike := official.lookalikeOf(meta, denom, base, symbol)
-	if unverifiedFactory && lookalike == "" {
-		lookalike = apiSymbolATOM
+	l.unverifiedFactory = isUnverifiedJunoFactoryUatom(chain, denom, l.base)
+	l.atomMismatch = chain == apiMainnet && denom != apiUatom && (l.unverifiedFactory || strings.EqualFold(l.symbol, apiSymbolATOM) || l.base == apiUatom)
+	l.official = s.officialIndexFor(chain, meta)
+	l.lookalike = l.official.lookalikeOf(meta, denom, l.base, l.symbol)
+	if l.unverifiedFactory && l.lookalike == "" {
+		l.lookalike = apiSymbolATOM
 	}
+	return l
+}
+
+func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time, hash, category, dir, denom, amountBase, from, to string) Row {
+	l := s.labelDenom(chain, meta, denom)
+	base, isIBC := l.base, l.isIBC
+	decimals, symbol, assumed := l.decimals, l.symbol, l.assumed
+	unverifiedFactory, atomMismatch := l.unverifiedFactory, l.atomMismatch
+	official, lookalike := l.official, l.lookalike
 	var identity *AssetIdentity
 	if atomMismatch {
 		identity = &AssetIdentity{
