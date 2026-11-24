@@ -258,26 +258,30 @@ func (s *Server) reviewedWindows(chain string, addresses []string, windows []rep
 }
 
 // readReviewWindows reads a report period over the row cap for review, one
-// window per snapshot. The review fingerprint is read with the first
-// window and again after the last, and a change between them refuses the
-// answer, so every window shows the same financial history.
+// window per snapshot. The windows, the readiness gate for the whole period
+// and the review fingerprint are read in one snapshot before the first
+// window, and the fingerprint again after the last. A change between them
+// refuses the answer, so every window shows the history the windows were
+// planned on, and a blocked report names what blocks the whole period.
 func (s *Server) readReviewWindows(chain string, addresses []string, start, end time.Time, decisions AssetDecisions) (windowedReview, error) {
 	var windows []reportWindow
+	var before string
 	if err := s.withReadSnapshotTimeout(reportJobReadSnapshotTimeout, func(reader *Server) error {
 		var err error
-		windows, err = reader.reportWindows(addresses, start, end, s.reportRowCap)
+		if windows, err = reader.reportWindows(addresses, start, end, s.reportRowCap); err != nil {
+			return err
+		}
+		if _, err = reader.reportReadiness(chain, addresses, start, end); err != nil {
+			return err
+		}
+		before, err = reader.reviewFingerprintInSnapshot(chain, addresses)
 		return err
 	}); err != nil {
 		return windowedReview{}, err
 	}
 	eras := s.legacyEras(chain)
-	before := ""
 	review, err := s.reviewedWindows(chain, addresses, windows, decisions, func(window reportWindow) (reportInput, error) {
-		input, err := s.readWalletInput(chain, addresses, window.Start, window.End, before == "", eras, reportJobReadSnapshotTimeout)
-		if err == nil && before == "" {
-			before = input.Fingerprint
-		}
-		return input, err
+		return s.readWalletInput(chain, addresses, window.Start, window.End, false, eras, reportJobReadSnapshotTimeout)
 	})
 	if err != nil {
 		return windowedReview{}, err

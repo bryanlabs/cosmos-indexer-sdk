@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -256,4 +257,20 @@ func TestAssetReviewWindowedMatchesWhole(t *testing.T) {
 	_, whole := answer(0, nil)
 	_, atCap := answer(6, nil)
 	require.Equal(t, whole, atCap)
+
+	// A blocked report names what blocks the whole period, not the first
+	// window: one undecoded message on each of two days.
+	for _, q := range []string{
+		"INSERT INTO message_parser_errors(message_id,error) VALUES(2,'bad')",
+		"INSERT INTO message_parser_errors(message_id,error) VALUES(4,'bad')",
+	} {
+		require.NoError(t, db.Exec(q).Error, q)
+	}
+	blockedCode, blocked := answer(0, nil)
+	require.Equal(t, http.StatusConflict, blockedCode)
+	for _, rowCap := range []int64{1, 2, 3, 5} {
+		code, body := answer(rowCap, nil)
+		require.Equal(t, blockedCode, code, "blocked at cap %d", rowCap)
+		require.Equal(t, blocked, body, "blocked at cap %d", rowCap)
+	}
 }

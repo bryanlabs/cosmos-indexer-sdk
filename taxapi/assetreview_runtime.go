@@ -458,25 +458,30 @@ func writeTaxError(w http.ResponseWriter, err error) {
 
 // assetReviewRows reads the rows /asset-review answers with, the report's
 // readiness and the decision keys no row matched. A period over the report
-// row cap is read in windows, keeping only the rows a person reviews.
+// row cap is read in windows, keeping only the rows a person reviews. A
+// period that grows over the cap between the count and the whole read is
+// read in windows too.
 func (s *Server) assetReviewRows(chain string, addresses []string, start, end time.Time, decisions AssetDecisions) ([]Row, ReportReadiness, []string, error) {
 	addresses = normalizedWalletScope(addresses)
 	over, err := s.overReportRowCap(addresses, start, end)
 	if err != nil {
 		return nil, ReportReadiness{}, nil, err
 	}
-	if over {
-		review, err := s.readReviewWindows(chain, addresses, start, end, decisions)
-		if err != nil {
-			return nil, ReportReadiness{}, nil, err
+	if !over {
+		rows, err := s.reviewedRows(chain, addresses, start, end, decisions, true)
+		var tooLarge reportTooLarge
+		if !errors.As(err, &tooLarge) {
+			if err != nil {
+				return nil, ReportReadiness{}, nil, err
+			}
+			return rows, readinessForRows(rows), UnmatchedDecisionKeys(rows, decisions), nil
 		}
-		return review.Rows, review.readiness(), unmatchedDecisionKeys(review.Used, decisions), nil
 	}
-	rows, err := s.reviewedRows(chain, addresses, start, end, decisions, true)
+	review, err := s.readReviewWindows(chain, addresses, start, end, decisions)
 	if err != nil {
 		return nil, ReportReadiness{}, nil, err
 	}
-	return rows, readinessForRows(rows), UnmatchedDecisionKeys(rows, decisions), nil
+	return review.Rows, review.readiness(), unmatchedDecisionKeys(review.Used, decisions), nil
 }
 
 func (s *Server) handleAssetReview(w http.ResponseWriter, r *http.Request) {
