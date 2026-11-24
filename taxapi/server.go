@@ -298,7 +298,7 @@ func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction Jurisd
 		}
 		total = total.Add(row.ValueUSD)
 		if row.PriceMissing {
-			missingDenoms[row.Symbol] = true
+			missingDenoms[row.exportSymbol()] = true
 		}
 		jur := ""
 		if row.Category == apiReward || row.Category == apiCommission {
@@ -310,7 +310,7 @@ func buildIncomeCSV(rows []Row, address, recognition string, jurisdiction Jurisd
 			typ = incomeType(row)
 		}
 		_ = cw.Write([]string{
-			address, row.Time.UTC().Format(apiDateLayout), typ, row.Symbol, row.Denom,
+			address, row.Time.UTC().Format(apiDateLayout), typ, row.exportSymbol(), row.Denom,
 			row.Amount.String(), row.PriceUSD.String(), rowValueText(row), row.TxHash, row.ValidatorAddress, spreadsheetLabel(row.ValidatorMoniker), row.RewardTrigger, jur, incomeSource(row),
 		})
 	}
@@ -670,11 +670,21 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	}
 	unverifiedFactory := isUnverifiedJunoFactoryUatom(chain, denom, base)
 	atomMismatch := chain == apiMainnet && denom != apiUatom && (unverifiedFactory || strings.EqualFold(symbol, apiSymbolATOM) || base == apiUatom)
+	official := s.officialIndexFor(chain, meta)
+	lookalike := official.lookalikeOf(meta, denom, base, symbol)
+	if unverifiedFactory && lookalike == "" {
+		lookalike = apiSymbolATOM
+	}
 	var identity *AssetIdentity
 	if atomMismatch {
 		identity = &AssetIdentity{
 			ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
 			BaseToken: base, Treatment: apiUnreviewed, Note: "Did not match the official Cosmos Hub ATOM denom. Native ATOM pricing is disabled; user treatment has not been selected.",
+		}
+	} else if lookalike != "" {
+		identity = &AssetIdentity{
+			ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
+			BaseToken: lookalikeBase(meta, denom, base), Treatment: apiUnreviewed, Note: "Labelled " + lookalike + " but did not match any listed " + lookalike + " denomination or base. Pricing as " + lookalike + " is disabled; user treatment has not been selected.",
 		}
 	}
 	if unverifiedFactory {
@@ -685,6 +695,11 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 		identity.ChannelPath = "transfer/channel-141/transfer/channel-42"
 		identity.BaseToken = junoFactoryUatomBase
 	}
+	if identity != nil && lookalike != "" {
+		identity.ListedLookalike = lookalike
+		identity.ExportLabel = official.lookalikeExportLabel(identity.TokenName, denom)
+	}
+	mismatch := atomMismatch || lookalike != ""
 	amt, err := decimal.NewFromString(amountBase)
 	if err != nil {
 		amt = decimal.Zero
@@ -701,7 +716,7 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	if !found && base != denom {
 		usdF, found = s.oracle.PriceAt(chain, denom, date)
 	}
-	if found && !atomMismatch {
+	if found && !mismatch {
 		price = decimal.NewFromFloat(usdF)
 	} else {
 		priceMissing = true

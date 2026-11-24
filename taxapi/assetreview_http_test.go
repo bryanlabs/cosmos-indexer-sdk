@@ -121,14 +121,17 @@ func TestAssetReviewHTTPGateAndExplicitDecisions(t *testing.T) {
 	}
 	pending := waitPreview(t, s, wallet, nil)
 	rows := csvRecords(t, pending[apiCSV].(string))
-	if len(rows) != 2 || rows[1][2] != apiSymbolATOM {
-		t.Fatalf("pending receipt was dropped/relabeled: %v", rows)
+	// The pending lookalike stays in the preview under its own token name,
+	// never the ATOM ticker it copies; the reported label stays in the
+	// identity metadata.
+	if len(rows) != 2 || rows[1][2] != junoFactoryUatomSymbol {
+		t.Fatalf("pending receipt was dropped or exported under the copied label: %v", rows)
 	}
 	var evidence AssetIdentity
 	if err := json.Unmarshal([]byte(rows[1][15]), &evidence); err != nil {
 		t.Fatal(err)
 	}
-	if evidence.RecordID != id || !evidence.SuspectedSpam || evidence.Decision != nil || evidence.Excluded || evidence.Memo == "" || len(evidence.Reasons) == 0 {
+	if evidence.RecordID != id || !evidence.SuspectedSpam || evidence.Decision != nil || evidence.Excluded || evidence.Memo == "" || len(evidence.Reasons) == 0 || evidence.ReportedLabel != apiSymbolATOM || evidence.RawDenom != junoFactoryUatomVoucher {
 		t.Fatalf("pending evidence wrong: %+v", evidence)
 	}
 	exclusion := AssetDecisions{id: {Mode: AssetDecisionExclude}}
@@ -405,7 +408,7 @@ func TestDenomAndPolicyDecisionsFanOutToReceipts(t *testing.T) {
 	if review.Pending != 2 || len(review.Groups) != 1 || review.Groups[0].Receipts != 2 || review.Groups[0].Pending != 2 || review.Groups[0].DecisionKey != DecisionKeyDenomPrefix+junoFactoryUatomVoucher || !review.Groups[0].SuspectedSpam || review.Groups[0].TotalQuantity != "20000" || len(review.Groups[0].RecordIDs) != 2 || review.Groups[0].SampleMemo == "" {
 		t.Fatalf("groups wrong: %+v", review.Groups)
 	}
-	if len(review.Glossary) != 4 {
+	if len(review.Glossary) != len(ReviewReasonGlossary()) || len(review.Glossary) != 6 {
 		t.Fatalf("glossary missing: %+v", review.Glossary)
 	}
 	for _, code := range []string{ReasonSpamMemo, ReasonLabelMismatch, ReasonUnverifiedFactory} {

@@ -9,6 +9,11 @@ const (
 	ReasonLabelMismatch     = "label_mismatch"
 	ReasonUnverifiedFactory = "unverified_factory"
 	ReasonIdentityMismatch  = "identity_mismatch"
+	// ReasonListedLookalike and ReasonIssuerToken generalise label_mismatch
+	// and unverified_factory beyond ATOM. They are new codes because those
+	// two texts name ATOM and are part of existing record fingerprints.
+	ReasonListedLookalike = "listed_lookalike"
+	ReasonIssuerToken     = "issuer_token"
 )
 
 // ReviewReason is one entry of the glossary served with /asset-review so a
@@ -41,6 +46,20 @@ var reviewReasons = []ReviewReason{
 		Title:     "Issuer-created token",
 		Text:      "This is an issuer-created Juno tokenfactory asset, not native ATOM. No native ATOM backing or reliable market price has been verified.",
 		Explainer: "Anyone can mint a tokenfactory asset and name it after a real coin. This one resolved to a Juno factory denomination with no verified market, so no price is applied.",
+		Suggested: "Valueless, unless you hold it deliberately and can price it.",
+	},
+	{
+		Code:      ReasonListedLookalike,
+		Title:     "Label copies a listed token",
+		Text:      "The label is the symbol of a listed asset, but the raw denomination is not that asset and does not share its base denomination; the label does not prove backing.",
+		Explainer: "The token carries the symbol of a listed asset such as USDC or OSMO, but on chain it is a different denomination with a different origin. Tax software that imports by symbol would value it as the listed asset and overstate your income, so exports name it by its own token name or raw denomination until you say what it is.",
+		Suggested: "Valueless if it is an unsolicited lookalike; Override with the real token and its price if you know what it is.",
+	},
+	{
+		Code:      ReasonIssuerToken,
+		Title:     "Issuer-created lookalike",
+		Text:      "This is an issuer-created tokenfactory asset named after a listed asset. No backing or reliable market price has been verified.",
+		Explainer: "Anyone can mint a tokenfactory asset and give it the symbol of a real coin. This one resolved to a factory denomination that is not the listed asset, so no price is applied.",
 		Suggested: "Valueless, unless you hold it deliberately and can price it.",
 	},
 	{
