@@ -654,11 +654,16 @@ type denomLabel struct {
 	isIBC, assumed, unverifiedFactory, atomMismatch bool
 	lookalike                                       string
 	official                                        officialIndex
+	// reported is the label the voucher itself carries when that label, not
+	// the resolved base's, is what flags it. knownSuspect marks the known spam
+	// vouchers, which get no reference price either.
+	reported     string
+	knownSuspect bool
 }
 
 // flagged reports whether a row in this denom carries an asset identity and
 // so gets no reference price.
-func (l denomLabel) flagged() bool { return l.atomMismatch || l.lookalike != "" }
+func (l denomLabel) flagged() bool { return l.atomMismatch || l.lookalike != "" || l.knownSuspect }
 
 func (s *Server) labelDenom(chain string, meta map[string]DenomMeta, denom string) denomLabel {
 	// IBC voucher denoms arrive as trace paths (e.g. "transfer/channel-0/uatom").
@@ -684,19 +689,21 @@ func (s *Server) labelDenom(chain string, meta map[string]DenomMeta, denom strin
 	l.atomMismatch = chain == apiMainnet && denom != apiUatom && (l.unverifiedFactory || strings.EqualFold(l.symbol, apiSymbolATOM) || l.base == apiUatom)
 	l.official = s.officialIndexFor(chain, meta)
 	l.lookalike = l.official.lookalikeOf(meta, denom, l.base, l.symbol)
-	// When the trace resolves to a base the oracle does not list, the label
-	// above is the bare base. The voucher's own listed label is judged too, so
-	// a resolved trace never turns a flagged voucher into an unflagged one.
-	if exact, ok := meta[denom]; ok && l.base != denom {
-		if _, listed := meta[l.base]; !listed {
-			if chain == apiMainnet && denom != apiUatom && strings.EqualFold(exact.Symbol, apiSymbolATOM) {
-				l.atomMismatch = true
-			}
-			if l.lookalike == "" {
-				l.lookalike = l.official.lookalikeOf(meta, denom, l.base, exact.Symbol)
+	// A resolved trace labels the voucher by its base. The voucher's own
+	// listed label is judged too, so a resolved trace never turns a flagged
+	// voucher into an unflagged one.
+	l.reported = l.symbol
+	if exact, ok := meta[denom]; ok && l.base != denom && exact.Symbol != "" && !strings.EqualFold(exact.Symbol, l.symbol) {
+		if !l.atomMismatch && chain == apiMainnet && denom != apiUatom && strings.EqualFold(exact.Symbol, apiSymbolATOM) {
+			l.atomMismatch, l.reported = true, exact.Symbol
+		}
+		if l.lookalike == "" {
+			if l.lookalike = l.official.lookalikeOf(meta, denom, l.base, exact.Symbol); l.lookalike != "" && !l.atomMismatch {
+				l.reported = exact.Symbol
 			}
 		}
 	}
+	l.knownSuspect = chain == apiMainnet && (denom == junoFactoryUatomVoucher || denom == airdrop67Voucher)
 	if l.unverifiedFactory && l.lookalike == "" {
 		l.lookalike = apiSymbolATOM
 	}
@@ -712,12 +719,12 @@ func (s *Server) buildRow(chain string, meta map[string]DenomMeta, ts time.Time,
 	var identity *AssetIdentity
 	if atomMismatch {
 		identity = &AssetIdentity{
-			ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
+			ReportedLabel: l.reported, RawDenom: denom, RawAmount: amountBase,
 			BaseToken: base, Treatment: apiUnreviewed, Note: "Did not match the official Cosmos Hub ATOM denom. Native ATOM pricing is disabled; user treatment has not been selected.",
 		}
 	} else if lookalike != "" {
 		identity = &AssetIdentity{
-			ReportedLabel: symbol, RawDenom: denom, RawAmount: amountBase,
+			ReportedLabel: l.reported, RawDenom: denom, RawAmount: amountBase,
 			BaseToken: lookalikeBase(meta, denom, base), Treatment: apiUnreviewed, Note: "Labelled " + lookalike + " but did not match any listed " + lookalike + " denomination or base. Pricing as " + lookalike + " is disabled; user treatment has not been selected.",
 		}
 	}
