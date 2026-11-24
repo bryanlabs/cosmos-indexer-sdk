@@ -602,7 +602,7 @@ func TestFlaggedDenomsGetNoReferencePrice(t *testing.T) {
 		}
 	}
 
-	anyPrice := func(string) (decimal.Decimal, bool) { return decimal.NewFromInt(1), true }
+	quoted := s.positionPrice(apiMainnet, "2026-05-21")
 	for _, denom := range []string{fake, roundTrip} {
 		row := lookalikeRow(s, apiMainnet, meta, denom)
 		attachSpamEvidence(&row, fakeUSDCEvent(denom), apiMainnet, "wallet", "")
@@ -613,14 +613,38 @@ func TestFlaggedDenomsGetNoReferencePrice(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := BuildPositions(decided, lookalikeAt.AddDate(0, 0, 1), anyPrice)
+		p := BuildPositions(decided, lookalikeAt.AddDate(0, 0, 1), quoted)
 		if len(p) != 1 || !p[0].PriceMissing || !p[0].MarketValueUSD.IsZero() || !p[0].UnrealizedGainUSD.IsZero() {
 			t.Fatalf("%s: decided flagged receipt took a reference price %+v", denom, p)
 		}
 	}
 	real := lookalikeRow(s, apiMainnet, meta, cosmosHubNobleUSDCDenom)
-	if p := BuildPositions([]Row{real}, lookalikeAt.AddDate(0, 0, 1), anyPrice); len(p) != 1 || p[0].PriceMissing {
+	if p := BuildPositions([]Row{real}, lookalikeAt.AddDate(0, 0, 1), quoted); len(p) != 1 || p[0].PriceMissing || !p[0].MarketPriceUSD.Equal(decimal.NewFromInt(1)) {
 		t.Fatalf("real USDC position lost its price %+v", p)
+	}
+	// A promotional memo on a real, unflagged OSMO receipt with no price that
+	// day is receipt-level spam evidence, not a flagged denom: once the user
+	// keeps it as OSMO, the position carries OSMO's price.
+	var osmo string
+	for d, m := range meta {
+		if m.Verified && m.Symbol == "OSMO" && !s.labelDenom(apiMainnet, meta, d).flagged() && (osmo == "" || d < osmo) {
+			osmo = d
+		}
+	}
+	if osmo == "" {
+		t.Fatal("fixture has no listed OSMO")
+	}
+	memo := lookalikeRow(noPriceServer(t), apiMainnet, meta, osmo)
+	attachSpamEvidence(&memo, fakeUSDCEvent(osmo), apiMainnet, "wallet", "claim your airdrop at https://example.invalid")
+	if memo.AssetIdentity == nil || memo.AssetIdentity.RecordID == "" {
+		t.Fatalf("spam evidence attached no identity: %+v", memo.AssetIdentity)
+	}
+	kept, err := ApplyAssetDecisions([]Row{memo}, AssetDecisions{memo.AssetIdentity.RecordID: {Mode: AssetDecisionOverride, Token: "OSMO", Quantity: "10", ValueUSD: "10", CostBasisUSD: "10", AcquiredDate: "2026-05-21"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := BuildPositions(kept, lookalikeAt.AddDate(0, 0, 1), quoted); len(p) != 1 || p[0].PriceMissing || p[0].Denom != osmo || !p[0].MarketPriceUSD.Equal(decimal.NewFromInt(1)) {
+		t.Fatalf("kept OSMO lost its price %+v", p)
 	}
 }
 
@@ -658,5 +682,123 @@ func TestFlaggedSwapLegNeverPricesTheOtherLeg(t *testing.T) {
 		if !usdc.PriceMissing || !usdc.ValueUSD.IsZero() {
 			t.Fatalf("fake USDC leg priced: %+v", usdc)
 		}
+	}
+}
+
+// /positions carries what the report charges a flagged receipt. Undecided, the
+// report holds it for review and positions leave it out. Excluded, the report
+// values it at zero and positions leave it out. Overridden, the report and the
+// Form 8949 lot use the user's basis, never an oracle quote, and the position
+// carries that basis with no reference price, even when the oracle quotes the
+// denom.
+func TestPositionsMatchReportForFlaggedReceipts(t *testing.T) {
+	meta := loadOracleDenomsFixture(t)[apiMainnet]
+	s := fixtureOracle(t, meta, 10)
+	anyPrice := s.positionPrice(apiMainnet, "2026-05-21")
+	asOf := lookalikeAt.AddDate(0, 0, 1)
+	for _, denom := range []string{fixtureFakeUSDC(t, meta), fixtureRoundTripATOM(t, meta)} {
+		row := lookalikeRow(s, apiMainnet, meta, denom)
+		attachSpamEvidence(&row, fakeUSDCEvent(denom), apiMainnet, "wallet", "")
+		id := row.AssetIdentity.RecordID
+
+		var out bytes.Buffer
+		var pending assetReviewRequired
+		if err := WriteCSV(&out, apiKoinly, []Row{row}); !errors.As(err, &pending) {
+			t.Fatalf("%s: undecided receipt was not held for review: %v", denom, err)
+		}
+		if p := BuildPositions([]Row{row}, asOf, anyPrice); len(p) != 0 {
+			t.Fatalf("%s: undecided receipt reached positions %+v", denom, p)
+		}
+
+		excluded, err := ApplyAssetDecisions([]Row{row}, AssetDecisions{id: {Mode: AssetDecisionExclude}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !excluded[0].ValueUSD.IsZero() {
+			t.Fatalf("%s: excluded receipt valued %s", denom, excluded[0].ValueUSD)
+		}
+		if p := BuildPositions(excluded, asOf, anyPrice); len(p) != 0 {
+			t.Fatalf("%s: excluded receipt reached positions %+v", denom, p)
+		}
+
+		decided, err := ApplyAssetDecisions([]Row{row}, AssetDecisions{id: {Mode: AssetDecisionOverride, Token: "MYTOKEN", Quantity: "10", ValueUSD: "25", CostBasisUSD: "20", AcquiredDate: "2026-05-21"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := decided[0]
+		if !r.ValueUSD.Equal(decimal.NewFromInt(25)) || !r.PriceUSD.Equal(decimal.RequireFromString("2.5")) || r.ManualBasisUSD == nil || !r.ManualBasisUSD.Equal(decimal.NewFromInt(20)) {
+			t.Fatalf("%s: report row not at the user's value and basis: %+v", denom, r)
+		}
+		sale := r
+		sale.Direction, sale.Category, sale.Time = apiOut, apiSwap, lookalikeAt.Add(time.Hour)
+		sale.ManualBasisUSD, sale.ManualAcquiredDate, sale.AssetDecision = nil, nil, r.AssetDecision
+		var lotBasis decimal.Decimal
+		for _, f := range Build8949([]Row{r, sale}) {
+			lotBasis = lotBasis.Add(f.CostBasis)
+		}
+		p := BuildPositions(decided, asOf, anyPrice)
+		if len(p) != 1 || !p[0].CostBasisUSD.Equal(decimal.NewFromInt(20)) || !p[0].CostBasisUSD.Equal(lotBasis) {
+			t.Fatalf("%s: position basis %+v, report lot basis %s", denom, p, lotBasis)
+		}
+		if !p[0].PriceMissing || !p[0].MarketPriceUSD.IsZero() || !p[0].MarketValueUSD.IsZero() {
+			t.Fatalf("%s: decided receipt took a reference price %+v", denom, p[0])
+		}
+	}
+}
+
+// A node that resolves the fake USDC's trace to its unlisted factory base, with
+// no bank metadata, still leaves the voucher flagged and unpriced.
+func TestResolvedTraceKeepsTheVoucherFlagged(t *testing.T) {
+	meta := loadOracleDenomsFixture(t)[apiMainnet]
+	fake := fixtureFakeUSDC(t, meta)
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/ibc/apps/transfer/v1/denom_traces/") {
+			w.Header().Set(apiContentType, apiJSONContentType)
+			_, _ = w.Write([]byte(`{"denom_trace":{"path":"transfer/channel-207","base_denom":"` + meta[fake].Base + `"}}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(node.Close)
+	priced := fixtureOracle(t, meta, 10)
+	s := NewServer(nil, NewOracle(priced.oracle.base, node.URL), DefaultNativeAsset)
+	row := lookalikeRow(s, apiMainnet, meta, fake)
+	if row.AssetIdentity == nil || !row.PriceMissing {
+		t.Fatalf("resolved trace unflagged the voucher: %+v", row)
+	}
+	if !s.labelDenom(apiMainnet, s.oracle.Denoms(apiMainnet), fake).flagged() {
+		t.Fatal("price-series would price the voucher")
+	}
+}
+
+// A /denoms failure before any good snapshot retries in five minutes, so a
+// cold-start outage does not leave every denom unlabelled for an hour.
+func TestDenomsColdStartFailureRetriesSoon(t *testing.T) {
+	up := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !up {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set(apiContentType, apiJSONContentType)
+		_, _ = w.Write([]byte(`{"denoms":{"uatom":{"symbol":"ATOM","decimals":6,"verified":true,"coingecko_id":"cosmos"}}}`))
+	}))
+	t.Cleanup(srv.Close)
+	o := NewOracle(srv.URL, "")
+	if m := o.Denoms(apiMainnet); len(m) != 0 {
+		t.Fatalf("outage returned %+v", m)
+	}
+	o.mu.Lock()
+	retryIn := o.at[apiMainnet].Add(time.Hour).Sub(nowUTC())
+	o.mu.Unlock()
+	if retryIn <= 0 || retryIn > denomsRetryAfterFailure {
+		t.Fatalf("retry in %s", retryIn)
+	}
+	up = true
+	o.mu.Lock()
+	o.at[apiMainnet] = o.at[apiMainnet].Add(-denomsRetryAfterFailure)
+	o.mu.Unlock()
+	if m := o.Denoms(apiMainnet); m[apiUatom].Symbol != apiSymbolATOM {
+		t.Fatalf("retry did not load the snapshot: %+v", m)
 	}
 }
