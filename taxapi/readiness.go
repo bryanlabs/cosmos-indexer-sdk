@@ -36,6 +36,9 @@ type ReportReadiness struct {
 	UnreviewedMessages       int64    `json:"unreviewed_messages"`
 	Scope                    string   `json:"scope"`
 	ReviewRequired           []string `json:"review_required,omitempty"`
+	// FeeOutcomeUnknown counts fee rows of failed transactions whose charge
+	// is not recorded; each is counted as 0 (OPS-810).
+	FeeOutcomeUnknown int `json:"fee_outcome_unknown"`
 }
 
 func semanticReviewReason(row Row) string {
@@ -63,7 +66,7 @@ func semanticReviewReason(row Row) string {
 }
 
 func previewTaxableText(row Row) string {
-	if semanticReviewReason(row) != "" {
+	if semanticReviewReason(row) != "" || row.FeeOutcomeUnknown {
 		return apiUnknown
 	}
 	return boolStr(row.isTaxable())
@@ -82,9 +85,13 @@ func PendingSemanticReviews(rows []Row) int {
 func readinessForRows(rows []Row) ReportReadiness {
 	assets, semantics := PendingAssetReviews(rows), PendingSemanticReviews(rows)
 	reasons := map[string]bool{}
+	unknownFees := 0
 	for _, row := range rows {
 		if reason := semanticReviewReason(row); reason != "" {
 			reasons[reason] = true
+		}
+		if row.FeeOutcomeUnknown {
+			unknownFees++
 		}
 	}
 	var required []string
@@ -96,7 +103,8 @@ func readinessForRows(rows []Row) ReportReadiness {
 		ReviewRequired: required,
 		ExportReady:    assets == 0 && semantics == 0, ParserDecodeComplete: true,
 		PendingAssetReviews: assets, PendingSemanticReviews: semantics,
-		Scope: "requested chain, wallets and period; review and retained parser/decode evidence only, not archive coverage, prices or basis",
+		FeeOutcomeUnknown: unknownFees,
+		Scope:             "requested chain, wallets and period; review and retained parser/decode evidence only, not archive coverage, prices or basis",
 	}
 }
 

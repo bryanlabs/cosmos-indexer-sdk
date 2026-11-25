@@ -312,7 +312,7 @@ func TestEffectiveWalletFeesPostgres(t *testing.T) {
 		for _, address := range []string{"proof-owner", "proof-grantee", "proof-unregistered-granter"} {
 			var want []feeRec
 			require.NoError(t, database.Table("fees").
-				Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash").
+				Select("fees.amount::text AS amount, denoms.base AS denom, blocks.time_stamp AS ts, txes.hash AS hash, "+feeOutcomeUnknownColumn).
 				Joins("JOIN addresses ON addresses.id=fees.payer_address_id").
 				Joins("JOIN denoms ON denoms.id=fees.denomination_id").
 				Joins("JOIN txes ON txes.id=fees.tx_id").

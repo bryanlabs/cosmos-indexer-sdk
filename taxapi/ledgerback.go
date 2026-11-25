@@ -254,7 +254,7 @@ ORDER BY b.height`, map[string]any{"ids": ids, "lo": from, "hi": to}).Scan(&rows
 			}
 		}
 		if write && len(fees) > 0 {
-			if err := s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(fees, 1000).Error; err != nil {
+			if err := s.db.Transaction(func(tx *gorm.DB) error { return recordFailedTxFees(tx, fees, 1000) }); err != nil {
 				return n, fmt.Errorf("record failed-tx fees %d to %d: %w", from, to-1, err)
 			}
 		}
@@ -348,15 +348,15 @@ func (s *Server) recordBackScan(chain string, blocks []backBlock, from int64) (i
 				}
 			}
 		}
-		if len(fees) > 0 {
-			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(fees, 500).Error; err != nil {
-				return err
-			}
-		}
+		// Grants first, so the fee outcomes below mark their granters'
+		// reports stale too.
 		if len(grants) > 0 {
 			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(grants, 500).Error; err != nil {
 				return err
 			}
+		}
+		if err := recordFailedTxFees(tx, fees, 500); err != nil {
+			return err
 		}
 		return tx.Model(&LedgerScan{}).Where("chain = ? AND fee_grants_from > ?", chain, from).Update("fee_grants_from", from).Error
 	})

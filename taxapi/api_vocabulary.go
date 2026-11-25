@@ -67,6 +67,7 @@ const (
 	apiNotFound                       = "not found"
 	apiPaginationKey                  = "pagination.key"
 	apiPriceMissing                   = "price_missing"
+	apiFeeOutcomeUnknown              = "fee_outcome_unknown"
 	apiProvider                       = "provider"
 	apiSpamPolicy                     = "spam_policy"
 	apiTags                           = "tags"

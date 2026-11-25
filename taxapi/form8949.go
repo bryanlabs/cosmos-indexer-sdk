@@ -152,7 +152,7 @@ func Build8949(rows []Row) []Form8949Row {
 	for _, r := range sorted {
 		stamp()
 		rowChain = r.ChainID
-		if r.Excluded || (r.AssetIdentity != nil && r.AssetDecision == nil) {
+		if r.Excluded || r.FeeOutcomeUnknown || (r.AssetIdentity != nil && r.AssetDecision == nil) {
 			continue
 		}
 		// A reward paid to the withdraw address is no disposal: the delegator
