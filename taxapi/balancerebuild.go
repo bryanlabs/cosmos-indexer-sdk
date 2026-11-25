@@ -81,8 +81,7 @@ func (s *Server) RebuildBalanceDaysFor(chain, prefix string, node *ledgerNode, a
 		days, ends = append(days, d), append(ends, ht)
 	}
 
-	reader := NewServer(s.db, s.oracle, s.native)
-	reader.readOnlyLedger = true
+	reader := s.balanceReader()
 	rows := make([][]BalanceDay, len(addrs))
 	var mu sync.Mutex
 	var firstErr error
@@ -261,4 +260,13 @@ func writeRollback(w io.Writer, chain string, addrs []string, from, to time.Time
 	b.WriteString("COMMIT;\n")
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// balanceReader is the read-only server the rebuild workers walk with. It
+// keeps the proved validator absences, which a fresh server would drop.
+func (s *Server) balanceReader() *Server {
+	reader := NewServer(s.db, s.oracle, s.native)
+	reader.readOnlyLedger = true
+	reader.ledgerAbsent = s.ledgerAbsent
+	return reader
 }

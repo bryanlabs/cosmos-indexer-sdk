@@ -176,3 +176,12 @@ func TestLoadAbsentProofs(t *testing.T) {
 		t.Fatal("a symlink was accepted")
 	}
 }
+
+func TestBalanceReaderKeepsAbsentProofs(t *testing.T) {
+	s := NewServer(nil, nil, DefaultNativeAsset)
+	s.UseAbsentProofs(map[AbsentAt]bool{{"cosmosvaloper1a", 10}: true})
+	r := s.balanceReader()
+	if !r.readOnlyLedger || !r.ledgerAbsent[AbsentAt{"cosmosvaloper1a", 10}] {
+		t.Fatalf("reader readOnly %v absent %v", r.readOnlyLedger, r.ledgerAbsent)
+	}
+}

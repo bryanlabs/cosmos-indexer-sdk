@@ -427,7 +427,7 @@ func (s *Server) RepairRepeatedInclusions(chain string, node *ledgerNode, opts R
 				preview.effective = append(preview.effective, p.Effective...)
 			}
 		}
-		sv := &Server{db: s.db, oracle: s.oracle, native: s.native, preview: preview, blockReads: true}
+		sv := &Server{db: s.db, oracle: s.oracle, native: s.native, preview: preview, blockReads: true, ledgerAbsent: s.ledgerAbsent}
 		if err := sv.checkInclusionPlans(chain, ids, node, plans, workers, &rates); err != nil {
 			return sum, err
 		}
