@@ -853,7 +853,7 @@ func (s *Server) walkAcross(chain string, ids []int64, node *ledgerNode, addr st
 	if err != nil {
 		return nil, "", err
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, targets)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, Absent: s.ledgerAbsent}, targets)
 	if err != nil {
 		var inc ledgerInconsistent
 		var unk ledgerUnknown

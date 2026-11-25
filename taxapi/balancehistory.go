@@ -1575,7 +1575,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	for _, i := range usable {
 		heights = append(heights, targets[i].Height)
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, heights)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, Absent: s.ledgerAbsent}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {

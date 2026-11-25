@@ -98,6 +98,8 @@ func main() {
 	daysAppend := flag.Bool("days-append", false, "append the finished days after the stored balance build")
 	daysRebuild := flag.String("days-rebuild", "", "file of address ids, one per line, whose stored balance days are rebuilt over the built span")
 	daysRebuildSHA := flag.String("days-rebuild-sha256", "", "exact digest of -days-rebuild")
+	flag.StringVar(&absentPath, "absent-proofs", "", "file of operator|height lines at which two archives proved the validator did not exist")
+	flag.StringVar(&absentSHA, "absent-proofs-sha256", "", "exact digest of -absent-proofs")
 	daysRebuildOut := flag.String("days-rebuild-out", "", "new directory for the rebuild's before.jsonl, after.jsonl and rollback.sql")
 	daysRebuildWrite := flag.Bool("days-rebuild-write", false, "replace the rows; without it the rebuild only writes its files")
 	flows := flag.Bool("commission-flows", false, "trace where each validator's commission went")
@@ -314,9 +316,25 @@ func buildDays(db *gorm.DB, chain, fromText, toText string, batch, workers int) 
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	useAbsent(srv)
 	if err := srv.BuildBalanceDays(chain, "cosmos", node, from, to, batch, workers, log.Printf); err != nil {
 		log.Fatalf("balance days: %v", err)
 	}
+}
+
+var absentPath, absentSHA string
+
+// useAbsent hands srv the proved validator absences named by -absent-proofs.
+func useAbsent(srv *taxapi.Server) {
+	if absentPath == "" && absentSHA == "" {
+		return
+	}
+	absent, err := taxapi.LoadAbsentProofs(absentPath, absentSHA)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.UseAbsentProofs(absent)
+	log.Printf("absent proofs: %d validator heights", len(absent))
 }
 
 func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir string, workers int, write bool) {
@@ -354,6 +372,7 @@ func rebuildDays(db *gorm.DB, chain, idsPath, wantSHA, outDir string, workers in
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	useAbsent(srv)
 	r, err := srv.RebuildBalanceDaysFor(chain, "cosmos", node, ids, workers, write, before, after, rollback, log.Printf)
 	for _, f := range []*os.File{before, after, rollback} {
 		if cerr := f.Close(); cerr != nil && err == nil {
@@ -375,6 +394,7 @@ func appendDays(db *gorm.DB, chain string, workers int) {
 		log.Fatal(err)
 	}
 	srv := taxapi.NewServer(db, nil, taxapi.DefaultNativeAsset)
+	useAbsent(srv)
 	through := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
 	if err := srv.AppendBalanceDays(chain, "cosmos", node, through, workers, log.Printf); err != nil {
 		log.Fatalf("balance days: %v", err)

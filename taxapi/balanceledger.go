@@ -119,6 +119,16 @@ type ledgerInput struct {
 	// Samples holds the recorded rates before the anchor of the validators
 	// whose rate is not one, ascending by height.
 	Samples map[string][]rateSample
+	// Absent holds the validator and height pairs at which two archives
+	// proved the validator was not in state (before its creation block or
+	// after its removal).
+	Absent map[AbsentAt]bool
+}
+
+// AbsentAt is a validator and a height at which it did not exist.
+type AbsentAt struct {
+	Operator string
+	Height   int64
 }
 
 // ledgerHoldings is the rebuilt state at one block, in base units.
@@ -484,6 +494,19 @@ func walkBack(in ledgerInput, targets []int64) (map[int64]ledgerHoldings, error)
 				continue
 			}
 			amt, bound, err := book.shown(v, h, *sp)
+			if err != nil && in.Absent[AbsentAt{v, h}] {
+				// v did not exist at h, so no one held a delegation on it.
+				// That is the wallet's figure only if its own rebuild allows
+				// zero and none of its staking records on v leaves a
+				// delegator or validator unnamed. Unbonding entries are kept
+				// as rebuilt.
+				if sp.lo.GreaterThan(tiny) || sp.hi.LessThan(tiny.Neg()) {
+					return nil, ledgerInconsistent{fmt.Sprintf("the rebuilt delegation on %s at height %d is not zero, but the validator did not exist then", v, h)}
+				}
+				if stakeRecordsNamed(events[:ei], v) {
+					continue
+				}
+			}
 			if err != nil {
 				return answeredOnUnknown(out, err)
 			}
@@ -514,6 +537,31 @@ func answeredOnUnknown(out map[int64]ledgerHoldings, err error) (map[int64]ledge
 		return out, err
 	}
 	return nil, err
+}
+
+// stakeRecordsNamed says whether every staking record in events that may
+// touch v names its delegator, and every one names a validator, so that none
+// of them can be a change to the wallet's shares on v that the walk skipped.
+func stakeRecordsNamed(events []ledgerEvent, v string) bool {
+	for _, ev := range events {
+		switch ev.Type {
+		case "delegate", "unbond", "redelegate", "cancel_unbonding_delegation", "tokenize_shares", "redeem_shares":
+		default:
+			continue
+		}
+		for _, rec := range ev.records() {
+			vals := []string{rec["validator"], rec["source_validator"], rec["destination_validator"]}
+			named, touches := false, false
+			for _, x := range vals {
+				named = named || x != ""
+				touches = touches || x == v
+			}
+			if !named || (touches && rec["delegator"] == "") {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // undoEvent reverses one event's effect on the wallet's liquid balance and

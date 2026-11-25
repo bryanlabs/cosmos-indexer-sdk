@@ -57,6 +57,8 @@ type Server struct {
 	stmtCache       statementCache
 
 	ledgerCov ledgerCoverage
+	// ledgerAbsent holds the proved heights at which a validator did not exist.
+	ledgerAbsent map[AbsentAt]bool
 
 	flowExpMu sync.Mutex
 	flowExp   map[string]*flowExpected
