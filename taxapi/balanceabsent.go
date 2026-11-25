@@ -9,8 +9,8 @@ import (
 )
 
 // LoadAbsentProofs reads a file of operator|height lines, each a height at
-// which two archives answered NotFound for the validator while serving the
-// validator set, and checks it against its exact digest.
+// which archive reads proved the validator absent (NotFound for the validator
+// while the validator set was served), and checks it against its exact digest.
 func LoadAbsentProofs(path, expected string) (map[AbsentAt]bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {

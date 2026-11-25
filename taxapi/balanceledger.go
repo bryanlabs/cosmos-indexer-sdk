@@ -119,9 +119,10 @@ type ledgerInput struct {
 	// Samples holds the recorded rates before the anchor of the validators
 	// whose rate is not one, ascending by height.
 	Samples map[string][]rateSample
-	// Absent holds the validator and height pairs at which two archives
-	// proved the validator was not in state (before its creation block or
-	// after its removal).
+	// Absent holds the validator and height pairs at which archive reads
+	// proved the validator absent (NotFound for the validator while the
+	// validator set was served): before its creation block or after its
+	// removal.
 	Absent map[AbsentAt]bool
 }
 

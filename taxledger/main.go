@@ -98,7 +98,7 @@ func main() {
 	daysAppend := flag.Bool("days-append", false, "append the finished days after the stored balance build")
 	daysRebuild := flag.String("days-rebuild", "", "file of address ids, one per line, whose stored balance days are rebuilt over the built span")
 	daysRebuildSHA := flag.String("days-rebuild-sha256", "", "exact digest of -days-rebuild")
-	flag.StringVar(&absentPath, "absent-proofs", "", "file of operator|height lines at which two archives proved the validator did not exist")
+	flag.StringVar(&absentPath, "absent-proofs", "", "file of operator|height lines at which archive reads proved the validator absent (NotFound for the validator while the validator set was served)")
 	flag.StringVar(&absentSHA, "absent-proofs-sha256", "", "exact digest of -absent-proofs")
 	daysRebuildOut := flag.String("days-rebuild-out", "", "new directory for the rebuild's before.jsonl, after.jsonl and rollback.sql")
 	daysRebuildWrite := flag.Bool("days-rebuild-write", false, "replace the rows; without it the rebuild only writes its files")
