@@ -531,18 +531,30 @@ func (s *Server) flowEvents(chain, addr string, start, end time.Time) ([]flowEve
 }
 
 func (s *Server) readFlowEvents(chain, addr string, start, end time.Time) ([]flowEvent, error) {
+	// The reward payout read needs nothing from the wallet's rows and runs
+	// outside the read snapshot as before, so it overlaps the snapshot read.
+	// Errors keep their order: the snapshot read, then return credits, then
+	// payouts.
+	payouts := make(chan flowPayoutRead, 1)
+	go func() {
+		paid, err := s.flowRewardPayouts(chain, addr, start, end)
+		payouts <- flowPayoutRead{paid: paid, err: err}
+	}()
 	input, err := s.readCurrentChainInput(chain, []string{addr}, start, end)
 	if err != nil {
+		<-payouts
 		return nil, err
 	}
 	rows := input.Wallets[0]
 	rows.Events = withoutWithdrawAddressMoves(rows.Events)
 	credited, err := s.flowReturnCredits(addr, rows.Events)
 	if err != nil {
+		<-payouts
 		return nil, err
 	}
 	out := commissionFlowEventsFromRows(rows, addr, s.native.Denom, credited)
-	paid, err := s.flowRewardPayouts(chain, addr, start, end)
+	read := <-payouts
+	paid, err := read.paid, read.err
 	if err != nil {
 		return nil, err
 	}
@@ -670,6 +682,12 @@ ORDER BY ev.id, a.index`,
 		paid[m] = q
 	}
 	return paid, nil
+}
+
+// flowPayoutRead is flowRewardPayouts' result, read beside the wallet's rows.
+type flowPayoutRead struct {
+	paid map[uint]flowRewardPayout
+	err  error
 }
 
 // flowTransferAttr is one attribute of a transfer event, in emitted order.
