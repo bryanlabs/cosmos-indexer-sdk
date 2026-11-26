@@ -17,8 +17,12 @@ type commissionFlowProgress struct {
 	// Archive counters are job-cumulative, not attributed to one root. Minus one means unavailable.
 	JobArchiveCallAttempts int64 `json:"job_archive_call_attempts"`
 	JobHeaderCacheReuses   int64 `json:"job_header_cache_reuses"`
-	PendingEvents          int   `json:"pending_events"`
-	AppliedQueuedEvents    int   `json:"applied_queued_events"`
+	// Requests sent again after a failure, and every failed attempt by cause
+	// (timeout, status_<code>, decode, transport). Job-cumulative.
+	JobArchiveCallRetries   int64            `json:"job_archive_call_retries"`
+	JobArchiveFailureCauses map[string]int64 `json:"job_archive_failure_causes,omitempty"`
+	PendingEvents           int              `json:"pending_events"`
+	AppliedQueuedEvents     int              `json:"applied_queued_events"`
 	// How far through [From, AsOf) the applied events have reached, by block
 	// time; -1 before the first. Later months hold more wallets, so it runs
 	// ahead of the work done.

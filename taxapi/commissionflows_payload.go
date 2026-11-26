@@ -153,8 +153,43 @@ func encodeCommissionPayload(raw []byte, m *CommissionFlowPayload, save func(int
 // storeCommissionFlowPayloads must run inside the result transaction. No marker
 // or complete manifest can become visible independently from all its chunks.
 func storeCommissionFlowPayloads(tx *gorm.DB, snapshot *CommissionFlowVersion) error {
+	_, err := storeCommissionFlowPayloadsFrom(tx, snapshot, nil)
+	return err
+}
+
+// storeCommissionFlowPayloadsFrom is storeCommissionFlowPayloads with a
+// streamed source for any field named in sources: the value is written from
+// the source into the same inline string, or the same chunks and complete
+// index, that its whole string would give. It returns each streamed field's
+// raw SHA-256.
+func storeCommissionFlowPayloadsFrom(tx *gorm.DB, snapshot *CommissionFlowVersion, sources map[string]payloadSource) (map[string]string, error) {
+	sums := map[string]string{}
 	for _, field := range []string{"run", "rows", "evidence"} {
 		value, _ := payloadField(snapshot, field)
+		if src := sources[field]; src != nil {
+			m := CommissionFlowPayload{Version: snapshot.Version, Chain: snapshot.Chain, Validator: snapshot.Validator, Build: snapshot.Build, Field: field}
+			w := newPayloadStreamWriter(&m, func(ordinal int, data []byte) error {
+				chunk := CommissionFlowPayloadChunk{Version: m.Version, Chain: m.Chain, Validator: m.Validator, Field: field, Ordinal: ordinal, SHA256: payloadHash(data), Data: data}
+				return tx.Create(&chunk).Error
+			})
+			if err := src(w); err != nil {
+				return nil, err
+			}
+			inline, chunked, err := w.finish()
+			if err != nil {
+				return nil, err
+			}
+			sums[field] = w.rawSHA256()
+			if !chunked {
+				*value = inline
+				continue
+			}
+			if err := tx.Create(&m).Error; err != nil {
+				return nil, err
+			}
+			*value = payloadMarker(m)
+			continue
+		}
 		if len(*value) <= commissionPayloadInlineLimit {
 			continue
 		}
@@ -163,14 +198,14 @@ func storeCommissionFlowPayloads(tx *gorm.DB, snapshot *CommissionFlowVersion) e
 			chunk := CommissionFlowPayloadChunk{Version: m.Version, Chain: m.Chain, Validator: m.Validator, Field: field, Ordinal: ordinal, SHA256: payloadHash(data), Data: data}
 			return tx.Create(&chunk).Error
 		}); err != nil {
-			return err
+			return nil, err
 		}
 		if err := tx.Create(&m).Error; err != nil {
-			return err
+			return nil, err
 		}
 		*value = payloadMarker(m)
 	}
-	return nil
+	return sums, nil
 }
 
 // payloadChunkReader holds at most one compressed chunk at a time. ReadByte

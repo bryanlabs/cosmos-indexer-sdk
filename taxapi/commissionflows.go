@@ -1484,10 +1484,12 @@ func (s *Server) BuildCommissionFlows(chain string, node *ledgerNode, from time.
 		defer progressSink.close()
 		loader.progress = func(p commissionFlowProgress) {
 			p.Version, p.Build = options[0].Version, options[0].Build
-			p.JobArchiveCallAttempts, p.JobHeaderCacheReuses = -1, -1
+			p.JobArchiveCallAttempts, p.JobHeaderCacheReuses, p.JobArchiveCallRetries = -1, -1, -1
 			if loader.archive != nil {
 				p.JobArchiveCallAttempts = loader.archive.callAttempts.Load()
 				p.JobHeaderCacheReuses = loader.archive.headerReuses.Load()
+				p.JobArchiveCallRetries = loader.archive.callRetries.Load()
+				p.JobArchiveFailureCauses = loader.archive.causeCounts()
 			}
 			progressSink.update(p)
 		}

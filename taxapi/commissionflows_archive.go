@@ -5,10 +5,15 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -41,6 +46,9 @@ type flowArchive struct {
 	holdings     map[string]flowHoldings
 	headers      flowHeaderCache
 	callAttempts atomic.Int64
+	callRetries  atomic.Int64
+	causeMu      sync.Mutex
+	causes       map[string]int64
 	headerReuses atomic.Int64
 }
 
@@ -54,9 +62,8 @@ func newFlowArchive(origin string) (*flowArchive, error) {
 
 func (a *flowArchive) response(addr string, height int64, method string, q url.Values, out any, local ...*[]FlowArchiveReceipt) error {
 	var raw json.RawMessage
-	a.callAttempts.Add(1)
-	if err := a.rpc.GetJSON(method, q, &raw); err != nil {
-		return fmt.Errorf("commission archive %s request failed", method)
+	if err := a.getJSON(method, q, &raw); err != nil {
+		return err
 	}
 	a.retainResponse(addr, height, method, q, string(raw), false, local...)
 	var envelope struct{ Error json.RawMessage }
@@ -67,6 +74,78 @@ func (a *flowArchive) response(addr string, height int64, method string, q url.V
 		return fmt.Errorf("invalid commission archive %s response", method)
 	}
 	return nil
+}
+
+// flowArchiveAttempts bounds how often one archive request is sent. Only a
+// request that got no usable body is sent again: the archive answers a fixed
+// height, so a later answer is the same bytes, and only the answer that is
+// used is retained as evidence. A JSON-RPC error inside a 200 body is an
+// answer, not a failed request, and is never retried here.
+var flowArchiveAttempts = 5
+
+var flowArchiveBackoff = func(attempt int) time.Duration { return time.Duration(1<<attempt) * time.Second }
+
+func (a *flowArchive) getJSON(method string, q url.Values, out *json.RawMessage) error {
+	var cause string
+	for attempt := 1; attempt <= flowArchiveAttempts; attempt++ {
+		a.callAttempts.Add(1)
+		*out = nil
+		err := a.rpc.GetJSON(method, q, out)
+		if err == nil {
+			return nil
+		}
+		cause = flowArchiveCause(err)
+		a.countCause(cause)
+		if attempt < flowArchiveAttempts {
+			a.callRetries.Add(1)
+			wait := flowArchiveBackoff(attempt)
+			log.Printf("commission archive %s attempt %d of %d failed: %s; retrying in %s", method, attempt, flowArchiveAttempts, cause, wait)
+			time.Sleep(wait)
+		}
+	}
+	log.Printf("commission archive %s failed after %d attempts: %s", method, flowArchiveAttempts, cause)
+	return fmt.Errorf("commission archive %s request failed after %d attempts: %s", method, flowArchiveAttempts, cause)
+}
+
+// flowArchiveCause names why one archive request got no usable body, without
+// any part of the request URL (the archive path is a credential): timeout, an
+// HTTP status as status_<code>, decode for a body that is not complete JSON,
+// or transport for any other connection failure.
+func flowArchiveCause(err error) string {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return "timeout"
+	}
+	if code, ok := strings.CutPrefix(err.Error(), "service HTTP status "); ok {
+		if _, perr := strconv.Atoi(code); perr == nil {
+			return "status_" + code
+		}
+	}
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	if errors.As(err, &syn) || errors.As(err, &typ) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return "decode"
+	}
+	return "transport"
+}
+
+func (a *flowArchive) countCause(cause string) {
+	a.causeMu.Lock()
+	defer a.causeMu.Unlock()
+	if a.causes == nil {
+		a.causes = map[string]int64{}
+	}
+	a.causes[cause]++
+}
+
+func (a *flowArchive) causeCounts() map[string]int64 {
+	a.causeMu.Lock()
+	defer a.causeMu.Unlock()
+	out := make(map[string]int64, len(a.causes))
+	for k, v := range a.causes {
+		out[k] = v
+	}
+	return out
 }
 
 func (a *flowArchive) retainResponse(addr string, height int64, method string, q url.Values, raw string, reused bool, local ...*[]FlowArchiveReceipt) {
@@ -84,9 +163,8 @@ func (a *flowArchive) header(addr string, height int64, local ...*[]FlowArchiveR
 	q := url.Values{"height": {strconv.FormatInt(height, 10)}}
 	raw, reused, err := a.headers.get(height, func() (string, error) {
 		var body json.RawMessage
-		a.callAttempts.Add(1)
-		if err := a.rpc.GetJSON("block", q, &body); err != nil {
-			return "", fmt.Errorf("commission archive block request failed")
+		if err := a.getJSON("block", q, &body); err != nil {
+			return "", err
 		}
 		_, err := flowArchiveHeader(string(body), height)
 		return string(body), err
