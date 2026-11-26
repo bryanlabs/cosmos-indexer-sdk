@@ -90,17 +90,14 @@ SELECT (SELECT count(*) FROM (SELECT 1 FROM message_event_attributes WHERE left(
 // counted, up to limit+1, so activity after a trace's as-of date cannot move
 // a wallet across the cutoff.
 func (s *Server) walletRowsBefore(addr string, limit int, end time.Time) (int64, error) {
+	if s.flowShared != nil {
+		return s.sharedWalletRowsBefore(addr, limit, end)
+	}
 	n, err := s.walletRows(addr, limit)
 	if err != nil || n <= int64(limit) {
 		return n, err
 	}
-	end = end.UTC()
-	if s.flowShared != nil {
-		return s.sharedCount(flowSharedKey{kind: flowSharedWalletRowsBefore, addr: addr, end: end, n: limit}, func() (int64, error) {
-			return s.readWalletRowsBefore(addr, limit, end)
-		})
-	}
-	return s.readWalletRowsBefore(addr, limit, end)
+	return s.readWalletRowsBefore(addr, limit, end.UTC())
 }
 
 func (s *Server) readWalletRowsBefore(addr string, limit int, end time.Time) (int64, error) {

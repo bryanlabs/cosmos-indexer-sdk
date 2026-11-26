@@ -26,6 +26,10 @@ type CommissionSharedHistory struct {
 	bytes   int64
 
 	hits, misses, evicted atomic.Int64
+
+	// heavy is kept outside the LRU, so the busy cutoff is not counted again
+	// for a wallet whose count entries were evicted by event reads.
+	heavy flowHeavyBook
 }
 
 // NewCommissionSharedHistory keeps up to limitBytes of finished reads,
