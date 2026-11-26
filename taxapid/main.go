@@ -107,6 +107,10 @@ func main() {
 	if err := taxapi.CommissionFlowsMigrate(db); err != nil {
 		log.Printf("commission flow tables migrate: %v", err)
 	}
+	// Covering indexes for the commission fee and payout id lookups.
+	if err := taxapi.LookupIndexesMigrate(db); err != nil {
+		log.Printf("lookup index migrate: %v", err)
+	}
 
 	oracle := taxapi.NewOracle(env("ORACLE_URL", "http://wasm-indexer:8080"), os.Getenv("NODE_REST_API"))
 	srv := taxapi.NewServer(db, oracle, nativeAssetFromEnv())
