@@ -396,7 +396,7 @@ func (s *Server) handleValidatorJurisdictions(w http.ResponseWriter, r *http.Req
 	})
 	writeJSON(w, map[string]any{
 		apiBasis:               "On-chain self-attestation only. Each row is a transaction signed by the validator's operator account carrying a bryanlabs-tax:jurisdiction memo; the transaction hash is the source. Nothing is inferred from monikers, websites or company registers. It records what the operator attested, not a verification of tax residence. Validators without an attestation are reported as undisclosed, never guessed.",
-		apiChain:               chain,
+		apiChain:               publicChain(chain),
 		"validators_on_chain":  len(monikers),
 		"validators_disclosed": disclosed,
 		"jurisdictions":        out,

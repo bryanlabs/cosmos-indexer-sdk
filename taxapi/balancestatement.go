@@ -156,7 +156,7 @@ func (s *Server) handleBalanceStatement(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set(apiContentType, apiJSONContentType)
 	writeJSON(w, map[string]any{
-		apiAddress: address, apiChain: chain, apiSymbol: s.native.Symbol,
+		apiAddress: address, apiChain: publicChain(chain), apiSymbol: s.native.Symbol,
 		apiMethodologyVersion: MethodologyVersion,
 		apiNote:               balanceStatementNote,
 		"balances":            dates,

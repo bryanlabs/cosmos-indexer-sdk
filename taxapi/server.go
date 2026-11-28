@@ -135,7 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /delegator-report", s.withPeriodCoverage(s.handleDelegatorReport))
 	mux.HandleFunc("POST /admin/validator-keys", s.handleCreateValidatorKey)
 	mux.HandleFunc("GET /admin/validator-keys", s.handleListValidatorKeys)
-	return withCORS(mux)
+	return withCORS(withProblems(mux))
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -712,6 +712,17 @@ func chainParam(v string) string {
 		return apiTestnet
 	}
 	return strings.TrimSpace(v)
+}
+
+// publicChain is the chain name a response reports. The oracle's key for
+// Cosmos Hub is "mainnet"; callers and the website name it "cosmoshub", so
+// every JSON body says "cosmoshub" and keeps the oracle key internal. Other
+// keys are reported as they are.
+func publicChain(chain string) string {
+	if chain == apiMainnet {
+		return apiCosmoshub
+	}
+	return chain
 }
 
 func def(v, d string) string {

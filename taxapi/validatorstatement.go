@@ -677,16 +677,20 @@ func (s *Server) handleValidatorStatement(w http.ResponseWriter, r *http.Request
 		cw.Flush()
 		return
 	}
+	monthsJSON := make([]statementMonthJSON, 0, len(out))
+	for _, m := range out {
+		monthsJSON = append(monthsJSON, m.centsUSD())
+	}
 	writeJSON(w, map[string]any{
-		apiValidator: val, apiMoniker: moniker, apiChain: chain,
+		apiValidator: val, apiMoniker: moniker, apiChain: publicChain(chain),
 		"jurisdiction":        s.jurisdictionLabel(chain, val),
 		apiMethodologyVersion: MethodologyVersion,
 		"recognition_policy":  RecognitionPolicyDefault,
 		"coverage":            cov,
 		"index_coverage":      period,
-		apiNote:               "Commission is the operator's own withdrawn commission. Delegator rewards are rewards actually withdrawn by delegators through this validator (claims and auto-withdrawals), not rewards accrued. Unique delegators counts distinct withdrawing addresses. USD figures for rows with no reference price are counted at zero; price_missing_days and price_missing_events say how many.",
-		"months":              out,
-		apiTotal:              totals,
+		apiNote:               "Commission is the operator's own withdrawn commission. Delegator rewards are rewards actually withdrawn by delegators through this validator (claims and auto-withdrawals), not rewards accrued. Unique delegators counts distinct withdrawing addresses. USD figures are rounded to cents, each month and the total from unrounded row values; rows with no reference price are counted at zero, and price_missing_days and price_missing_events say how many.",
+		"months":              monthsJSON,
+		apiTotal:              totals.centsUSD(),
 	})
 }
 
@@ -711,6 +715,22 @@ func writeStatementError(ctx context.Context, w http.ResponseWriter, val string,
 		log.Printf("validator-statement %s: %v", val, err) //nolint:gosec // val passed the bech32 checksum
 		http.Error(w, "could not read the validator statement", http.StatusInternalServerError)
 	}
+}
+
+// statementMonthJSON is a statement month as the JSON body sends it: the USD
+// columns in cents with two decimals, as the CSV prints them. The outer fields
+// take the place of the embedded decimal ones in the JSON encoding.
+type statementMonthJSON struct {
+	ValidatorStatementMonth
+	CommissionUSD       string `json:"commission_usd"`
+	DelegatorRewardsUSD string `json:"delegator_rewards_usd"`
+}
+
+// centsUSD rounds the USD columns to cents. Totals are summed from the
+// unrounded months first, so the total row equals the CSV total and may differ
+// from the sum of the rounded months by a cent.
+func (m ValidatorStatementMonth) centsUSD() statementMonthJSON {
+	return statementMonthJSON{ValidatorStatementMonth: m, CommissionUSD: m.CommissionUSD.StringFixed(2), DelegatorRewardsUSD: m.DelegatorRewardsUSD.StringFixed(2)}
 }
 
 // statementTotals sums the month rows. A month entirely inside an index gap
