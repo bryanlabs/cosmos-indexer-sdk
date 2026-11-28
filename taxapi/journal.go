@@ -358,7 +358,7 @@ func (s *Server) handleJournal(w http.ResponseWriter, r *http.Request) {
 	}
 	lines := BuildJournal(rows, s.jurisdictionFunc(chain))
 	if q.Get(apiFormat) == "json" {
-		writeJSON(w, map[string]any{apiAddress: addr, apiChain: chain, apiMethodologyVersion: MethodologyVersion, "lines": lines})
+		writeJSON(w, map[string]any{apiAddress: addr, apiChain: publicChain(chain), apiMethodologyVersion: MethodologyVersion, "lines": lines})
 		return
 	}
 	w.Header().Set(apiContentType, apiCSVContentType)

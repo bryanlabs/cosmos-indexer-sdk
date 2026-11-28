@@ -290,11 +290,11 @@ func TestValidatorStatementHandlerPostgres(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, statementPGGold, body.Validator)
 	require.Len(t, body.Months, 2)
-	require.JSONEq(t, `{"month":"2025-03","symbol":"ATOM","commission_amount":"0","commission_usd":"0","delegator_rewards_amount":"4","delegator_rewards_usd":"40","reward_events":2,"unique_delegators":2,"price_missing_days":0,"price_missing_events":0,"incomplete":false}`, string(body.Months[0]))
-	require.JSONEq(t, `{"month":"2025-04","symbol":"ATOM","commission_amount":"3","commission_usd":"30","delegator_rewards_amount":"1.25","delegator_rewards_usd":"12.5","reward_events":3,"unique_delegators":2,"price_missing_days":1,"price_missing_events":1,"incomplete":false}`, string(body.Months[1]))
+	require.JSONEq(t, `{"month":"2025-03","symbol":"ATOM","commission_amount":"0","commission_usd":"0.00","delegator_rewards_amount":"4","delegator_rewards_usd":"40.00","reward_events":2,"unique_delegators":2,"price_missing_days":0,"price_missing_events":0,"incomplete":false}`, string(body.Months[0]))
+	require.JSONEq(t, `{"month":"2025-04","symbol":"ATOM","commission_amount":"3","commission_usd":"30.00","delegator_rewards_amount":"1.25","delegator_rewards_usd":"12.50","reward_events":3,"unique_delegators":2,"price_missing_days":1,"price_missing_events":1,"incomplete":false}`, string(body.Months[1]))
 	// The period's coverage is unknown without a block scanner, which marks
 	// the total incomplete; the figures are what is pinned here.
-	require.JSONEq(t, `{"month":"TOTAL","symbol":"ATOM","commission_amount":"3","commission_usd":"30","delegator_rewards_amount":"5.25","delegator_rewards_usd":"52.5","reward_events":5,"unique_delegators":3,"price_missing_days":1,"price_missing_events":1,"incomplete":true}`, string(body.Total))
+	require.JSONEq(t, `{"month":"TOTAL","symbol":"ATOM","commission_amount":"3","commission_usd":"30.00","delegator_rewards_amount":"5.25","delegator_rewards_usd":"52.50","reward_events":5,"unique_delegators":3,"price_missing_days":1,"price_missing_events":1,"incomplete":true}`, string(body.Total))
 
 	rec = statementPGRequest(t, s, statementPGPath+statementPGGold+"&start=2025-01-01&end=2026-01-01&format=csv")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

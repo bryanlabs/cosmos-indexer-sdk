@@ -406,6 +406,7 @@ func (s *Server) handleValidatorCommissionFlows(w http.ResponseWriter, r *http.R
 		return
 	}
 	w.Header().Set(apiContentType, apiJSONContentType)
+	out.Chain = publicChain(out.Chain)
 	writeJSON(w, out)
 }
 
@@ -615,6 +616,7 @@ func (s *Server) handleCommissionFlowsHub(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set(apiContentType, apiJSONContentType)
+	out.Chain = publicChain(out.Chain)
 	writeJSON(w, out)
 }
 
@@ -657,5 +659,5 @@ func (s *Server) handleAddressLabels(w http.ResponseWriter, r *http.Request) {
 		out = append(out, label{l.Address, l.Name, l.Kind, l.Source, l.Evidence})
 	}
 	w.Header().Set(apiContentType, apiJSONContentType)
-	writeJSON(w, map[string]any{apiChain: chain, "labels": out, "note": "IBC escrow and validator operator accounts are also labelled and derived the same way; they are left out of this list."})
+	writeJSON(w, map[string]any{apiChain: publicChain(chain), "labels": out, "note": "IBC escrow and validator operator accounts are also labelled and derived the same way; they are left out of this list."})
 }

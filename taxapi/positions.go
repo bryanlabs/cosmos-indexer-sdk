@@ -162,7 +162,7 @@ func (s *Server) handlePositions(w http.ResponseWriter, r *http.Request) {
 		note = fmt.Sprintf("Open lots from acquisitions seen in the indexed history, FIFO, per wallet, across the Cosmos Hub restarts from %s (%s) on. Coins acquired in blocks not yet indexed (see index_coverage and GET /index-coverage) or before %s are not represented.", eras.earliest().ChainID, dayString(eras.earliest().Start), eras.earliest().ChainID)
 	}
 	writeJSON(w, map[string]any{
-		apiAddress: addr, apiChain: chain, "as_of": day, apiMethodologyVersion: MethodologyVersion,
+		apiAddress: addr, apiChain: publicChain(chain), "as_of": day, apiMethodologyVersion: MethodologyVersion,
 		apiNote:          note + " Quantity with basis_unknown arrived from outside our view (a plain transfer or IBC receipt) and is valued but has no cost basis here. Staked, unbonding and protocol-held coins stay in quantity because delegating is not a disposal; the liquid, staked and unbonding split is on /balances.",
 		"positions":      positions,
 		"index_coverage": s.periodCoverage(time.Time{}, asOf.AddDate(0, 0, 1)),

@@ -73,7 +73,7 @@ func (s *Server) handlePriceSeries(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set(apiContentType, apiJSONContentType)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		apiChain:              chain,
+		apiChain:              publicChain(chain),
 		apiDenom:              denom,
 		apiMethodologyVersion: MethodologyVersion,
 		"points":              points,

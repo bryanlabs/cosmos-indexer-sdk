@@ -151,5 +151,5 @@ func (s *Server) handleValidatorList(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(out, func(i, j int) bool { return out[i].OperatorAddress < out[j].OperatorAddress })
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
-	writeJSON(w, map[string]any{apiChain: chain, "count": len(out), "validators": out})
+	writeJSON(w, map[string]any{apiChain: publicChain(chain), "count": len(out), "validators": out})
 }
