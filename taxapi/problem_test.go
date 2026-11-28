@@ -21,6 +21,15 @@ func problemServe(t *testing.T, h http.HandlerFunc, header map[string]string) *h
 	return rec
 }
 
+// problemDetail decodes a problem body and returns its detail.
+func problemDetail(t *testing.T, body string) string {
+	t.Helper()
+	var p Problem
+	require.NoError(t, json.Unmarshal([]byte(body), &p), body)
+	require.NotEmpty(t, p.Code, body)
+	return p.Detail
+}
+
 func TestPlainTextErrorBecomesProblem(t *testing.T) {
 	rec := problemServe(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "60")
