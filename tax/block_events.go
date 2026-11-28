@@ -238,12 +238,50 @@ func settleGovDeposits(events []BlockEvent, owner string, deposits []GovDeposit,
 
 // blockResiduals compares what the bank module says the owner received and
 // spent in the lifecycle against the classified rows. Chains before SDK 0.44
-// emit no coin_received or coin_spent events, so nothing is checked there.
-// classifiedOut holds debits a rule already booked as the owner's disposal.
+// (the Hub before Gaia v6) emit no coin_received or coin_spent events, so
+// there the transfer events are read instead: a transfer record names its
+// recipient on every send and its sender on all but InputOutputCoins outputs,
+// and an unbonding's payout moves no coins through a bank event at all, so
+// its complete_unbonding amount counts as received. classifiedOut holds
+// debits a rule already booked as the owner's disposal.
 func blockResiduals(events []BlockEvent, owner string, classifiedIn, classifiedOut map[string]sdkmath.Int) []TaxableEvent {
 	received := map[string][]blockCoin{}
 	spent := map[string][]blockCoin{}
 	bankEvents := false
+	transfers := false
+	for _, e := range events {
+		switch e.Type {
+		case "coin_received", "coin_spent":
+			bankEvents = true
+		case "transfer":
+			transfers = true
+		}
+	}
+	if !bankEvents && transfers {
+		for _, e := range events {
+			a := blockAttrs(e)
+			switch e.Type {
+			case "transfer":
+				if a[attributeRecipient] == owner {
+					for _, c := range blockCoins(e, a[attributeAmount]) {
+						received[c.denom] = append(received[c.denom], c)
+					}
+				}
+				if a[attributeSender] == owner {
+					for _, c := range blockCoins(e, a[attributeAmount]) {
+						spent[c.denom] = append(spent[c.denom], c)
+					}
+				}
+			case "complete_unbonding":
+				if a[attributeDelegator] == owner {
+					for _, c := range blockCoins(e, a[attributeAmount]) {
+						received[c.denom] = append(received[c.denom], c)
+					}
+				}
+			}
+		}
+		bankEvents = true
+	}
 	for _, e := range events {
 		a := blockAttrs(e)
 		switch e.Type {
