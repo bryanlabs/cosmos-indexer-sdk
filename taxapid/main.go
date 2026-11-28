@@ -46,6 +46,9 @@ func nativeAssetFromEnv() taxapi.NativeAsset {
 }
 
 func main() {
+	// The readiness counts and the wallet scopes are small index lookups whose
+	// estimated cost crosses jit_above_cost. JIT compiling each took about
+	// 0.8 s for 5 ms of work, five times per /events request.
 	db, err := indexerDB.PostgresDbConnect(
 		env("DB_HOST", "localhost"),
 		env("DB_PORT", "5432"),
@@ -53,6 +56,7 @@ func main() {
 		env("DB_USER", "postgres"),
 		env("DB_PASS", "postgres"),
 		env("DB_LOG_LEVEL", "warn"),
+		"jit=off",
 	)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
