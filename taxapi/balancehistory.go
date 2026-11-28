@@ -1299,9 +1299,14 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	if err != nil {
 		return nil, 0, err
 	}
-	unnamed, err := s.unnamedStakingHeights(chain, addr, lowest)
-	if err != nil {
-		return nil, 0, err
+	mainnet := chainParam(chain) == apiMainnet
+	transfers := mainnet && s.earlyHub.transfers
+	attribute := mainnet && s.earlyHub.unnamedStaking
+	var unnamed []int64
+	if !attribute {
+		if unnamed, err = s.unnamedStakingHeights(chain, addr, lowest); err != nil {
+			return nil, 0, err
+		}
 	}
 	lowest = tip.Height
 	var usable []int
@@ -1332,7 +1337,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 			out[i].Reason = fmt.Sprintf("%d blocks between this date and the index tip, the first at height %d, are missing transactions in the index, so the balance cannot be rebuilt exactly", len(holes)-k, holes[k])
 			continue
 		}
-		if reason := preCoinEventsReason(chain, t.Height); reason != "" {
+		if reason := preCoinEventsReason(chain, t.Height); reason != "" && !transfers {
 			out[i].Status, out[i].Reason = balanceIncompleteS, reason
 			continue
 		}
@@ -1363,12 +1368,59 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	if err != nil {
 		return nil, 0, err
 	}
+	if attribute && lowest+1 < hubStakingDelegatorFrom {
+		// Before v15 the staking rows attribute every staking event,
+		// redelegations included, so the reading from the reward withdrawals
+		// is kept only from v15 on.
+		kept := events[:0]
+		for _, e := range events {
+			if e.Type != "redelegate" || e.Height >= hubStakingDelegatorFrom {
+				kept = append(kept, e)
+			}
+		}
+		events = kept
+		if unattributed < hubStakingDelegatorFrom {
+			unattributed = 0
+		}
+		staking, unmatched, err := s.unnamedStakingEvents(ids, addr, lowest, tip.Height)
+		if err != nil {
+			return nil, 0, err
+		}
+		events = append(events, staking...)
+		unattributed = max(unattributed, unmatched)
+	}
+	var transfersBelow int64
+	if transfers && lowest+1 < hubCoinEventsFrom {
+		transfersBelow = hubCoinEventsFrom
+		moved, unknown, err := s.prev6Events(ids, addr, lowest, tip.Height)
+		if err != nil {
+			return nil, 0, err
+		}
+		events = append(events, moved...)
+		if unknown > 0 {
+			kept := usable[:0]
+			for _, i := range usable {
+				if targets[i].Height < unknown {
+					out[i].Status = balanceIncompleteS
+					out[i].Reason = fmt.Sprintf("a transfer at height %d after this date moved coins from this wallet together with other senders, and the events do not say how much was the wallet's", unknown)
+					continue
+				}
+				kept = append(kept, i)
+			}
+			if usable = kept; len(usable) == 0 {
+				return out, tip.Height, nil
+			}
+		}
+	}
 	if unattributed > 0 {
 		kept := usable[:0]
 		for _, i := range usable {
 			if targets[i].Height < unattributed {
 				out[i].Status = balanceIncompleteS
 				out[i].Reason = fmt.Sprintf("a redelegation at height %d after this date cannot be attributed to one delegator", unattributed)
+				if attribute && unattributed < hubStakingDelegatorFrom {
+					out[i].Reason = fmt.Sprintf("a staking movement at height %d after this date does not match the staking rows written from its message, so it cannot be attributed to one delegator", unattributed)
+				}
 				continue
 			}
 			kept = append(kept, i)
@@ -1405,7 +1457,7 @@ func (s *Server) rebuildHoldings(chain string, ids []int64, node *ledgerNode, ad
 	for _, i := range usable {
 		heights = append(heights, targets[i].Height)
 	}
-	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples}, heights)
+	held, err := walkBack(ledgerInput{Address: addr, Operator: operator, BondDenom: s.native.Denom, Anchor: anchor, Events: events, Fees: fees, Slashes: slashes, Samples: samples, TransfersBelow: transfersBelow}, heights)
 	if err != nil {
 		var inc ledgerInconsistent
 		if errors.As(err, &inc) {

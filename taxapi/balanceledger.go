@@ -115,6 +115,11 @@ type ledgerInput struct {
 	// Samples holds the recorded rates before the anchor of the validators
 	// whose rate is not one, ascending by height.
 	Samples map[string][]rateSample
+	// TransfersBelow is the first height with coin events when blocks before
+	// it are rebuilt from transfer events, and zero otherwise. Below it a
+	// bond, a self-bond and a completed unbonding move the wallet's liquid
+	// coins without any bank event, so the staking events move them.
+	TransfersBelow int64
 }
 
 // ledgerHoldings is the rebuilt state at one block, in base units.
@@ -510,6 +515,34 @@ func undoEvent(in ledgerInput, book rateBook, spent map[uint64]*big.Int, ev ledg
 					addInt(liquid, c.Denom, c.Amount.BigInt())
 				}
 			}
+		case "transfer":
+			// Only blocks before coin events are read as transfers.
+			if ev.Height >= in.TransfersBelow {
+				continue
+			}
+			coins, err := ledgerCoins(rec["amount"], in.BondDenom)
+			if err != nil {
+				return fmt.Errorf("%s at height %d: %w", ev.Type, ev.Height, err)
+			}
+			for _, c := range coins {
+				if rec["recipient"] == in.Address {
+					subInt(liquid, c.Denom, c.Amount.BigInt())
+				}
+				if rec["sender"] == in.Address {
+					addInt(liquid, c.Denom, c.Amount.BigInt())
+				}
+			}
+		case "complete_unbonding":
+			if rec["delegator"] != in.Address || ev.Height >= in.TransfersBelow {
+				continue
+			}
+			coins, err := ledgerCoins(rec["amount"], in.BondDenom)
+			if err != nil {
+				return fmt.Errorf("%s at height %d: %w", ev.Type, ev.Height, err)
+			}
+			for _, c := range coins {
+				subInt(liquid, c.Denom, c.Amount.BigInt())
+			}
 		case "delegate", "unbond", "redelegate", "cancel_unbonding_delegation", "tokenize_shares", "redeem_shares":
 			if rec["delegator"] != in.Address {
 				continue
@@ -519,6 +552,9 @@ func undoEvent(in ledgerInput, book rateBook, spent map[uint64]*big.Int, ev ledg
 				return fmt.Errorf("%s at height %d: %w", ev.Type, ev.Height, err)
 			}
 			amt := decimal.NewFromBigInt(bondAmount(coins, in.BondDenom), 0)
+			if ev.Type == "delegate" && ev.Height < in.TransfersBelow {
+				addInt(liquid, in.BondDenom, amt.BigInt())
+			}
 			v := rec["validator"]
 			wrap := func(err error) error { return fmt.Errorf("%s at height %d: %w", ev.Type, ev.Height, err) }
 			switch ev.Type {
@@ -605,6 +641,9 @@ func undoEvent(in ledgerInput, book rateBook, spent map[uint64]*big.Int, ev ledg
 				return fmt.Errorf("%s at height %d: %w", ev.Type, ev.Height, err)
 			}
 			n := decimal.NewFromBigInt(bondAmount(coins, in.BondDenom), 0)
+			if ev.Height < in.TransfersBelow {
+				addInt(liquid, in.BondDenom, n.BigInt())
+			}
 			remove(rec["validator"], n, n)
 		}
 	}
