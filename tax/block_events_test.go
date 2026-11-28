@@ -191,3 +191,44 @@ func TestBlockClassifiedMoreThanReceivedNeedsReview(t *testing.T) {
 		t.Fatalf("detail %v", d)
 	}
 }
+
+// Before Gaia v6 a lifecycle has no coin events, so the transfer records
+// stand in for them. An unbonding payout moves no coins through a transfer
+// in SDK 0.42, so its complete_unbonding amount is what the owner received.
+func TestBlockPreV6TransfersChecked(t *testing.T) {
+	payout := blockEvent(3, BlockPhaseEnd, "complete_unbonding", "amount", "10uatom", "validator", "cosmosvaloper1v", "delegator", blockOwner)
+	row := onlyRow(t, ClassifyBlockLifecycle([]BlockEvent{payout}, blockOwner, nil))
+	if row.Category != string(CategoryUnbondingComplete) || blockDetail(t, row)["review_required"] != "" {
+		t.Fatalf("row %+v", row)
+	}
+
+	moved := []BlockEvent{
+		payout,
+		blockEvent(4, BlockPhaseEnd, "transfer", "recipient", blockOwner, "sender", blockOther, "amount", "6uatom"),
+		blockEvent(5, BlockPhaseEnd, "transfer", "recipient", blockOther, "sender", blockOwner, "amount", "2uatom"),
+		blockEvent(6, BlockPhaseEnd, "transfer", "recipient", blockOther, "sender", blockOther, "amount", "99uatom"),
+	}
+	rows := ClassifyBlockLifecycle(moved, blockOwner, nil)
+	if len(rows) != 3 {
+		t.Fatalf("rows %+v", rows)
+	}
+	in, out := rows[1], rows[2]
+	if in.ToAddr != blockOwner || in.Amount != "6" || out.FromAddr != blockOwner || out.Amount != "2" {
+		t.Fatalf("residuals %+v", rows[1:])
+	}
+	for _, r := range rows[1:] {
+		if d := blockDetail(t, r); d["review_required"] != "true" || d["review_reason"] != ReviewUnclassifiedBlockMovement {
+			t.Fatalf("residual %+v not gated: %v", r, d)
+		}
+	}
+
+	// A classified transfer leaves nothing over.
+	refund := []BlockEvent{
+		blockEvent(1, BlockPhaseEnd, "transfer", "recipient", blockOwner, "sender", govModuleAddress, "amount", "1000000uatom"),
+		blockEvent(2, BlockPhaseEnd, "active_proposal", "proposal_id", "1001", "proposal_result", "proposal_passed"),
+	}
+	row = onlyRow(t, ClassifyBlockLifecycle(refund, blockOwner, []GovDeposit{{ProposalID: "1001", Amount: "1000000", Denom: "uatom"}}))
+	if row.Category != string(CategoryGovDepositRefund) {
+		t.Fatalf("row %+v", row)
+	}
+}
