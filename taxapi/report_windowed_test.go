@@ -274,8 +274,9 @@ func TestAssetReviewWindowedMatchesWhole(t *testing.T) {
 		for _, rowCap := range []int64{1, 2, 3, 5} {
 			code, body := answer(rowCap, decisions)
 			require.Equal(t, http.StatusBadRequest, code, "%s at cap %d", name, rowCap)
-			require.NotContains(t, body, "{", "%s at cap %d", name, rowCap)
-			require.True(t, strings.Contains(body, "acquisition date cannot be after the receipt date") || strings.Contains(body, stale), "%s at cap %d: %s", name, rowCap, body)
+			detail := problemDetail(t, body)
+			require.NotContains(t, detail, "{", "%s at cap %d", name, rowCap)
+			require.True(t, strings.Contains(detail, "acquisition date cannot be after the receipt date") || strings.Contains(detail, stale), "%s at cap %d: %s", name, rowCap, body)
 			if len(decisions) == 1 {
 				require.Equal(t, whole, body, "%s at cap %d", name, rowCap)
 			}
@@ -399,7 +400,7 @@ func TestAssetReviewWindowsTimeoutIsTooLarge(t *testing.T) {
 	require.Error(t, sleepErr)
 	require.Less(t, slept, 10*time.Second, "the statement running at the deadline is cancelled")
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
-	require.Equal(t, reportTooLarge{Limit: 2}.Error()+"\n", rr.Body.String())
+	require.Equal(t, reportTooLarge{Limit: 2}.Error(), problemDetail(t, rr.Body.String()))
 	// The snapshot's session runs nothing and holds no snapshot.
 	require.Eventually(t, func() bool {
 		var held int64
@@ -443,7 +444,7 @@ func TestAssetReviewWindowsOneAtATime(t *testing.T) {
 	require.Less(t, time.Since(began), 2*time.Second, "a second review is refused at once, not queued")
 	require.Equal(t, http.StatusServiceUnavailable, busy.Code, busy.Body.String())
 	require.Equal(t, "60", busy.Header().Get("Retry-After"))
-	require.Equal(t, errReviewWindowsBusy.Error()+"\n", busy.Body.String())
+	require.Equal(t, errReviewWindowsBusy.Error(), problemDetail(t, busy.Body.String()))
 
 	close(release)
 	firstRR := <-done
