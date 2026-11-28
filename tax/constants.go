@@ -53,6 +53,7 @@ const (
 	eventWasm                           = "wasm"
 	fixtureNativeDenom                  = "uatom"
 	gaiaSDK0534                         = "0.53.4"
+	gaiaSDK0538                         = "0.53.8"
 	protocolNames                       = "names"
 	protocolPrize                       = "prize"
 	protocolTribute                     = "tribute"
