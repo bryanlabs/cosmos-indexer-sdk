@@ -85,10 +85,13 @@ type Server struct {
 	// staking serves the staking views from the staking tables once they
 	// cover the embedded files; nil serves the embedded files.
 	staking *stakingTables
+	// earlyHub turns on the balance rebuild across the Hub's earlier event
+	// shapes; off, those dates are refused.
+	earlyHub earlyHubLedger
 }
 
 func NewServer(db *gorm.DB, oracle *Oracle, native NativeAsset) *Server {
-	return &Server{db: db, oracle: oracle, native: native, covRollup: newCoverageRollup(db), staking: newStakingTables(db)}
+	return &Server{db: db, oracle: oracle, native: native, covRollup: newCoverageRollup(db), staking: newStakingTables(db), earlyHub: earlyHubLedgerFromEnv()}
 }
 
 func (s *Server) Handler() http.Handler {
