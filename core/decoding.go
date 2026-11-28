@@ -42,7 +42,15 @@ func InAppTxDecoder(cdc probeClient.Codec) sdk.TxDecoder {
 
 		err = cdc.Marshaler.Unmarshal(raw.AuthInfoBytes, &authInfo)
 		if err != nil {
-			return nil, errors.New("failed to unmarshal auth info")
+			// A signer public key type the codec does not know (Cosmos SDK
+			// 0.54 bls12_381, 0.55 mldsa65 or secp256k1eth) fails interface
+			// unpacking. Decode the wire form without unpacking so the
+			// transaction is kept; the block path stores it as opaque
+			// evidence (UnreadableSignerKeys). Any other failure still fails.
+			authInfo = tx.AuthInfo{}
+			if plainErr := authInfo.Unmarshal(raw.AuthInfoBytes); plainErr != nil || len(UnreadableSignerKeys(cdc.InterfaceRegistry, &authInfo)) == 0 {
+				return nil, errors.New("failed to unmarshal auth info")
+			}
 		}
 
 		theTx := &tx.Tx{

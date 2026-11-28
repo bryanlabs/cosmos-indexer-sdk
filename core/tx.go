@@ -85,6 +85,27 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 				return nil, blockTime, fmt.Errorf("wire/decoded message type mismatch at index %d", i)
 			}
 		}
+		// A signer key this build cannot read leaves the signer unproven, so
+		// every message is kept as opaque evidence: stored, unclassified, and
+		// holding back the signers' reports until the key type is registered
+		// and the block is reindexed. The rest of the block indexes as usual.
+		unreadableKeys := UnreadableSignerKeys(cl.Codec.InterfaceRegistry, txFull.AuthInfo)
+		var decodedMessages []types.Msg
+		allDecoded := true
+		if len(unreadableKeys) > 0 {
+			config.Log.Warnf("[Block: %v] [TX: %v] Signer key type(s) %v cannot be read by this build; preserving every message as opaque evidence.",
+				blockResults.Block.Height, tendermintHashToHex(tendermintTx.Hash()), unreadableKeys)
+			for i, message := range txFull.Body.Messages {
+				decoded, _ := message.GetCachedValue().(types.Msg)
+				if decoded == nil {
+					decoded = decodeKnownEnvelope(wireBody.Messages[i])
+				}
+				if decoded == nil {
+					allDecoded = false
+				}
+				decodedMessages = append(decodedMessages, decoded)
+			}
+		}
 		logs := types.ABCIMessageLogs{}
 
 		// Failed TXs do not have proper JSON in the .Log field, causing ParseABCILogs to fail to unmarshal the logs
@@ -133,7 +154,7 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 				currMsg = decodeKnownEnvelope(wireBody.Messages[msgIdx])
 			}
 
-			if currMsg != nil {
+			if currMsg != nil && len(unreadableKeys) == 0 {
 				msg := currMsg.(types.Msg)
 				msgEvents := types.StringEvents{}
 				if txResult.Code == 0 {
@@ -221,14 +242,25 @@ func ProcessRPCBlockByHeightTXs(cfg *config.IndexConfig, db *gorm.DB, cl *client
 			}
 		}
 
-		signers, err := ProcessSigners(cl, txFull.AuthInfo, filteredSigners)
-		if err != nil {
-			return currTxDbWrappers, blockTime, err
+		var signers []models.Address
+		feeSigners := []models.Address(nil)
+		if len(unreadableKeys) > 0 {
+			var firstSigner string
+			signers, firstSigner = signersWithUnreadableKeys(cl, txFull.AuthInfo, decodedMessages, allDecoded)
+			if firstSigner != "" {
+				feeSigners = signers
+			}
+		} else {
+			signers, err = ProcessSigners(cl, txFull.AuthInfo, filteredSigners)
+			if err != nil {
+				return currTxDbWrappers, blockTime, err
+			}
+			feeSigners = signers
 		}
 
 		processedTx.Tx.SignerAddresses = signers
 
-		fees, err := ProcessFees(db, indexerTx.AuthInfo, signers)
+		fees, err := ProcessFees(db, indexerTx.AuthInfo, feeSigners)
 		if err != nil {
 			return currTxDbWrappers, blockTime, err
 		}

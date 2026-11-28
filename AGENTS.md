@@ -206,7 +206,12 @@ An undecodable message is retained as opaque evidence (`core/opaque.go` and
 `core/tx.go`): original type URL, index, bytes and ordered events. It is not
 classified by guessing, and does not silently disappear from an indexed block.
 A nonzero fee with no resolvable payer defers its block rather than inventing
-an address. Raw-disabled upserts must not erase existing raw bytes.
+an address. A signer public key type this build's SDK cannot read (SDK
+0.54 bls12_381, 0.55 mldsa65 and secp256k1eth; `core/signer_keys.go`) keeps
+the transaction with every message opaque, signers taken from the decoded
+messages, and the fee charged to the first signer only when the message
+order or a readable first key names it. Raw-disabled upserts must not erase
+existing raw bytes.
 
 Some `ibc.core.client`, `interchain_security` provider and
 `interchain_accounts` controller messages remain opaque. Historical provider
